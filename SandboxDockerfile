@@ -1,13 +1,16 @@
 FROM alpine:latest
 
-RUN apk add --no-cache nodejs npm git ripgrep bash ca-certificates tmux \
+RUN apk add --no-cache nodejs npm git ripgrep bash ca-certificates tmux github-cli openssh-client \
     && npm install -g @anthropic-ai/claude-code \
-    && git config --system http.sslCAInfo /etc/certs/git-certificate \
+    && ssh-keyscan github.com >> /etc/ssh/ssh_known_hosts \
     && adduser -D -h /home/claude claude \
     && mkdir -p /workspace /home/claude/.claude \
     && chown -R claude:claude /workspace /home/claude
 
+COPY --chown=claude:claude entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
 USER claude
 WORKDIR /workspace
 
-CMD ["sh", "-c", "tmux new-session -d -s main 'claude --dangerously-skip-permissions' && tail -f /dev/null"]
+CMD ["/usr/local/bin/entrypoint.sh"]
