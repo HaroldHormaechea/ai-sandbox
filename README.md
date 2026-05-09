@@ -21,7 +21,7 @@ Authenticate Claude on first run:
 # inside Claude: /login
 ```
 
-The auth token is persisted to `claude-config/`, so you only need to do this once.
+The auth token is persisted to `claude-config/`, so you only need to do this once. This folder is not tracked by git.
 
 ### Attaching to the Claude session
 
@@ -48,7 +48,7 @@ Inside that shell you're in `/workspace` as the `claude` user. Anything you clon
 docker compose down
 ```
 
-Workspace files, auth config, and the certificate persist on the host. The container itself is disposable.
+Workspace files, auth config, and the certificate persist on the host, and are not tracked by git. The container itself is disposable.
 
 ## How it works
 
