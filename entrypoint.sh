@@ -5,6 +5,11 @@ PROJECT_DIR=/workspace/project-builder
 KEY_FILE=/etc/secrets/git-key
 TOKEN_FILE=/etc/secrets/gh-token
 
+# Claude Code stores some global state (trusted folders, onboarding, default
+# mode, theme) at ~/.claude.json — a file outside the ~/.claude/ directory we
+# mount. Symlink it inside that mounted dir so the state persists across runs.
+ln -sf "$HOME/.claude/.claude.json" "$HOME/.claude.json"
+
 if [ -f "$KEY_FILE" ]; then
     mkdir -p "$HOME/.ssh"
     chmod 700 "$HOME/.ssh"
