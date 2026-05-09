@@ -1,0 +1,18 @@
+services:
+  claude-sandbox:
+    build:
+      context: .
+      dockerfile: SandboxDockerfile
+    image: ai-context:latest
+    stdin_open: true
+    tty: true
+    volumes:
+      # Local workspace — clone your projects here on the host
+      # and they'll be available inside the container.
+      - "./workspace:/workspace"
+      # You can map your local git certificate here to be able
+      # to read/push from/to git repositories.
+      - "./certs/git-certificate:/etc/certs/git-certificate:ro"
+      # Persist Claude's auth/config across container restarts so
+      # you only need to /login once.
+      - "./claude-config:/home/claude/.claude"

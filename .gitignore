@@ -1,0 +1,5 @@
+workspace/*
+!workspace/.gitkeep
+
+claude-config/*
+!claude-config/.gitkeep

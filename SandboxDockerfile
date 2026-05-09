@@ -1,0 +1,13 @@
+FROM alpine:latest
+
+RUN apk add --no-cache nodejs npm git ripgrep bash ca-certificates tmux \
+    && npm install -g @anthropic-ai/claude-code \
+    && git config --system http.sslCAInfo /etc/certs/git-certificate \
+    && adduser -D -h /home/claude claude \
+    && mkdir -p /workspace /home/claude/.claude \
+    && chown -R claude:claude /workspace /home/claude
+
+USER claude
+WORKDIR /workspace
+
+CMD ["sh", "-c", "tmux new-session -d -s main 'claude --dangerously-skip-permissions' && tail -f /dev/null"]
