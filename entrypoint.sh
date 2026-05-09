@@ -32,9 +32,20 @@ fi
 
 if [ ! -d "$PROJECT_DIR/.git" ]; then
     echo "Cloning project-builder into $PROJECT_DIR..."
-    git clone git@github.com:HaroldHormaechea/project-builder.git "$PROJECT_DIR"
+    git clone git@github.com:HaroldHormaechea/project-builder.git "$PROJECT_DIR" \
+        || echo "WARNING: clone failed; continuing without project." >&2
 fi
 
-tmux new-session -d -s main -c "$PROJECT_DIR" 'claude --dangerously-skip-permissions'
+START_DIR="$PROJECT_DIR"
+[ -d "$START_DIR" ] || START_DIR=/workspace
+
+# If a command is passed (e.g. one-off setup runs), execute it in the project
+# directory after bootstrap. Otherwise launch the persistent tmux session.
+if [ "$#" -gt 0 ]; then
+    cd "$START_DIR"
+    exec "$@"
+fi
+
+tmux new-session -d -s main -c "$START_DIR" 'claude --dangerously-skip-permissions'
 
 exec tail -f /dev/null

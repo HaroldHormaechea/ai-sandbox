@@ -20,18 +20,18 @@ It steps you through:
 1. **SSH key** — copies your private key to `secrets/git-key` (or confirms it's already there). Used for git clone/push.
 2. **Container image** — builds `ai-context:latest` if needed.
 3. **`gh` login (optional)** — launches a disposable container that runs `gh auth login` and writes the resulting token to `secrets/gh-token`. Skip if you don't need `gh issue` / `gh pr` etc.
-4. **Start sandbox** — brings the container up in the background.
+4. **Claude first-run** — launches Claude in a disposable container so you can do `/login`, accept the "trust this folder" prompt, and acknowledge the bypass-permissions warning. The state lives in `claude-config/` and persists, so the long-running daemon never asks again.
+5. **Start sandbox** — brings the container up in the background.
 
-The script is idempotent — re-run it any time to re-authenticate or rebuild.
+The script is idempotent — re-run it any time to re-authenticate, rebuild, or replay the Claude first-run.
 
-After the container is running, attach to Claude and authenticate it on first run:
+After setup completes, attach to Claude:
 
 ```bash
 ./attach.sh         # or .\attach.ps1 on Windows
-# inside Claude: /login
 ```
 
-The auth token is persisted to `claude-config/`, so you only need to do this once. None of `secrets/`, `claude-config/`, or `workspace/` is tracked by git.
+You'll drop straight into your already-authenticated session. None of `secrets/`, `claude-config/`, or `workspace/` is tracked by git.
 
 ### Attaching to the Claude session
 
@@ -60,12 +60,25 @@ docker compose down
 
 Workspace files, the cloned project, auth config, and the SSH key all persist on the host. The container itself is disposable.
 
+### Resetting (start over from scratch)
+
+If you want to wipe everything and run setup fresh — copied SSH key, gh token, Claude auth, cloned projects, the running container, and the built image:
+
+```bash
+./clean.sh         # Linux / macOS
+.\clean.ps1        # Windows
+```
+
+The script lists exactly what it'll delete, warns about uncommitted work in `workspace/`, and requires you to type `yes` to confirm. It does **not** touch your real `~/.ssh/` keys or your host `gh` login. Re-running `setup.sh` after this rebuilds the image from scratch (slower — minutes instead of seconds).
+
 ## How it works
 
 Claude is launched with `--dangerously-skip-permissions`, which disables every permission prompt — file writes, bash commands, network calls, all run without asking. This is safe *only* because the container itself is the trust boundary: Claude is confined to a non-root user inside Alpine, with no access to your host beyond the explicit bind mounts (`workspace/`, `claude-config/`, and the read-only `secrets/` folder).
 
 All git operations are expected to go over SSH; no HTTPS-specific configuration (custom CA cert, credential helper) is set up. `gh` is configured to use SSH for `git_protocol`, so `gh repo clone OWNER/REPO` works the same way as a plain `git clone git@github.com:OWNER/REPO.git`. If `secrets/gh-token` is present (created via the setup walkthrough), the entrypoint also runs `gh auth login --with-token` so `gh`'s API operations work — those still go to `api.github.com` over HTTPS via the system CA bundle.
 
-On boot, an entrypoint script copies the mounted SSH key into `~/.ssh/`, fixes its permissions (SSH refuses world-readable keys), writes an SSH config that pins the key to all hosts, then clones the bootstrap project if it isn't already there. After that, it starts a [`tmux`](https://github.com/tmux/tmux) session named `main` running Claude with the project directory as its working directory, and keeps the container alive with `tail -f /dev/null`. That tmux setup is what makes the detach/reattach workflow possible: Claude is never bound to your terminal, so disconnecting your client doesn't kill it. The `attach.sh` / `attach.ps1` scripts are thin wrappers around `docker compose exec claude-sandbox tmux attach -t main`.
+On boot, an entrypoint script copies the mounted SSH key into `~/.ssh/`, fixes its permissions (SSH refuses world-readable keys), writes an SSH config that pins the key to all hosts, then clones the bootstrap project if it isn't already there. With no command passed, it starts a [`tmux`](https://github.com/tmux/tmux) session named `main` running Claude with the project directory as its working directory, and keeps the container alive with `tail -f /dev/null`. That tmux setup is what makes the detach/reattach workflow possible: Claude is never bound to your terminal, so disconnecting your client doesn't kill it. The `attach.sh` / `attach.ps1` scripts are thin wrappers around `docker compose exec claude-sandbox tmux attach -t main`.
+
+The same entrypoint also supports a one-off mode (used by setup step 4): when given a command like `claude --dangerously-skip-permissions`, it runs the bootstrap and then `exec`'s that command instead of starting tmux. This is how the wizard pre-handles `/login`, the trust dialog, and the bypass-permissions warning — the dialogs fire in a disposable container, but Claude's state is written to the bind-mounted `claude-config/`, so the persistent daemon inherits the accepted state.
 
 Anything Claude can reach — your workspace files, the network, the SSH key (and therefore your git account), any credentials checked into a repo you cloned in — it can also modify or exfiltrate. The autonomous mode trades safety prompts for throughput; treat the workspace folder as "the agent could see and change this."
