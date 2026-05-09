@@ -1,5 +1,8 @@
 FROM alpine:latest
 
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
+
 RUN apk add --no-cache nodejs npm git ripgrep bash ca-certificates tmux github-cli openssh-client \
     && npm install -g @anthropic-ai/claude-code \
     && ssh-keyscan github.com >> /etc/ssh/ssh_known_hosts \

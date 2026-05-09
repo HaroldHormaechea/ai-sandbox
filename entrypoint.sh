@@ -51,6 +51,9 @@ if [ "$#" -gt 0 ]; then
     exec "$@"
 fi
 
-tmux new-session -d -s main -c "$START_DIR" 'claude --dangerously-skip-permissions'
+# Wrap claude in a restart loop so /exit drops back into a fresh claude
+# session inside the same tmux window — the session never dies.
+tmux new-session -d -s main -c "$START_DIR" \
+    'while true; do claude --dangerously-skip-permissions; sleep 1; done'
 
 exec tail -f /dev/null
