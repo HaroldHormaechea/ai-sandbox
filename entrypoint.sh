@@ -51,9 +51,12 @@ if [ "$#" -gt 0 ]; then
     exec "$@"
 fi
 
-# Wrap claude in a restart loop so /exit drops back into a fresh claude
-# session inside the same tmux window — the session never dies.
+# Wrap claude in a restart loop. On /exit:
+#   1. detach any attached clients (kicks them back to the host shell)
+#   2. wipe the pane (visible + scrollback) so the next attach lands clean
+#   3. relaunch claude so it's ready for the next ./attach
+# The tmux session itself never dies.
 tmux new-session -d -s main -c "$START_DIR" \
-    'while true; do claude --dangerously-skip-permissions; sleep 1; done'
+    'while true; do claude --dangerously-skip-permissions; tmux detach-client -s main 2>/dev/null; printf "\033c\033[3J"; sleep 1; done'
 
 exec tail -f /dev/null
