@@ -3,8 +3,13 @@ FROM alpine:latest
 ENV LANG=C.UTF-8
 ENV LC_ALL=C.UTF-8
 
-RUN apk add --no-cache nodejs npm git ripgrep bash ca-certificates tmux github-cli openssh-client gitleaks \
+ARG GITLEAKS_VERSION=8.21.0
+
+RUN apk add --no-cache nodejs npm git ripgrep bash ca-certificates tmux github-cli openssh-client curl \
     && npm install -g @anthropic-ai/claude-code \
+    && curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_$(uname -m | sed 's/x86_64/x64/;s/aarch64/arm64/').tar.gz" \
+       | tar -xz -C /usr/local/bin gitleaks \
+    && chmod +x /usr/local/bin/gitleaks \
     && ssh-keyscan github.com >> /etc/ssh/ssh_known_hosts \
     && adduser -D -h /home/claude claude \
     && mkdir -p /workspace /home/claude/.claude \

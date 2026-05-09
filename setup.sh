@@ -78,7 +78,7 @@ info "This walks you through setting up the sandbox in 4 steps:"
 hr
 info "  1. SSH key      — register a key for git operations"
 info "  2. Image        — build the container if needed"
-info "  3. gh login     — optional, for GitHub API operations"
+info "  3. gh login     — optional, for the GitHub CLI (gh issue / pr / etc.)"
 info "  4. Claude setup — /login, trust folder, accept bypass warning"
 info "  5. Start        — bring the container up"
 hr
@@ -176,7 +176,12 @@ fi
 
 # ── Step 3: gh authentication ────────────────────────────────────────────────
 clear_screen
-screen_header 3 5 "gh authentication (optional)"
+screen_header 3 5 "GitHub CLI (gh) authentication — optional"
+info "\`gh\` is the official GitHub command-line client (https://cli.github.com)."
+info "Authenticating it lets you create PRs, list issues, and call the GitHub"
+info "API from inside the sandbox. Cloning / pushing already works via SSH and"
+info "does NOT require this — skip if you only need git operations."
+hr
 do_auth=false
 if [ -f secrets/gh-token ]; then
     ok "Found token at secrets/gh-token"
@@ -185,9 +190,6 @@ if [ -f secrets/gh-token ]; then
     [[ "${re_auth:-}" =~ ^[Yy]$ ]] && do_auth=true
 else
     warn "No gh token found"
-    hr
-    info "Optional. Enables gh issue / pr / api commands inside the sandbox."
-    info "Skip if you only need git clone / push (those use SSH already)."
     hr
     read -r -p "  Authenticate now? [y/N]: " want_auth
     [[ "${want_auth:-}" =~ ^[Yy]$ ]] && do_auth=true

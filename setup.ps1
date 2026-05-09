@@ -65,7 +65,7 @@ Write-Info "This walks you through setting up the sandbox in 4 steps:"
 Write-Blank
 Write-Info "  1. SSH key      - register a key for git operations"
 Write-Info "  2. Image        - build the container if needed"
-Write-Info "  3. gh login     - optional, for GitHub API operations"
+Write-Info "  3. gh login     - optional, for the GitHub CLI (gh issue / pr / etc.)"
 Write-Info "  4. Claude setup - /login, trust folder, accept bypass warning"
 Write-Info "  5. Start        - bring the container up"
 Write-Blank
@@ -161,7 +161,12 @@ if (docker images -q ai-context:latest) {
 
 # --- Step 3: gh authentication -----------------------------------------------
 Clear-Host
-Write-Step 3 5 "gh authentication (optional)"
+Write-Step 3 5 "GitHub CLI (gh) authentication - optional"
+Write-Info "``gh`` is the official GitHub command-line client (https://cli.github.com)."
+Write-Info "Authenticating it lets you create PRs, list issues, and call the GitHub"
+Write-Info "API from inside the sandbox. Cloning / pushing already works via SSH and"
+Write-Info "does NOT require this - skip if you only need git operations."
+Write-Blank
 $doAuth = $false
 if (Test-Path .\secrets\gh-token) {
     Write-Ok "Found token at secrets/gh-token"
@@ -170,9 +175,6 @@ if (Test-Path .\secrets\gh-token) {
     if ($reAuth -match '^[Yy]') { $doAuth = $true }
 } else {
     Write-Warn "No gh token found"
-    Write-Blank
-    Write-Info "Optional. Enables gh issue / pr / api commands inside the sandbox."
-    Write-Info "Skip if you only need git clone / push (those use SSH already)."
     Write-Blank
     $wantAuth = Read-Host "  Authenticate now? [y/N]"
     if ($wantAuth -match '^[Yy]') { $doAuth = $true }
