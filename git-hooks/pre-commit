@@ -1,0 +1,24 @@
+#!/bin/sh
+# Block commits that contain leaked secrets.
+#
+# Scans staged changes with gitleaks. Exits non-zero on any finding so
+# the commit is aborted. Bypass with `git commit --no-verify` if you're
+# certain a match is a false positive.
+
+if ! gitleaks git --staged --redact --verbose; then
+    cat >&2 <<'EOF'
+
+================================================================================
+  Potential secret detected in staged changes (see matches above).
+
+  - Verify the finding. If it is a real key/token, remove it before committing.
+  - For false positives, allowlist the pattern in a `.gitleaks.toml` file at
+    the repo root: https://github.com/gitleaks/gitleaks#configuration
+  - To bypass this hook for one commit (use sparingly):
+      git commit --no-verify
+================================================================================
+EOF
+    exit 1
+fi
+
+exit 0

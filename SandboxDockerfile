@@ -3,12 +3,17 @@ FROM alpine:latest
 ENV LANG=C.UTF-8
 ENV LC_ALL=C.UTF-8
 
-RUN apk add --no-cache nodejs npm git ripgrep bash ca-certificates tmux github-cli openssh-client \
+RUN apk add --no-cache nodejs npm git ripgrep bash ca-certificates tmux github-cli openssh-client gitleaks \
     && npm install -g @anthropic-ai/claude-code \
     && ssh-keyscan github.com >> /etc/ssh/ssh_known_hosts \
     && adduser -D -h /home/claude claude \
     && mkdir -p /workspace /home/claude/.claude \
     && chown -R claude:claude /workspace /home/claude
+
+# System-wide git hooks (currently: pre-commit secret scan via gitleaks).
+COPY git-hooks/ /etc/git-hooks/
+RUN chmod +x /etc/git-hooks/* \
+    && git config --system core.hooksPath /etc/git-hooks
 
 COPY --chown=claude:claude entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
