@@ -1,0 +1,15 @@
+# Local pre-commit hooks for contributors to this repo.
+#
+# One-time setup after cloning:
+#   pip install pre-commit
+#   pre-commit install
+#
+# After that, every `git commit` runs the hooks below on staged files.
+# pre-commit auto-downloads the pinned gitleaks version into a local
+# cache the first time the hook fires — no separate install needed.
+
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.0
+    hooks:
+      - id: gitleaks
