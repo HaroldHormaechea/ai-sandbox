@@ -20,7 +20,7 @@ Write-Host "=== Clean environment ===" -ForegroundColor Red
 Write-Host ""
 Write-Host "  This will PERMANENTLY DELETE the following:" -ForegroundColor Red
 Write-Host ""
-Write-Host "    secrets/git-key, secrets/gh-token" -ForegroundColor Yellow
+Write-Host "    secrets/git-key, secrets/gh-token, secrets/gitconfig" -ForegroundColor Yellow
 Write-Host "      (the copies inside this project - your originals in ~/.ssh and your"
 Write-Host "       host gh login are untouched)"
 Write-Host ""
@@ -49,7 +49,7 @@ Write-Host "  Stopping container and removing image..."
 docker compose down --rmi all
 
 Write-Host "  Removing copied secrets..."
-Remove-Item -Path .\secrets\git-key, .\secrets\gh-token -Force -ErrorAction SilentlyContinue
+Remove-Item -Path .\secrets\git-key, .\secrets\gh-token, .\secrets\gitconfig -Force -ErrorAction SilentlyContinue
 
 Write-Host "  Removing Claude config..."
 Remove-FolderContents .\claude-config

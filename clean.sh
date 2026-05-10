@@ -16,7 +16,7 @@ clear_screen() { printf "\033[H\033[2J"; }
 clear_screen
 printf "%s%s=== Clean environment ===%s\n\n" "$BOLD" "$RED" "$RESET"
 printf "  This will %sPERMANENTLY DELETE%s the following:\n\n" "$RED" "$RESET"
-printf "    %ssecrets/git-key%s, %ssecrets/gh-token%s\n" "$YELLOW" "$RESET" "$YELLOW" "$RESET"
+printf "    %ssecrets/git-key%s, %ssecrets/gh-token%s, %ssecrets/gitconfig%s\n" "$YELLOW" "$RESET" "$YELLOW" "$RESET" "$YELLOW" "$RESET"
 printf "      (the copies inside this project — your originals in ~/.ssh and your\n"
 printf "       host gh login are untouched)\n\n"
 printf "    %sclaude-config/*%s\n" "$YELLOW" "$RESET"
@@ -52,7 +52,7 @@ echo "  Stopping container and removing image..."
 docker compose down --rmi all 2>/dev/null || true
 
 echo "  Removing copied secrets..."
-rm -f secrets/git-key secrets/gh-token
+rm -f secrets/git-key secrets/gh-token secrets/gitconfig
 
 echo "  Removing Claude config..."
 remove_contents claude-config

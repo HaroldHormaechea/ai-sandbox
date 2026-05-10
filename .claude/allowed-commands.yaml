@@ -1,0 +1,12 @@
+# Bash command prefixes the dev-team is allowed to run for this project.
+# Each entry maps to a Bash(<prefix>:*) permission rule, granted by the
+# develop skill's Step 3a before agents are spawned.
+#
+# Aligned with PROJECT_BRIEF.md `stack` and `build.commands`:
+#   stack.languages = [Bash, PowerShell, Dockerfile]
+#   build.tool      = docker compose
+commands:
+  - git
+  - docker
+  - ssh-keygen
+  - chmod

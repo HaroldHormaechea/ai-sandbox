@@ -4,6 +4,7 @@ set -e
 PROJECT_DIR=/workspace/project-builder
 KEY_FILE=/etc/secrets/git-key
 TOKEN_FILE=/etc/secrets/gh-token
+GITCONFIG_FILE=/etc/secrets/gitconfig
 
 # Claude Code stores some global state (trusted folders, onboarding, default
 # mode, theme) at ~/.claude.json — a file outside the ~/.claude/ directory we
@@ -27,6 +28,18 @@ EOF
     gh config set git_protocol ssh >/dev/null 2>&1 || true
 else
     echo "WARNING: no SSH key at $KEY_FILE — git over SSH will not work." >&2
+fi
+
+# Apply git author identity (user.name / user.email) from the bind-mounted
+# gitconfig if present, by adding it to git's global include.path so every
+# commit Claude makes — in any cloned project — inherits these values.
+# Check-before-add keeps include.path idempotent across container restarts.
+if [ -f "$GITCONFIG_FILE" ]; then
+    if ! git config --global --get-all include.path 2>/dev/null | grep -qx "$GITCONFIG_FILE"; then
+        git config --global --add include.path "$GITCONFIG_FILE"
+    fi
+else
+    echo "WARNING: no git identity at $GITCONFIG_FILE — git commit will fail. Re-run host setup." >&2
 fi
 
 # Authenticate gh from the token file if present (used for API ops:
