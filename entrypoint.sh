@@ -11,6 +11,57 @@ GITCONFIG_FILE=/etc/secrets/gitconfig
 # mount. Symlink it inside that mounted dir so the state persists across runs.
 ln -sf "$HOME/.claude/.claude.json" "$HOME/.claude.json"
 
+# RTK (Rust Token Killer) wiring. MUST run here (post-mount, pre-tmux), NOT in
+# the Dockerfile: anything `rtk init -g` writes lives under ~/.claude/, which is
+# bind-mounted from the host's claude-config/ at runtime — the build-time copy
+# would be masked by the mount. Running it in entrypoint.sh means the hook
+# lands in the persisted host folder and survives docker compose down/up.
+mkdir -p "$HOME/.claude"
+
+# 1. Let RTK install its global hook into ~/.claude/settings.json (and possibly
+#    emit ~/.claude/RTK.md). Idempotent per upstream; warn-and-continue on
+#    failure so a flaky run does not block the container from booting.
+rtk init -g || echo "WARNING: rtk init -g failed; RTK hook may be missing." >&2
+
+# 2. Conditionally append a directive to ~/.claude/CLAUDE.md nudging Claude to
+#    prefer Bash equivalents (cat, rg, find) over the built-in Read / Grep /
+#    Glob tools, since those bypass the Bash hook and therefore bypass RTK.
+#    Sentinel-guarded so repeated container starts do not duplicate the block.
+#    We also peek inside whatever upstream RTK may have written: if either
+#    CLAUDE.md or RTK.md already nudges away from the built-ins, skip the append
+#    to avoid conflicting / duplicate guidance.
+RTK_SENTINEL_START="<!-- ai-sandbox:rtk-bypass-START -->"
+RTK_SENTINEL_END="<!-- ai-sandbox:rtk-bypass-END -->"
+_rtk_already_documented() {
+    # Args: $1 = file to check. Returns 0 if the file references both at least
+    # one built-in tool name (Read/Grep/Glob) and at least one Bash equivalent
+    # (cat/rg/find/grep) — a heuristic for "upstream already covers this".
+    [ -f "$1" ] || return 1
+    grep -qE 'Read|Grep|Glob' "$1" 2>/dev/null \
+        && grep -qE '\bcat\b|\brg\b|\bgrep\b|\bfind\b' "$1" 2>/dev/null
+}
+if grep -qF "$RTK_SENTINEL_START" "$HOME/.claude/CLAUDE.md" 2>/dev/null; then
+    : # Already appended on a previous start — idempotent no-op.
+elif _rtk_already_documented "$HOME/.claude/CLAUDE.md" \
+  || _rtk_already_documented "$HOME/.claude/RTK.md"; then
+    echo "INFO: existing CLAUDE.md/RTK.md already nudges away from built-in Read/Grep/Glob; skipping ai-sandbox append." >&2
+else
+    cat >> "$HOME/.claude/CLAUDE.md" <<EOF
+$RTK_SENTINEL_START
+## Prefer Bash equivalents over built-in Read / Grep / Glob
+
+Prefer Bash tool calls over Claude Code's built-in file tools:
+
+- Use \`cat\` instead of the \`Read\` tool.
+- Use \`rg\` (preferred) or \`grep\` instead of the \`Grep\` tool.
+- Use \`find\` instead of the \`Glob\` tool.
+
+Rationale: built-in Read / Grep / Glob bypass the Bash hook and therefore
+bypass RTK token compression. Routing through Bash keeps RTK in the loop.
+$RTK_SENTINEL_END
+EOF
+fi
+
 if [ -f "$KEY_FILE" ]; then
     mkdir -p "$HOME/.ssh"
     chmod 700 "$HOME/.ssh"

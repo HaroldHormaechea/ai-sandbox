@@ -4,6 +4,9 @@ ENV LANG=C.UTF-8
 ENV LC_ALL=C.UTF-8
 
 ARG GITLEAKS_VERSION=8.21.0
+# BuildKit auto-populates TARGETARCH (amd64 / arm64 / ...). Used below to pick
+# the right RTK release tarball and to decide whether gcompat is needed.
+ARG TARGETARCH
 
 RUN apk add --no-cache nodejs npm git ripgrep bash ca-certificates tmux github-cli openssh-client curl \
     && npm install -g @anthropic-ai/claude-code \
@@ -14,6 +17,26 @@ RUN apk add --no-cache nodejs npm git ripgrep bash ca-certificates tmux github-c
     && adduser -D -h /home/claude claude \
     && mkdir -p /workspace /home/claude/.claude \
     && chown -R claude:claude /workspace /home/claude
+
+# RTK (Rust Token Killer) — bundled CLI proxy that compresses Bash output before
+# it reaches the LLM. Rolling latest at build time (matches the
+# @anthropic-ai/claude-code pinning policy, NOT the pinned gitleaks pattern).
+# Upstream ships a musl binary for amd64 and a glibc binary for aarch64, so on
+# arm64 we also install gcompat as a glibc shim. Source: https://github.com/rtk-ai/rtk
+RUN set -eu; \
+    case "${TARGETARCH}" in \
+      amd64) \
+        RTK_TARBALL="rtk-x86_64-unknown-linux-musl.tar.gz" ;; \
+      arm64) \
+        apk add --no-cache gcompat; \
+        RTK_TARBALL="rtk-aarch64-unknown-linux-gnu.tar.gz" ;; \
+      *) \
+        echo "Unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://github.com/rtk-ai/rtk/releases/latest/download/${RTK_TARBALL}" \
+       | tar -xz -C /usr/local/bin rtk; \
+    chmod +x /usr/local/bin/rtk; \
+    echo "Installed RTK version: $(/usr/local/bin/rtk --version)"
 
 # System-wide git hooks (currently: pre-commit secret scan via gitleaks).
 COPY git-hooks/ /etc/git-hooks/

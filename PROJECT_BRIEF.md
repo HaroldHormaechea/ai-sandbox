@@ -11,6 +11,7 @@ stack:
     alpine: "latest"
     gitleaks: "8.21.0"
     claude_code: "latest-at-build"
+    rtk: "latest-at-build"
     node: "alpine-apk"
     tmux: "alpine-apk"
     docker_compose: "v2+"
@@ -105,7 +106,7 @@ Source of truth for the `ai-sandbox` project. Machine-read fields live in the YA
 - **runtimes:**
   - Host: Docker (any version supporting Compose v2) + a POSIX shell or PowerShell.
   - Container: Alpine Linux (`alpine:latest`).
-  - In-container processes: Node.js (apk-supplied) hosting `@anthropic-ai/claude-code`; `tmux` keeping the Claude session alive across detach/reattach.
+  - In-container processes: Node.js (apk-supplied) hosting `@anthropic-ai/claude-code`; `tmux` keeping the Claude session alive across detach/reattach. `rtk` (Rust Token Killer) sits on the PATH as a passive CLI proxy invoked by Claude's Bash hook to compress command output before it reaches the LLM — no daemon process.
 - **languages:**
   - Bash — operator scripts (`setup.sh`, `attach.sh`, `clean.sh`), `entrypoint.sh`, system-wide git hooks.
   - PowerShell — Windows mirrors of every `.sh` (`setup.ps1`, `attach.ps1`, `clean.ps1`).
@@ -120,11 +121,13 @@ Source of truth for the `ai-sandbox` project. Machine-read fields live in the YA
   - **GitHub** — git clone/push over SSH, `gh` CLI, `gh` API (`api.github.com` over HTTPS).
   - **Anthropic** — Claude Code authentication and API endpoints (used by `@anthropic-ai/claude-code`).
   - **gitleaks GitHub Releases** — build-time only; `curl` fetches the pinned `gitleaks_${VERSION}_linux_*` tarball during `docker build`.
-  - **Alpine `apk` repositories** — build-time only; `apk add` installs `nodejs npm git ripgrep bash ca-certificates tmux github-cli openssh-client curl`.
+  - **rtk-ai/rtk GitHub Releases** — build-time only; `curl` fetches the latest `rtk-<arch>-unknown-linux-{musl,gnu}.tar.gz` (amd64: musl; arm64: glibc + `apk add gcompat` shim) during `docker build`.
+  - **Alpine `apk` repositories** — build-time only; `apk add` installs `nodejs npm git ripgrep bash ca-certificates tmux github-cli openssh-client curl` (plus `gcompat` on arm64 for the glibc `rtk` binary).
 - **ai_ml_dependency:** Anthropic Claude (via `@anthropic-ai/claude-code`); model selection and configuration are owned by Claude Code itself, not by this project.
 - **versions / pinning policy (intentional):**
   - `alpine` — rolling `latest` (rebuild picks up upstream changes).
   - `@anthropic-ai/claude-code` — rolling latest at image build time (no version pin).
+  - `rtk` — rolling latest at image build time (matches the `@anthropic-ai/claude-code` policy, not the pinned `gitleaks` pattern). The resolved version is echoed during `docker build` so the actual version landed is visible in the build log.
   - `gitleaks` — pinned to `8.21.0` via the `GITLEAKS_VERSION` build arg in `SandboxDockerfile` and via the host pre-commit hook in `.pre-commit-config.yaml`. Both layers must move together when bumped.
 - **build.tool:** `docker compose` (the only build surface).
 - **build.commands:**
@@ -143,8 +146,8 @@ Source of truth for the `ai-sandbox` project. Machine-read fields live in the YA
 - **service_shape:** single-container monolith. One Compose service (`claude-sandbox`) running one Alpine image (`ai-context:latest`). No internal service-to-service architecture.
 - **components:**
   - **Operator scripts (host)** — `setup.sh`/`setup.ps1`, `attach.sh`/`attach.ps1`, `clean.sh`/`clean.ps1`. Wizard, tmux attach wrapper, destructive reset.
-  - **`SandboxDockerfile` (build)** — produces `ai-context:latest`: Alpine + nodejs/npm + git + ripgrep + bash + tmux + github-cli + openssh-client + curl + gitleaks 8.21.0 + `@anthropic-ai/claude-code` (global) + non-root `claude` user + system-wide git hooks at `/etc/git-hooks/`.
-  - **`entrypoint.sh` (container PID 1)** — copies the SSH key from `/etc/secrets/git-key` to `~/.ssh/`, fixes perms, writes an SSH config, optionally `gh auth login --with-token` if `gh-token` is present, clones the bootstrap project into `/workspace/project-builder` if missing, then either `exec`s a one-off command (used by the wizard for `/login`) or starts `tmux new-session -d -s main` running Claude in a while-loop.
+  - **`SandboxDockerfile` (build)** — produces `ai-context:latest`: Alpine + nodejs/npm + git + ripgrep + bash + tmux + github-cli + openssh-client + curl + gitleaks 8.21.0 + `@anthropic-ai/claude-code` (global) + `rtk` (Rust Token Killer, rolling-latest; arm64 also pulls `gcompat`) + non-root `claude` user + system-wide git hooks at `/etc/git-hooks/`.
+  - **`entrypoint.sh` (container PID 1)** — copies the SSH key from `/etc/secrets/git-key` to `~/.ssh/`, fixes perms, writes an SSH config, optionally `gh auth login --with-token` if `gh-token` is present, clones the bootstrap project into `/workspace/project-builder` if missing, then either `exec`s a one-off command (used by the wizard for `/login`) or starts `tmux new-session -d -s main` running Claude in a while-loop. Also runs `rtk init -g` idempotently on every start (after `claude-config/` is bind-mounted so the hook config persists) and conditionally appends an RTK bypass directive to `~/.claude/CLAUDE.md` under sentinel markers, skipping if upstream RTK already documented the bypass in `CLAUDE.md` or `RTK.md`.
   - **`tmux` session `main` (in-container, long-running)** — keeps Claude alive across `docker compose exec` detach/reattach cycles; restarts Claude in a loop on `/exit` so `attach` always lands in a fresh prompt.
   - **System-wide git hooks (in-container)** — `/etc/git-hooks/pre-commit` runs gitleaks on staged changes for any commit Claude makes inside any cloned project.
   - **Host pre-commit hook (contributors only)** — `.pre-commit-config.yaml` invokes the same gitleaks v8.21.0 via the [pre-commit](https://pre-commit.com/) framework on the host before commits land in *this* repo.
@@ -160,6 +163,7 @@ Source of truth for the `ai-sandbox` project. Machine-read fields live in the YA
   - **GitHub** — `git clone`/`fetch`/`push` over SSH; `gh` CLI for API operations (`gh issue`, `gh pr`, etc.).
   - **Anthropic Claude** — via `@anthropic-ai/claude-code`.
   - **gitleaks GitHub Releases** — pulled at `docker build` time only.
+  - **rtk-ai/rtk GitHub Releases** — pulled at `docker build` time only.
   - **Alpine `apk` repos** — pulled at `docker build` time only.
 - **data_flow_narrative:** The operator runs a host script (`setup.sh`/`attach.sh`/etc.). That script invokes `docker compose` against the local Docker daemon, which boots `claude-sandbox` from `ai-context:latest`. The entrypoint hydrates auth (SSH key from `secrets/`, optional `gh` token, persisted Claude `/login` state from `claude-config/`) and starts the `tmux main` session. Claude runs inside that session, reading and writing within `/workspace` (which is the host's `./workspace/` directory), and reaching out to GitHub and Anthropic when it needs to clone, push, or talk to its model. The operator detaches and reattaches via `docker compose exec claude-sandbox tmux attach -t main`. Nothing inbound from the network — there are no exposed ports.
 - **trust_boundaries:**
@@ -168,6 +172,7 @@ Source of truth for the `ai-sandbox` project. Machine-read fields live in the YA
   - **gitleaks at two layers.** Host pre-commit (this repo's contributors) and container-wide system hook (every commit Claude makes anywhere inside the container). Both pinned to gitleaks 8.21.0 and must move together.
   - **No inbound network surface.** No ports published in `docker-compose.yml`; the container is reachable only via `docker compose exec` from the same host.
   - **Bind-mount dirs are not project source.** `workspace/`, `secrets/`, and `claude-config/` are runtime state owned by the operator/Claude — they are excluded from `paths.production` so the dev-team never edits them.
+  - **RTK as a CLI proxy on the PATH, not a new trust boundary.** `rtk` is a passive binary at `/usr/local/bin/rtk` invoked by Claude's Bash hook (configured by `rtk init -g` writing to `~/.claude/settings.json`). It runs in-process as the `claude` user; it does not add inbound surface or change isolation properties. The supply-chain note above for `rtk-ai/rtk` GitHub Releases (build-time fetch, rolling-latest, no checksum) is the relevant risk.
 - **multi_tenancy:** not applicable. Single-user, single-host, single-container. There is no concept of "another tenant"; there is only "the operator running this on their machine."
 
 ### Production / test path scopes
@@ -232,6 +237,10 @@ None
 - **hot_reload:** not applicable. The runtime is `tmux` running Claude in a while-loop; iteration on the image itself requires `docker compose down && docker compose build && docker compose up -d` (or just `./clean.sh` then `./setup.sh`).
 - **seed_data:** none. All state is operator-supplied (`secrets/git-key`, optional `secrets/gh-token`, the project that gets cloned into `/workspace`).
 - **migrations:** not applicable. No data store, no schema.
+
+## Use Cases
+
+Use cases are captured individually under `use-cases/` and indexed in `USE_CASES.md`.
 
 ## Scaffolding Plan
 
