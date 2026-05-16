@@ -24,6 +24,8 @@ Extend `ai-sandbox` from a single-container setup to multiple concurrent Claude 
 18. PROJECT_BRIEF.md `build.commands` is updated to reflect the new operator commands (build, setup, spawn, attach, clean) and the legacy single-container `up`/`down` entries are removed or repurposed.
 19. README is updated to explain spawn/attach/clean, the shared-by-default workspace + claude-config, the opt-in isolation flags, and a "known foot-guns" note covering: concurrent file edits across sessions sharing a workspace, concurrent writes to `~/.claude/projects/` across sessions sharing claude-config, and concurrent `git push` races against the same remote branch. No code guard is added for any of these — operator-aware behavior only.
 20. No new ports are published in any per-session Compose invocation.
+21. `spawn.sh` / `spawn.ps1` and `clean.sh` / `clean.ps1` must support **non-interactive flag-only invocation**: every choice currently offered as an interactive prompt (workspace mode, claude-config mode, clean-target selection, etc.) is also exposable via a flag, and the script can be driven end-to-end without a TTY. Detection mechanism (e.g. `[[ -t 0 ]]`, an explicit `--non-interactive` flag, or both) is implementation-defined. Required by UC03 — the Java server cannot answer interactive prompts.
+22. `spawn.sh` / `spawn.ps1` accepts an optional `--label <value>` flag that sets the Docker Compose label `com.ai-sandbox.label=<value>` on the new container (via `--label` on `docker compose up` or via a generated overlay file — implementation-defined). The label, when set, is read back by `attach.sh` / `attach.ps1` and surfaced alongside the tmux window title. Required by UC03 — the management REST API exposes the label as a first-class field.
 
 ## Potential Pitfalls & Open Questions
 - **Accepted risk** — Shared `./claude-config/` across multiple concurrent Claude processes: `~/.claude/projects/`, `~/.claude/settings.json`, and hook state are shared mutable state; concurrent writes can clobber each other. Documented in README; no engineering mitigation.
@@ -69,3 +71,7 @@ This is the FINAL shape, but I need to split this into multiple use cases, which
   A: `docker compose ls` (Compose v2 native).
 - Q: Should anything actively guard against concurrent git pushes?
   A: Doc-only — README warning, no code.
+
+## Amendments
+
+- **2026-05-16** — Added ACs 21 and 22 (non-interactive flag-only mode for `spawn.sh` / `clean.sh`; `--label` flag on `spawn.sh` that sets `com.ai-sandbox.label`). Source: UC03 (`mtls-java-management-server`) declares both as hard preconditions that must be satisfied before UC03's `/develop` run begins. Without these, the Java server cannot drive UC02's scripts non-interactively and cannot tag sessions for the management API.
