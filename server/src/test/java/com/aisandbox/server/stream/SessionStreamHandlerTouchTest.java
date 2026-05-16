@@ -51,8 +51,8 @@ class SessionStreamHandlerTouchTest {
     void touch_advances_lastIo_to_now() {
         StreamRegistryService streams = new StreamRegistryService(props());
         ClientIdentity id = new ClientIdentity("alice", "a".repeat(64), BigInteger.ONE);
-        ActiveStream as = new ActiveStream(
-                StreamId.fresh(), 1, id.fingerprintHex(), Mockito.mock(WebSocketSession.class));
+        ActiveStream as =
+                new ActiveStream(StreamId.fresh(), 1, id.fingerprintHex(), Mockito.mock(WebSocketSession.class));
         Instant before = Instant.now().minusSeconds(60);
         as.lastIo = before;
         streams.register(as);

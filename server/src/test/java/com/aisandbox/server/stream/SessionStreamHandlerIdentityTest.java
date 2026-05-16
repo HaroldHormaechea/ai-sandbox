@@ -205,7 +205,8 @@ class SessionStreamHandlerIdentityTest {
 
         @Override
         public WebSocketMessage binaryMessage(
-                java.util.function.Function<org.springframework.core.io.buffer.DataBufferFactory,
+                java.util.function.Function<
+                                org.springframework.core.io.buffer.DataBufferFactory,
                                 org.springframework.core.io.buffer.DataBuffer>
                         payloadFactory) {
             return new WebSocketMessage(WebSocketMessage.Type.BINARY, payloadFactory.apply(bufferFactory()));
@@ -213,7 +214,8 @@ class SessionStreamHandlerIdentityTest {
 
         @Override
         public WebSocketMessage pingMessage(
-                java.util.function.Function<org.springframework.core.io.buffer.DataBufferFactory,
+                java.util.function.Function<
+                                org.springframework.core.io.buffer.DataBufferFactory,
                                 org.springframework.core.io.buffer.DataBuffer>
                         payloadFactory) {
             return new WebSocketMessage(WebSocketMessage.Type.PING, payloadFactory.apply(bufferFactory()));
@@ -221,7 +223,8 @@ class SessionStreamHandlerIdentityTest {
 
         @Override
         public WebSocketMessage pongMessage(
-                java.util.function.Function<org.springframework.core.io.buffer.DataBufferFactory,
+                java.util.function.Function<
+                                org.springframework.core.io.buffer.DataBufferFactory,
                                 org.springframework.core.io.buffer.DataBuffer>
                         payloadFactory) {
             return new WebSocketMessage(WebSocketMessage.Type.PONG, payloadFactory.apply(bufferFactory()));
