@@ -22,15 +22,16 @@ import org.mockito.Mockito;
 import org.springframework.web.reactive.socket.WebSocketSession;
 
 /**
- * Developer's known limitation #5 — {@code SessionStreamHandler.touch(streamId)}
- * is a stub. The idle-timeout sweeper reads {@link ActiveStream#lastIo} but
- * the read / write paths in {@link SessionStreamHandler} never refresh it,
- * so an active stream looks idle to the sweeper.
+ * AC28 — the idle-timeout sweeper must measure elapsed time since the
+ * last <em>real</em> I/O, not since stream-open. {@code touch(StreamId)}
+ * advances {@code lastIo} to "now" on every frame so an actively
+ * streaming client is never evicted.
  *
- * <p>This test asserts the gap is present: invoking {@code touch} on the
- * handler does NOT update an {@link ActiveStream}'s {@code lastIo} (it can't,
- * since the handler holds no registry handle today). The finding is
- * reported back to the developer in the test summary.
+ * <p>This test pinned the gap when {@code touch()} was a stub (round 1);
+ * after the developer wired the registry-side hook on every read / write
+ * path, the assertion was flipped to confirm advancement. If a future
+ * change re-stubs the method, this test goes red — that's the regression
+ * signal.
  */
 class SessionStreamHandlerTouchTest {
 
@@ -47,16 +48,11 @@ class SessionStreamHandlerTouchTest {
     }
 
     @Test
-    void touch_is_currently_a_stub_and_does_not_refresh_lastIo() {
-        // This test documents an open bug. When the developer wires touch()
-        // into the read/write paths (and the handler gains access to the
-        // ActiveStream lastIo field), update this test to assert the
-        // OPPOSITE: invoking touch DOES advance lastIo. The current state
-        // is intentionally captured to make the regression visible.
+    void touch_advances_lastIo_to_now() {
         StreamRegistryService streams = new StreamRegistryService(props());
         ClientIdentity id = new ClientIdentity("alice", "a".repeat(64), BigInteger.ONE);
-        ActiveStream as =
-                new ActiveStream(StreamId.fresh(), 1, id.fingerprintHex(), Mockito.mock(WebSocketSession.class));
+        ActiveStream as = new ActiveStream(
+                StreamId.fresh(), 1, id.fingerprintHex(), Mockito.mock(WebSocketSession.class));
         Instant before = Instant.now().minusSeconds(60);
         as.lastIo = before;
         streams.register(as);
@@ -71,12 +67,28 @@ class SessionStreamHandlerTouchTest {
         SessionStreamHandler handler =
                 new SessionStreamHandler(facade, new StreamControlMessageService(), 262144, 262144, 16384);
 
-        // Invoke the public hook — currently a no-op per its own javadoc.
+        Instant beforeCall = Instant.now();
         handler.touch(as.id);
 
-        // KNOWN ISSUE: this assertion is INTENTIONAL — if the developer
-        // wires touch() through to the registry, the assertion must flip
-        // (assertThat(as.lastIo).isAfter(before)) and the test renamed.
-        assertThat(as.lastIo).isEqualTo(before);
+        // touch() must move lastIo forward to (approximately) "now".
+        assertThat(as.lastIo).isAfter(before);
+        assertThat(as.lastIo).isAfterOrEqualTo(beforeCall.minusMillis(1));
+    }
+
+    @Test
+    void touch_on_unknown_streamId_is_a_safe_no_op() {
+        StreamRegistryService streams = new StreamRegistryService(props());
+        StreamFacade facade = new StreamFacade(
+                Mockito.mock(SessionRegistryService.class),
+                streams,
+                Mockito.mock(TmuxBridgeService.class),
+                new PerSessionMutexRegistry(),
+                Mockito.mock(AuditLogger.class),
+                props());
+        SessionStreamHandler handler =
+                new SessionStreamHandler(facade, new StreamControlMessageService(), 262144, 262144, 16384);
+
+        // Must not throw; nothing registered for this id.
+        handler.touch(StreamId.fresh());
     }
 }
