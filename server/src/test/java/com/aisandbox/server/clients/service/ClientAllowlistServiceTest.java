@@ -42,8 +42,7 @@ class ClientAllowlistServiceTest {
         ClientAllowlistService svc = service(dir);
         svc.rebuild();
 
-        String bobFp = PemUtils.fingerprintHex(
-                PemUtils.parseCertificate(Files.readString(bobCrt)));
+        String bobFp = PemUtils.fingerprintHex(PemUtils.parseCertificate(Files.readString(bobCrt)));
 
         // Revoke bob by deleting the file, then rebuild.
         Files.delete(bobCrt);
@@ -68,7 +67,8 @@ class ClientAllowlistServiceTest {
 
     @Test
     void rebuild_soft_fails_on_unparseable_entry(@TempDir Path dir) throws Exception {
-        Files.writeString(dir.resolve("good.crt"), CertFixtures.newClient("good").pem());
+        Files.writeString(
+                dir.resolve("good.crt"), CertFixtures.newClient("good").pem());
         Files.writeString(dir.resolve("bad.crt"), "this is not pem at all");
 
         ClientAllowlistService svc = service(dir);

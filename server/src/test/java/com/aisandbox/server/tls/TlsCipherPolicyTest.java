@@ -22,8 +22,7 @@ class TlsCipherPolicyTest {
     @Test
     void ciphers_match_AC10_allowlist_exactly_and_in_order() {
         assertThat(TlsCipherPolicy.CIPHERS)
-                .containsExactly(
-                        "TLS_AES_256_GCM_SHA384", "TLS_CHACHA20_POLY1305_SHA256", "TLS_AES_128_GCM_SHA256");
+                .containsExactly("TLS_AES_256_GCM_SHA384", "TLS_CHACHA20_POLY1305_SHA256", "TLS_AES_128_GCM_SHA256");
     }
 
     @Test

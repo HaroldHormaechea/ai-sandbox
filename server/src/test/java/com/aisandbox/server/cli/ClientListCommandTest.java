@@ -28,15 +28,18 @@ class ClientListCommandTest {
         PrintStream originalOut = System.out;
         System.setOut(new PrintStream(buf, true, StandardCharsets.UTF_8));
         try {
-            int exit = new CommandLine(new ClientListCommand.List())
-                    .execute( "--clients-dir", clients.toString());
+            int exit = new CommandLine(new ClientListCommand.List()).execute("--clients-dir", clients.toString());
             assertThat(exit).isZero();
         } finally {
             System.setOut(originalOut);
         }
 
         String stdout = buf.toString(StandardCharsets.UTF_8);
-        assertThat(stdout).contains("NAME").contains("CN").contains("FINGERPRINT").contains("ADDED");
+        assertThat(stdout)
+                .contains("NAME")
+                .contains("CN")
+                .contains("FINGERPRINT")
+                .contains("ADDED");
         assertThat(stdout).contains("alice").contains("bob");
     }
 
@@ -48,8 +51,7 @@ class ClientListCommandTest {
         PrintStream originalErr = System.err;
         System.setErr(new PrintStream(err, true, StandardCharsets.UTF_8));
         try {
-            int exit = new CommandLine(new ClientListCommand.List())
-                    .execute( "--clients-dir", notADir.toString());
+            int exit = new CommandLine(new ClientListCommand.List()).execute("--clients-dir", notADir.toString());
             assertThat(exit).isEqualTo(1);
         } finally {
             System.setErr(originalErr);

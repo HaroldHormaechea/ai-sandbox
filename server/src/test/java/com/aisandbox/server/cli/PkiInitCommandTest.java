@@ -54,11 +54,25 @@ class PkiInitCommandTest {
         Path config = tmp.resolve("config.yaml");
 
         int firstRun = new CommandLine(new PkiInitCommand())
-                .execute("init", "--pki-dir", pki.toString(), "--clients-dir", clients.toString(), "--config", config.toString());
+                .execute(
+                        "init",
+                        "--pki-dir",
+                        pki.toString(),
+                        "--clients-dir",
+                        clients.toString(),
+                        "--config",
+                        config.toString());
         assertThat(firstRun).isZero();
 
         int secondRun = new CommandLine(new PkiInitCommand())
-                .execute("init", "--pki-dir", pki.toString(), "--clients-dir", clients.toString(), "--config", config.toString());
+                .execute(
+                        "init",
+                        "--pki-dir",
+                        pki.toString(),
+                        "--clients-dir",
+                        clients.toString(),
+                        "--config",
+                        config.toString());
         assertThat(secondRun).isEqualTo(2);
     }
 
@@ -69,7 +83,14 @@ class PkiInitCommandTest {
         Path config = tmp.resolve("config.yaml");
 
         new CommandLine(new PkiInitCommand())
-                .execute("init", "--pki-dir", pki.toString(), "--clients-dir", clients.toString(), "--config", config.toString());
+                .execute(
+                        "init",
+                        "--pki-dir",
+                        pki.toString(),
+                        "--clients-dir",
+                        clients.toString(),
+                        "--config",
+                        config.toString());
 
         int exit = new CommandLine(new PkiInitCommand())
                 .execute(
@@ -94,7 +115,14 @@ class PkiInitCommandTest {
         Path clients = tmp.resolve("clients");
         Path config = tmp.resolve("config.yaml");
         new CommandLine(new PkiInitCommand())
-                .execute("init", "--pki-dir", pki.toString(), "--clients-dir", clients.toString(), "--config", config.toString());
+                .execute(
+                        "init",
+                        "--pki-dir",
+                        pki.toString(),
+                        "--clients-dir",
+                        clients.toString(),
+                        "--config",
+                        config.toString());
         var cert = PemUtils.parseCertificate(Files.readString(pki.resolve("server.crt")));
         assertThat(PemUtils.extractCommonName(cert)).isEqualTo("ai-sandbox-server");
     }

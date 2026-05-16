@@ -33,16 +33,15 @@ class ProcessExecutorTest {
     void argv_is_passed_as_an_array_not_a_shell_command() throws Exception {
         // If we were going through a shell, ';true' would split into two commands.
         // Going through argv-only, the entire string is one argument to echo.
-        ProcessExecutor.Result r =
-                exec.run(List.of("/bin/echo", "foo; rm -rf /"), null, Duration.ofSeconds(5));
+        ProcessExecutor.Result r = exec.run(List.of("/bin/echo", "foo; rm -rf /"), null, Duration.ofSeconds(5));
         assertThat(r.exitCode()).isZero();
         assertThat(r.stdout()).contains("foo; rm -rf /");
     }
 
     @Test
     void captures_stderr_and_non_zero_exit() throws Exception {
-        ProcessExecutor.Result r = exec.run(
-                List.of("/bin/sh", "-c", "printf err 1>&2; exit 17"), null, Duration.ofSeconds(5));
+        ProcessExecutor.Result r =
+                exec.run(List.of("/bin/sh", "-c", "printf err 1>&2; exit 17"), null, Duration.ofSeconds(5));
         assertThat(r.exitCode()).isEqualTo(17);
         assertThat(r.stderr()).contains("err");
     }
@@ -58,8 +57,8 @@ class ProcessExecutorTest {
     @Test
     void truncates_large_output_with_sentinel() throws Exception {
         // Spit > 64 KiB at stdout.
-        ProcessExecutor.Result r = exec.run(
-                List.of("/bin/sh", "-c", "yes A | head -c 200000"), null, Duration.ofSeconds(5));
+        ProcessExecutor.Result r =
+                exec.run(List.of("/bin/sh", "-c", "yes A | head -c 200000"), null, Duration.ofSeconds(5));
         assertThat(r.exitCode()).isZero();
         // Captured buffer is capped at 64 KiB + the truncation sentinel.
         assertThat(r.stdout().length()).isLessThan(70_000);

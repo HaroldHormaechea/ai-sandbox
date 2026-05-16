@@ -62,7 +62,7 @@ class OutputRingBufferTest {
         OutputRingBuffer ring = new OutputRingBuffer(6);
         // Fill, drain half, write a chunk that crosses the wrap.
         ring.write("ABCDEF".getBytes(), 0, 6);
-        ring.drain(4);                       // leaves "EF" at head=4
+        ring.drain(4); // leaves "EF" at head=4
         boolean ok = ring.write("123".getBytes(), 0, 3); // wraps to index 0..1
         assertThat(ok).isTrue();
         byte[] all = ring.drain(100);

@@ -63,7 +63,8 @@ class ProblemDetailsAdviceTest {
 
     @Test
     void build_factory_emits_type_uri_and_lowercase_code() {
-        ProblemDetail pd = ProblemDetailsAdvice.build(HttpStatus.SERVICE_UNAVAILABLE, ErrorCode.STREAM_CAP_EXCEEDED, "global cap");
+        ProblemDetail pd =
+                ProblemDetailsAdvice.build(HttpStatus.SERVICE_UNAVAILABLE, ErrorCode.STREAM_CAP_EXCEEDED, "global cap");
         assertThat(pd.getStatus()).isEqualTo(503);
         assertThat(pd.getType().toString()).endsWith("/stream_cap_exceeded");
         assertThat(pd.getProperties()).containsEntry("code", "stream_cap_exceeded");

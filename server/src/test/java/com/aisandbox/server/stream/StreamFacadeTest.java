@@ -50,7 +50,8 @@ class StreamFacadeTest {
                 props(10, 100));
     }
 
-    private static StreamFacade buildWithCaps(SessionRegistryService sr, StreamRegistryService str, int per, int global) {
+    private static StreamFacade buildWithCaps(
+            SessionRegistryService sr, StreamRegistryService str, int per, int global) {
         return new StreamFacade(
                 sr,
                 str,
@@ -87,12 +88,15 @@ class StreamFacadeTest {
         StreamRegistryService streams = new StreamRegistryService(props(10, 1));
         // Fill the registry to its global cap.
         streams.register(new StreamRegistryService.ActiveStream(
-                StreamRegistryService.StreamId.fresh(), 1, "x", mock(org.springframework.web.reactive.socket.WebSocketSession.class)));
+                StreamRegistryService.StreamId.fresh(),
+                1,
+                "x",
+                mock(org.springframework.web.reactive.socket.WebSocketSession.class)));
 
         StreamFacade f = buildWithCaps(sr, streams, 10, 1);
         AuthorizeResult r = f.authorizeOpen(1, identity());
-        assertThat(r).isInstanceOfSatisfying(StreamFacade.CapExceeded.class, ce ->
-                assertThat(ce.scope()).isEqualTo("global"));
+        assertThat(r).isInstanceOfSatisfying(StreamFacade.CapExceeded.class, ce -> assertThat(ce.scope())
+                .isEqualTo("global"));
     }
 
     @Test
@@ -101,13 +105,15 @@ class StreamFacadeTest {
         when(sr.exists(1)).thenReturn(true);
         StreamRegistryService streams = new StreamRegistryService(props(1, 100));
         streams.register(new StreamRegistryService.ActiveStream(
-                StreamRegistryService.StreamId.fresh(), 1, identity().fingerprintHex(),
+                StreamRegistryService.StreamId.fresh(),
+                1,
+                identity().fingerprintHex(),
                 mock(org.springframework.web.reactive.socket.WebSocketSession.class)));
 
         StreamFacade f = buildWithCaps(sr, streams, 1, 100);
         AuthorizeResult r = f.authorizeOpen(1, identity());
-        assertThat(r).isInstanceOfSatisfying(StreamFacade.CapExceeded.class, ce ->
-                assertThat(ce.scope()).isEqualTo("per-client"));
+        assertThat(r).isInstanceOfSatisfying(StreamFacade.CapExceeded.class, ce -> assertThat(ce.scope())
+                .isEqualTo("per-client"));
     }
 
     @Test

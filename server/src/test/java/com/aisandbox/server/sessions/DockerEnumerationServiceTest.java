@@ -23,7 +23,8 @@ class DockerEnumerationServiceTest {
     @Test
     void parses_json_array_output() throws Exception {
         ProcessExecutor exec = mock(ProcessExecutor.class);
-        String arrayJson = """
+        String arrayJson =
+                """
                 [{"Name":"ai-sandbox-1","Status":"running"},
                  {"Name":"ai-sandbox-3","Status":"running"},
                  {"Name":"unrelated-project","Status":"running"}]
@@ -55,7 +56,8 @@ class DockerEnumerationServiceTest {
         // KNOWN LIMITATION (developer flagged): NDJSON path is best-effort.
         // This test fails today if the NDJSON branch is broken.
         ProcessExecutor exec = mock(ProcessExecutor.class);
-        String ndjson = """
+        String ndjson =
+                """
                 {"Name":"ai-sandbox-2","Status":"running"}
                 {"Name":"ai-sandbox-5","Status":"running"}
                 """;

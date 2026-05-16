@@ -31,11 +31,10 @@ import org.junit.jupiter.api.Test;
  */
 class LayeringTest {
 
-    private static final JavaClasses PRODUCTION =
-            new ClassFileImporter()
-                    .withImportOption(ImportOption.Predefined.DO_NOT_INCLUDE_TESTS)
-                    .withImportOption(ImportOption.Predefined.DO_NOT_INCLUDE_JARS)
-                    .importPackages("com.aisandbox.server");
+    private static final JavaClasses PRODUCTION = new ClassFileImporter()
+            .withImportOption(ImportOption.Predefined.DO_NOT_INCLUDE_TESTS)
+            .withImportOption(ImportOption.Predefined.DO_NOT_INCLUDE_JARS)
+            .importPackages("com.aisandbox.server");
 
     @Test
     void controllers_only_reference_facade_layer_service_types_not_service_classes_themselves() {
@@ -87,9 +86,7 @@ class LayeringTest {
                 .haveSimpleNameEndingWith("Controller")
                 .should()
                 .dependOnClassesThat()
-                .resideInAnyPackage(
-                        "com.aisandbox.server.sessions.dto",
-                        "com.aisandbox.server.clients.dto");
+                .resideInAnyPackage("com.aisandbox.server.sessions.dto", "com.aisandbox.server.clients.dto");
         rule.allowEmptyShould(true).check(PRODUCTION);
     }
 
@@ -102,8 +99,7 @@ class LayeringTest {
         JavaClasses featureOnly = new ClassFileImporter()
                 .withImportOption(ImportOption.Predefined.DO_NOT_INCLUDE_TESTS)
                 .withImportOption(ImportOption.Predefined.DO_NOT_INCLUDE_JARS)
-                .withImportOption(location ->
-                        !location.contains("/com/aisandbox/server/config/"))
+                .withImportOption(location -> !location.contains("/com/aisandbox/server/config/"))
                 .importPackages("com.aisandbox.server");
         ArchRule rule = SlicesRuleDefinition.slices()
                 .matching("com.aisandbox.server.(*)..")

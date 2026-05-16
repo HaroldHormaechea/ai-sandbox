@@ -51,7 +51,8 @@ class SessionFacadeTest {
         AuditLogger audit = mock(AuditLogger.class);
         when(exec.spawn(any(), any())).thenReturn(new ProcessExecutor.Result(0, "ai-sandbox-9 ready", ""));
 
-        SessionFacade facade = new SessionFacade(registry, exec, new SpawnMutex(), new PerSessionMutexRegistry(), audit, props());
+        SessionFacade facade =
+                new SessionFacade(registry, exec, new SpawnMutex(), new PerSessionMutexRegistry(), audit, props());
 
         int n = facade.spawnSession(new SpawnCommand("foo", WorkspaceMode.SHARED, ClaudeConfigMode.SHARED));
 
@@ -68,9 +69,11 @@ class SessionFacadeTest {
         when(exec.spawn(any(), any())).thenReturn(new ProcessExecutor.Result(7, "ai-sandbox-4 emerging", "boom"));
         when(exec.clean(anyInt(), any())).thenReturn(new ProcessExecutor.Result(0, "", ""));
 
-        SessionFacade facade = new SessionFacade(registry, exec, new SpawnMutex(), new PerSessionMutexRegistry(), audit, props());
+        SessionFacade facade =
+                new SessionFacade(registry, exec, new SpawnMutex(), new PerSessionMutexRegistry(), audit, props());
 
-        assertThatThrownBy(() -> facade.spawnSession(new SpawnCommand(null, WorkspaceMode.SHARED, ClaudeConfigMode.SHARED)))
+        assertThatThrownBy(() ->
+                        facade.spawnSession(new SpawnCommand(null, WorkspaceMode.SHARED, ClaudeConfigMode.SHARED)))
                 .isInstanceOf(SessionFacade.SpawnFailedException.class)
                 .hasFieldOrPropertyWithValue("exitCode", 7)
                 .hasFieldOrPropertyWithValue("consumedN", 4)
@@ -86,9 +89,11 @@ class SessionFacadeTest {
         AuditLogger audit = mock(AuditLogger.class);
         when(exec.spawn(any(), any())).thenReturn(new ProcessExecutor.Result(1, "", "early failure"));
 
-        SessionFacade facade = new SessionFacade(registry, exec, new SpawnMutex(), new PerSessionMutexRegistry(), audit, props());
+        SessionFacade facade =
+                new SessionFacade(registry, exec, new SpawnMutex(), new PerSessionMutexRegistry(), audit, props());
 
-        assertThatThrownBy(() -> facade.spawnSession(new SpawnCommand(null, WorkspaceMode.SHARED, ClaudeConfigMode.SHARED)))
+        assertThatThrownBy(() ->
+                        facade.spawnSession(new SpawnCommand(null, WorkspaceMode.SHARED, ClaudeConfigMode.SHARED)))
                 .isInstanceOf(SessionFacade.SpawnFailedException.class);
 
         verify(exec, never()).clean(anyInt(), any());
@@ -101,7 +106,8 @@ class SessionFacadeTest {
         AuditLogger audit = mock(AuditLogger.class);
         when(exec.clean(anyInt(), any())).thenReturn(new ProcessExecutor.Result(0, "", ""));
 
-        SessionFacade facade = new SessionFacade(registry, exec, new SpawnMutex(), new PerSessionMutexRegistry(), audit, props());
+        SessionFacade facade =
+                new SessionFacade(registry, exec, new SpawnMutex(), new PerSessionMutexRegistry(), audit, props());
         assertThat(facade.deleteSession(3, false)).isTrue();
     }
 
@@ -112,8 +118,8 @@ class SessionFacadeTest {
         AuditLogger audit = mock(AuditLogger.class);
         when(exec.clean(anyInt(), any())).thenReturn(new ProcessExecutor.Result(2, "", "fail"));
 
-        SessionFacade facade = new SessionFacade(registry, exec, new SpawnMutex(), new PerSessionMutexRegistry(), audit, props());
+        SessionFacade facade =
+                new SessionFacade(registry, exec, new SpawnMutex(), new PerSessionMutexRegistry(), audit, props());
         assertThat(facade.deleteSession(3, true)).isFalse();
     }
-
 }

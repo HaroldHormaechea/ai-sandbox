@@ -71,8 +71,7 @@ class ScriptExecutorServiceTest {
         ArgumentCaptor<List<String>> argv = ArgumentCaptor.forClass(List.class);
         verify(exec).run(argv.capture(), any(), any());
         assertThat(argv.getValue())
-                .containsExactly(
-                        "/fake/spawn.sh", "--non-interactive", "--shared-workspace", "--shared-claude-config");
+                .containsExactly("/fake/spawn.sh", "--non-interactive", "--shared-workspace", "--shared-claude-config");
     }
 
     @Test
@@ -87,7 +86,6 @@ class ScriptExecutorServiceTest {
 
         ArgumentCaptor<List<String>> argv = ArgumentCaptor.forClass(List.class);
         verify(exec).run(argv.capture(), eq(Path.of("/fake")), eq(Duration.ofSeconds(5)));
-        assertThat(argv.getValue())
-                .containsExactly("/fake/clean.sh", "--non-interactive", "--session", "7");
+        assertThat(argv.getValue()).containsExactly("/fake/clean.sh", "--non-interactive", "--session", "7");
     }
 }

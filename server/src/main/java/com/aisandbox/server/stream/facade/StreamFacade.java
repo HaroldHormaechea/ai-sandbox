@@ -157,4 +157,14 @@ public class StreamFacade {
     public TmuxBridgeService tmux() {
         return tmux;
     }
+
+    /**
+     * Accessor exposed so {@link com.aisandbox.server.stream.handler.SessionStreamHandler}
+     * can refresh {@code lastIo} on the underlying stream record without
+     * needing a second constructor parameter. Wiring through the facade
+     * keeps the handler's constructor signature stable for unit tests.
+     */
+    public StreamRegistryService streamRegistry() {
+        return streamRegistry;
+    }
 }

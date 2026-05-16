@@ -7,7 +7,6 @@ import com.aisandbox.server.clients.service.AllowlistDirectoryTestFactory;
 import com.aisandbox.server.clients.service.ClientAllowlistService;
 import com.aisandbox.server.clients.service.ClientCertParser;
 import com.aisandbox.server.test.CertFixtures;
-import com.aisandbox.server.tls.AllowlistTrustManager;
 import com.aisandbox.server.tls.ReloadableSslContextHolder;
 import com.aisandbox.server.tls.TlsCipherPolicy;
 import io.netty.bootstrap.ServerBootstrap;
@@ -67,10 +66,7 @@ class MtlsHandshakeIT {
         ServerHandle server = startTlsServer(holder);
         try {
             HandshakeOutcome outcome = clientHandshake(
-                    server.port,
-                    holder.current(),
-                    clientMat.keyPair().getPrivate(),
-                    clientMat.certificate());
+                    server.port, holder.current(), clientMat.keyPair().getPrivate(), clientMat.certificate());
             assertThat(outcome.success).isTrue();
         } finally {
             server.shutdown();
@@ -142,10 +138,14 @@ class MtlsHandshakeIT {
     }
 
     private HandshakeOutcome clientHandshake(
-            int port, SslContext serverCtx, java.security.PrivateKey clientKey, java.security.cert.X509Certificate clientCert)
+            int port,
+            SslContext serverCtx,
+            java.security.PrivateKey clientKey,
+            java.security.cert.X509Certificate clientCert)
             throws Exception {
         // Build a client SSLContext that:
-        //   - trusts the server cert (the AllowlistTrustManager on the server side ignores chains; we use a permissive one here).
+        //   - trusts the server cert (the AllowlistTrustManager on the server side ignores chains; we use a permissive
+        // one here).
         //   - presents the supplied client cert.
         var clientCtx = SslContextBuilder.forClient()
                 .protocols(TlsCipherPolicy.PROTOCOLS)

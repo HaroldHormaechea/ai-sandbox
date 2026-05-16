@@ -37,8 +37,7 @@ class AuditNoSecretsTest {
      * Constructed character-by-character so this source file never contains the
      * actual seven-character literal — otherwise the test would fail on itself.
      */
-    private static final String FORBIDDEN_KEY_PREFIX =
-            new String(new char[] {'s', 'k', '-', 'a', 'n', 't', '-'});
+    private static final String FORBIDDEN_KEY_PREFIX = new String(new char[] {'s', 'k', '-', 'a', 'n', 't', '-'});
 
     @BeforeEach
     void setUp() {

@@ -1,6 +1,7 @@
 package com.aisandbox.server.identity;
 
 import io.netty.channel.Channel;
+import io.netty.channel.ChannelId;
 import io.netty.util.AttributeKey;
 import java.util.Collections;
 import java.util.Map;
@@ -11,25 +12,35 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 /**
- * Tracks every live TLS connection by client-cert fingerprint so that, when
- * {@code AllowlistWatcher} sees a cert removed, we can synchronously close
- * the still-attached channels (AC13).
+ * Tracks every live TLS connection so that:
+ *
+ * <ul>
+ *   <li>The {@code AllowlistWatcher} can synchronously close still-attached
+ *       channels when a cert is removed (AC13) — keyed by SHA-256
+ *       fingerprint.</li>
+ *   <li>The WebSocket layer can recover the authenticated
+ *       {@link ClientIdentity} of an upgrade request — keyed by
+ *       {@link ChannelId}. Reactor-Netty's {@code WebSocketSession}
+ *       exposes only the channel id (not the channel itself), so we keep
+ *       a second index here that the stream handler can read.</li>
+ * </ul>
  *
  * <p>Connection lifecycle:
  *
  * <ol>
  *   <li>TLS handshake completes → {@code NettyServerCustomizer}'s
  *       {@link io.netty.handler.ssl.SslHandshakeCompletionEvent} listener
- *       calls {@link #attach(Channel, String, ClientIdentity)}.</li>
- *   <li>Channel goes inactive → the same listener (or the registered
- *       {@code channelInactive} hook) calls {@link #detach(Channel, String)}.</li>
+ *       calls {@link #attach(Channel, String, ClientIdentity)}, which
+ *       writes both indexes.</li>
+ *   <li>Channel goes inactive → the {@code closeFuture} listener calls
+ *       {@link #detach(Channel, String)}, which removes from both
+ *       indexes.</li>
  *   <li>Watcher detects a removed fingerprint →
  *       {@link #terminate(Set)} iterates and closes channels.</li>
  * </ol>
  *
  * <p>{@link ClientIdentity} is also stored on the channel as a Netty
- * attribute so HTTP/WebSocket filters can recover it without a registry
- * lookup.
+ * attribute so HTTP filters can recover it without a registry lookup.
  */
 @Component
 public class ActiveConnectionRegistry {
@@ -39,12 +50,14 @@ public class ActiveConnectionRegistry {
     private static final Logger LOG = LoggerFactory.getLogger(ActiveConnectionRegistry.class);
 
     private final Map<String, Set<Channel>> byFingerprint = new ConcurrentHashMap<>();
+    private final Map<ChannelId, ClientIdentity> byChannelId = new ConcurrentHashMap<>();
 
     public void attach(Channel channel, String fingerprintHex, ClientIdentity identity) {
         channel.attr(IDENTITY_ATTR).set(identity);
         byFingerprint
                 .computeIfAbsent(fingerprintHex, k -> Collections.newSetFromMap(new ConcurrentHashMap<>()))
                 .add(channel);
+        byChannelId.put(channel.id(), identity);
         channel.closeFuture().addListener(f -> detach(channel, fingerprintHex));
     }
 
@@ -56,6 +69,7 @@ public class ActiveConnectionRegistry {
                 byFingerprint.remove(fingerprintHex, set);
             }
         }
+        byChannelId.remove(channel.id());
     }
 
     /**
@@ -71,6 +85,7 @@ public class ActiveConnectionRegistry {
             int n = 0;
             for (Channel c : channels) {
                 if (c.isActive()) {
+                    byChannelId.remove(c.id());
                     c.close();
                     n++;
                 }
@@ -79,6 +94,16 @@ public class ActiveConnectionRegistry {
                 LOG.info("Closed {} channels for revoked fingerprint {}", n, fp);
             }
         }
+    }
+
+    /**
+     * Look up the authenticated identity by Netty channel id. Returns
+     * {@code null} when no identity is recorded — typically because the
+     * TLS handshake-completion handler has not yet fired, or because the
+     * channel has already detached.
+     */
+    public ClientIdentity identityFor(ChannelId channelId) {
+        return byChannelId.get(channelId);
     }
 
     public int activeConnectionsFor(String fingerprintHex) {

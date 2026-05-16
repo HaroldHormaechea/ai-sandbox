@@ -55,7 +55,8 @@ class SessionStreamHandlerTouchTest {
         // is intentionally captured to make the regression visible.
         StreamRegistryService streams = new StreamRegistryService(props());
         ClientIdentity id = new ClientIdentity("alice", "a".repeat(64), BigInteger.ONE);
-        ActiveStream as = new ActiveStream(StreamId.fresh(), 1, id.fingerprintHex(), Mockito.mock(WebSocketSession.class));
+        ActiveStream as =
+                new ActiveStream(StreamId.fresh(), 1, id.fingerprintHex(), Mockito.mock(WebSocketSession.class));
         Instant before = Instant.now().minusSeconds(60);
         as.lastIo = before;
         streams.register(as);
@@ -67,8 +68,8 @@ class SessionStreamHandlerTouchTest {
                 new PerSessionMutexRegistry(),
                 Mockito.mock(AuditLogger.class),
                 props());
-        SessionStreamHandler handler = new SessionStreamHandler(
-                facade, new StreamControlMessageService(), 262144, 262144, 16384);
+        SessionStreamHandler handler =
+                new SessionStreamHandler(facade, new StreamControlMessageService(), 262144, 262144, 16384);
 
         // Invoke the public hook — currently a no-op per its own javadoc.
         handler.touch(as.id);

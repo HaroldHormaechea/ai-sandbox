@@ -87,16 +87,28 @@ public class StreamRegistryService {
         return Map.copyOf(streams).values();
     }
 
+    /**
+     * Refresh the {@code lastIo} watermark for a live stream. Called by
+     * {@code SessionStreamHandler} on every binary frame in / out and on
+     * every text-frame control message, so the idle-timeout sweeper
+     * measures elapsed time since last real activity rather than since
+     * stream open (AC28).
+     */
+    public void touch(StreamId id) {
+        ActiveStream s = streams.get(id);
+        if (s != null) {
+            s.lastIo = Instant.now();
+        }
+    }
+
     /** Idle-timeout sweeper; fires every 30 s. */
     @Scheduled(fixedDelay = 30_000L)
     public void sweep() {
-        long idleNs = props.streams().idleTimeoutSeconds() * 1_000_000_000L;
-        long now = System.nanoTime();
-        long deadline = now - idleNs;
+        long idleMs = props.streams().idleTimeoutSeconds() * 1000L;
+        long deadline = System.currentTimeMillis() - idleMs;
         for (var entry : Map.copyOf(streams).entrySet()) {
             ActiveStream s = entry.getValue();
-            long t = s.lastIo.toEpochMilli() * 1_000_000L;
-            if (t < deadline) {
+            if (s.lastIo.toEpochMilli() < deadline) {
                 s.session.close().subscribe();
                 unregister(entry.getKey());
             }

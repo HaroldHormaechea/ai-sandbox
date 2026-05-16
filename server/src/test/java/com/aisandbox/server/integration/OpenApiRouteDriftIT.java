@@ -43,11 +43,7 @@ class OpenApiRouteDriftIT {
         String body = Files.readString(oas);
         // Routes pulled from SessionController / ClientController / HealthController.
         for (String path : new String[] {
-                "/v1/sessions",
-                "/v1/sessions/{n}",
-                "/v1/clients",
-                "/v1/clients/{cnOrFingerprint}",
-                "/v1/healthz"
+            "/v1/sessions", "/v1/sessions/{n}", "/v1/clients", "/v1/clients/{cnOrFingerprint}", "/v1/healthz"
         }) {
             assertThat(body).as("route %s in committed OAS", path).contains(path);
         }

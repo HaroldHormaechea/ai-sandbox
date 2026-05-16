@@ -1,6 +1,7 @@
 package com.aisandbox.server.stream.config;
 
 import com.aisandbox.server.config.ServerProperties;
+import com.aisandbox.server.identity.ActiveConnectionRegistry;
 import com.aisandbox.server.stream.facade.StreamFacade;
 import com.aisandbox.server.stream.handler.SessionStreamHandler;
 import com.aisandbox.server.stream.handshake.StreamCapsHandshakeInterceptor;
@@ -43,6 +44,7 @@ public class WebSocketConfiguration {
     public SessionStreamHandler sessionStreamHandler(
             StreamFacade facade,
             StreamControlMessageService controlSvc,
+            ActiveConnectionRegistry connections,
             ServerProperties props,
             SubprotocolHandshakeInterceptor subprotocol,
             StreamCapsHandshakeInterceptor capCheck) {
@@ -52,11 +54,17 @@ public class WebSocketConfiguration {
         // facade directly.
         java.util.Objects.requireNonNull(subprotocol);
         java.util.Objects.requireNonNull(capCheck);
-        return new SessionStreamHandler(
+        SessionStreamHandler handler = new SessionStreamHandler(
                 facade,
                 controlSvc,
                 props.streams().outputRingBytes(),
                 props.streams().maxBinaryFrameBytes(),
                 props.streams().maxTextFrameBytes());
+        // Inject the connection registry post-construct so the unit-test
+        // constructor signature stays stable; without this the handler
+        // cannot resolve identity from the Netty channel id and every
+        // upgrade closes with POLICY_VIOLATION.
+        handler.setActiveConnectionRegistry(connections);
+        return handler;
     }
 }

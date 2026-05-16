@@ -1,13 +1,15 @@
 package com.aisandbox.server.stream.handler;
 
+import com.aisandbox.server.identity.ActiveConnectionRegistry;
 import com.aisandbox.server.identity.ClientIdentity;
-import com.aisandbox.server.identity.ClientIdentityExtractor;
 import com.aisandbox.server.stream.dto.ControlMessage;
 import com.aisandbox.server.stream.facade.StreamFacade;
 import com.aisandbox.server.stream.service.OutputRingBuffer;
 import com.aisandbox.server.stream.service.StreamControlMessageService;
+import com.aisandbox.server.stream.service.StreamRegistryService;
 import com.aisandbox.server.stream.service.StreamRegistryService.StreamId;
 import com.aisandbox.server.stream.service.TmuxBridgeService;
+import io.netty.channel.ChannelId;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.concurrent.atomic.AtomicReference;
@@ -17,6 +19,7 @@ import org.springframework.web.reactive.socket.CloseStatus;
 import org.springframework.web.reactive.socket.WebSocketHandler;
 import org.springframework.web.reactive.socket.WebSocketMessage;
 import org.springframework.web.reactive.socket.WebSocketSession;
+import org.springframework.web.reactive.socket.adapter.ReactorNettyWebSocketSession;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.publisher.Sinks;
@@ -27,11 +30,31 @@ import reactor.core.scheduler.Schedulers;
  * Spawns a {@link TmuxBridgeService.Bridge} via the facade, then bridges
  * binary frames ↔ PTY stdio and text frames ↔ control messages.
  *
+ * <p><b>Identity propagation.</b> The {@code WebSocketSession} produced by
+ * Reactor-Netty does NOT carry the authenticated {@link ClientIdentity}
+ * in its attribute map — Spring's {@code HandshakeWebSocketService}
+ * builds those attributes from the HTTP web-session, which we don't use.
+ * Instead, the TLS handshake-completion handler in
+ * {@code NettyServerCustomizer} indexes the identity by Netty
+ * {@link ChannelId} on {@link ActiveConnectionRegistry}. The Reactor-Netty
+ * {@code WebSocketSession} exposes its underlying channel id; we look up
+ * the identity via the registry (injected post-construct via
+ * {@link #setActiveConnectionRegistry(ActiveConnectionRegistry)}) and
+ * stash it on the session's attribute map so downstream code can read it
+ * without another registry hop.
+ *
+ * <p>Identity resolution falls back to a pre-stashed session attribute
+ * (key {@link #IDENTITY_ATTR}) so unit tests can inject identity without
+ * spinning up a real TLS pipeline.
+ *
  * <p>The {@code n} path variable is resolved from the URI in
  * {@link #handle(WebSocketSession)} since reactive Spring does not
  * thread path-variables into the handler directly.
  */
 public class SessionStreamHandler implements WebSocketHandler {
+
+    /** Key under which the resolved identity is stored on the WebSocket session. */
+    public static final String IDENTITY_ATTR = "ai-sandbox.client-identity";
 
     private static final Logger LOG = LoggerFactory.getLogger(SessionStreamHandler.class);
 
@@ -40,6 +63,9 @@ public class SessionStreamHandler implements WebSocketHandler {
     private final int outputRingBytes;
     private final int maxBinaryBytes;
     private final int maxTextBytes;
+
+    /** Optional — set by {@code WebSocketConfiguration} at bean construction time. */
+    private volatile ActiveConnectionRegistry connections;
 
     public SessionStreamHandler(
             StreamFacade facade,
@@ -54,6 +80,17 @@ public class SessionStreamHandler implements WebSocketHandler {
         this.maxTextBytes = maxTextBytes;
     }
 
+    /**
+     * Late binding of the TLS-side connection registry so production
+     * wiring can inject it without changing the unit-test constructor
+     * signature. Tests that don't need identity resolution leave it
+     * unset and {@link #resolveIdentity(WebSocketSession)} either reads
+     * a pre-stashed attribute or returns {@code null}.
+     */
+    public void setActiveConnectionRegistry(ActiveConnectionRegistry connections) {
+        this.connections = connections;
+    }
+
     @Override
     public Mono<Void> handle(WebSocketSession session) {
         int n;
@@ -62,17 +99,24 @@ public class SessionStreamHandler implements WebSocketHandler {
         } catch (IllegalArgumentException iae) {
             return session.close(CloseStatus.BAD_DATA);
         }
-        ClientIdentity identity = (ClientIdentity) session.getAttributes().get(ClientIdentityExtractor.ATTR);
+        ClientIdentity identity = resolveIdentity(session);
         if (identity == null) {
+            LOG.warn(
+                    "Closing stream: no client identity recorded for channel {} (TLS handshake completion handler"
+                            + " did not run, or fingerprint was just revoked)",
+                    channelIdOf(session));
             return session.close(CloseStatus.POLICY_VIOLATION);
         }
+        // Stash for downstream consumers.
+        session.getAttributes().put(IDENTITY_ATTR, identity);
 
         OutputRingBuffer ring = new OutputRingBuffer(outputRingBytes);
         Sinks.Many<WebSocketMessage> outbound = Sinks.many().unicast().onBackpressureBuffer();
         AtomicReference<TmuxBridgeService.Bridge> bridgeRef = new AtomicReference<>();
         AtomicReference<StreamId> idRef = new AtomicReference<>();
 
-        return Mono.fromCallable(() -> facade.openStream(n, identity, session))
+        final ClientIdentity capturedIdentity = identity;
+        return Mono.fromCallable(() -> facade.openStream(n, capturedIdentity, session))
                 .subscribeOn(Schedulers.boundedElastic())
                 .flatMap(streamId -> {
                     idRef.set(streamId);
@@ -86,14 +130,14 @@ public class SessionStreamHandler implements WebSocketHandler {
                     }
 
                     // Reader thread: PTY stdout → outbound binary frames.
-                    Thread reader = new Thread(() -> pump(bridgeRef.get(), ring, outbound, session));
+                    Thread reader = new Thread(() -> pump(bridgeRef.get(), ring, outbound, session, streamId));
                     reader.setDaemon(true);
                     reader.setName("ai-sandbox-pty-out-" + streamId.value());
                     reader.start();
 
                     // Incoming pipeline: text → control, binary → PTY stdin.
                     Flux<Void> incoming = session.receive()
-                            .flatMap(msg -> handleIncoming(msg, bridgeRef.get(), session))
+                            .flatMap(msg -> handleIncoming(msg, bridgeRef.get(), session, streamId))
                             .then()
                             .flux();
 
@@ -116,7 +160,40 @@ public class SessionStreamHandler implements WebSocketHandler {
                 });
     }
 
-    private Mono<Void> handleIncoming(WebSocketMessage msg, TmuxBridgeService.Bridge bridge, WebSocketSession session) {
+    /**
+     * Resolve the authenticated {@link ClientIdentity} for an incoming
+     * WebSocket session. Order:
+     *
+     * <ol>
+     *   <li>Already-stashed attribute on the session (allows tests to
+     *       inject identity without spinning up a real TLS pipeline).</li>
+     *   <li>Channel-id lookup against {@link ActiveConnectionRegistry} —
+     *       the production path. Requires {@link #setActiveConnectionRegistry}
+     *       to have been called.</li>
+     * </ol>
+     */
+    private ClientIdentity resolveIdentity(WebSocketSession session) {
+        Object stashed = session.getAttributes().get(IDENTITY_ATTR);
+        if (stashed instanceof ClientIdentity ci) {
+            return ci;
+        }
+        ActiveConnectionRegistry reg = connections;
+        if (reg == null) {
+            return null;
+        }
+        ChannelId cid = channelIdOf(session);
+        return cid == null ? null : reg.identityFor(cid);
+    }
+
+    private static ChannelId channelIdOf(WebSocketSession session) {
+        if (session instanceof ReactorNettyWebSocketSession rnws) {
+            return rnws.getChannelId();
+        }
+        return null;
+    }
+
+    private Mono<Void> handleIncoming(
+            WebSocketMessage msg, TmuxBridgeService.Bridge bridge, WebSocketSession session, StreamId streamId) {
         if (bridge == null) {
             return Mono.empty();
         }
@@ -133,6 +210,7 @@ public class SessionStreamHandler implements WebSocketHandler {
                 } catch (IOException io) {
                     return session.close(CloseStatus.SERVER_ERROR);
                 }
+                facade.streamRegistry().touch(streamId);
                 return Mono.empty();
             case TEXT:
                 String text = msg.getPayloadAsText();
@@ -141,6 +219,7 @@ public class SessionStreamHandler implements WebSocketHandler {
                 }
                 try {
                     ControlMessage cm = controlSvc.parse(text);
+                    facade.streamRegistry().touch(streamId);
                     return applyControl(cm, bridge, session);
                 } catch (IllegalArgumentException iae) {
                     return session.send(Mono.just(session.textMessage(controlError(iae))))
@@ -175,8 +254,10 @@ public class SessionStreamHandler implements WebSocketHandler {
             TmuxBridgeService.Bridge bridge,
             OutputRingBuffer ring,
             Sinks.Many<WebSocketMessage> outbound,
-            WebSocketSession session) {
+            WebSocketSession session,
+            StreamId streamId) {
         byte[] buf = new byte[8192];
+        StreamRegistryService registry = facade.streamRegistry();
         try {
             while (bridge.isAlive()) {
                 int n = bridge.readStdout(buf);
@@ -195,6 +276,7 @@ public class SessionStreamHandler implements WebSocketHandler {
                 byte[] drained = ring.drain(maxBinaryBytes);
                 if (drained.length > 0) {
                     outbound.tryEmitNext(session.binaryMessage(bf -> bf.wrap(drained)));
+                    registry.touch(streamId);
                 }
             }
         } catch (IOException io) {
@@ -226,11 +308,13 @@ public class SessionStreamHandler implements WebSocketHandler {
     }
 
     /**
-     * Reserved hook for the keepalive sweeper to refresh lastIo on a
-     * stream — currently a no-op pending a registry-handle accessor. The
-     * sweeper independently inspects each stream's {@code lastIo}.
+     * Public hook for refreshing the {@code lastIo} watermark on a
+     * stream. Delegates to the facade-exposed
+     * {@link StreamRegistryService#touch(StreamId)}. Production paths
+     * inside this class call the registry directly; external callers can
+     * use this entry point.
      */
     public void touch(StreamId id) {
-        // intentionally empty
+        facade.streamRegistry().touch(id);
     }
 }

@@ -78,8 +78,13 @@ class AllowlistWatcherTest {
         org.mockito.ArgumentCaptor<com.aisandbox.server.audit.AuditAction> actionCap =
                 org.mockito.ArgumentCaptor.forClass(com.aisandbox.server.audit.AuditAction.class);
         Mockito.verify(audit, Mockito.atLeastOnce())
-                .logEvent(actionCap.capture(), Mockito.eq("ok"), Mockito.<Object>any(), Mockito.<Object>any(),
-                        Mockito.<Object>any(), Mockito.<Object>any());
+                .logEvent(
+                        actionCap.capture(),
+                        Mockito.eq("ok"),
+                        Mockito.<Object>any(),
+                        Mockito.<Object>any(),
+                        Mockito.<Object>any(),
+                        Mockito.<Object>any());
         assertThat(actionCap.getAllValues()).contains(com.aisandbox.server.audit.AuditAction.CLIENT_REMOVE);
     }
 

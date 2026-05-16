@@ -50,14 +50,12 @@ class StreamControlMessageServiceTest {
 
     @Test
     void rejects_unknown_type() {
-        assertThatThrownBy(() -> svc.parse("{\"type\":\"nope\"}"))
-                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> svc.parse("{\"type\":\"nope\"}")).isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
     void rejects_invalid_json() {
-        assertThatThrownBy(() -> svc.parse("not-json"))
-                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> svc.parse("not-json")).isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test
