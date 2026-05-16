@@ -1,0 +1,192 @@
+openapi: 3.1.0
+info:
+  title: ai-sandbox management server
+  description: mTLS-gated REST + WebSocket API for the ai-sandbox UC02 multi-session
+    kit.
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+  version: 0.0.1
+servers:
+- url: https://localhost:12410
+  description: Default mTLS endpoint.
+paths:
+  /v1/sessions:
+    get:
+      tags:
+      - session-controller
+      operationId: list
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                type: object
+    post:
+      tags:
+      - session-controller
+      operationId: spawn
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SpawnRequest"
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                type: object
+  /v1/clients:
+    get:
+      tags:
+      - client-controller
+      operationId: list_1
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ClientSummary"
+    post:
+      tags:
+      - client-controller
+      operationId: add
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AddClientRequest"
+        required: true
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                type: object
+  /v1/sessions/{n}:
+    get:
+      tags:
+      - session-controller
+      operationId: detail
+      parameters:
+      - name: "n"
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int32
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                type: object
+    delete:
+      tags:
+      - session-controller
+      operationId: delete
+      parameters:
+      - name: "n"
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int32
+      - name: force
+        in: query
+        required: false
+        schema:
+          type: boolean
+          default: false
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                type: object
+  /v1/healthz:
+    get:
+      tags:
+      - health-controller
+      operationId: healthz
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                type: object
+  /v1/clients/{cnOrFingerprint}:
+    delete:
+      tags:
+      - client-controller
+      operationId: delete_1
+      parameters:
+      - name: cnOrFingerprint
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                type: object
+components:
+  schemas:
+    SpawnRequest:
+      type: object
+      description: Body of POST /v1/sessions.
+      properties:
+        label:
+          type: string
+          description: Optional label set as com.ai-sandbox.label on the container.
+          pattern: "[A-Za-z0-9._:/+\\- ]{1,64}"
+        workspaceMode:
+          type: string
+          default: shared
+          description: shared | isolated
+        claudeConfigMode:
+          type: string
+          default: shared
+          description: shared | isolated
+    AddClientRequest:
+      type: object
+      description: Body of POST /v1/clients.
+      properties:
+        name:
+          type: string
+          minLength: 1
+          pattern: "[A-Za-z0-9._-]+"
+        certPem:
+          type: string
+          minLength: 1
+      required:
+      - certPem
+      - name
+    ClientSummary:
+      type: object
+      description: Item in GET /v1/clients.
+      properties:
+        name:
+          type: string
+        cn:
+          type: string
+        fingerprint:
+          type: string
+        serial:
+          type: string
+        addedAt:
+          type: string
+          format: date-time

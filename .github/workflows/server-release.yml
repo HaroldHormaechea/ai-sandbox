@@ -1,0 +1,49 @@
+name: server-release
+
+on:
+  push:
+    tags:
+      - 'server-v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Derive version from tag
+        id: ver
+        run: |
+          tag="${GITHUB_REF##*/}"
+          # tag form: server-vX.Y.Z
+          v="${tag#server-v}"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Build release bundle
+        run: |
+          ./gradlew \
+              -Pai_sandbox_server_version=${{ steps.ver.outputs.version }} \
+              :server:bootJar :server:aisandboxctlJar :server:generateOpenApiDocs :server:releaseBundle \
+              --no-daemon
+
+      - name: Locate the assembled zip
+        id: zip
+        run: |
+          path="$(ls server/build/release/ai-sandbox-server-*.zip | head -1)"
+          echo "path=$path" >> "$GITHUB_OUTPUT"
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ai-sandbox-server ${{ steps.ver.outputs.version }}
+          files: ${{ steps.zip.outputs.path }}
+          fail_on_unmatched_files: true
+          generate_release_notes: true

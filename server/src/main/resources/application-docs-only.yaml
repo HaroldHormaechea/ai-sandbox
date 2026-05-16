@@ -1,0 +1,46 @@
+# `docs-only` profile — used by `./gradlew :server:generateOpenApiDocs` to
+# spin up a minimal context, render the springdoc OAS, and exit. Avoids
+# every component that touches /etc, the audit file, or the TLS port.
+
+server:
+  port: 0
+  http2:
+    enabled: false
+  shutdown: immediate
+
+logging:
+  level:
+    root: WARN
+
+ai-sandbox:
+  server:
+    tls:
+      port: 0
+      bind-address: "127.0.0.1"
+    pki:
+      dir: /tmp/ai-sandbox-docs-only/pki
+    clients:
+      dir: /tmp/ai-sandbox-docs-only/clients
+    hostscripts:
+      repo-root: /tmp/ai-sandbox-docs-only/repo
+    limits:
+      per-ip-new-conn-per-window: 10
+      per-ip-window-seconds: 10
+      per-ip-concurrent: 10
+      spawn-timeout-seconds: 60
+      max-request-bytes: 65536
+    audit:
+      file: /tmp/audit-docs-only.log
+      retention-days: 7
+    shutdown:
+      rest-grace-seconds: 1
+      total-grace-seconds: 5
+    streams:
+      idle-timeout-seconds: 7200
+      per-client-cap: 10
+      global-cap: 100
+      max-binary-frame-bytes: 262144
+      max-text-frame-bytes: 16384
+      output-ring-bytes: 262144
+      keepalive-ping-seconds: 30
+      keepalive-pong-timeout-seconds: 15

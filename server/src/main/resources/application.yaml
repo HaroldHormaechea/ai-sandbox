@@ -1,0 +1,82 @@
+# Default application configuration baked into the fat jar.
+#
+# Production overrides live in /etc/ai-sandbox-server/config.yaml; the
+# systemd unit imports it via `--spring.config.additional-location=`.
+#
+# This file MUST stay in sync with the ServerProperties record schema and
+# with server/sample-config.yaml.
+
+spring:
+  application:
+    name: ai-sandbox-server
+  main:
+    banner-mode: "off"
+  codec:
+    max-in-memory-size: 64KB
+  webflux:
+    base-path: /
+  jackson:
+    default-property-inclusion: non_null
+  threads:
+    virtual:
+      enabled: true
+
+# Spring Boot's own server.* properties — we run TLS through a custom
+# NettyServerCustomizer, so most TLS knobs here are intentionally absent.
+server:
+  port: 12410
+  http2:
+    enabled: true
+  shutdown: graceful
+  netty:
+    connection-timeout: 5s
+    idle-timeout: 60s
+  forward-headers-strategy: native
+
+logging:
+  level:
+    root: INFO
+    com.aisandbox.server: INFO
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level %logger{36} - %msg%n"
+
+springdoc:
+  api-docs:
+    path: /v1/openapi
+    enabled: true
+  swagger-ui:
+    path: /v1/swagger-ui
+    enabled: true
+
+ai-sandbox:
+  server:
+    tls:
+      port: 12410
+      bind-address: "0.0.0.0"
+    pki:
+      dir: /etc/ai-sandbox-server/pki
+    clients:
+      dir: /etc/ai-sandbox-server/clients
+    hostscripts:
+      repo-root: /opt/ai-sandbox
+    limits:
+      per-ip-new-conn-per-window: 10
+      per-ip-window-seconds: 10
+      per-ip-concurrent: 10
+      spawn-timeout-seconds: 60
+      max-request-bytes: 65536
+    audit:
+      file: /var/log/ai-sandbox-server/audit.log
+      retention-days: 7
+    shutdown:
+      rest-grace-seconds: 30
+      total-grace-seconds: 60
+    streams:
+      idle-timeout-seconds: 7200
+      per-client-cap: 10
+      global-cap: 100
+      max-binary-frame-bytes: 262144
+      max-text-frame-bytes: 16384
+      output-ring-bytes: 262144
+      keepalive-ping-seconds: 30
+      keepalive-pong-timeout-seconds: 15

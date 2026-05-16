@@ -1,0 +1,56 @@
+# Test profile — used by Spring Boot @SpringBootTest classes that want a
+# fully-wired context without the production /etc/* footprint. Filesystem
+# paths point at temp folders created by @TempDir or set programmatically
+# via @DynamicPropertySource; the values below are only fallbacks.
+
+server:
+  port: 0
+  http2:
+    enabled: false
+  shutdown: immediate
+
+logging:
+  level:
+    root: WARN
+    com.aisandbox.server: INFO
+
+springdoc:
+  api-docs:
+    path: /v1/openapi
+    enabled: true
+  swagger-ui:
+    path: /v1/swagger-ui
+    enabled: true
+
+ai-sandbox:
+  server:
+    tls:
+      port: 0
+      bind-address: "127.0.0.1"
+    pki:
+      dir: /tmp/ai-sandbox-test/pki
+    clients:
+      dir: /tmp/ai-sandbox-test/clients
+    hostscripts:
+      repo-root: /tmp/ai-sandbox-test/repo
+    limits:
+      per-ip-new-conn-per-window: 10
+      per-ip-window-seconds: 10
+      per-ip-concurrent: 10
+      spawn-timeout-seconds: 5
+      max-request-bytes: 65536
+    audit:
+      file: /tmp/ai-sandbox-test/audit.log
+      retention-days: 7
+    shutdown:
+      rest-grace-seconds: 1
+      total-grace-seconds: 2
+    streams:
+      idle-timeout-seconds: 7200
+      per-client-cap: 10
+      global-cap: 100
+      max-binary-frame-bytes: 262144
+      max-text-frame-bytes: 16384
+      output-ring-bytes: 262144
+      keepalive-ping-seconds: 30
+      keepalive-pong-timeout-seconds: 15

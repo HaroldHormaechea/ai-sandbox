@@ -153,6 +153,110 @@ rm -rf workspace/* claude-config/* secrets/git-key secrets/gh-token secrets/gitc
 
 After that, `./setup.sh` starts everything fresh (rebuilds the image — slower).
 
+## Remote management — the UC03 mTLS server
+
+Sitting alongside the Bash/PowerShell kit is a Java (21 LTS) Spring Boot
+service that exposes the same session operations — **list / spawn / kill
+/ inspect** — plus **interactive tmux attach** over WebSocket-over-TLS,
+all on a single mTLS-gated port (default `12410`, bound to all
+interfaces). It lives under [`server/`](server/) with its own Gradle
+build and ships as two fat jars.
+
+### Prerequisites
+
+- Host **OpenJDK 21+** at install time.
+- Same Docker engine the UC02 scripts already use.
+- A dedicated POSIX user `ai-sandbox-server` in the `docker` group.
+
+### Install
+
+```bash
+# Create the runtime user.
+sudo useradd -r -s /usr/sbin/nologin -G docker ai-sandbox-server
+
+# Unpack the release zip (jars + OAS + sample config + systemd unit).
+sudo install -d -m 0755 /opt/ai-sandbox-server /opt/ai-sandbox-server/lib
+sudo install -d -m 0750 -o ai-sandbox-server -g ai-sandbox-server /var/log/ai-sandbox-server
+sudo unzip ai-sandbox-server-*.zip -d /opt/ai-sandbox-server
+
+# Generate server cert + key + empty allowlist + sample config.
+sudo java -jar /opt/ai-sandbox-server/lib/aisandboxctl.jar pki init
+
+# Mint a client cert, then start the service.
+sudo java -jar /opt/ai-sandbox-server/lib/aisandboxctl.jar client mint alice --out /tmp/alice/
+sudo install -m 0644 /opt/ai-sandbox-server/systemd/ai-sandbox-server.service \
+    /etc/systemd/system/ai-sandbox-server.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now ai-sandbox-server
+```
+
+The unit refuses to start if any of the following is wrong: server key/cert
+unreadable, allowlist folder empty (refuse-to-start policy), Docker socket
+unreachable, UC02 scripts missing or non-executable, audit-log directory
+missing or not writable.
+
+### Client lifecycle
+
+```bash
+# PKCS#12 bundle (passphrase prompted at the TTY) — default.
+aisandboxctl client mint alice --out /tmp/alice/
+
+# PEM trio instead (alice.crt + alice.key + server.crt).
+aisandboxctl client mint alice --pem --out /tmp/alice/
+
+# Revoke. In-flight connections from that cert are torn down within ≤ 1s.
+aisandboxctl client revoke alice
+
+# List currently-allowed certs.
+aisandboxctl client list
+```
+
+Mint always copies the public client cert into the allowlist folder
+(`/etc/ai-sandbox-server/clients/`); the server's filesystem watcher
+picks the change up within 250 ms.
+
+### Endpoints
+
+All mTLS-gated; there are no anonymous paths.
+
+| Verb   | Path                              | Notes |
+|--------|-----------------------------------|-------|
+| GET    | `/v1/sessions`                    | Running session list. |
+| POST   | `/v1/sessions`                    | Spawn (sync, 60 s timeout). |
+| GET    | `/v1/sessions/{n}`                | Session detail. |
+| DELETE | `/v1/sessions/{n}[?force=true]`   | Clean a session. |
+| GET    | `/v1/healthz`                     | 200 only when Docker, scripts, TLS are healthy. |
+| GET    | `/v1/clients`                     | Allowlist listing. |
+| POST   | `/v1/clients`                     | Add a cert. |
+| DELETE | `/v1/clients/{cnOrFingerprint}`   | Remove a cert. |
+| GET    | `/v1/openapi.yaml`                | springdoc-generated OAS (also committed at `server/openapi.yaml`; CI fails on drift). |
+| GET    | `/v1/swagger-ui`                  | Swagger UI (strict CSP). |
+| WSS    | `/v1/sessions/{n}/stream`         | Subprotocol `ai-sandbox.v1`. Schema in [`server/STREAM_PROTOCOL.md`](server/STREAM_PROTOCOL.md). |
+
+### Foot-guns
+
+- Binding to all interfaces by default means a misconfigured firewall
+  could expose port 12410 to the public internet. Host-level firewalling
+  is recommended even though mTLS is the gate.
+- Plain-PEM server private key at mode 0600 is the at-rest protection.
+  Future upgrade path (passphrase-protected key + systemd
+  `EnvironmentFile=`) is documented in
+  [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md).
+- Docker socket access (via the `docker` group) is the privilege boundary
+  that mTLS protects. Anyone with a valid client cert can spawn / kill /
+  stream into containers and, via container escape, root the host.
+- The same foot-guns inherited from UC02 (shared workspace / claude-config
+  races, git push races) apply when sessions are driven through the
+  management server, exactly as they do via the local shell scripts.
+
+### Build (developer)
+
+```bash
+./gradlew :server:build           # compile + spotlessCheck + bootJar + ctl jar
+./gradlew :server:generateOpenApiDocs  # regenerate the committed OAS
+./gradlew :server:releaseBundle   # build/release/ai-sandbox-server-*.zip
+```
+
 ### Known foot-guns
 
 The default shared-workspace + shared-claude-config layout trades safety for ergonomics. Nothing in the code prevents the following — be aware:
