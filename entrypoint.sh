@@ -5,6 +5,7 @@ PROJECT_DIR=/workspace/project-builder
 KEY_FILE=/etc/secrets/git-key
 TOKEN_FILE=/etc/secrets/gh-token
 GITCONFIG_FILE=/etc/secrets/gitconfig
+export RTK_TELEMETRY_DISABLED=1
 
 # Claude Code stores some global state (trusted folders, onboarding, default
 # mode, theme) at ~/.claude.json — a file outside the ~/.claude/ directory we
@@ -21,7 +22,7 @@ mkdir -p "$HOME/.claude"
 # 1. Let RTK install its global hook into ~/.claude/settings.json (and possibly
 #    emit ~/.claude/RTK.md). Idempotent per upstream; warn-and-continue on
 #    failure so a flaky run does not block the container from booting.
-rtk init -g || echo "WARNING: rtk init -g failed; RTK hook may be missing." >&2
+yes n | rtk init -g  --auto-patch || echo "WARNING: rtk init -g failed; RTK hook may be missing." >&2
 
 # 2. Conditionally append a directive to ~/.claude/CLAUDE.md nudging Claude to
 #    prefer Bash equivalents (cat, rg, find) over the built-in Read / Grep /
