@@ -20,8 +20,8 @@ import org.bouncycastle.openssl.jcajce.JcaPEMWriter;
  *
  * <p>Every test method that needs material instantiates a fresh fixture
  * to avoid cross-test contamination. None of the material here resembles
- * real Anthropic API keys; per the mock contract no {@code sk-ant-} strings
- * may appear in any test file or fixture.
+ * any real provider API key; the mock contract forbids embedding any
+ * Anthropic-style API-key prefix (enforced by AuditNoSecretsTest).
  */
 public final class CertFixtures {
 
