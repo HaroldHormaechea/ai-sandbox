@@ -1,0 +1,46 @@
+[Unit]
+Description=ai-sandbox mTLS management server (UC03)
+Documentation=file:///opt/ai-sandbox-server/README.md
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=ai-sandbox-server
+Group=docker
+ExecStart=/usr/bin/java \
+    -Xms256m -Xmx1g \
+    -Dfile.encoding=UTF-8 \
+    -jar /opt/ai-sandbox-server/lib/aisandbox-server.jar \
+    --spring.config.additional-location=optional:file:/etc/ai-sandbox-server/config.yaml
+Restart=on-failure
+RestartSec=5s
+StartLimitBurst=5
+StartLimitIntervalSec=60s
+KillSignal=SIGTERM
+TimeoutStopSec=70
+SuccessExitStatus=143
+
+# Hardening (AC3) ────────────────────────────────────────────────────────────
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+MemoryDenyWriteExecute=false
+RestrictRealtime=true
+SystemCallArchitectures=native
+
+# Writable directories — strictly required for the audit log + runtime tmp.
+ReadWritePaths=/var/log/ai-sandbox-server
+
+# Read-only directories the server needs.
+ReadOnlyPaths=/etc/ai-sandbox-server /opt/ai-sandbox
+
+[Install]
+WantedBy=multi-user.target

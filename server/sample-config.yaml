@@ -1,0 +1,62 @@
+# /etc/ai-sandbox-server/config.yaml — annotated reference.
+#
+# Every key has a sensible default baked into the fat jar (see
+# server/src/main/resources/application.yaml). Uncomment to override.
+#
+# Reload semantics:
+#   * cert + allowlist directories         → hot-reloaded via filesystem watch
+#   * everything else                      → restart-only (systemctl restart)
+
+ai-sandbox:
+  server:
+
+    tls:
+      # Listen port for both REST/HTTPS (HTTP/2) and WebSocket upgrades.
+      port: 12410
+      # Bind interface. "0.0.0.0" listens on every IPv4 + IPv6 address; firewall
+      # at the host level if exposure is not desired.
+      bind-address: "0.0.0.0"
+
+    pki:
+      # Directory holding server.crt (0644) and server.key (0600).
+      dir: /etc/ai-sandbox-server/pki
+
+    clients:
+      # Allowlist folder. Drop a *.crt per allowed client; the server picks
+      # them up via fs-watch within 250 ms. Removing a file revokes the cert
+      # and tears down any in-flight connection from that cert within 1 s.
+      dir: /etc/ai-sandbox-server/clients
+
+    hostscripts:
+      # Repo root where UC02's spawn.sh / clean.sh / attach.sh live.
+      repo-root: /opt/ai-sandbox
+
+    limits:
+      # Per-IP connection rate-limit (token bucket).
+      per-ip-new-conn-per-window: 10
+      per-ip-window-seconds: 10
+      # Per-IP concurrent connections.
+      per-ip-concurrent: 10
+      # spawn.sh subprocess timeout (AC19 → 504 on trip).
+      spawn-timeout-seconds: 60
+      # Maximum POST body size (AC20).
+      max-request-bytes: 65536
+
+    audit:
+      # Audit-log file. Daily rotation; gzip; 7-day retention.
+      file: /var/log/ai-sandbox-server/audit.log
+      retention-days: 7
+
+    shutdown:
+      rest-grace-seconds: 30
+      total-grace-seconds: 60
+
+    streams:
+      idle-timeout-seconds: 7200       # 2 h, AC28
+      per-client-cap: 10               # max simultaneous streams per cert
+      global-cap: 100                  # max simultaneous streams overall
+      max-binary-frame-bytes: 262144   # 256 KiB, AC29
+      max-text-frame-bytes: 16384      # 16 KiB,  AC29
+      output-ring-bytes: 262144        # 256 KiB per-stream buffer, AC30
+      keepalive-ping-seconds: 30
+      keepalive-pong-timeout-seconds: 15

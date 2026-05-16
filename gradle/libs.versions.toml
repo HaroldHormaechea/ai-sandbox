@@ -1,0 +1,95 @@
+# Centralised dependency versions for the :server subproject.
+#
+# Pinned at UC03 scaffold time (2026-05-16). "Latest" is a scaffold-time
+# decision, not a runtime mandate — upgrades are an explicit follow-up
+# project, never a side-effect of feature work (per profile-java-server-
+# architecture § "Version handling on subsequent runs").
+#
+# Deviations from the approved proposal:
+#   * springdoc-openapi 3.0.3 (proposal pinned 2.7.0).
+#     Rationale: springdoc 2.x is Boot-3 / Spring Framework 6 / Jakarta EE 10.
+#     Boot 4.0.6 ships Spring Framework 7 / Jakarta EE 11, which is incompatible
+#     with springdoc 2.x. springdoc 3.0.3 has spring-boot-starter-parent 4.0.5
+#     as its POM parent and is the natural fix; AC23 (committed OAS + drift
+#     check) is preserved unchanged. No escalation needed per the contract.
+
+[versions]
+java               = "21"
+springBoot         = "4.0.6"
+springDepMgmt      = "1.1.6"
+springdoc          = "3.0.3"
+
+bouncycastle       = "1.79"
+pty4j              = "0.13.4"
+logstashLogback    = "8.0"
+picocli            = "4.7.6"
+jacksonYaml        = "2.18.2"
+
+# Test-only — fully owned by QA; pinned here so the version catalog is the
+# single source of truth.
+junit              = "5.11.4"
+mockito            = "5.14.2"
+assertj            = "3.26.3"
+archunit           = "1.3.0"
+awaitility         = "4.2.2"
+testcontainers     = "1.20.4"
+
+spotless           = "7.0.0.BETA4"
+
+[libraries]
+# Spring Boot — managed by the BOM the plugin applies; explicit modules
+# below intentionally omit versions.
+spring-boot-starter-webflux          = { module = "org.springframework.boot:spring-boot-starter-webflux" }
+spring-boot-starter-validation       = { module = "org.springframework.boot:spring-boot-starter-validation" }
+spring-boot-starter-actuator         = { module = "org.springframework.boot:spring-boot-starter-actuator" }
+spring-boot-starter-logging          = { module = "org.springframework.boot:spring-boot-starter-logging" }
+spring-boot-configuration-processor  = { module = "org.springframework.boot:spring-boot-configuration-processor" }
+
+# Reactor / Netty — pulled by the WebFlux starter, exposed here for
+# explicit references (channel handlers, SslContext builders).
+netty-handler                        = { module = "io.netty:netty-handler" }
+netty-codec-http2                    = { module = "io.netty:netty-codec-http2" }
+
+# springdoc + Swagger UI.
+springdoc-webflux-ui = { module = "org.springdoc:springdoc-openapi-starter-webflux-ui", version.ref = "springdoc" }
+
+# Crypto.
+bouncycastle-prov = { module = "org.bouncycastle:bcprov-jdk18on", version.ref = "bouncycastle" }
+bouncycastle-pkix = { module = "org.bouncycastle:bcpkix-jdk18on", version.ref = "bouncycastle" }
+
+# PTY (for `docker exec -it` interactive tmux attach in TmuxBridgeService).
+pty4j = { module = "org.jetbrains.pty4j:pty4j", version.ref = "pty4j" }
+
+# Structured logging (JSON Lines) for the audit appender.
+logstash-logback-encoder = { module = "net.logstash.logback:logstash-logback-encoder", version.ref = "logstashLogback" }
+
+# YAML config for sample-config.yaml round-trip in PkiInitCommand.
+jackson-dataformat-yaml = { module = "com.fasterxml.jackson.dataformat:jackson-dataformat-yaml", version.ref = "jacksonYaml" }
+
+# picocli — aisandboxctl CLI.
+picocli              = { module = "info.picocli:picocli", version.ref = "picocli" }
+picocli-codegen      = { module = "info.picocli:picocli-codegen", version.ref = "picocli" }
+
+# ArchUnit — owned by QA, declared here as a testImplementation entry.
+archunit-junit5      = { module = "com.tngtech.archunit:archunit-junit5", version.ref = "archunit" }
+
+# Awaitility — owned by QA.
+awaitility           = { module = "org.awaitility:awaitility", version.ref = "awaitility" }
+
+# Testcontainers — owned by QA.
+testcontainers-core  = { module = "org.testcontainers:testcontainers", version.ref = "testcontainers" }
+testcontainers-junit = { module = "org.testcontainers:junit-jupiter", version.ref = "testcontainers" }
+
+# Test framework — owned by QA.
+junit-bom            = { module = "org.junit:junit-bom", version.ref = "junit" }
+junit-jupiter        = { module = "org.junit.jupiter:junit-jupiter" }
+spring-boot-starter-test  = { module = "org.springframework.boot:spring-boot-starter-test" }
+reactor-test         = { module = "io.projectreactor:reactor-test" }
+mockito-core         = { module = "org.mockito:mockito-core", version.ref = "mockito" }
+mockito-junit        = { module = "org.mockito:mockito-junit-jupiter", version.ref = "mockito" }
+assertj-core         = { module = "org.assertj:assertj-core", version.ref = "assertj" }
+
+[plugins]
+spring-boot          = { id = "org.springframework.boot",                version.ref = "springBoot" }
+spring-dep-mgmt      = { id = "io.spring.dependency-management",         version.ref = "springDepMgmt" }
+spotless             = { id = "com.diffplug.spotless",                   version.ref = "spotless" }

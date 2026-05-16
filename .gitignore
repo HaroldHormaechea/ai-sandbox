@@ -14,3 +14,11 @@ secrets/*
 # Per-session isolated host directories created by ./spawn.sh.
 workspace-*/
 claude-config-*/
+
+# UC03 — Java/Gradle server build artefacts.
+.gradle/
+build/
+server/build/
+server/bin/
+server/.gradle/
+*.class

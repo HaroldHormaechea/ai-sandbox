@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+ Logback configuration for ai-sandbox-server.
+
+ Console appender writes structured JSON Lines (captured by journald via
+ systemd). A separate file appender writes the audit stream to
+ /var/log/ai-sandbox-server/audit.log on a daily rotation (7-day retention,
+ no size cap). The audit appender is mounted under the `audit` logger
+ name; AuditLogger.java emits to that logger.
+-->
+<configuration scan="false">
+
+    <springProfile name="!docs-only">
+
+        <appender name="JSON_CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+            <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+                <includeMdcKeyName>identity</includeMdcKeyName>
+                <includeMdcKeyName>fingerprint</includeMdcKeyName>
+                <includeMdcKeyName>action</includeMdcKeyName>
+                <includeMdcKeyName>target</includeMdcKeyName>
+                <includeMdcKeyName>outcome</includeMdcKeyName>
+                <fieldNames>
+                    <timestamp>ts</timestamp>
+                    <message>msg</message>
+                    <thread>thread</thread>
+                </fieldNames>
+            </encoder>
+        </appender>
+
+        <appender name="AUDIT_FILE" class="ch.qos.logback.core.rolling.RollingFileAppender">
+            <file>${ai-sandbox.server.audit.file:-/var/log/ai-sandbox-server/audit.log}</file>
+            <rollingPolicy class="ch.qos.logback.core.rolling.TimeBasedRollingPolicy">
+                <fileNamePattern>${ai-sandbox.server.audit.file:-/var/log/ai-sandbox-server/audit.log}.%d{yyyy-MM-dd}.gz</fileNamePattern>
+                <maxHistory>${ai-sandbox.server.audit.retention-days:-7}</maxHistory>
+            </rollingPolicy>
+            <encoder class="net.logstash.logback.encoder.LogstashEncoder">
+                <customFields>{"audit":true}</customFields>
+                <includeMdcKeyName>identity</includeMdcKeyName>
+                <includeMdcKeyName>fingerprint</includeMdcKeyName>
+                <includeMdcKeyName>action</includeMdcKeyName>
+                <includeMdcKeyName>target</includeMdcKeyName>
+                <includeMdcKeyName>outcome</includeMdcKeyName>
+            </encoder>
+        </appender>
+
+        <logger name="audit" level="INFO" additivity="true">
+            <appender-ref ref="AUDIT_FILE"/>
+        </logger>
+
+        <root level="INFO">
+            <appender-ref ref="JSON_CONSOLE"/>
+        </root>
+
+    </springProfile>
+
+    <springProfile name="docs-only">
+        <appender name="PLAIN_CONSOLE" class="ch.qos.logback.core.ConsoleAppender">
+            <encoder>
+                <pattern>%d{HH:mm:ss.SSS} %-5level %logger{40} - %msg%n</pattern>
+            </encoder>
+        </appender>
+        <root level="WARN">
+            <appender-ref ref="PLAIN_CONSOLE"/>
+        </root>
+    </springProfile>
+
+</configuration>

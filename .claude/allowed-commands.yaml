@@ -33,3 +33,13 @@ commands:
   - find
   - bash
   - pwsh
+  # UC03 — Java/Gradle management server build + PKI tooling.
+  - ./gradlew
+  - java
+  - javac
+  - jar
+  - keytool
+  - openssl
+  - xxd
+  - unzip
+  - zip
