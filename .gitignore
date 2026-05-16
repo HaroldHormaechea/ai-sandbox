@@ -6,3 +6,11 @@ claude-config/*
 
 secrets/*
 !secrets/.gitkeep
+
+# Monotonic session counter (UC02 — multi-session containers).
+.ai-sandbox-counter
+.ai-sandbox-counter.lock/
+
+# Per-session isolated host directories created by ./spawn.sh.
+workspace-*/
+claude-config-*/
