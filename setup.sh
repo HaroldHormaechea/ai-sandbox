@@ -3,32 +3,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-# Use ANSI-C quoting so the variables hold real ESC chars and work
-# anywhere (format strings, %s arguments, heredocs).
-CYAN=$'\033[1;36m'
-GREEN=$'\033[1;32m'
-YELLOW=$'\033[1;33m'
-MAGENTA=$'\033[1;35m'
-BOLD=$'\033[1m'
-RESET=$'\033[0m'
-
-ok()    { printf "  %s✓%s %s\n" "$GREEN" "$RESET" "$1"; }
-warn()  { printf "  %s!%s %s\n" "$YELLOW" "$RESET" "$1"; }
-info()  { printf "  %s\n" "$1"; }
-hr()    { printf "\n"; }
-
-clear_screen() { printf "\033[H\033[2J"; }
-
-screen_header() {
-    local current="$1" total="$2" title="$3"
-    printf "%s%s=== Step %s of %s: %s ===%s\n\n" \
-        "$BOLD" "$CYAN" "$current" "$total" "$title" "$RESET"
-}
-
-press_enter() {
-    printf "\n  %sPress Enter to continue%s " "$BOLD" "$RESET"
-    read -r _
-}
+# Shared helpers (color/format primitives, prompt_field, session enumeration).
+# shellcheck source=lib.sh
+. "$(dirname "$0")/lib.sh"
 
 list_ssh_keys() {
     [ -d "$HOME/.ssh" ] || return 0
@@ -202,55 +179,7 @@ validate_email() {
     printf "%s" "$v" | grep -Eq '^[^@[:space:]]+@[^@[:space:]]+\.[^@[:space:]]+$'
 }
 
-# Generic prompt loop.
-#   prompt_field LABEL DEFAULT VALIDATOR_FN
-# Echoes the chosen value on stdout. Returns non-zero if the user typed /skip.
-# Calls `exit 0` on /exit. /help shows the identity help screen.
-prompt_field() {
-    local label="$1" default="$2" validator="$3"
-    local resp last_error="" suffix=""
-    [ -n "$default" ] && suffix="[$default]"
-    while true; do
-        if [ -n "$last_error" ]; then
-            warn "$last_error" >&2
-            last_error=""
-        fi
-        printf "  %s %s: " "$label" "$suffix" >&2
-        IFS= read -r resp || return 1
-        case "$resp" in
-            /exit)
-                echo "  Exiting setup." >&2
-                exit 0
-                ;;
-            /skip)
-                return 1
-                ;;
-            /help)
-                show_identity_help_screen
-                continue
-                ;;
-            "")
-                if [ -n "$default" ]; then
-                    printf "%s" "$default"
-                    return 0
-                fi
-                last_error="Required."
-                continue
-                ;;
-            *)
-                # Trim leading/trailing whitespace.
-                local trimmed="$resp"
-                trimmed="${trimmed#"${trimmed%%[![:space:]]*}"}"
-                trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
-                if "$validator" "$trimmed"; then
-                    printf "%s" "$trimmed"
-                    return 0
-                fi
-                last_error="Invalid format."
-                ;;
-        esac
-    done
-}
+# prompt_field is provided by lib.sh.
 
 read_gitconfig_field() {
     local field="$1"
@@ -554,18 +483,49 @@ if [ "$do_claude_setup" = true ]; then
     ok "First-run setup complete"
 fi
 
-# ── Step 6: Start sandbox ────────────────────────────────────────────────────
+# ── Step 6: Initialize counter & spawn first session ────────────────────────
 clear_screen
-screen_header 6 6 "Starting sandbox"
-docker compose up -d
-hr
-ok "Container is running"
+screen_header 6 6 "Starting first session"
+
+# Ensure the monotonic session counter exists. The file holds the last issued
+# N (increment-before-use): initializing it to 0 makes the first ./spawn.sh
+# issue ai-sandbox-1, per AC4.
+COUNTER_FILE="./.ai-sandbox-counter"
+if [ ! -f "$COUNTER_FILE" ]; then
+    printf "0\n" > "$COUNTER_FILE"
+    ok "Initialized $COUNTER_FILE (next spawn → ai-sandbox-1)"
+fi
+
+# Legacy migration: take down the old unnumbered `ai-sandbox` Compose project
+# from before multi-session was introduced. Silent no-op if it isn't there.
+# We use the text output here so we don't depend on jq being installed yet.
+if docker compose ls -a 2>/dev/null \
+    | awk 'NR>1 {print $1}' \
+    | grep -qx 'ai-sandbox'; then
+    info "Found legacy unnumbered ai-sandbox project — bringing it down."
+    docker compose -p ai-sandbox down --remove-orphans 2>/dev/null || true
+    ok "Legacy project removed"
+fi
+
+# Idempotency: skip spawn if ANY ai-sandbox-* project already exists. We
+# parse `docker compose ls -a` text output here rather than the JSON form
+# so the check works even when `jq` is not yet installed on the host.
+EXISTING_NAME="$(docker compose ls -a 2>/dev/null \
+    | awk 'NR>1 && $1 ~ /^ai-sandbox-[0-9]+$/ {print $1; exit}')"
+if [ -n "$EXISTING_NAME" ]; then
+    ok "$EXISTING_NAME already exists — skipping spawn"
+else
+    info "Spawning ai-sandbox-1..."
+    hr
+    ./spawn.sh --non-interactive
+fi
 press_enter
 
 # ── Done ─────────────────────────────────────────────────────────────────────
 clear_screen
 printf "%s%s=== Done! ===%s\n\n" "$BOLD" "$GREEN" "$RESET"
-printf "  Attach to Claude:    %s./attach.sh%s\n" "$MAGENTA" "$RESET"
-printf "  Stop the sandbox:    %sdocker compose down%s\n" "$MAGENTA" "$RESET"
-printf "  Re-run this setup:   %s./setup.sh%s   (idempotent — safe any time)\n" "$MAGENTA" "$RESET"
+printf "  Attach to Claude:        %s./attach.sh%s\n"  "$MAGENTA" "$RESET"
+printf "  Spawn another session:   %s./spawn.sh%s\n"   "$MAGENTA" "$RESET"
+printf "  Clean a session:         %s./clean.sh%s\n"   "$MAGENTA" "$RESET"
+printf "  Re-run this setup:       %s./setup.sh%s   (idempotent — safe any time)\n" "$MAGENTA" "$RESET"
 hr

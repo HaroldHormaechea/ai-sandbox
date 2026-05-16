@@ -3,26 +3,13 @@ $ErrorActionPreference = "Stop"
 
 Set-Location $PSScriptRoot
 
-# ANSI escape sequences (modern Windows + PowerShell terminals support them).
+# Shared helpers (color/format primitives, Read-IdentityField, session enum).
+. (Join-Path $PSScriptRoot 'lib.ps1')
+
+# Module-scope copies for legacy callers below that reference $M / $R.
 $ESC = [char]27
-$M   = "$ESC[1;35m"   # magenta — used to highlight commands
+$M   = "$ESC[1;35m"
 $R   = "$ESC[0m"
-
-function Write-Step {
-    param([int]$Num, [int]$Total, [string]$Title)
-    Write-Host ("=== Step {0} of {1}: {2} ===" -f $Num, $Total, $Title) -ForegroundColor Cyan
-    Write-Host ""
-}
-function Write-Ok    { param([string]$Msg) Write-Host "  + $Msg" -ForegroundColor Green }
-function Write-Warn  { param([string]$Msg) Write-Host "  ! $Msg" -ForegroundColor Yellow }
-function Write-Info  { param([string]$Msg) Write-Host "  $Msg" }
-function Write-Blank { Write-Host "" }
-
-function Press-Enter {
-    Write-Host ""
-    Write-Host "  Press Enter to continue " -ForegroundColor White -NoNewline
-    [void](Read-Host)
-}
 
 function Test-ClaudeConfigSetUp {
     if (-not (Test-Path .\claude-config)) { return $false }
@@ -151,38 +138,7 @@ function Parse-PubComment {
     return $result
 }
 
-# Generic prompt-and-validate loop.
-#   Read-IdentityField -Label "Author name " -Default "..." -Validator { param($v) ... }
-# Returns the chosen value (string), or $null when the user typed /skip.
-# Calls `exit 0` on /exit. /help shows the identity help screen.
-function Read-IdentityField {
-    param(
-        [Parameter(Mandatory)][string]$Label,
-        [string]$Default,
-        [Parameter(Mandatory)][scriptblock]$Validator
-    )
-    $lastError = ""
-    while ($true) {
-        if ($lastError) { Write-Warn $lastError; $lastError = "" }
-        $suffix = if ($Default) { "[$Default]" } else { "" }
-        $resp = Read-Host "  $Label$suffix"
-        switch -Regex ($resp) {
-            '^/exit$' { Write-Host "  Exiting setup."; exit 0 }
-            '^/skip$' { return $null }
-            '^/help$' { Show-IdentityHelpScreen; continue }
-            '^$' {
-                if ($Default) { return $Default }
-                $lastError = "Required."
-                continue
-            }
-            default {
-                $trimmed = $resp.Trim()
-                if (& $Validator $trimmed) { return $trimmed }
-                $lastError = "Invalid format."
-            }
-        }
-    }
-}
+# Read-IdentityField is provided by lib.ps1.
 
 function Read-GitConfigField {
     param([Parameter(Mandatory)][string]$Field)
@@ -466,19 +422,53 @@ if ($doClaudeSetup) {
     Write-Ok "First-run setup complete"
 }
 
-# --- Step 6: Start sandbox ---------------------------------------------------
+# --- Step 6: Initialize counter & spawn first session ------------------------
 Clear-Host
-Write-Step 6 6 "Starting sandbox"
-docker compose up -d
-Write-Blank
-Write-Ok "Container is running"
+Write-Step 6 6 "Starting first session"
+
+# Ensure the monotonic session counter exists. The file holds the last issued
+# N (increment-before-use): initializing it to 0 makes the first .\spawn.ps1
+# issue ai-sandbox-1, per AC4.
+$counterFile = Join-Path $PSScriptRoot '.ai-sandbox-counter'
+if (-not (Test-Path $counterFile)) {
+    Set-Content -Path $counterFile -Value '0' -NoNewline
+    Write-Ok "Initialized .ai-sandbox-counter (next spawn -> ai-sandbox-1)"
+}
+
+# Legacy migration: take down the old unnumbered `ai-sandbox` Compose project.
+try {
+    $legacyJson = (& docker compose ls -a --format json 2>$null | Out-String).Trim()
+    if ($legacyJson) {
+        $legacy = $null
+        try { $legacy = $legacyJson | ConvertFrom-Json } catch { }
+        if ($legacy) {
+            $arr = if ($legacy -is [System.Array]) { $legacy } else { @($legacy) }
+            if ($arr | Where-Object { $_.Name -eq 'ai-sandbox' }) {
+                Write-Info "Found legacy unnumbered ai-sandbox project - bringing it down."
+                & docker compose -p ai-sandbox down --remove-orphans 2>$null | Out-Null
+                Write-Ok "Legacy project removed"
+            }
+        }
+    }
+} catch { }
+
+# Idempotency: skip spawn if ANY ai-sandbox-* project already exists.
+$existing = @(Get-AiSandboxSessions -IncludeStopped)
+if ($existing.Count -gt 0) {
+    Write-Ok "$($existing[0].Name) already exists - skipping spawn"
+} else {
+    Write-Info "Spawning ai-sandbox-1..."
+    Write-Blank
+    & (Join-Path $PSScriptRoot 'spawn.ps1') --non-interactive
+}
 Press-Enter
 
 # --- Done --------------------------------------------------------------------
 Clear-Host
 Write-Host "=== Done! ===" -ForegroundColor Green
 Write-Host ""
-Write-Host "  Attach to Claude:    $M.\attach.ps1$R"
-Write-Host "  Stop the sandbox:    $M`docker compose down$R"
-Write-Host "  Re-run this setup:   $M.\setup.ps1$R   (idempotent - safe any time)"
+Write-Host "  Attach to Claude:        $M.\attach.ps1$R"
+Write-Host "  Spawn another session:   $M.\spawn.ps1$R"
+Write-Host "  Clean a session:         $M.\clean.ps1$R"
+Write-Host "  Re-run this setup:       $M.\setup.ps1$R   (idempotent - safe any time)"
 Write-Host ""

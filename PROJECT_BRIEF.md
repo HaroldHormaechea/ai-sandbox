@@ -26,9 +26,8 @@ build:
     lint: "./gradlew :server:spotlessCheck"
     format: "./gradlew :server:spotlessApply"
     build: "docker compose build"
-    up: "docker compose up -d"
-    down: "docker compose down"
     setup: "./setup.sh   # or .\\setup.ps1 on Windows"
+    spawn: "./spawn.sh   # or .\\spawn.ps1 on Windows"
     attach: "./attach.sh # or .\\attach.ps1 on Windows"
     clean: "./clean.sh   # or .\\clean.ps1 on Windows"
     java_build: "./gradlew :server:bootJar"
@@ -152,12 +151,10 @@ The project now spans two co-equal stacks: the original shell + Docker container
 - **build.tool:** **`docker-compose+gradle`** — two co-equal build surfaces in the same repo. The container side uses `docker compose` (Compose v2); the Java side uses the Gradle wrapper checked into `ai-sandbox/server/`. Neither side blocks the other: a contributor working only on shell scripts never needs to run Gradle, and a contributor working only on the Java server only needs Docker to run the Testcontainers integration tests.
 - **build.commands:**
   - build image: `docker compose build`
-  - bring container up: `docker compose up -d`
-  - bring container down: `docker compose down`
-  - first-run wizard: `./setup.sh` / `.\setup.ps1`
-  - spawn an additional session: `./spawn.sh` / `.\spawn.ps1` (per UC02)
+  - first-run wizard (bootstraps **and** spawns `ai-sandbox-1`): `./setup.sh` / `.\setup.ps1`
+  - spawn an additional session: `./spawn.sh` / `.\spawn.ps1`
   - attach to a session: `./attach.sh` / `.\attach.ps1`
-  - destructive reset (per N): `./clean.sh [N]` / `.\clean.ps1 [N]`
+  - clean a session (per N or `--all`): `./clean.sh [N|--all]` / `.\clean.ps1 [N|--all]`
   - host-side secret scan (contributors): `pre-commit run --all-files`
   - build the Java server fat jar: `./gradlew :server:bootJar`
   - run Java unit + integration tests: `./gradlew :server:test`

@@ -12,3 +12,24 @@ commands:
   - chmod
   - curl
   - tar
+  # UC02 — `enumerate_ai_sandbox_sessions` parses `docker compose ls --format json`.
+  - jq
+  # UC02 — operator scripts are POSIX shell + PowerShell; lint the .sh side.
+  - shellcheck
+  # UC02 — spawn pre-creates per-session host dirs; clean removes them.
+  - mkdir
+  - rm
+  - rmdir
+  - mv
+  - cp
+  - cat
+  - awk
+  - sed
+  - tr
+  - head
+  - tail
+  - grep
+  - rg
+  - find
+  - bash
+  - pwsh
