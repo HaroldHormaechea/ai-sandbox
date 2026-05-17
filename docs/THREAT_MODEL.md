@@ -123,3 +123,181 @@ defence against itself.
 - Container-side hardening (those decisions belong to UC02's threat
   model).
 - DDoS / SYN flood protections beyond the per-IP rate limit.
+
+## Enrollment trust boundary (UC04)
+
+UC04 adds an Android client whose initial bootstrap necessarily happens
+**without** an existing client certificate — the whole point is to
+deliver one. To make that possible the server's
+`io.netty.handler.ssl.ClientAuth` was flipped from `REQUIRE` to
+`OPTIONAL`, and a new HTTP-level filter
+(`com.aisandbox.server.api.MtlsEnforcementFilter`) re-imposes the same
+gate at L7. The single mTLS-exempt path is:
+
+```
+POST /v1/enrollment   (body: {"token": "<single-use opaque token>"})
+```
+
+Every other path returns `401 mtls_required` when the connecting client
+has not presented (and the trust manager has not approved) a real cert.
+This section enumerates the new threats, the mitigations, and the
+residual risk that comes with widening the trust surface.
+
+### TLS-layer change — REQUIRE → OPTIONAL
+
+**Threat.** Before UC04, a TCP connection without a client cert was
+torn down during the TLS handshake; the application never saw the
+attempt. After UC04 the handshake completes and the request reaches
+the WebFilter chain. A bug in `MtlsEnforcementFilter`'s bypass logic
+(e.g. a path-traversal that resolves to `/v1/enrollment/../sessions`)
+would expose the entire authenticated API anonymously.
+
+**Mitigations.**
+- The bypass list is exactly two strings: `/v1/enrollment` and
+  `/v1/enrollment/` (trailing-slash normalisation matching
+  `RequestSizeLimitFilter`). Sub-paths under `/v1/enrollment/foo` are
+  NOT bypassed.
+- The filter runs at `Ordered.HIGHEST_PRECEDENCE + 10`, ahead of any
+  routing — there is no path-rewrite that the filter would miss.
+- `ClientIdentityExtractor` (HIGHEST_PRECEDENCE) is the canonical
+  ATTR-writer; it reads the identity off the Netty channel id, never
+  off a header that could be forged.
+- Any path widening to the bypass list MUST update this section.
+
+### Single-use token semantics
+
+**Threat.** A leaked token (operator's QR screenshot, SD card image of
+a phone, etc.) lets an attacker fetch a client cert for someone else's
+device — a silent take-over of the operator's intended enrollment.
+
+**Mitigations.**
+- Tokens carry ≥256 bits of entropy (32 bytes / 64 hex chars from
+  `SecureRandom`) — brute-forcing the value space is computationally
+  infeasible.
+- Default lifetime 10 minutes, configurable via
+  `ai-sandbox.server.enrollment.default-ttl-minutes`. Operator workflow
+  is "run `aisandboxctl client invite`, scan the QR within minutes,
+  done"; the window is small enough that a leaked token typically
+  expires before reuse.
+- Single-use: redemption deletes the token file. A second redemption
+  attempt — by the legitimate device that recovered from a network
+  blip, or by an attacker who acquired the QR — returns
+  `enrollment_token_redeemed` (401).
+- The token is never logged. The audit log records the lowercase reject
+  reason (`token-invalid`, `token-expired`, `token-redeemed`,
+  `rate-limited`) and the source IP, never the token itself.
+
+### Atomic file-delete serialization
+
+**Threat.** Two simultaneous redemption attempts on the same token race
+to mint two certs. If both win, the operator has shipped a cert to an
+attacker without realising it.
+
+**Mitigation.** `EnrollmentTokenStore.redeem(token, clock)` wraps the
+read-verify-delete critical section in a `synchronized` block — only
+one caller inside the JVM at a time. The actual atomicity comes from
+`Files.deleteIfExists` (POSIX-atomic on Linux); the synchronized block
+is the in-process serialization point. The losing caller sees
+`Files.deleteIfExists → false` and is mapped to `ALREADY_REDEEMED`
+through a bounded LRU tombstone set (1024 recent tokens).
+
+### Per-IP rate limit
+
+**Threat.** A network-level attacker who has tapped one Android QR
+flow can replay-attempt the token at line rate while the legitimate
+device is still walking to the operator's machine. The race favours
+whichever side hits the server first; per-IP rate-limiting tilts that
+race back to the operator's network.
+
+**Mitigation.** `EnrollmentRateLimiterService` enforces 1 redemption per
+60 s per source IP by default
+(`ai-sandbox.server.enrollment.rate-limit-{per-window,window-seconds}`).
+Independent counter from the pre-TLS `PerIpRateLimiter` so a noisy
+neighbour at the TCP layer can't consume an enrollment slot. Trip
+returns `429 enrollment_rate_limited`.
+
+The 256-byte hard cap on the request body (`RequestSizeLimitFilter`
+specialization for `/v1/enrollment`) prevents amplification attempts
+that pad the JSON to extract differential timing.
+
+### PKCS#12 transport-passphrase-empty
+
+**Threat.** A PKCS#12 file with an empty passphrase looks like a
+mishandled secret — naive log scanners see the empty-string field and
+flag it as a credentials leak.
+
+**Mitigation by design.** The empty passphrase is intentional: the
+bundle is delivered over the same TLS connection that authenticated
+the single-use token, consumed entirely in-memory by the Android
+client (no `Files.write`), and the imported key lives in the Android
+KeyStore as non-exportable. The wire envelope (TLS) is the secret,
+not the P12 passphrase. The response carries
+`X-AI-Sandbox-P12-Passphrase:` (empty) as an informational header so
+the client can sanity-check without hard-coding the convention.
+Operators MUST NOT redirect the response body to disk.
+
+### Operator hygiene for `/etc/ai-sandbox-server/enrollment/`
+
+**Threat.** The token store lives at
+`/etc/ai-sandbox-server/enrollment/` by default (operator-owned, mode
+0700). A host-level intruder with read access there can lift unredeemed
+tokens and pre-empt the legitimate enrollment.
+
+**Mitigation.**
+- `EnrollmentTokenStore.ensureDir()` creates the directory at mode
+  0700 on first use; the systemd unit's `ReadWritePaths=` is the
+  authoritative narrowing.
+- Each token file is mode 0600 via tmp + `ATOMIC_MOVE`.
+- A scheduled `purgeExpired()` job (60 s `fixedDelay`) keeps the
+  on-disk footprint bounded so operator audit is feasible.
+- Operators should NOT keep the directory backed up off-host — token
+  files are short-lived, the backup would be stale by the time it
+  could be exploited.
+
+### Non-goal: re-keying existing clients
+
+`POST /v1/enrollment` is for **bootstrap only**. The proposal explicitly
+excludes using the endpoint to roll a compromised cert: revocation
+remains a folder-delete operation against `/etc/ai-sandbox-server/clients/`
+followed by a fresh `aisandboxctl client invite`. Treating enrollment
+as a re-key path would let an attacker who stole a current cert mint
+themselves a replacement under the same name without the operator's
+involvement.
+
+### Residual risk
+
+Even with every mitigation above, a network-adjacent attacker who
+catches a QR scan in flight (e.g. a malicious agent in the lobby of the
+operator's office) can race the legitimate device on the redemption,
+and rate limiting cannot break a near-tie. The acceptable mitigation
+today is operator vigilance: keep the QR off camera, redeem promptly,
+verify the cert CN on the device matches what was invited.
+
+A future revision should consider deriving enrollment authority from a
+separate operator-only mTLS-gated bootstrap channel (operator
+authenticates over the existing mTLS port, mints a one-shot enrollment
+URL with a short-lived nonce, the Android device scans that). That
+removes the mTLS-exempt path entirely. The operator burden — one extra
+step per device — is the reason the simpler shape was chosen for UC04.
+
+### Anonymous-identity sentinel
+
+For accounting symmetry, a TLS connection that completes the handshake
+without a client cert is attached to `ClientIdentity.ANONYMOUS` via
+`ActiveConnectionRegistry.attachAnonymous`. The
+`MtlsEnforcementFilter` treats anonymous identically to a null
+identity: every non-enrollment path is rejected. The sentinel exists
+so log lines and the audit record can distinguish "TLS layer never
+ran" (registry miss) from "TLS layer ran without auth" (anonymous) —
+useful when triaging filter ordering bugs.
+
+### Graceful WS close on revocation
+
+When the allowlist watcher detects a removed cert, the
+`ActiveConnectionRegistry.revoke(Set<String>)` orchestration now
+graceful-closes every active WebSocket session for that fingerprint
+(close code `4401`, reason `revoked`) before tearing down the
+underlying TCP channel — the Android client AC26 cert-revoked dialog
+fires on that close frame. The 100 ms timeout keeps a non-responsive
+client from delaying the TCP-layer tear-down beyond AC13's 1-second
+budget.
