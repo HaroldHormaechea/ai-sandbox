@@ -16,8 +16,17 @@ import androidx.core.content.getSystemService
  */
 class AiSandboxApplication : Application() {
 
+    /**
+     * Process-wide service locator. Built eagerly on app start; held by
+     * the Application so ViewModels can re-resolve it from any
+     * `Context` without a DI container. See [AppContainer].
+     */
+    lateinit var container: AppContainer
+        private set
+
     override fun onCreate() {
         super.onCreate()
+        container = AppContainer(this)
         registerTerminalStreamNotificationChannel()
     }
 
