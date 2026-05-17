@@ -217,14 +217,19 @@ picks the change up within 250 ms.
 
 ### Endpoints
 
-All mTLS-gated; there are no anonymous paths.
+All mTLS-gated **except** `POST /v1/enrollment` (UC04), which exists so
+the Android client can bootstrap mTLS in the first place. The
+enrollment endpoint is single-use-token-gated + per-IP rate-limited;
+trust-surface analysis lives in [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md)
+§ "Enrollment trust boundary".
 
 | Verb   | Path                              | Notes |
 |--------|-----------------------------------|-------|
-| GET    | `/v1/sessions`                    | Running session list. |
+| GET    | `/v1/sessions`                    | Session list (running + starting + stopped, UC04 AC37). |
 | POST   | `/v1/sessions`                    | Spawn (sync, 60 s timeout). |
 | GET    | `/v1/sessions/{n}`                | Session detail. |
 | DELETE | `/v1/sessions/{n}[?force=true]`   | Clean a session. |
+| POST   | `/v1/enrollment`                  | **mTLS-exempt.** Single-use-token bootstrap; returns a P12 bundle (UC04). |
 | GET    | `/v1/healthz`                     | 200 only when Docker, scripts, TLS are healthy. |
 | GET    | `/v1/clients`                     | Allowlist listing. |
 | POST   | `/v1/clients`                     | Add a cert. |
@@ -256,6 +261,58 @@ All mTLS-gated; there are no anonymous paths.
 ./gradlew :server:generateOpenApiDocs  # regenerate the committed OAS
 ./gradlew :server:releaseBundle   # build/release/ai-sandbox-server-*.zip
 ```
+
+## Android client — the UC04 phone app
+
+A native Android client (Kotlin + Jetpack Compose, Material 3 Expressive,
+`minSdk = 29`, sideload-only distribution) talks to the UC03 server.
+Lives under [`android/`](android/) and ships as a signed APK + AAB on
+every `android-vX.Y.Z` tag. **Two users, two devices** — this is not a
+public app and never will be on the Play Store; AC29 forbids any
+analytics / telemetry / crash-reporter SDK.
+
+Per-device enrollment is QR-based:
+
+```bash
+# On the server host — issue a single-use 10-minute token + show its QR.
+aisandboxctl client invite alice-phone \
+    --server-url https://your-host:12410 \
+    --pki-dir /etc/ai-sandbox-server/pki
+# The ASCII QR prints to stdout. Scan from the app's onboarding screen.
+
+# Or emit a 512x512 PNG for sharing over a side channel:
+aisandboxctl client invite alice-phone \
+    --server-url https://your-host:12410 \
+    --pki-dir /etc/ai-sandbox-server/pki \
+    --out /tmp/alice-phone-invite.png
+```
+
+The Android client scans the QR, POSTs the token to
+`POST /v1/enrollment` (the single mTLS-exempt path on the server),
+imports the returned PKCS#12 bundle into the Android KeyStore as
+**non-exportable**, and uses that key as the sole TLS client identity
+for every subsequent call. Re-scanning a QR replaces the existing
+identity (one server profile at a time per device).
+
+See [`android/README.md`](android/README.md) for operator + developer
+quickstart, [`design/android-ui/`](design/android-ui/) for the visual
+specification, and [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md)
+§ "Enrollment trust boundary" for the trust-surface analysis of the
+mTLS-exempt path.
+
+### Android build (developer)
+
+```bash
+./gradlew :android:lint :android:test           # JVM-only checks
+./gradlew :android:assembleDebug :android:bundleDebug   # debug APK + AAB
+./gradlew :android:assembleRelease :android:bundleRelease  # release artefacts (needs signing config)
+```
+
+Signing config reads the env vars `KEYSTORE_FILE` / `KEYSTORE_PASSWORD`
+/ `KEY_ALIAS` / `KEY_PASSWORD`, or falls back to `~/.gradle/keystore.jks`
+when those are unset and the file exists. CI (`android-release.yml`)
+decodes the keystore from a base64-encoded GitHub secret to tmpfs at
+build time.
 
 ### Known foot-guns
 
