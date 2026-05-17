@@ -21,7 +21,7 @@ import com.aisandbox.android.net.NetworkEvent
 import com.aisandbox.android.net.NetworkEvents
 import com.aisandbox.android.requireContainer
 import com.aisandbox.android.ui.screens.CertRevokedScreen
-import com.aisandbox.android.ui.screens.OnboardingPlaceholder
+import com.aisandbox.android.ui.screens.OnboardingScreen
 import com.aisandbox.android.ui.screens.ServerIdentityChangedScreen
 import com.aisandbox.android.ui.screens.SessionsPlaceholder
 import com.aisandbox.android.ui.screens.SettingsPlaceholder
@@ -94,7 +94,14 @@ fun AiSandboxApp() {
         NavHost(navController = navController, startDestination = start) {
 
             composable(Routes.Onboarding) {
-                OnboardingPlaceholder()
+                OnboardingScreen(
+                    onContinue = {
+                        navController.navigate(Routes.Sessions) {
+                            popUpTo(Routes.Onboarding) { inclusive = true }
+                            launchSingleTop = true
+                        }
+                    },
+                )
             }
 
             composable(Routes.Sessions) {
