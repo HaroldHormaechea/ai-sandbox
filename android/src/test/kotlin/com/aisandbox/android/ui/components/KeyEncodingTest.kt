@@ -20,48 +20,47 @@ class KeyEncodingTest {
         assertThat(KeyEncoding.bytesFor(KeyEvent.Tab)).containsExactly(0x09.toByte())
     }
 
-    private fun bytesOf(s: String): List<Byte> = s.toByteArray().toList()
-    private fun actual(e: KeyEvent): List<Byte>? = KeyEncoding.bytesFor(e)?.toList()
+    /** Decoded UTF-8 view of the wire bytes — comparing strings sidesteps
+     *  every nullable-/array-/iterable-related AssertJ dispatch ambiguity. */
+    private fun decoded(e: KeyEvent): String? =
+        KeyEncoding.bytesFor(e)?.toString(Charsets.UTF_8)
 
     @Test
     fun `arrow keys emit CSI sequences A B C D`() {
         // xterm CSI: ESC[A/B/C/D — the leading 0x1B is conventionally
         // prepended by the screen on emit (or by tmux); the bar emits
-        // the "[A" suffix only. Pin both representations.
-        // Compare as List<Byte> — Kotlin's ByteArray.equals is identity-based,
-        // and AssertJ's nullable-receiver overload doesn't dispatch to the
-        // content-comparing byte[] overload.
-        assertThat(actual(KeyEvent.ArrowUp)).isEqualTo(bytesOf("[A"))
-        assertThat(actual(KeyEvent.ArrowDown)).isEqualTo(bytesOf("[B"))
-        assertThat(actual(KeyEvent.ArrowRight)).isEqualTo(bytesOf("[C"))
-        assertThat(actual(KeyEvent.ArrowLeft)).isEqualTo(bytesOf("[D"))
+        // the "[A" suffix only.
+        assertThat(decoded(KeyEvent.ArrowUp)).isEqualTo("[A")
+        assertThat(decoded(KeyEvent.ArrowDown)).isEqualTo("[B")
+        assertThat(decoded(KeyEvent.ArrowRight)).isEqualTo("[C")
+        assertThat(decoded(KeyEvent.ArrowLeft)).isEqualTo("[D")
     }
 
     @Test
     fun `function keys F1 through F4 use SS3 form OP OQ OR OS`() {
-        assertThat(actual(KeyEvent.Function(1))).isEqualTo(bytesOf("OP"))
-        assertThat(actual(KeyEvent.Function(2))).isEqualTo(bytesOf("OQ"))
-        assertThat(actual(KeyEvent.Function(3))).isEqualTo(bytesOf("OR"))
-        assertThat(actual(KeyEvent.Function(4))).isEqualTo(bytesOf("OS"))
+        assertThat(decoded(KeyEvent.Function(1))).isEqualTo("OP")
+        assertThat(decoded(KeyEvent.Function(2))).isEqualTo("OQ")
+        assertThat(decoded(KeyEvent.Function(3))).isEqualTo("OR")
+        assertThat(decoded(KeyEvent.Function(4))).isEqualTo("OS")
     }
 
     @Test
     fun `function keys F5 through F12 use CSI tilde form`() {
-        assertThat(actual(KeyEvent.Function(5))).isEqualTo(bytesOf("[15~"))
-        assertThat(actual(KeyEvent.Function(6))).isEqualTo(bytesOf("[17~"))
-        assertThat(actual(KeyEvent.Function(7))).isEqualTo(bytesOf("[18~"))
-        assertThat(actual(KeyEvent.Function(8))).isEqualTo(bytesOf("[19~"))
-        assertThat(actual(KeyEvent.Function(9))).isEqualTo(bytesOf("[20~"))
-        assertThat(actual(KeyEvent.Function(10))).isEqualTo(bytesOf("[21~"))
-        assertThat(actual(KeyEvent.Function(11))).isEqualTo(bytesOf("[23~"))
-        assertThat(actual(KeyEvent.Function(12))).isEqualTo(bytesOf("[24~"))
+        assertThat(decoded(KeyEvent.Function(5))).isEqualTo("[15~")
+        assertThat(decoded(KeyEvent.Function(6))).isEqualTo("[17~")
+        assertThat(decoded(KeyEvent.Function(7))).isEqualTo("[18~")
+        assertThat(decoded(KeyEvent.Function(8))).isEqualTo("[19~")
+        assertThat(decoded(KeyEvent.Function(9))).isEqualTo("[20~")
+        assertThat(decoded(KeyEvent.Function(10))).isEqualTo("[21~")
+        assertThat(decoded(KeyEvent.Function(11))).isEqualTo("[23~")
+        assertThat(decoded(KeyEvent.Function(12))).isEqualTo("[24~")
     }
 
     @Test
     fun `out of range function key falls back to F12 encoding`() {
         // Defensive default for the screen's `Fn` row — anything > 12
         // collapses to F12's CSI[24~ rather than producing no output.
-        assertThat(actual(KeyEvent.Function(99))).isEqualTo(bytesOf("[24~"))
+        assertThat(decoded(KeyEvent.Function(99))).isEqualTo("[24~")
     }
 
     @Test
