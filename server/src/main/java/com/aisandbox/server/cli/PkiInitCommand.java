@@ -73,9 +73,7 @@ public class PkiInitCommand implements Runnable {
         @Option(names = "--enrollment-dir", description = "Enrollment-token directory (default ${DEFAULT-VALUE})")
         Path enrollmentDir = Path.of("/etc/ai-sandbox-server/enrollment");
 
-        @Option(
-                names = "--secrets-dir",
-                description = "Container-mounted secrets directory (default ${DEFAULT-VALUE})")
+        @Option(names = "--secrets-dir", description = "Container-mounted secrets directory (default ${DEFAULT-VALUE})")
         Path secretsDir = Path.of("/etc/ai-sandbox-server/secrets");
 
         @Option(names = "--sessions-dir", description = "Per-session host-state root (default ${DEFAULT-VALUE})")
@@ -90,9 +88,7 @@ public class PkiInitCommand implements Runnable {
         @Option(names = "--cn", description = "Server cert Common Name (default ${DEFAULT-VALUE})")
         String cn = "ai-sandbox-server";
 
-        @Option(
-                names = "--user",
-                description = "System user to own the directory tree (default ${DEFAULT-VALUE})")
+        @Option(names = "--user", description = "System user to own the directory tree (default ${DEFAULT-VALUE})")
         String systemUserName = "ai-sandbox-server";
 
         @Option(
@@ -235,8 +231,7 @@ public class PkiInitCommand implements Runnable {
             System.out.println("  logs    : " + logDir + "  (mode 0750)");
             System.out.println("  config  : " + configFile);
             System.out.println();
-            System.out.println("Next: populate " + secretsDir
-                    + " with your SSH key (git-key) and optional gh-token,");
+            System.out.println("Next: populate " + secretsDir + " with your SSH key (git-key) and optional gh-token,");
             System.out.println("      then `systemctl enable --now ai-sandbox-server`.");
             return 0;
         }
@@ -256,9 +251,8 @@ public class PkiInitCommand implements Runnable {
             // container's runtime user but uid-0 ownership is what
             // useradd / chown actually require.
             try {
-                Process p = new ProcessBuilder("id", "-u")
-                        .redirectErrorStream(true)
-                        .start();
+                Process p =
+                        new ProcessBuilder("id", "-u").redirectErrorStream(true).start();
                 byte[] out = p.getInputStream().readAllBytes();
                 if (!p.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)) {
                     p.destroyForcibly();

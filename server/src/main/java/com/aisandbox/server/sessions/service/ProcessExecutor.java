@@ -46,7 +46,8 @@ public class ProcessExecutor {
      * AI_SANDBOX_SECRETS_HOST_PATH, the existing AI_SANDBOX_LABEL et al).
      * An empty map preserves the historical bare-environment behaviour.
      */
-    public Result run(List<String> argv, Path workingDir, Map<String, String> env, Duration timeout) throws IOException {
+    public Result run(List<String> argv, Path workingDir, Map<String, String> env, Duration timeout)
+            throws IOException {
         ProcessBuilder pb = new ProcessBuilder(argv);
         if (workingDir != null) {
             pb.directory(workingDir.toFile());

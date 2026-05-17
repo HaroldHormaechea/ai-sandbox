@@ -94,9 +94,7 @@ public class ScriptExecutorService {
         env.put(
                 "AI_SANDBOX_COMPOSE_FILE",
                 locator.repoRoot().resolve("docker-compose.yml").toString());
-        env.put(
-                "AI_SANDBOX_HOST_STATE_ROOT",
-                props.sessions().hostStateRoot().toString());
+        env.put("AI_SANDBOX_HOST_STATE_ROOT", props.sessions().hostStateRoot().toString());
         env.put("AI_SANDBOX_SECRETS_HOST_PATH", props.secrets().dir().toString());
         return env;
     }
