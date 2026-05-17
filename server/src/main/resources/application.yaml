@@ -80,3 +80,11 @@ ai-sandbox:
       output-ring-bytes: 262144
       keepalive-ping-seconds: 30
       keepalive-pong-timeout-seconds: 15
+    # UC04 — enrollment endpoint. POST /v1/enrollment is the only
+    # mTLS-exempt path on the server; see docs/THREAT_MODEL.md §
+    # "Enrollment trust boundary" for the trust-surface analysis.
+    enrollment:
+      dir: /etc/ai-sandbox-server/enrollment
+      default-ttl-minutes: 10
+      rate-limit-per-window: 1
+      rate-limit-window-seconds: 60

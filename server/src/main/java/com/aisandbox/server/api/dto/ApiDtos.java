@@ -27,7 +27,7 @@ public final class ApiDtos {
             int n,
             @Schema(description = "Free-form label echoed from com.ai-sandbox.label") String label,
             @Schema(description = "Tmux window title, or '(idle)' / '(unavailable)'") String tmuxTitle,
-            @Schema(description = "running | exited") String state,
+            @Schema(description = "running | starting | stopped (UC04 AC37 extended set).") String state,
             long uptimeSec,
             int activeStreams,
             Instant startedAt) {}
@@ -57,4 +57,30 @@ public final class ApiDtos {
 
     @Schema(description = "Response of GET /v1/healthz.")
     public record HealthResponse(boolean dockerOk, boolean scriptsOk, boolean tlsOk) {}
+
+    /**
+     * Body of {@code POST /v1/enrollment} (UC04 AC33). The endpoint is
+     * the only mTLS-exempt path on the server; redeeming a one-time
+     * token returns a PKCS#12 octet-stream the Android client imports
+     * into the Android KeyStore (the operator carries no key material
+     * between the server and the device).
+     *
+     * <p>The body is hard-capped at 256 bytes upstream (AC33). The
+     * declared {@code @Pattern} is the on-paper constraint only; the
+     * actual byte cap is enforced by
+     * {@code RequestSizeLimitFilter} so payloads that don't even reach
+     * Jackson are rejected with {@link ErrorCode#PAYLOAD_TOO_LARGE}.
+     */
+    @Schema(description = "Body of POST /v1/enrollment (UC04).")
+    public record EnrollmentRequest(
+            @Schema(
+                            description = "Opaque single-use token issued by `aisandboxctl client invite <name>`.",
+                            example = "8a1f3c0e9b4d…",
+                            minLength = 32,
+                            maxLength = 256)
+                    @NotBlank
+                    @Pattern(
+                            regexp = "[A-Za-z0-9._-]{32,256}",
+                            message = "Token must be 32–256 chars of [A-Za-z0-9._-]")
+                    String token) {}
 }
