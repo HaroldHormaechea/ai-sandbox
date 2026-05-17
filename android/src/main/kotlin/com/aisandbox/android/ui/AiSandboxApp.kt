@@ -25,7 +25,7 @@ import com.aisandbox.android.ui.screens.OnboardingScreen
 import com.aisandbox.android.ui.screens.ServerIdentityChangedScreen
 import com.aisandbox.android.ui.screens.SessionsScreen
 import com.aisandbox.android.ui.screens.SettingsPlaceholder
-import com.aisandbox.android.ui.screens.TerminalPlaceholder
+import com.aisandbox.android.ui.screens.TerminalScreen
 
 /**
  * Root composable. Hosts the navigation graph and the network-event
@@ -116,7 +116,7 @@ fun AiSandboxApp() {
                 arguments = listOf(navArgument("n") { type = NavType.IntType }),
             ) { backStackEntry ->
                 val n = backStackEntry.arguments?.getInt("n") ?: 0
-                TerminalPlaceholder(sessionN = n, onBack = { navController.popBackStack() })
+                TerminalScreen(sessionN = n, onBack = { navController.popBackStack() })
             }
 
             composable(Routes.Settings) {
