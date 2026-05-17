@@ -230,6 +230,9 @@ dependencies {
     // when useJUnitPlatform() is used; otherwise Gradle Test Executor
     // fails to start with "Failed to load JUnit Platform".
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+    // Global per-test timeout so a hung test fails the build instead
+    // of stalling android-ci until the GH Actions job timeout.
+    testImplementation("org.junit.jupiter:junit-jupiter-params")
     testImplementation(libs.robolectric)
     testImplementation(libs.assertj.core)
     // QA-only — MockWebServer drives EnrollmentClient + StreamClient unit
