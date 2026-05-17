@@ -25,6 +25,9 @@ import com.google.zxing.MultiFormatReader
 import com.google.zxing.PlanarYUVLuminanceSource
 import com.google.zxing.common.HybridBinarizer
 import com.google.zxing.BarcodeFormat
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.launch
 import com.google.zxing.NotFoundException
 import java.util.EnumMap
 import java.util.concurrent.Executors
@@ -172,11 +175,11 @@ private fun decodeQr(proxy: ImageProxy): String? {
  * composition; we just want a fire-and-forget semantic for the single
  * onQr emission.
  */
-private fun kotlinx.coroutines.CoroutineScope.launchWhenSafe(block: suspend () -> Unit) {
-    kotlinx.coroutines.launch {
+private fun CoroutineScope.launchWhenSafe(block: suspend () -> Unit) {
+    launch {
         try {
             block()
-        } catch (_: kotlinx.coroutines.CancellationException) {
+        } catch (_: CancellationException) {
             // expected when the screen leaves composition mid-emission
         }
     }

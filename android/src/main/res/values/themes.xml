@@ -6,7 +6,7 @@
   status bar + nav bar are correct from cold start.
 -->
 <resources xmlns:tools="http://schemas.android.com/tools">
-    <style name="Theme.AiSandbox" parent="Theme.Material3.DayNight.NoActionBar">
+    <style name="Theme.AiSandbox" parent="Theme.Material3.Dark.NoActionBar">
         <item name="android:statusBarColor">@color/bootstrap_surface</item>
         <item name="android:navigationBarColor">@color/bootstrap_surface</item>
         <item name="android:windowBackground">@color/bootstrap_workbench</item>
