@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>ai-sandbox · Android client</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Roboto+Flex:opsz,wght@8..144,300..700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    /* Material 3 Expressive — dark, neutral-warm base */
+    --bg-workbench:        #0a0a0c;
+    --surface:             #131216;
+    --surface-low:         #1a181d;
+    --surface:             #1f1d22;
+    --surface-high:        #2a282e;
+    --surface-highest:     #34323a;
+    --on-surface:          #ece6ec;
+    --on-surface-variant:  #c8c2cc;
+    --on-surface-muted:    #8c8693;
+    --outline:             #7a747e;
+    --outline-variant:     #3a373d;
+    --error:               #ffb4ab;
+    --error-container:     #5d1a17;
+    --success:             #8ad6a5;
+    --warning:             #ffb784;
+
+    /* Accent is tweakable; default mono-warm */
+    --accent:              #ece6ec;
+    --on-accent:           #1f1d22;
+    --accent-container:    #2a262e;
+    --on-accent-container: #efe9ef;
+
+    --font-sans: "Roboto Flex", "Roboto", system-ui, sans-serif;
+    --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg-workbench); color: var(--on-surface); font-family: var(--font-sans); }
+  body { overflow: hidden; }
+  #root { width: 100vw; height: 100vh; }
+  ::selection { background: color-mix(in oklab, var(--accent) 35%, transparent); color: var(--on-surface); }
+  /* Scrollbars in terminal etc. */
+  .scroll::-webkit-scrollbar { width: 6px; height: 6px; }
+  .scroll::-webkit-scrollbar-thumb { background: var(--outline-variant); border-radius: 3px; }
+  .scroll::-webkit-scrollbar-track { background: transparent; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+<script type="text/babel" src="tweaks-panel.jsx"></script>
+<script type="text/babel" src="primitives.jsx"></script>
+<script type="text/babel" src="icons.jsx"></script>
+<script type="text/babel" src="terminal-data.jsx"></script>
+<script type="text/babel" src="screen-onboarding.jsx"></script>
+<script type="text/babel" src="screen-sessions.jsx"></script>
+<script type="text/babel" src="screen-terminal.jsx"></script>
+<script type="text/babel" src="screen-overlays.jsx"></script>
+<script type="text/babel" src="screen-settings.jsx"></script>
+<script type="text/babel" src="app.jsx"></script>
+</body>
+</html>
