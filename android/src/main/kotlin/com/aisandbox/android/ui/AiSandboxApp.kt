@@ -24,7 +24,7 @@ import com.aisandbox.android.ui.screens.CertRevokedScreen
 import com.aisandbox.android.ui.screens.OnboardingScreen
 import com.aisandbox.android.ui.screens.ServerIdentityChangedScreen
 import com.aisandbox.android.ui.screens.SessionsScreen
-import com.aisandbox.android.ui.screens.SettingsPlaceholder
+import com.aisandbox.android.ui.screens.SettingsScreen
 import com.aisandbox.android.ui.screens.TerminalScreen
 
 /**
@@ -120,7 +120,7 @@ fun AiSandboxApp() {
             }
 
             composable(Routes.Settings) {
-                SettingsPlaceholder(onBack = { navController.popBackStack() })
+                SettingsScreen(onBack = { navController.popBackStack() })
             }
 
             composable(Routes.CertRevoked) {
