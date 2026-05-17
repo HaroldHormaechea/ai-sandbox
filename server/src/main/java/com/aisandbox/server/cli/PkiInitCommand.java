@@ -104,9 +104,20 @@ public class PkiInitCommand implements Runnable {
         // load Spring; production callers use the default impl.
         private SystemUserAdmin systemUserAdmin = new SystemUserAdmin.Default();
 
-        /** Test seam — substitute a fake before invoking {@link #call()}. */
+        // Test seam (b) — gates the "must run as root" check. Production
+        // defaults to the real `id -u` probe; tests inject `() -> true` so
+        // the rest of the flow runs against a tempdir hierarchy without
+        // needing sudo.
+        private java.util.function.BooleanSupplier rootCheck = Init::isRoot;
+
+        /** Test seam — substitute a fake SystemUserAdmin before invoking {@link #call()}. */
         void setSystemUserAdmin(SystemUserAdmin admin) {
             this.systemUserAdmin = admin;
+        }
+
+        /** Test seam — override the root-check probe. */
+        void setRootCheck(java.util.function.BooleanSupplier rootCheck) {
+            this.rootCheck = rootCheck;
         }
 
         @Override
@@ -115,7 +126,8 @@ public class PkiInitCommand implements Runnable {
 
             // 1. Root check (POSIX only). UC05 § AC13 — useradd is root-only,
             //    and we need to chown directories to ai-sandbox-server.
-            if (posix && !isRoot()) {
+            //    Uses the injectable rootCheck seam so tests can bypass.
+            if (posix && !rootCheck.getAsBoolean()) {
                 System.err.println("aisandboxctl pki init: must run as root (use sudo).");
                 return 2;
             }
@@ -151,7 +163,11 @@ public class PkiInitCommand implements Runnable {
             //    operator-managed tree. /etc/ai-sandbox-server itself is
             //    0750 (parent); the children holding key material are
             //    0700; /var/lib + /var/log are 0750.
-            Path etcRoot = Path.of("/etc/ai-sandbox-server");
+            //    Derive etcRoot from pkiDir's parent so a test (or anyone
+            //    passing --pki-dir <tmp>/pki) gets a consistent tree rooted
+            //    at the supplied parent; defaults to /etc/ai-sandbox-server
+            //    via pkiDir's default value of /etc/ai-sandbox-server/pki.
+            Path etcRoot = (pkiDir.getParent() != null) ? pkiDir.getParent() : Path.of("/etc/ai-sandbox-server");
             ensureDir(etcRoot, "rwxr-x---", posix);
             ensureDir(pkiDir, "rwx------", posix);
             ensureDir(clientsDir, "rwx------", posix);
@@ -165,13 +181,19 @@ public class PkiInitCommand implements Runnable {
             ensureDir(logDir, "rwxr-x---", posix);
 
             // Chown the entire tree to ai-sandbox-server:ai-sandbox-server.
-            if (posix) {
-                chownTree(systemUserName, etcRoot);
+            // Resolve owner/group once: on a test host (or any environment
+            // where the user wasn't actually created), the lookup throws
+            // UserPrincipalNotFoundException — we log a single warning and
+            // skip every chown rather than blowing up mid-flow. The CI
+            // smoke job exercises real chown as root in ubuntu:24.04.
+            Ownership ownership = posix ? resolveOwnership(systemUserName) : null;
+            if (posix && ownership != null) {
+                chownTreeWith(ownership, etcRoot);
                 if (sessionsParent != null) {
-                    chown(systemUserName, sessionsParent);
+                    chownWith(ownership, sessionsParent);
                 }
-                chownTree(systemUserName, sessionsDir);
-                chownTree(systemUserName, logDir);
+                chownTreeWith(ownership, sessionsDir);
+                chownTreeWith(ownership, logDir);
             }
 
             // 5. Cert mint (AC15). The key file gets mode 0600 explicitly,
@@ -184,8 +206,10 @@ public class PkiInitCommand implements Runnable {
             if (posix) {
                 Files.setPosixFilePermissions(crt, PosixFilePermissions.fromString("rw-r--r--"));
                 Files.setPosixFilePermissions(key, PosixFilePermissions.fromString("rw-------"));
-                chown(systemUserName, crt);
-                chown(systemUserName, key);
+                if (ownership != null) {
+                    chownWith(ownership, crt);
+                    chownWith(ownership, key);
+                }
             }
 
             // 6. Config write (AC16). bakedConfigYaml() encodes every
@@ -194,7 +218,9 @@ public class PkiInitCommand implements Runnable {
             Files.writeString(configFile, bakedConfigYaml());
             if (posix) {
                 Files.setPosixFilePermissions(configFile, PosixFilePermissions.fromString("rw-r-----"));
-                chown(systemUserName, configFile);
+                if (ownership != null) {
+                    chownWith(ownership, configFile);
+                }
             }
 
             // 7. Print summary.
@@ -256,20 +282,43 @@ public class PkiInitCommand implements Runnable {
             }
         }
 
-        private static void chown(String user, Path p) throws IOException {
+        /** Pre-resolved owner + group, captured once so a per-file lookup can't surprise us mid-walk. */
+        private record Ownership(UserPrincipal owner, GroupPrincipal group) {}
+
+        /**
+         * Resolve {@code <user>:<user>} once. Returns {@code null} when the
+         * lookup fails (the user isn't on the host — typical for unit-test
+         * runs). On {@code null} the caller skips every chown; production
+         * environments where {@code aisandboxctl pki init} just created the
+         * user via {@code SystemUserAdmin} reach this path with a live user
+         * and a non-null Ownership.
+         */
+        private static Ownership resolveOwnership(String user) {
             UserPrincipalLookupService lookup =
-                    p.getFileSystem().getUserPrincipalLookupService();
-            UserPrincipal owner = lookup.lookupPrincipalByName(user);
-            GroupPrincipal group = lookup.lookupPrincipalByGroupName(user);
-            PosixFileAttributeView view = Files.getFileAttributeView(p, PosixFileAttributeView.class);
-            view.setOwner(owner);
-            view.setGroup(group);
+                    java.nio.file.FileSystems.getDefault().getUserPrincipalLookupService();
+            try {
+                UserPrincipal owner = lookup.lookupPrincipalByName(user);
+                GroupPrincipal group = lookup.lookupPrincipalByGroupName(user);
+                return new Ownership(owner, group);
+            } catch (IOException ioe) {
+                System.err.println(
+                        "aisandboxctl pki init: skipping chown — user '" + user + "' not resolvable on this host ("
+                                + ioe.getClass().getSimpleName() + "). Production runs MUST be invoked as root after"
+                                + " the system user has been created.");
+                return null;
+            }
         }
 
-        private static void chownTree(String user, Path root) throws IOException {
+        private static void chownWith(Ownership ownership, Path p) throws IOException {
+            PosixFileAttributeView view = Files.getFileAttributeView(p, PosixFileAttributeView.class);
+            view.setOwner(ownership.owner());
+            view.setGroup(ownership.group());
+        }
+
+        private static void chownTreeWith(Ownership ownership, Path root) throws IOException {
             try (var stream = Files.walk(root)) {
                 for (var it = stream.iterator(); it.hasNext(); ) {
-                    chown(user, it.next());
+                    chownWith(ownership, it.next());
                 }
             }
         }
