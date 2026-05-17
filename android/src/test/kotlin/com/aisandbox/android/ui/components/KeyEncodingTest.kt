@@ -27,15 +27,24 @@ class KeyEncodingTest {
             ?.joinToString(" ") { "%02x".format(it.toInt() and 0xff) }
             ?: "null"
 
+    private fun checkHex(e: KeyEvent, expected: String) {
+        val got = hex(e)
+        if (got != expected) {
+            throw RuntimeException(
+                "KeyEncoding wire-byte mismatch: event=$e expected=[$expected] got=[$got]"
+            )
+        }
+    }
+
     @Test
     fun `arrow keys emit CSI sequences A B C D`() {
         // xterm CSI: '[' A/B/C/D bytes (0x5B 0x41..0x44). The leading
         // ESC (0x1B) is prepended on emit; this layer outputs the
         // suffix only.
-        assertThat(hex(KeyEvent.ArrowUp)).isEqualTo("5b 41")
-        assertThat(hex(KeyEvent.ArrowDown)).isEqualTo("5b 42")
-        assertThat(hex(KeyEvent.ArrowRight)).isEqualTo("5b 43")
-        assertThat(hex(KeyEvent.ArrowLeft)).isEqualTo("5b 44")
+        checkHex(KeyEvent.ArrowUp, "5b 41")
+        checkHex(KeyEvent.ArrowDown, "5b 42")
+        checkHex(KeyEvent.ArrowRight, "5b 43")
+        checkHex(KeyEvent.ArrowLeft, "5b 44")
     }
 
     @Test
