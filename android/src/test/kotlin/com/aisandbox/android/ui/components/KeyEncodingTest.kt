@@ -20,68 +20,49 @@ class KeyEncodingTest {
         assertThat(KeyEncoding.bytesFor(KeyEvent.Tab)).containsExactly(0x09.toByte())
     }
 
-    private fun hex(b: ByteArray?): String =
-        b?.joinToString(" ") { "%02x".format(it.toInt() and 0xff) } ?: "null"
+    /** Hex string of the wire bytes, lowercase, space-separated.
+     *  e.g. byteArrayOf(0x5B, 0x41) → "5b 41". null becomes "null". */
+    private fun hex(e: KeyEvent): String =
+        KeyEncoding.bytesFor(e)
+            ?.joinToString(" ") { "%02x".format(it.toInt() and 0xff) }
+            ?: "null"
 
     @Test
     fun `arrow keys emit CSI sequences A B C D`() {
-        // xterm CSI: ESC[A/B/C/D — the leading 0x1B is conventionally
-        // prepended by the screen on emit (or by tmux); the bar emits
-        // the "[A" suffix only.
-        val up = KeyEncoding.bytesFor(KeyEvent.ArrowUp)
-        assertThat(up)
-            .withFailMessage { "ArrowUp got=${hex(up)} (size=${up?.size})" }
-            .containsExactly(0x5b.toByte(), 0x41.toByte())
-        val down = KeyEncoding.bytesFor(KeyEvent.ArrowDown)
-        assertThat(down)
-            .withFailMessage { "ArrowDown got=${hex(down)} (size=${down?.size})" }
-            .containsExactly(0x5b.toByte(), 0x42.toByte())
-        val right = KeyEncoding.bytesFor(KeyEvent.ArrowRight)
-        assertThat(right)
-            .withFailMessage { "ArrowRight got=${hex(right)} (size=${right?.size})" }
-            .containsExactly(0x5b.toByte(), 0x43.toByte())
-        val left = KeyEncoding.bytesFor(KeyEvent.ArrowLeft)
-        assertThat(left)
-            .withFailMessage { "ArrowLeft got=${hex(left)} (size=${left?.size})" }
-            .containsExactly(0x5b.toByte(), 0x44.toByte())
+        // xterm CSI: '[' A/B/C/D bytes (0x5B 0x41..0x44). The leading
+        // ESC (0x1B) is prepended on emit; this layer outputs the
+        // suffix only.
+        assertThat(hex(KeyEvent.ArrowUp)).isEqualTo("5b 41")
+        assertThat(hex(KeyEvent.ArrowDown)).isEqualTo("5b 42")
+        assertThat(hex(KeyEvent.ArrowRight)).isEqualTo("5b 43")
+        assertThat(hex(KeyEvent.ArrowLeft)).isEqualTo("5b 44")
     }
 
     @Test
     fun `function keys F1 through F4 use SS3 form OP OQ OR OS`() {
-        assertThat(KeyEncoding.bytesFor(KeyEvent.Function(1))).containsExactly(0x4f.toByte(), 0x50.toByte())
-        assertThat(KeyEncoding.bytesFor(KeyEvent.Function(2))).containsExactly(0x4f.toByte(), 0x51.toByte())
-        assertThat(KeyEncoding.bytesFor(KeyEvent.Function(3))).containsExactly(0x4f.toByte(), 0x52.toByte())
-        assertThat(KeyEncoding.bytesFor(KeyEvent.Function(4))).containsExactly(0x4f.toByte(), 0x53.toByte())
+        // 'O' P/Q/R/S → 0x4F 0x50..0x53
+        assertThat(hex(KeyEvent.Function(1))).isEqualTo("4f 50")
+        assertThat(hex(KeyEvent.Function(2))).isEqualTo("4f 51")
+        assertThat(hex(KeyEvent.Function(3))).isEqualTo("4f 52")
+        assertThat(hex(KeyEvent.Function(4))).isEqualTo("4f 53")
     }
 
     @Test
     fun `function keys F5 through F12 use CSI tilde form`() {
-        // CSI[<n>~ — 0x5B '[', digits, 0x7E '~'.
-        assertThat(KeyEncoding.bytesFor(KeyEvent.Function(5)))
-            .containsExactly(0x5b.toByte(), 0x31.toByte(), 0x35.toByte(), 0x7e.toByte())
-        assertThat(KeyEncoding.bytesFor(KeyEvent.Function(6)))
-            .containsExactly(0x5b.toByte(), 0x31.toByte(), 0x37.toByte(), 0x7e.toByte())
-        assertThat(KeyEncoding.bytesFor(KeyEvent.Function(7)))
-            .containsExactly(0x5b.toByte(), 0x31.toByte(), 0x38.toByte(), 0x7e.toByte())
-        assertThat(KeyEncoding.bytesFor(KeyEvent.Function(8)))
-            .containsExactly(0x5b.toByte(), 0x31.toByte(), 0x39.toByte(), 0x7e.toByte())
-        assertThat(KeyEncoding.bytesFor(KeyEvent.Function(9)))
-            .containsExactly(0x5b.toByte(), 0x32.toByte(), 0x30.toByte(), 0x7e.toByte())
-        assertThat(KeyEncoding.bytesFor(KeyEvent.Function(10)))
-            .containsExactly(0x5b.toByte(), 0x32.toByte(), 0x31.toByte(), 0x7e.toByte())
-        assertThat(KeyEncoding.bytesFor(KeyEvent.Function(11)))
-            .containsExactly(0x5b.toByte(), 0x32.toByte(), 0x33.toByte(), 0x7e.toByte())
-        assertThat(KeyEncoding.bytesFor(KeyEvent.Function(12)))
-            .containsExactly(0x5b.toByte(), 0x32.toByte(), 0x34.toByte(), 0x7e.toByte())
+        // '[' <digits> '~' — F5..F12 = 15, 17, 18, 19, 20, 21, 23, 24
+        assertThat(hex(KeyEvent.Function(5))).isEqualTo("5b 31 35 7e")
+        assertThat(hex(KeyEvent.Function(6))).isEqualTo("5b 31 37 7e")
+        assertThat(hex(KeyEvent.Function(7))).isEqualTo("5b 31 38 7e")
+        assertThat(hex(KeyEvent.Function(8))).isEqualTo("5b 31 39 7e")
+        assertThat(hex(KeyEvent.Function(9))).isEqualTo("5b 32 30 7e")
+        assertThat(hex(KeyEvent.Function(10))).isEqualTo("5b 32 31 7e")
+        assertThat(hex(KeyEvent.Function(11))).isEqualTo("5b 32 33 7e")
+        assertThat(hex(KeyEvent.Function(12))).isEqualTo("5b 32 34 7e")
     }
 
     @Test
     fun `out of range function key falls back to F12 encoding`() {
-        // Defensive default for the screen's `Fn` row — anything > 12
-        // collapses to F12's CSI[24~ rather than producing no output.
-        // [24~ → 0x5B, 0x32, 0x34, 0x7E
-        assertThat(KeyEncoding.bytesFor(KeyEvent.Function(99)))
-            .containsExactly(0x5b.toByte(), 0x32.toByte(), 0x34.toByte(), 0x7e.toByte())
+        assertThat(hex(KeyEvent.Function(99))).isEqualTo("5b 32 34 7e")
     }
 
     @Test
