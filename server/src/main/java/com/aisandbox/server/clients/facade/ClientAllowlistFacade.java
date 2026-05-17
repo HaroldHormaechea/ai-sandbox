@@ -86,7 +86,11 @@ public class ClientAllowlistFacade {
         boolean removed = directory.deleteByName(client.name());
         if (removed) {
             var revoked = service.rebuild();
-            registry.terminate(revoked);
+            // UC04 § B2 — orchestration entry: graceful WS close (so the
+            // Android client sees AC26 "Identity revoked") then TCP-layer
+            // tear-down. terminate() is still public for back-compat but
+            // is no longer called directly from production code.
+            registry.revoke(revoked);
             audit.logEvent(
                     AuditAction.CLIENT_REMOVE,
                     "ok",

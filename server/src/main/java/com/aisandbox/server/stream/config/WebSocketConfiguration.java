@@ -2,6 +2,7 @@ package com.aisandbox.server.stream.config;
 
 import com.aisandbox.server.config.ServerProperties;
 import com.aisandbox.server.identity.ActiveConnectionRegistry;
+import com.aisandbox.server.identity.ActiveStreamRegistry;
 import com.aisandbox.server.stream.facade.StreamFacade;
 import com.aisandbox.server.stream.handler.SessionStreamHandler;
 import com.aisandbox.server.stream.handshake.StreamCapsHandshakeInterceptor;
@@ -45,6 +46,7 @@ public class WebSocketConfiguration {
             StreamFacade facade,
             StreamControlMessageService controlSvc,
             ActiveConnectionRegistry connections,
+            ActiveStreamRegistry streamRegistry,
             ServerProperties props,
             SubprotocolHandshakeInterceptor subprotocol,
             StreamCapsHandshakeInterceptor capCheck) {
@@ -65,6 +67,11 @@ public class WebSocketConfiguration {
         // cannot resolve identity from the Netty channel id and every
         // upgrade closes with POLICY_VIOLATION.
         handler.setActiveConnectionRegistry(connections);
+        // UC04 § B2 — index live WS sessions by fingerprint so the
+        // ActiveConnectionRegistry.revoke(...) orchestration can issue
+        // a graceful close (close code 4401, reason "revoked") before
+        // tearing down the underlying TCP channel.
+        handler.setActiveStreamRegistry(streamRegistry);
         return handler;
     }
 }

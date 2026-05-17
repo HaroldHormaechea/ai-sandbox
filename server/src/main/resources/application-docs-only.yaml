@@ -44,3 +44,12 @@ ai-sandbox:
       output-ring-bytes: 262144
       keepalive-ping-seconds: 30
       keepalive-pong-timeout-seconds: 15
+    # UC04 — enrollment endpoint; the facade graph loads under docs-only
+    # so springdoc can include POST /v1/enrollment in the OAS render.
+    # The path points at /tmp so the @PostConstruct ensureDir doesn't
+    # try to mkdir /etc on a non-root CI runner.
+    enrollment:
+      dir: /tmp/ai-sandbox-docs-only/enrollment
+      default-ttl-minutes: 10
+      rate-limit-per-window: 1
+      rate-limit-window-seconds: 60

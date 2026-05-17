@@ -22,8 +22,13 @@ import picocli.CommandLine.Parameters;
  */
 @Command(
         name = "client",
-        description = "Client mint/revoke/list.",
-        subcommands = {ClientMintCommand.Mint.class, ClientRevokeCommand.Revoke.class, ClientListCommand.List.class})
+        description = "Client mint/revoke/list/invite.",
+        subcommands = {
+            ClientMintCommand.Mint.class,
+            ClientRevokeCommand.Revoke.class,
+            ClientListCommand.List.class,
+            ClientInviteCommand.class,
+        })
 public class ClientMintCommand implements Runnable {
 
     @Override

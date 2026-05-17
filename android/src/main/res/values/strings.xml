@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">ai-sandbox</string>
+
+    <!-- Onboarding (UC04-1) -->
+    <string name="onboarding_title">Scan invite QR</string>
+    <string name="onboarding_subtitle">Aim the camera at the QR shown by aisandboxctl client invite.</string>
+    <string name="onboarding_imported_title">Identity imported</string>
+    <string name="onboarding_imported_keystore_badge">Stored in Android KeyStore · non-exportable</string>
+    <string name="onboarding_continue">Continue</string>
+    <string name="onboarding_replace_existing_title">Replace existing identity?</string>
+    <string name="onboarding_replace_existing_body">Scanning a new invite QR will delete the current cert from the Android KeyStore. The old identity becomes unusable until the operator re-invites this device.</string>
+    <string name="onboarding_replace_existing_confirm">Replace</string>
+    <string name="onboarding_camera_permission_required">Camera access is required to scan the invite QR.</string>
+    <string name="onboarding_camera_permission_grant">Grant camera access</string>
+
+    <!-- Sessions list (UC04-2) -->
+    <string name="sessions_title">ai-sandbox</string>
+    <string name="sessions_new_session">New session</string>
+    <string name="sessions_filter_all">All</string>
+    <string name="sessions_filter_running">Running</string>
+    <string name="sessions_filter_stopped">Stopped</string>
+    <string name="sessions_empty_running">No running sessions yet — tap "New session" to spawn one.</string>
+    <string name="sessions_empty_stopped">No stopped sessions.</string>
+    <string name="sessions_empty_all">No sessions on this server.</string>
+
+    <!-- New session sheet (UC04-2a) -->
+    <string name="new_session_label_hint">e.g. release-build, scratch</string>
+    <string name="new_session_help">Image and hardware specs are fixed by the server profile — not selectable from the client.</string>
+    <string name="new_session_cancel">Cancel</string>
+    <string name="new_session_spawn">Spawn</string>
+
+    <!-- Delete dialog (UC04-2b) -->
+    <string name="delete_title">Delete ai-sandbox-%1$d?</string>
+    <string name="delete_body">The container and its tmux session will be destroyed on the server. The workspace bind mount is preserved.</string>
+    <string name="delete_attached_warning">%1$d client(s) currently attached and will be disconnected.</string>
+    <string name="delete_force">Force delete (kill attached streams)</string>
+    <string name="delete_cancel">Cancel</string>
+    <string name="delete_confirm">Delete</string>
+
+    <!-- Terminal (UC04-3) -->
+    <string name="terminal_back">Back</string>
+    <string name="terminal_split">Toggle split pane</string>
+    <string name="terminal_more">More</string>
+    <string name="terminal_modifier_tmux">⌘ tmux</string>
+    <string name="terminal_modifier_ctrl">Ctrl</string>
+    <string name="terminal_modifier_alt">Alt</string>
+    <string name="terminal_modifier_esc">Esc</string>
+    <string name="terminal_modifier_tab">Tab</string>
+    <string name="terminal_modifier_fn">Fn</string>
+    <string name="terminal_selection_copy">Copy</string>
+    <string name="terminal_selection_paste">Paste</string>
+    <string name="terminal_selection_select_all">Select all</string>
+    <string name="terminal_selection_send_to">Send to…</string>
+    <string name="terminal_reconnecting">Reconnecting…</string>
+    <string name="terminal_disconnected">Disconnected — tap to reconnect</string>
+
+    <!-- Foreground notification (UC04-4) -->
+    <string name="notification_channel_id">terminal-stream</string>
+    <string name="notification_channel_name">Attached terminal stream</string>
+    <string name="notification_channel_description">Ongoing notification while ai-sandbox keeps a terminal stream open in the background.</string>
+    <string name="notification_pill">FOREGROUND · dataSync</string>
+    <string name="notification_title">Attached to ai-sandbox-%1$d</string>
+    <string name="notification_body">%1$s · %2$dx%3$d · idle %4$ds</string>
+    <string name="notification_action_open">Open</string>
+    <string name="notification_action_disconnect">Disconnect</string>
+
+    <!-- Battery optimization prompt (AC23) -->
+    <string name="battery_opt_title">Keep terminal alive in background?</string>
+    <string name="battery_opt_body">Android may kill the terminal stream on long idle periods. Exempting ai-sandbox from battery optimization keeps the WebSocket attached while the screen is locked.</string>
+    <string name="battery_opt_open_settings">Open battery settings</string>
+    <string name="battery_opt_dismiss">Not now</string>
+
+    <!-- Settings (UC04-5) -->
+    <string name="settings_title">Settings</string>
+    <string name="settings_section_server">Server</string>
+    <string name="settings_section_identity">Client identity</string>
+    <string name="settings_section_websocket">WebSocket</string>
+    <string name="settings_section_diagnostics">Diagnostics</string>
+    <string name="settings_server_url">URL</string>
+    <string name="settings_server_pin">Pin (SHA-256)</string>
+    <string name="settings_copy">Copy</string>
+    <string name="settings_identity_keystore_badge">Android KeyStore · non-exportable</string>
+    <string name="settings_identity_issued">ISSUED</string>
+    <string name="settings_identity_expires">EXPIRES</string>
+    <string name="settings_identity_serial">SERIAL</string>
+    <string name="settings_identity_key">KEY</string>
+    <string name="settings_websocket_subprotocol">Subprotocol</string>
+    <string name="settings_websocket_ping">Ping interval</string>
+    <string name="settings_websocket_ping_value">30s · auto-reconnect on lock</string>
+    <string name="settings_websocket_stream_id">tmux stream id</string>
+    <string name="settings_websocket_size">Cols × rows</string>
+    <string name="settings_diagnostics_simulate_revoke">Simulate cert revoke</string>
+    <string name="settings_diagnostics_simulate_revoke_subtitle">Triggers the AC25 cert-revoked path locally — no server call.</string>
+    <string name="settings_footer">ai-sandbox-android %1$s · minSdk %2$d · sideload · no telemetry · no SDK</string>
+
+    <!-- Cert-revoked dialog (UC04-7) -->
+    <string name="cert_revoked_title">Identity revoked</string>
+    <string name="cert_revoked_body">The server has revoked this device\'s client certificate. Ask the operator to run aisandboxctl client invite again and re-scan the QR.</string>
+    <string name="cert_revoked_later">Later</string>
+    <string name="cert_revoked_scan">Scan new QR</string>
+
+    <!-- Server identity changed (server pin mismatch — separate from cert-revoked) -->
+    <string name="server_identity_changed_title">Server identity changed</string>
+    <string name="server_identity_changed_body">The server\'s TLS certificate no longer matches the pin we stored during enrollment. This could be a server re-key or a man-in-the-middle. Re-scan a fresh invite QR from the operator to proceed.</string>
+    <string name="server_identity_changed_quit">Quit</string>
+    <string name="server_identity_changed_rescan">Scan new QR</string>
+
+    <!-- Status pills -->
+    <string name="status_running">running</string>
+    <string name="status_starting">starting</string>
+    <string name="status_stopped">stopped</string>
+    <string name="status_connected">connected</string>
+
+</resources>

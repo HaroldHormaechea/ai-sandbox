@@ -49,6 +49,13 @@ dependencies {
     implementation(libs.logstash.logback.encoder)
     implementation(libs.jackson.dataformat.yaml)
     implementation(libs.picocli)
+    // UC04 § B3 — `aisandboxctl client invite` encodes the {u,t,exp,pin}
+    // payload into a QR (ASCII to stdout or PNG to --out). The dep was
+    // already pinned in libs.versions.toml for the :android module
+    // (ZXing chosen over ML Kit for guaranteed-zero GMS deps); reusing
+    // the same artifact on the server saves vendoring ~1000 lines of
+    // the Nayuki QR-Code-generator.
+    implementation(libs.zxing.core)
 
     annotationProcessor(libs.spring.boot.configuration.processor)
     annotationProcessor(libs.picocli.codegen)

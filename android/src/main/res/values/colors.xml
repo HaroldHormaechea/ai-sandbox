@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Bootstrap colors for the XML Theme. The full Compose palette lives in
+  AiSandboxTheme.kt and matches the UC04 § Theming token table verbatim.
+-->
+<resources>
+    <color name="bootstrap_workbench">#0a0a0c</color>
+    <color name="bootstrap_surface">#131216</color>
+    <color name="bootstrap_on_surface">#ece6ec</color>
+</resources>

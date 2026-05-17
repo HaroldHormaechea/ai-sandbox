@@ -1,6 +1,7 @@
 package com.aisandbox.server.stream.handler;
 
 import com.aisandbox.server.identity.ActiveConnectionRegistry;
+import com.aisandbox.server.identity.ActiveStreamRegistry;
 import com.aisandbox.server.identity.ClientIdentity;
 import com.aisandbox.server.stream.dto.ControlMessage;
 import com.aisandbox.server.stream.facade.StreamFacade;
@@ -67,6 +68,16 @@ public class SessionStreamHandler implements WebSocketHandler {
     /** Optional — set by {@code WebSocketConfiguration} at bean construction time. */
     private volatile ActiveConnectionRegistry connections;
 
+    /**
+     * UC04 § B2 — set by {@code WebSocketConfiguration} so the handler
+     * can index every live WS session against its client fingerprint.
+     * The connection registry's {@code revoke(...)} path consults this
+     * index to issue a graceful close (code 4401, "revoked") before
+     * tearing down the underlying TCP channel — AC26 surfaces the
+     * Android cert-revoked dialog on the resulting close-frame event.
+     */
+    private volatile ActiveStreamRegistry streamRegistry;
+
     public SessionStreamHandler(
             StreamFacade facade,
             StreamControlMessageService controlSvc,
@@ -89,6 +100,15 @@ public class SessionStreamHandler implements WebSocketHandler {
      */
     public void setActiveConnectionRegistry(ActiveConnectionRegistry connections) {
         this.connections = connections;
+    }
+
+    /**
+     * Late binding of the UC04 {@link ActiveStreamRegistry}. Tests that
+     * don't care about the graceful-close path leave this unset; the
+     * handler treats it as a no-op.
+     */
+    public void setActiveStreamRegistry(ActiveStreamRegistry streamRegistry) {
+        this.streamRegistry = streamRegistry;
     }
 
     @Override
@@ -114,6 +134,16 @@ public class SessionStreamHandler implements WebSocketHandler {
         Sinks.Many<WebSocketMessage> outbound = Sinks.many().unicast().onBackpressureBuffer();
         AtomicReference<TmuxBridgeService.Bridge> bridgeRef = new AtomicReference<>();
         AtomicReference<StreamId> idRef = new AtomicReference<>();
+
+        // UC04 § B2 — index this WS session against its fingerprint so
+        // the revoke() orchestration can graceful-close it on cert
+        // removal. detach happens in the doFinally below regardless of
+        // exit path (normal close, server error, client disconnect).
+        ActiveStreamRegistry streams = this.streamRegistry;
+        final String fingerprintForStreamIndex = identity.fingerprintHex();
+        if (streams != null) {
+            streams.attach(fingerprintForStreamIndex, session);
+        }
 
         final ClientIdentity capturedIdentity = identity;
         return Mono.fromCallable(() -> facade.openStream(n, capturedIdentity, session))
@@ -152,6 +182,9 @@ public class SessionStreamHandler implements WebSocketHandler {
                     StreamId id = idRef.get();
                     if (id != null) {
                         facade.closeStream(id, 1000, sig.name());
+                    }
+                    if (streams != null) {
+                        streams.detach(fingerprintForStreamIndex, session);
                     }
                 })
                 .onErrorResume(t -> {

@@ -39,6 +39,42 @@ paths:
             '*/*':
               schema:
                 type: object
+  /v1/enrollment:
+    post:
+      tags:
+      - enrollment-controller
+      summary: Redeem a single-use enrollment token (UC04).
+      description: "The only mTLS-exempt path on the server. Returns a freshly-minted\
+        \ PKCS#12 bundle (private key + cert, empty transport passphrase). The newly-minted\
+        \ public cert is written to the server allowlist before the response is returned,\
+        \ so the client can immediately use the new identity on the next request."
+      operationId: redeem
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EnrollmentRequest"
+        required: true
+      responses:
+        "201":
+          description: Bundle minted.
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "401":
+          description: "Token invalid, expired, or already redeemed."
+          content:
+            application/problem+json: {}
+        "413":
+          description: Request body too large.
+          content:
+            application/problem+json: {}
+        "429":
+          description: Per-IP rate limit tripped.
+          content:
+            application/problem+json: {}
   /v1/clients:
     get:
       tags:
@@ -161,6 +197,20 @@ components:
           type: string
           default: shared
           description: shared | isolated
+    EnrollmentRequest:
+      type: object
+      description: Body of POST /v1/enrollment (UC04).
+      properties:
+        token:
+          type: string
+          description: Opaque single-use token issued by `aisandboxctl client invite
+            <name>`.
+          example: 8a1f3c0e9b4d…
+          maxLength: 256
+          minLength: 32
+          pattern: "[A-Za-z0-9._-]{32,256}"
+      required:
+      - token
     AddClientRequest:
       type: object
       description: Body of POST /v1/clients.

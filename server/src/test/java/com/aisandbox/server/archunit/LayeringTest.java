@@ -108,4 +108,104 @@ class LayeringTest {
                 .beFreeOfCycles();
         rule.check(featureOnly);
     }
+
+    // ── UC04 § B2 / proposal — additional structural rules ───────────────────
+
+    @Test
+    void enrollment_facade_does_not_reach_into_clients_service_package() {
+        // UC04 cross-domain hand-off goes facade-to-facade
+        // (EnrollmentFacade → ClientAllowlistFacade). Reaching directly
+        // into clients.service.* (AllowlistDirectory / ClientAllowlistService
+        // / ClientCertParser) would bypass the use-case boundary and lose
+        // the immediate-rebuild + audit emission contract that lives on
+        // the sibling facade. profile-java-server-architecture rule 6.
+        ArchRule rule = noClasses()
+                .that()
+                .resideInAPackage("..enrollment..")
+                .should()
+                .dependOnClassesThat()
+                .resideInAPackage("..clients.service..");
+        rule.allowEmptyShould(true).check(PRODUCTION);
+    }
+
+    @Test
+    void enrollment_controller_only_references_enrollment_facade_at_the_use_case_boundary() {
+        // Mirrors the generic "controllers don't reach into services or
+        // repositories" pin, scoped to the enrollment slice so a future
+        // refactor that injects EnrollmentTokenService or
+        // EnrollmentCertMintService into the controller surfaces with
+        // the right blame line.
+        ArchRule rule = noClasses()
+                .that()
+                .resideInAPackage("..enrollment.api..")
+                .and()
+                .haveSimpleNameEndingWith("Controller")
+                .should()
+                .dependOnClassesThat()
+                .resideInAPackage("..enrollment.service..");
+        rule.allowEmptyShould(true).check(PRODUCTION);
+    }
+
+    @Test
+    void no_production_caller_outside_identity_may_call_ActiveConnectionRegistry_terminate() {
+        // UC04 § B2 — production code must go through revoke(Set), which
+        // first issues a graceful WS close (so the Android client surfaces
+        // the AC26 "Identity revoked" dialog) then calls terminate(Set)
+        // internally. Direct terminate(Set) calls from a facade or
+        // watcher would skip the close-frame step. The method is kept
+        // public for back-compat with QA tests; the proposal's
+        // "demote to package-private" follow-up lands later.
+        ArchRule rule = noClasses()
+                .that()
+                .resideOutsideOfPackage("..identity..")
+                .and()
+                .resideOutsideOfPackage("..config..")
+                .should()
+                .callMethod(
+                        com.aisandbox.server.identity.ActiveConnectionRegistry.class, "terminate", java.util.Set.class);
+        rule.allowEmptyShould(true).check(PRODUCTION);
+    }
+
+    @Test
+    void only_active_connection_registry_calls_active_stream_registry_gracefulClose() {
+        // The graceful WebSocket close path MUST funnel through
+        // ActiveConnectionRegistry#revoke(Set) — that's the place that
+        // pairs gracefulClose with the bounded timeout + the TCP-layer
+        // tear-down. A facade or watcher calling gracefulClose directly
+        // would lose the timeout (deadlock risk) and would skip the
+        // subsequent terminate() — so the channel survives indefinitely.
+        com.tngtech.archunit.base.DescribedPredicate<com.tngtech.archunit.core.domain.JavaCall<?>> isGracefulClose =
+                new com.tngtech.archunit.base.DescribedPredicate<>("a call to ActiveStreamRegistry#gracefulClose") {
+                    @Override
+                    public boolean test(com.tngtech.archunit.core.domain.JavaCall<?> call) {
+                        return call.getTarget().getName().equals("gracefulClose")
+                                && call.getTarget()
+                                        .getOwner()
+                                        .isAssignableTo(com.aisandbox.server.identity.ActiveStreamRegistry.class);
+                    }
+                };
+        ArchRule rule = noClasses()
+                .that()
+                .resideOutsideOfPackage("..identity..")
+                .should()
+                .callMethodWhere(isGracefulClose);
+        rule.allowEmptyShould(true).check(PRODUCTION);
+    }
+
+    @Test
+    void enrollment_service_classes_carry_no_at_transactional_annotation() {
+        // The store + cert-mint + rate-limiter all touch filesystem /
+        // in-memory state only — there is no transactional resource to
+        // join. Adding @Transactional here would be a runtime no-op AND
+        // a false promise of atomicity. profile-java-server-architecture
+        // already restricts @Transactional to ..facade.. ; this is a
+        // narrower pin so an enrollment-slice regression surfaces with
+        // the right blame line.
+        ArchRule rule = noClasses()
+                .that()
+                .resideInAPackage("..enrollment.service..")
+                .should()
+                .beAnnotatedWith("org.springframework.transaction.annotation.Transactional");
+        rule.allowEmptyShould(true).check(PRODUCTION);
+    }
 }

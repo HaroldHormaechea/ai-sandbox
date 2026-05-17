@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- UC04 AC3, AC21, AC22, AC23 — permissions list documented here. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <!-- Foreground service of type dataSync keeps the WebSocket alive
+         across lock-screen + task-switch (AC21, UC04-4 design). -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- Notifications for the dataSync ongoing notification (AC22). -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Haptic vibration on terminal BEL (AC14). -->
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- Battery-optimization deep link (AC23). REQUEST_IGNORE_BATTERY_OPTIMIZATIONS
+         is documented in the manifest so the system settings deep-link works;
+         we never actually request the special permission programmatically. -->
+    <uses-permission
+        android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"
+        tools:ignore="BatteryLife" />
+
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
+
+    <application
+        android:name=".AiSandboxApplication"
+        android:label="@string/app_name"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:theme="@style/Theme.AiSandbox"
+        android:supportsRtl="true"
+        android:enableOnBackInvokedCallback="true"
+        android:allowBackup="false"
+        tools:targetApi="34">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|keyboard|uiMode|fontScale|density|locale"
+            android:windowSoftInputMode="adjustResize"
+            android:theme="@style/Theme.AiSandbox">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- UC04 AC21 — dataSync foreground service that holds the
+             WebSocket open across lock/screen-off. Type pinned to
+             dataSync per the design's UC04-4 pill text. -->
+        <service
+            android:name=".terminal.service.TerminalForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync"
+            android:stopWithTask="false" />
+
+    </application>
+</manifest>

@@ -1,0 +1,20 @@
+{
+  "mcpServers": {
+    "java-class-call-scanning": {
+      "command": "java",
+      "args": [
+        "-jar",
+        "/home/claude/.cache/project-builder/java-class-call-scanning/v0.2.0/java-class-call-scanning.jar",
+        "serve",
+        "--classpath",
+        "/workspace/ai-sandbox/server/build/classes/java/main",
+        "--classpath",
+        "/workspace/ai-sandbox/server/build/classes/java/test",
+        "--src",
+        "/workspace/ai-sandbox/server/src/main/java",
+        "--src",
+        "/workspace/ai-sandbox/server/src/test/java"
+      ]
+    }
+  }
+}

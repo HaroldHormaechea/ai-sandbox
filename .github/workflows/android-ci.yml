@@ -1,0 +1,99 @@
+name: android-ci
+
+# UC04 AC30 — every PR touching the Android module and every push to
+# main runs lint + JVM unit tests + a debug APK + debug AAB build. We
+# skip integration tests (`connectedAndroidTest`) since GitHub Actions
+# runners don't ship an Android emulator and spinning one up doubles
+# wall-clock time for marginal value while the project is in sideload.
+
+on:
+  pull_request:
+    paths:
+      - 'android/**'
+      - 'gradle/**'
+      - 'settings.gradle.kts'
+      - 'gradle.properties'
+      - '.github/workflows/android-ci.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'android/**'
+      - 'gradle/**'
+      - 'settings.gradle.kts'
+      - 'gradle.properties'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Android SDK
+        # android-actions/setup-android handles cmdline-tools install,
+        # license acceptance, and platform / build-tools download in one
+        # go. AGP 9.x picks up the SDK location from $ANDROID_HOME.
+        uses: android-actions/setup-android@v3
+        with:
+          cmdline-tools-version: latest
+          packages: 'platform-tools platforms;android-36 build-tools;36.0.0'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Cache AGP transformed jars
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches/transforms-3
+            ~/.gradle/caches/transforms-4
+          key: agp-transforms-${{ runner.os }}-${{ hashFiles('gradle/libs.versions.toml') }}
+          restore-keys: |
+            agp-transforms-${{ runner.os }}-
+
+      - name: Lint + unit tests + assemble debug
+        # `lint` produces an XML report under android/build/reports/lint-results-debug.xml
+        # `test` runs JUnit + Robolectric on the JVM (no emulator).
+        # `assembleDebug` + `bundleDebug` confirm the AAB packaging path.
+        run: |
+          ./gradlew \
+              :android:lint \
+              :android:test \
+              :android:assembleDebug \
+              :android:bundleDebug \
+              --no-daemon
+
+      - name: Verify zero GMS dependencies (UC04 AC29)
+        # Sideload-only target — ZXing was chosen over ML Kit precisely
+        # to keep play-services-* out of the dep graph. CI catches any
+        # regression that pulls one back in.
+        run: |
+          if ./gradlew :android:dependencies --no-daemon | grep -E 'com\.google\.android\.gms|play-services'; then
+            echo "::error::play-services dependency detected — AC29 violated"
+            exit 1
+          fi
+
+      - name: Upload lint XML report
+        # Always upload even on failure so reviewers can pull the report
+        # without re-running the job.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-lint-report
+          path: android/build/reports/lint-results-debug.xml
+          if-no-files-found: warn
+
+      - name: Upload debug APK
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-debug-apk
+          path: android/build/outputs/apk/debug/*.apk
+          if-no-files-found: warn

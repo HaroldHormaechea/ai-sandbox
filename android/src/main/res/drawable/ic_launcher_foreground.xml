@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Adaptive-icon foreground: an accent-coloured monospace "S" centred on
+  the 108 dp safe square. Pixel-perfect match for the
+  Avatar component (UC04 § Components) used on session cards.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#ece6ec"
+        android:pathData="M54,32 m-12,0 a12,12 0 1,0 24,0 a12,12 0 1,0 -24,0" />
+    <path
+        android:fillColor="#ece6ec"
+        android:pathData="M42,52 h24 v6 h-24 z M42,64 h24 v6 h-24 z M42,76 m-12,0 a12,12 0 1,0 24,0 a12,12 0 1,0 -24,0" />
+</vector>

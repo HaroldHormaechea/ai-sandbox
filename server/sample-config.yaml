@@ -60,3 +60,17 @@ ai-sandbox:
       output-ring-bytes: 262144        # 256 KiB per-stream buffer, AC30
       keepalive-ping-seconds: 30
       keepalive-pong-timeout-seconds: 15
+
+    # UC04 — Android client enrollment endpoint. POST /v1/enrollment is the
+    # only mTLS-exempt path on the server; trust-surface analysis lives in
+    # docs/THREAT_MODEL.md § "Enrollment trust boundary". Tokens issued by
+    # `aisandboxctl client invite` land as small JSON files under `dir`
+    # (mode 0700, owned by ai-sandbox-server); redemption deletes them
+    # atomically, so unredeemed/expired tokens leave no cert behind.
+    enrollment:
+      dir: /etc/ai-sandbox-server/enrollment
+      # Token lifetime in minutes (AC32 default).
+      default-ttl-minutes: 10
+      # Per-IP token bucket. 1 redemption per 60 s by default (AC34).
+      rate-limit-per-window: 1
+      rate-limit-window-seconds: 60

@@ -70,9 +70,10 @@ class AllowlistWatcherTest {
 
         await().atMost(Duration.ofSeconds(3)).until(() -> svc.list().size() == 1);
 
-        // registry.terminate must have been called with exactly the revoked fingerprint.
-        Mockito.verify(registry, Mockito.atLeastOnce())
-                .terminate(Mockito.argThat(set -> set != null && set.size() == 1));
+        // UC04 § B2 — production code now calls registry.revoke() (the orchestration
+        // entry point that issues a graceful WS close before TCP-layer tear-down).
+        // terminate() stays public for back-compat but is no longer the primary path.
+        Mockito.verify(registry, Mockito.atLeastOnce()).revoke(Mockito.argThat(set -> set != null && set.size() == 1));
         // logEvent is varargs. Capture invocations and assert at least one carries
         // the CLIENT_REMOVE action + "fs-watch" trigger.
         org.mockito.ArgumentCaptor<com.aisandbox.server.audit.AuditAction> actionCap =

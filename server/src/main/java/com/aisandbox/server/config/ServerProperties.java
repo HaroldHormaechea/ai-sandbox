@@ -5,6 +5,7 @@ import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import java.nio.file.Path;
 import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.boot.context.properties.bind.ConstructorBinding;
 import org.springframework.validation.annotation.Validated;
 
 /**
@@ -31,7 +32,47 @@ public record ServerProperties(
         @NotNull Limits limits,
         @NotNull Audit audit,
         @NotNull Shutdown shutdown,
-        @NotNull Streams streams) {
+        @NotNull Streams streams,
+        @NotNull Enrollment enrollment) {
+
+    /**
+     * Canonical constructor — explicitly tagged
+     * {@link ConstructorBinding} so Spring picks it (not the 8-arg
+     * back-compat ctor below) when binding from YAML. Without this,
+     * Spring 4 sees two ctors on the record and falls back to the
+     * no-arg ctor lookup, which records don't have.
+     */
+    @ConstructorBinding
+    public ServerProperties {}
+
+    /**
+     * Backwards-compatible 8-arg constructor for QA-owned test fixtures
+     * built before UC04 added the {@link Enrollment} field. Production
+     * binding always supplies {@link Enrollment} from
+     * {@code application.yaml} / {@code /etc/ai-sandbox-server/config.yaml}
+     * so this constructor is never reached by Spring; only QA test code
+     * uses it. New tests should call the canonical 9-arg constructor.
+     */
+    public ServerProperties(
+            Tls tls,
+            Pki pki,
+            Clients clients,
+            Hostscripts hostscripts,
+            Limits limits,
+            Audit audit,
+            Shutdown shutdown,
+            Streams streams) {
+        this(
+                tls,
+                pki,
+                clients,
+                hostscripts,
+                limits,
+                audit,
+                shutdown,
+                streams,
+                new Enrollment(Path.of("/etc/ai-sandbox-server/enrollment"), 10, 1, 60));
+    }
 
     public record Tls(@Min(1) int port, @NotBlank String bindAddress) {}
 
@@ -61,4 +102,19 @@ public record ServerProperties(
             @Min(1) int outputRingBytes,
             @Min(1) int keepalivePingSeconds,
             @Min(1) int keepalivePongTimeoutSeconds) {}
+
+    /**
+     * UC04 enrollment-endpoint configuration. Tokens issued by
+     * {@code aisandboxctl client invite <name>} land as small JSON
+     * files under {@link #dir()}; {@code POST /v1/enrollment} reads
+     * them, deletes them atomically on redemption (single-use), and
+     * mints a fresh client cert. The endpoint is the only mTLS-exempt
+     * path on the server — see {@code docs/THREAT_MODEL.md} §
+     * "Enrollment trust boundary" for the trust-surface analysis.
+     */
+    public record Enrollment(
+            @NotNull Path dir,
+            @Min(1) int defaultTtlMinutes,
+            @Min(1) int rateLimitPerWindow,
+            @Min(1) int rateLimitWindowSeconds) {}
 }
