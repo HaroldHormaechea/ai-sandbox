@@ -68,7 +68,13 @@ public class ReloadableSslContextHolder {
                 .protocols(TlsCipherPolicy.PROTOCOLS)
                 .ciphers(TlsCipherPolicy.CIPHERS, SupportedCipherSuiteFilter.INSTANCE)
                 .sslProvider(SslProvider.JDK)
-                .clientAuth(ClientAuth.REQUIRE)
+                // UC04 § B2 — flipped from REQUIRE → OPTIONAL so the
+                // mTLS-exempt POST /v1/enrollment path can reach the
+                // application layer. The MtlsEnforcementFilter rejects
+                // every OTHER path that arrives without a client cert
+                // with 401 mtls_required, so the security envelope is
+                // preserved at L7 instead of L5.
+                .clientAuth(ClientAuth.OPTIONAL)
                 .trustManager(new AllowlistTrustManager(allowlist))
                 .applicationProtocolConfig(new io.netty.handler.ssl.ApplicationProtocolConfig(
                         io.netty.handler.ssl.ApplicationProtocolConfig.Protocol.ALPN,

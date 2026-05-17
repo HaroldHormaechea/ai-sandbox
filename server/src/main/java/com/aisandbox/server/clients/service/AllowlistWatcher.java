@@ -101,7 +101,13 @@ public class AllowlistWatcher implements SmartLifecycle {
                     pendingUntil = 0L;
                     Set<String> revoked = service.rebuild();
                     if (!revoked.isEmpty()) {
-                        registry.terminate(revoked);
+                        // UC04 § B2 — go through the orchestration entry
+                        // point: graceful WS close first (so the Android
+                        // client surfaces AC26's "Identity revoked"
+                        // dialog) then TCP-layer tear-down. terminate()
+                        // stays public for back-compat; this is the
+                        // primary production path.
+                        registry.revoke(revoked);
                         for (String fp : revoked) {
                             audit.logEvent(AuditAction.CLIENT_REMOVE, "ok", "fingerprint", fp, "trigger", "fs-watch");
                         }

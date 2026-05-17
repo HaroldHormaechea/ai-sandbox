@@ -74,8 +74,22 @@ public class NettyServerCustomizer implements WebServerFactoryCustomizer<NettyRe
 
     /**
      * Tail-of-pipeline handler that listens for
-     * {@link SslHandshakeCompletionEvent} and, on success, computes
-     * fingerprint + CN from the peer cert and hands them to the registry.
+     * {@link SslHandshakeCompletionEvent}. UC04 § B2 flipped the server
+     * to {@link io.netty.handler.ssl.ClientAuth#OPTIONAL}, so the
+     * completion event no longer guarantees a peer cert. Three outcomes:
+     *
+     * <ol>
+     *   <li><b>Success + peer cert</b> — compute fingerprint + CN and
+     *       attach the {@link ClientIdentity} via {@code registry.attach}.</li>
+     *   <li><b>Success + no peer cert</b> — call
+     *       {@code registry.attachAnonymous} so HTTP filters see
+     *       {@link ClientIdentity#ANONYMOUS} instead of a null gap.
+     *       {@code SSLSession.getPeerCertificates()} throws
+     *       {@code SSLPeerUnverifiedException} when no cert was presented;
+     *       we catch + treat as anonymous.</li>
+     *   <li><b>Failure</b> — Netty has already torn the channel down; we
+     *       leave the registry untouched.</li>
+     * </ol>
      */
     static final class IdentityCapturingHandler extends io.netty.channel.ChannelInboundHandlerAdapter {
 
@@ -98,9 +112,26 @@ public class NettyServerCustomizer implements WebServerFactoryCustomizer<NettyRe
                             String cn = PemUtils.extractCommonName(leaf);
                             ClientIdentity id = new ClientIdentity(cn, fp, leaf.getSerialNumber());
                             registry.attach(ctx.channel(), fp, id);
+                        } else {
+                            registry.attachAnonymous(ctx.channel());
                         }
+                    } catch (javax.net.ssl.SSLException sslEx) {
+                        // UC04 § B2 — covers SSLPeerUnverifiedException
+                        // (no client cert presented; the OPTIONAL
+                        // clientAuth path) AND any broader handshake
+                        // anomaly. Either way the connection completed
+                        // anonymously; MtlsEnforcementFilter rejects
+                        // every path except /v1/enrollment.
+                        if (!(sslEx instanceof javax.net.ssl.SSLPeerUnverifiedException)) {
+                            LOG.warn(
+                                    "Non-peer-unverified SSLException post-handshake; treating channel as"
+                                            + " anonymous: {}",
+                                    sslEx.toString());
+                        }
+                        registry.attachAnonymous(ctx.channel());
                     } catch (CertificateException ce) {
                         LOG.warn("Cannot extract peer identity from completed TLS session: {}", ce.toString());
+                        registry.attachAnonymous(ctx.channel());
                     }
                 }
             }
