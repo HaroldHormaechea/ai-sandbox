@@ -226,6 +226,10 @@ dependencies {
     //    and are written by QA, not the developer). ─────────────────────
     testImplementation(platform(libs.junit.bom))
     testImplementation(libs.junit.jupiter)
+    // JUnit Platform launcher is required on the test runtime classpath
+    // when useJUnitPlatform() is used; otherwise Gradle Test Executor
+    // fails to start with "Failed to load JUnit Platform".
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
     testImplementation(libs.robolectric)
     testImplementation(libs.assertj.core)
     // QA-only — MockWebServer drives EnrollmentClient + StreamClient unit
