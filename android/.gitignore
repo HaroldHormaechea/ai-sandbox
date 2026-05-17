@@ -1,0 +1,12 @@
+# Android module .gitignore
+#
+# `build/` is shared with :server's convention; lint and APK/AAB
+# artifacts both land under it.
+build/
+
+# Per-developer local SDK pointer; CI sets ANDROID_HOME instead.
+local.properties
+
+# Lint baselines are committed only when intentional — keep the
+# placeholder name out of git until we choose to record one.
+lint-baseline.xml.tmp
