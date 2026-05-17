@@ -235,6 +235,9 @@ dependencies {
     testImplementation("org.junit.jupiter:junit-jupiter-params")
     testImplementation(libs.robolectric)
     testImplementation(libs.assertj.core)
+    // kotlin-reflect is required by tests that introspect sealed-class
+    // permittedSubclasses (TerminalBellDetectionTest.HapticEvent_pin).
+    testImplementation(kotlin("reflect"))
     // QA-only — MockWebServer drives EnrollmentClient + StreamClient unit
     // tests against real WS / HTTP responses without spinning the server.
     testImplementation(libs.okhttp.mockwebserver)

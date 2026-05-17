@@ -20,42 +20,48 @@ class KeyEncodingTest {
         assertThat(KeyEncoding.bytesFor(KeyEvent.Tab)).containsExactly(0x09.toByte())
     }
 
+    private fun bytesOf(s: String): List<Byte> = s.toByteArray().toList()
+    private fun actual(e: KeyEvent): List<Byte>? = KeyEncoding.bytesFor(e)?.toList()
+
     @Test
     fun `arrow keys emit CSI sequences A B C D`() {
         // xterm CSI: ESC[A/B/C/D — the leading 0x1B is conventionally
         // prepended by the screen on emit (or by tmux); the bar emits
         // the "[A" suffix only. Pin both representations.
-        assertThat(KeyEncoding.bytesFor(KeyEvent.ArrowUp)).isEqualTo("[A".toByteArray())
-        assertThat(KeyEncoding.bytesFor(KeyEvent.ArrowDown)).isEqualTo("[B".toByteArray())
-        assertThat(KeyEncoding.bytesFor(KeyEvent.ArrowRight)).isEqualTo("[C".toByteArray())
-        assertThat(KeyEncoding.bytesFor(KeyEvent.ArrowLeft)).isEqualTo("[D".toByteArray())
+        // Compare as List<Byte> — Kotlin's ByteArray.equals is identity-based,
+        // and AssertJ's nullable-receiver overload doesn't dispatch to the
+        // content-comparing byte[] overload.
+        assertThat(actual(KeyEvent.ArrowUp)).isEqualTo(bytesOf("[A"))
+        assertThat(actual(KeyEvent.ArrowDown)).isEqualTo(bytesOf("[B"))
+        assertThat(actual(KeyEvent.ArrowRight)).isEqualTo(bytesOf("[C"))
+        assertThat(actual(KeyEvent.ArrowLeft)).isEqualTo(bytesOf("[D"))
     }
 
     @Test
     fun `function keys F1 through F4 use SS3 form OP OQ OR OS`() {
-        assertThat(KeyEncoding.bytesFor(KeyEvent.Function(1))).isEqualTo("OP".toByteArray())
-        assertThat(KeyEncoding.bytesFor(KeyEvent.Function(2))).isEqualTo("OQ".toByteArray())
-        assertThat(KeyEncoding.bytesFor(KeyEvent.Function(3))).isEqualTo("OR".toByteArray())
-        assertThat(KeyEncoding.bytesFor(KeyEvent.Function(4))).isEqualTo("OS".toByteArray())
+        assertThat(actual(KeyEvent.Function(1))).isEqualTo(bytesOf("OP"))
+        assertThat(actual(KeyEvent.Function(2))).isEqualTo(bytesOf("OQ"))
+        assertThat(actual(KeyEvent.Function(3))).isEqualTo(bytesOf("OR"))
+        assertThat(actual(KeyEvent.Function(4))).isEqualTo(bytesOf("OS"))
     }
 
     @Test
     fun `function keys F5 through F12 use CSI tilde form`() {
-        assertThat(KeyEncoding.bytesFor(KeyEvent.Function(5))).isEqualTo("[15~".toByteArray())
-        assertThat(KeyEncoding.bytesFor(KeyEvent.Function(6))).isEqualTo("[17~".toByteArray())
-        assertThat(KeyEncoding.bytesFor(KeyEvent.Function(7))).isEqualTo("[18~".toByteArray())
-        assertThat(KeyEncoding.bytesFor(KeyEvent.Function(8))).isEqualTo("[19~".toByteArray())
-        assertThat(KeyEncoding.bytesFor(KeyEvent.Function(9))).isEqualTo("[20~".toByteArray())
-        assertThat(KeyEncoding.bytesFor(KeyEvent.Function(10))).isEqualTo("[21~".toByteArray())
-        assertThat(KeyEncoding.bytesFor(KeyEvent.Function(11))).isEqualTo("[23~".toByteArray())
-        assertThat(KeyEncoding.bytesFor(KeyEvent.Function(12))).isEqualTo("[24~".toByteArray())
+        assertThat(actual(KeyEvent.Function(5))).isEqualTo(bytesOf("[15~"))
+        assertThat(actual(KeyEvent.Function(6))).isEqualTo(bytesOf("[17~"))
+        assertThat(actual(KeyEvent.Function(7))).isEqualTo(bytesOf("[18~"))
+        assertThat(actual(KeyEvent.Function(8))).isEqualTo(bytesOf("[19~"))
+        assertThat(actual(KeyEvent.Function(9))).isEqualTo(bytesOf("[20~"))
+        assertThat(actual(KeyEvent.Function(10))).isEqualTo(bytesOf("[21~"))
+        assertThat(actual(KeyEvent.Function(11))).isEqualTo(bytesOf("[23~"))
+        assertThat(actual(KeyEvent.Function(12))).isEqualTo(bytesOf("[24~"))
     }
 
     @Test
     fun `out of range function key falls back to F12 encoding`() {
         // Defensive default for the screen's `Fn` row — anything > 12
         // collapses to F12's CSI[24~ rather than producing no output.
-        assertThat(KeyEncoding.bytesFor(KeyEvent.Function(99))).isEqualTo("[24~".toByteArray())
+        assertThat(actual(KeyEvent.Function(99))).isEqualTo(bytesOf("[24~"))
     }
 
     @Test
