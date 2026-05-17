@@ -51,7 +51,11 @@ fi
 
 attach_to_n() {
     local n="$1" name="ai-sandbox-${n}"
-    exec docker compose -p "$name" exec claude-sandbox tmux attach -t main
+    # AC25: pass -f and --project-directory on every docker compose call
+    # for consistency; `compose exec` identifies the project by container
+    # labels so the flags are functionally a no-op here. Kept for parity
+    # with spawn/clean so every invocation looks the same.
+    exec ai_sandbox_compose -p "$name" exec claude-sandbox tmux attach -t main
 }
 
 # Direct-pick path: --session <N>

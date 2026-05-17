@@ -11,6 +11,17 @@ cd "$(dirname "$0")"
 # shellcheck source=lib.sh
 . "$(dirname "$0")/lib.sh"
 
+# UC05 § AC11,AC25 — when running under the install-mode management server
+# the script lives under /opt/ai-sandbox-server/host/ (read-only) and must
+# route writes (counter file, lockdir, per-session workspace-N/ + claude-
+# config-N/) to /var/lib/ai-sandbox-server/sessions/ instead. The server
+# exports AI_SANDBOX_HOST_STATE_ROOT for that purpose; developer-mode runs
+# leave it unset and spawn.sh continues to cwd at the repo root.
+if [ -n "${AI_SANDBOX_HOST_STATE_ROOT:-}" ]; then
+    mkdir -p "$AI_SANDBOX_HOST_STATE_ROOT"
+    cd "$AI_SANDBOX_HOST_STATE_ROOT"
+fi
+
 usage() {
     cat >&2 <<'EOF'
 Usage: ./spawn.sh [flags]
@@ -147,7 +158,7 @@ if [ "$LABEL_SET" -eq 1 ] && [ -n "$LABEL" ]; then
     info "  label         : $LABEL" >&2
 fi
 
-if ! docker compose -p "$PROJECT" up -d; then
+if ! ai_sandbox_compose -p "$PROJECT" up -d; then
     warn "docker compose up failed for $PROJECT." >&2
     warn "Counter NOT rolled back (monotonic by design); next spawn will use N=$(( N + 1 ))." >&2
     exit 1

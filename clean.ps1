@@ -13,6 +13,14 @@ $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 . (Join-Path $PSScriptRoot 'lib.ps1')
 
+# UC05 § AC11,AC25 — match spawn.ps1: route per-session host state under
+# /var/lib/ai-sandbox-server/sessions/ when the management server sets
+# AI_SANDBOX_HOST_STATE_ROOT. Developer-mode runs leave the var unset.
+if ($env:AI_SANDBOX_HOST_STATE_ROOT) {
+    New-Item -ItemType Directory -Force -Path $env:AI_SANDBOX_HOST_STATE_ROOT | Out-Null
+    Set-Location $env:AI_SANDBOX_HOST_STATE_ROOT
+}
+
 function Show-Usage {
     @"
 Usage: .\clean.ps1 [<N>] [flags]
@@ -95,7 +103,7 @@ function Clean-One {
     param([Parameter(Mandatory)][int]$N)
     $name = "ai-sandbox-$N"
     Write-Info "Cleaning $name"
-    & docker compose -p $name down -v --remove-orphans 2>$null | Out-Null
+    Invoke-AiSandboxCompose -p $name down -v --remove-orphans 2>$null | Out-Null
 
     if (-not $KeepWorkspace -and (Test-Path ".\workspace-$N")) {
         Write-Info "  rm -rf .\workspace-$N"
