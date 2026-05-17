@@ -20,12 +20,22 @@ public final class PemWriter {
     private PemWriter() {}
 
     public static void writeCert(Path path, X509Certificate cert) throws IOException {
+        Files.writeString(path, certPem(cert));
+        setPosix(path, "rw-r--r--");
+    }
+
+    /**
+     * PEM-encode a certificate to a {@link String}. Used by the UC04
+     * enrollment cert-mint service to feed
+     * {@code ClientAllowlistFacade.addClient(name, pem)} without taking a
+     * round-trip through disk.
+     */
+    public static String certPem(X509Certificate cert) throws IOException {
         StringWriter sw = new StringWriter();
         try (JcaPEMWriter pw = new JcaPEMWriter(sw)) {
             pw.writeObject(cert);
         }
-        Files.writeString(path, sw.toString());
-        setPosix(path, "rw-r--r--");
+        return sw.toString();
     }
 
     public static void writePrivateKey(Path path, PrivateKey key) throws IOException {
