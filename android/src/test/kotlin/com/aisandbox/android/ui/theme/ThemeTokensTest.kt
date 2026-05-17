@@ -61,9 +61,8 @@ class ThemeTokensTest {
         )
 
         for ((name, exp) in expected) {
-            assertThat(actual[name])
-                .as("token %s should match design bundle", name)
-                .isEqualTo(exp)
+            val got = actual[name]
+            assertThat(got).withFailMessage { "token $name should match design bundle (exp=$exp, got=$got)" }.isEqualTo(exp)
         }
     }
 

@@ -106,7 +106,7 @@ class SessionsUiStateTest {
             ),
             filter = SessionsFilter.RUNNING,
         )
-        assertThat(s.visible).extracting { it.n }.containsExactly(1, 3, 5)
+        assertThat(s.visible.map { it.n }).containsExactly(1, 3, 5)
     }
 
     @Test
@@ -119,7 +119,7 @@ class SessionsUiStateTest {
             ),
             filter = SessionsFilter.STOPPED,
         )
-        assertThat(s.visible).extracting { it.n }.containsExactly(2)
+        assertThat(s.visible.map { it.n }).containsExactly(2)
     }
 
     @Test

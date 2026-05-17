@@ -71,9 +71,8 @@ class KeyEncodingTest {
             KeyEvent.TmuxDisarmed,
         )
         for (e in nonByteEvents) {
-            assertThat(KeyEncoding.bytesFor(e))
-                .as("event=%s should not emit a byte sequence", e)
-                .isNull()
+            val actual = KeyEncoding.bytesFor(e)
+            assertThat(actual).withFailMessage { "event=$e should not emit a byte sequence (got=$actual)" }.isNull()
         }
     }
 
