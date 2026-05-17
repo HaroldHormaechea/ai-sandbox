@@ -17,23 +17,43 @@ import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 /**
- * Enumerates running ai-sandbox sessions by mirroring the behaviour of
+ * Enumerates ai-sandbox sessions by mirroring the behaviour of
  * {@code lib.sh:enumerate_ai_sandbox_sessions} (the Bash kit's
  * source-of-truth), but in pure Java with argv-only {@code docker} calls.
  *
- * <p>Steps:
+ * <h2>UC04 AC37 — stopped containers surface too</h2>
+ *
+ * The original implementation filtered to running projects only. UC04
+ * extends the enumeration so the Android sessions list can show
+ * {@code stopped} entries (the "Stopped" filter chip in UC04-2):
+ *
  * <ol>
- *   <li>{@code docker compose ls --format json} → projects whose
- *       {@code Name} matches {@code ^ai-sandbox-\d+$}.</li>
- *   <li>For each, {@code docker compose -p <Name> ps -q claude-sandbox}
- *       → container id.</li>
- *   <li>{@code docker inspect --format ...} → label.</li>
- *   <li>{@code docker compose -p <Name> exec -T claude-sandbox tmux
- *       display-message -p -t main '#W'} → window title.</li>
+ *   <li>{@code docker compose ls --all --format json} (the {@code --all}
+ *       flag — without it, stopped projects are invisible) → projects
+ *       whose {@code Name} matches {@code ^ai-sandbox-\d+$}.</li>
+ *   <li>{@code docker compose -p <Name> ps -q --all claude-sandbox} →
+ *       container id even when the container is exited.</li>
+ *   <li><em>Single combined</em> {@code docker inspect} with
+ *       {@code --format='{{label}}|{{.State.Status}}|{{.State.Running}}'}
+ *       parsed on {@code |} — one process per session instead of one
+ *       per attribute.</li>
+ *   <li>For {@code running} sessions only:
+ *       {@code docker compose -p <Name> exec -T claude-sandbox tmux
+ *       display-message ...} → window title. Skipped for {@code
+ *       starting}/{@code stopped} since exec on a non-running container
+ *       errors and inflates enumeration latency.</li>
  * </ol>
  *
+ * <p>State mapping per UC04 § B4:
+ * <ul>
+ *   <li>{@code running}                  → {@code "running"}</li>
+ *   <li>{@code created} / {@code restarting} → {@code "starting"}</li>
+ *   <li>{@code exited} / {@code dead} / {@code paused} → {@code "stopped"}</li>
+ *   <li>anything else / no container     → {@code "stopped"}</li>
+ * </ul>
+ *
  * <p>Title normalisation: empty / {@code bash} / {@code sh} / {@code claude}
- * → {@code (idle)}; failure → {@code (unavailable)}.
+ * → {@code (idle)}; failure or non-running → {@code (unavailable)}.
  */
 @Service
 public class DockerEnumerationService {
@@ -50,7 +70,9 @@ public class DockerEnumerationService {
 
     public List<SessionRecord> enumerate() throws IOException {
         Duration timeout = Duration.ofSeconds(15);
-        ProcessExecutor.Result ls = executor.run(List.of("docker", "compose", "ls", "--format", "json"), null, timeout);
+        // UC04 § B4 — --all so stopped projects show up too.
+        ProcessExecutor.Result ls =
+                executor.run(List.of("docker", "compose", "ls", "--all", "--format", "json"), null, timeout);
         if (ls.exitCode() != 0) {
             LOG.warn("docker compose ls failed (exit={}): {}", ls.exitCode(), ls.stderr());
             return List.of();
@@ -88,20 +110,44 @@ public class DockerEnumerationService {
             int n = e.getKey();
             String project = e.getValue();
             String cid = containerId(project, timeout);
-            String label = (cid == null || cid.isEmpty()) ? "" : inspectLabel(cid, timeout);
-            String title = (cid == null || cid.isEmpty()) ? "(unavailable)" : tmuxTitle(project, timeout);
+            if (cid == null || cid.isEmpty()) {
+                // Project enumerated but no container — likely transient
+                // mid-compose-up. Mark stopped so the Android UI shows it
+                // under the Stopped chip rather than silently dropping it.
+                out.add(new SessionRecord(n, "", "(unavailable)", "stopped", 0L, 0, Instant.EPOCH));
+                continue;
+            }
+            InspectResult inspect = inspectCombined(cid, timeout);
+            String state = mapState(inspect.status());
+            String title = "running".equals(state) ? tmuxTitle(project, timeout) : "(unavailable)";
             out.add(new SessionRecord(
-                    n,
-                    label == null ? "" : label,
-                    title,
-                    cid == null || cid.isEmpty() ? "exited" : "running",
-                    0L,
-                    0,
-                    Instant.EPOCH));
+                    n, inspect.label() == null ? "" : inspect.label(), title, state, 0L, 0, Instant.EPOCH));
         }
         out.sort((a, b) -> Integer.compare(a.n(), b.n()));
         return out;
     }
+
+    /**
+     * Map raw {@code docker inspect .State.Status} to the UC04 AC37
+     * three-state model {@code running | starting | stopped}. Anything
+     * unknown becomes {@code stopped} — defensive: if Docker introduces
+     * a new state we don't want the Android UI to wedge on an unmapped
+     * value.
+     */
+    static String mapState(String dockerStatus) {
+        if (dockerStatus == null || dockerStatus.isEmpty()) {
+            return "stopped";
+        }
+        return switch (dockerStatus) {
+            case "running" -> "running";
+            case "created", "restarting" -> "starting";
+            case "exited", "dead", "paused" -> "stopped";
+            default -> "stopped";
+        };
+    }
+
+    /** Tuple returned by the single combined inspect call. */
+    record InspectResult(String label, String status, boolean running) {}
 
     public boolean exists(int n) throws IOException {
         for (SessionRecord r : enumerate()) {
@@ -126,8 +172,10 @@ public class DockerEnumerationService {
 
     private String containerId(String project, Duration timeout) {
         try {
+            // UC04 § B4 — --all so the container id of a stopped/exited
+            // container is also returned (default ps -q hides them).
             ProcessExecutor.Result r = executor.run(
-                    List.of("docker", "compose", "-p", project, "ps", "-q", "claude-sandbox"), null, timeout);
+                    List.of("docker", "compose", "-p", project, "ps", "-q", "--all", "claude-sandbox"), null, timeout);
             if (r.exitCode() != 0) {
                 return null;
             }
@@ -140,24 +188,40 @@ public class DockerEnumerationService {
         }
     }
 
-    private String inspectLabel(String cid, Duration timeout) {
+    /**
+     * UC04 § B4 — single combined inspect call that returns
+     * {@code label|status|running} on one line. Replaces the prior two
+     * round-trips (one for label, one for tmux title) where the title
+     * call is now skipped for non-running containers.
+     */
+    InspectResult inspectCombined(String cid, Duration timeout) {
         try {
             ProcessExecutor.Result r = executor.run(
                     List.of(
                             "docker",
                             "inspect",
                             "--format",
-                            "{{ index .Config.Labels \"com.ai-sandbox.label\" }}",
+                            // Two separate {{...}} runs separated by literal |, exactly
+                            // as documented in the proposal.
+                            "{{index .Config.Labels \"com.ai-sandbox.label\"}}|{{.State.Status}}|{{.State.Running}}",
                             cid),
                     null,
                     timeout);
             if (r.exitCode() != 0) {
-                return "";
+                return new InspectResult("", "", false);
             }
-            String s = r.stdout().strip();
-            return s.equals("<no value>") ? "" : s;
+            String raw = r.stdout().strip();
+            String[] parts = raw.split("\\|", -1);
+            String label = parts.length > 0 ? parts[0] : "";
+            if (label.equals("<no value>")) {
+                label = "";
+            }
+            String status = parts.length > 1 ? parts[1] : "";
+            boolean running = parts.length > 2 && Boolean.parseBoolean(parts[2]);
+            return new InspectResult(label, status, running);
         } catch (IOException io) {
-            return "";
+            LOG.debug("inspectCombined({}): {}", cid, io.toString());
+            return new InspectResult("", "", false);
         }
     }
 

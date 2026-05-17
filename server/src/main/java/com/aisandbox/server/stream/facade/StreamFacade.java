@@ -52,11 +52,21 @@ public class StreamFacade {
     }
 
     /** Sealed result of the cap / existence check run before upgrading the WebSocket. */
-    public sealed interface AuthorizeResult permits Allowed, SessionNotFound, CapExceeded, Draining {}
+    /** Sealed result of the cap / existence check run before upgrading the WebSocket. */
+    public sealed interface AuthorizeResult permits Allowed, SessionNotFound, NotRunning, CapExceeded, Draining {}
 
     public record Allowed() implements AuthorizeResult {}
 
     public record SessionNotFound(int n) implements AuthorizeResult {}
+
+    /**
+     * UC04 AC37 — the session exists but its container is not in
+     * {@code running} state. The handshake interceptor maps this to a
+     * {@code 409 session_not_running} ProblemDetails. Attaching a tmux
+     * bridge to a stopped/starting container would fail downstream
+     * anyway; failing fast keeps the wire error clean.
+     */
+    public record NotRunning(int n, String state) implements AuthorizeResult {}
 
     public record CapExceeded(String scope) implements AuthorizeResult {}
 
@@ -67,8 +77,13 @@ public class StreamFacade {
             return new Draining();
         }
         try {
-            if (!sessionRegistry.exists(n)) {
+            var rec = findSession(n);
+            if (rec.isEmpty()) {
                 return new SessionNotFound(n);
+            }
+            String state = rec.get().state();
+            if (!"running".equals(state)) {
+                return new NotRunning(n, state);
             }
         } catch (IOException io) {
             LOG.warn("authorizeOpen({}): enumeration failed; treating as not-found: {}", n, io.toString());
@@ -84,6 +99,15 @@ public class StreamFacade {
         return new Allowed();
     }
 
+    private java.util.Optional<com.aisandbox.server.sessions.dto.SessionRecord> findSession(int n) throws IOException {
+        for (var r : sessionRegistry.list()) {
+            if (r.n() == n) {
+                return java.util.Optional.of(r);
+            }
+        }
+        return java.util.Optional.empty();
+    }
+
     public StreamId openStream(int n, ClientIdentity identity, WebSocketSession session) throws IOException {
         ReentrantLock l = perN.get(n);
         try {
@@ -95,8 +119,17 @@ public class StreamFacade {
             throw new IOException(ie);
         }
         try {
-            if (!sessionRegistry.exists(n)) {
+            var rec = findSession(n);
+            if (rec.isEmpty()) {
                 throw new java.util.NoSuchElementException("session " + n + " disappeared during open");
+            }
+            // UC04 AC37 — attach guard: a stream can only be attached to
+            // a running container. Stopped/starting → 409 session_not_running
+            // via SessionNotRunningException (mapped by
+            // ProblemDetailsAdvice).
+            String state = rec.get().state();
+            if (!"running".equals(state)) {
+                throw new SessionNotRunningException(n, state);
             }
             StreamId id = StreamId.fresh();
             ActiveStream as = new ActiveStream(id, n, identity.fingerprintHex(), session);
@@ -166,5 +199,32 @@ public class StreamFacade {
      */
     public StreamRegistryService streamRegistry() {
         return streamRegistry;
+    }
+
+    /**
+     * UC04 AC37 — attach-time guard exception. Distinct from
+     * {@link java.util.NoSuchElementException} (mapped to 404) because
+     * "exists but stopped" needs its own wire code so the Android UI
+     * can disambiguate ("session deleted on server" vs. "tap to start
+     * the container first"). Mapped to {@code 409 session_not_running}
+     * by {@code ProblemDetailsAdvice}.
+     */
+    public static final class SessionNotRunningException extends RuntimeException {
+        private final int n;
+        private final String state;
+
+        public SessionNotRunningException(int n, String state) {
+            super("Session " + n + " is not running (state=" + state + ")");
+            this.n = n;
+            this.state = state;
+        }
+
+        public int n() {
+            return n;
+        }
+
+        public String state() {
+            return state;
+        }
     }
 }

@@ -16,6 +16,7 @@ import org.springframework.stereotype.Component;
  * <ul>
  *   <li>{@link StreamFacade.Allowed} → continue with upgrade</li>
  *   <li>{@link StreamFacade.SessionNotFound} → 404 + Problem-Details</li>
+ *   <li>{@link StreamFacade.NotRunning} → 409 + Problem-Details (session_not_running, UC04 AC37)</li>
  *   <li>{@link StreamFacade.CapExceeded} → 503 + Problem-Details (stream_cap_exceeded)</li>
  *   <li>{@link StreamFacade.Draining} → 503 + Problem-Details (draining)</li>
  * </ul>
@@ -41,6 +42,11 @@ public class StreamCapsHandshakeInterceptor {
             case StreamFacade.SessionNotFound nf -> {
                 resp.setStatusCode(HttpStatus.NOT_FOUND);
                 return body(HttpStatus.NOT_FOUND, ErrorCode.SESSION_NOT_FOUND, "n=" + nf.n());
+            }
+            case StreamFacade.NotRunning nr -> {
+                resp.setStatusCode(HttpStatus.CONFLICT);
+                return body(
+                        HttpStatus.CONFLICT, ErrorCode.SESSION_NOT_RUNNING, "session " + nr.n() + " is " + nr.state());
             }
             case StreamFacade.CapExceeded ce -> {
                 resp.setStatusCode(HttpStatus.SERVICE_UNAVAILABLE);
