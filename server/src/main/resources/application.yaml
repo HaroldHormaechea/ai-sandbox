@@ -58,7 +58,19 @@ ai-sandbox:
     clients:
       dir: /etc/ai-sandbox-server/clients
     hostscripts:
-      repo-root: /opt/ai-sandbox
+      # UC05 § AC10,AC12,AC22 — host scripts are bundled inside the
+      # release zip and unzipped to /opt/ai-sandbox-server/host/.
+      repo-root: /opt/ai-sandbox-server/host
+    # UC05 § AC11,AC25 — per-session compose project-directory. spawn.sh
+    # and clean.sh receive AI_SANDBOX_HOST_STATE_ROOT pointing here and
+    # cd into it before writing the counter / per-session dirs.
+    sessions:
+      host-state-root: /var/lib/ai-sandbox-server/sessions
+    # UC05 § AC14,AC27 — operator-populated secrets dir bind-mounted r/o
+    # into each sandbox container at /etc/secrets. Default lives next
+    # to PKI material under /etc; mode 0700 enforced by `pki init`.
+    secrets:
+      dir: /etc/ai-sandbox-server/secrets
     limits:
       per-ip-new-conn-per-window: 10
       per-ip-window-seconds: 10

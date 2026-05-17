@@ -28,8 +28,24 @@ ai-sandbox:
       dir: /etc/ai-sandbox-server/clients
 
     hostscripts:
-      # Repo root where UC02's spawn.sh / clean.sh / attach.sh live.
-      repo-root: /opt/ai-sandbox
+      # UC05 — repo-root where the bundled host scripts live. Set by
+      # `aisandboxctl pki init`; matches the install-time path
+      # /opt/ai-sandbox-server/host/. Operators never edit this.
+      repo-root: /opt/ai-sandbox-server/host
+
+    sessions:
+      # UC05 § AC11,AC25 — per-session compose project-directory.
+      # spawn.sh / clean.sh cd here before writing the counter file and
+      # per-session workspace-N/ + claude-config-N/ subdirs. Read-write
+      # for the systemd unit (ReadWritePaths).
+      host-state-root: /var/lib/ai-sandbox-server/sessions
+
+    secrets:
+      # UC05 § AC14,AC27 — operator-populated secrets dir bind-mounted
+      # read-only into each sandbox container at /etc/secrets. SSH keys
+      # and an optional gh-token live here; mode 0700 enforced by
+      # `aisandboxctl pki init`.
+      dir: /etc/ai-sandbox-server/secrets
 
     limits:
       # Per-IP connection rate-limit (token bucket).

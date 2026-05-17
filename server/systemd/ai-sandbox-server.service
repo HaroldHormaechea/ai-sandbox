@@ -36,11 +36,15 @@ MemoryDenyWriteExecute=false
 RestrictRealtime=true
 SystemCallArchitectures=native
 
-# Writable directories — strictly required for the audit log + runtime tmp.
-ReadWritePaths=/var/log/ai-sandbox-server
+# Writable directories — UC05 § AC23. /var/log holds the audit log;
+# /var/lib holds per-session workspace + claude-config bind-mount targets
+# created by spawn.sh under sessions/workspace-N/.
+ReadWritePaths=/var/log/ai-sandbox-server /var/lib/ai-sandbox-server
 
-# Read-only directories the server needs.
-ReadOnlyPaths=/etc/ai-sandbox-server /opt/ai-sandbox
+# Read-only directories the server needs — UC05 § AC22. The bundled host
+# scripts + Compose context live under /opt/ai-sandbox-server/host/ and
+# must not be writable by the service.
+ReadOnlyPaths=/etc/ai-sandbox-server /opt/ai-sandbox-server/host
 
 [Install]
 WantedBy=multi-user.target

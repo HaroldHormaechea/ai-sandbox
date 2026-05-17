@@ -1,0 +1,16 @@
+# Line-ending normalization (UC05 § AC9 precondition).
+#
+# The release zip must be byte-identical across re-runs of the same tag
+# (deterministic bundling). Inconsistent EOLs in the repo would taint
+# hashing even when the underlying logical content is unchanged.
+#
+# POSIX shell + container build context: LF. PowerShell: CRLF. Mixed-
+# audience text (yaml, md): LF.
+*.sh text eol=lf
+*.ps1 text eol=crlf
+*.yml text eol=lf
+*.yaml text eol=lf
+Dockerfile text eol=lf
+SandboxDockerfile text eol=lf
+entrypoint.sh text eol=lf
+* text=auto
