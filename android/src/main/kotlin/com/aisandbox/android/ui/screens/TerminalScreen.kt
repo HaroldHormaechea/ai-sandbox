@@ -47,10 +47,13 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.aisandbox.android.R
+import com.aisandbox.android.terminal.service.TerminalForegroundService
+import com.aisandbox.android.ui.components.BatteryOptPrompt
 import com.aisandbox.android.ui.components.HapticEventListener
 import com.aisandbox.android.ui.components.KeyEncoding
 import com.aisandbox.android.ui.components.KeyEvent
 import com.aisandbox.android.ui.components.ModifierBar
+import com.aisandbox.android.requireContainer
 import com.aisandbox.android.ui.theme.AiSandboxMonoTypography
 import com.aisandbox.android.ui.theme.BgWorkbench
 import com.aisandbox.android.ui.theme.OnSurface
@@ -103,6 +106,40 @@ fun TerminalScreen(
 
     // AC14 — observe haptic events and fire 150 ms vibrate.
     HapticEventListener(viewModel = viewModel)
+
+    // AC21–AC23 — start the dataSync foreground service when the WS is
+    // Open; tear it down on Revoked / GaveUp / leaving the screen. Show
+    // the one-time battery-optimization prompt the first time we reach
+    // Open after install.
+    val container = remember { requireContainer(context) }
+    val profile by container.profileStore.profile.collectAsState(initial = null)
+    LaunchedEffect(state, profile) {
+        when (state) {
+            is TerminalState.Open -> {
+                TerminalForegroundService.start(
+                    context,
+                    TerminalForegroundService.NotificationParams(
+                        sessionN = sessionN,
+                        wssUrl = profile?.serverUrl?.replace("https://", "wss://") ?: "",
+                        cols = 80,
+                        rows = 24,
+                        idleSec = 0,
+                    ),
+                )
+            }
+            is TerminalState.Revoked, is TerminalState.GaveUp -> {
+                TerminalForegroundService.stop(context)
+            }
+            else -> { /* keep current notification — reconnect counts as still-attached */ }
+        }
+    }
+    // AC23 — one-time prompt on first reach of Open.
+    if (state is TerminalState.Open) {
+        BatteryOptPrompt()
+    }
+    androidx.compose.runtime.DisposableEffect(Unit) {
+        onDispose { TerminalForegroundService.stop(context) }
+    }
 
     val scrollBehavior = TopAppBarDefaults.pinnedScrollBehavior()
 
