@@ -228,8 +228,13 @@ val releaseBundle by tasks.registering(Zip::class) {
     destinationDirectory.set(layout.buildDirectory.dir("release"))
     isPreserveFileTimestamps = false
     isReproducibleFileOrder = true
+    // UC05 § AC2,AC20 — exact filenames, no wildcards. With
+    // `archiveVersion.set("")` the jars now build at fixed names; a glob
+    // like `aisandbox-server*.jar` would additionally pick up any stale
+    // versioned artifacts left over from earlier builds (or sources jars
+    // created by `withSourcesJar()`) and ship a duplicate-jar zip.
     from(layout.buildDirectory.dir("libs")) {
-        include("aisandbox-server*.jar", "aisandboxctl*.jar")
+        include("aisandbox-server.jar", "aisandboxctl.jar")
         into("lib")
     }
     from("$projectDir/openapi.yaml") { into(".") }

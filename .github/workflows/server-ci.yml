@@ -8,6 +8,23 @@ on:
       - 'settings.gradle.kts'
       - 'gradle.properties'
       - '.github/workflows/server-ci.yml'
+      # UC05 § AC29 — release-install-smoke exercises the bundled host
+      # scripts and Docker context. PRs touching only those files must
+      # still run the smoke job, so they need to fire server-ci.
+      - 'spawn.sh'
+      - 'clean.sh'
+      - 'attach.sh'
+      - 'lib.sh'
+      - 'setup.sh'
+      - 'spawn.ps1'
+      - 'clean.ps1'
+      - 'attach.ps1'
+      - 'lib.ps1'
+      - 'setup.ps1'
+      - 'docker-compose.yml'
+      - 'SandboxDockerfile'
+      - 'entrypoint.sh'
+      - '.gitattributes'
   push:
     branches:
       - main
@@ -16,6 +33,20 @@ on:
       - 'gradle/**'
       - 'settings.gradle.kts'
       - 'gradle.properties'
+      - 'spawn.sh'
+      - 'clean.sh'
+      - 'attach.sh'
+      - 'lib.sh'
+      - 'setup.sh'
+      - 'spawn.ps1'
+      - 'clean.ps1'
+      - 'attach.ps1'
+      - 'lib.ps1'
+      - 'setup.ps1'
+      - 'docker-compose.yml'
+      - 'SandboxDockerfile'
+      - 'entrypoint.sh'
+      - '.gitattributes'
 
 permissions:
   contents: read
@@ -49,3 +80,154 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
       - name: Testcontainers integration suite
         run: ./gradlew :server:integrationTest --no-daemon
+
+  # UC05 § AC29,AC30 — smoke-test the self-contained release zip. Runs
+  # parallel to `build` and is required-passing per AC30 (the actual
+  # branch-protection gate is operator-side, documented in the release
+  # README's CI section).
+  #
+  # Two phases:
+  #   1. Inside ubuntu:24.04 (fresh-VM semantics) install only JDK + unzip,
+  #      run `aisandboxctl pki init`, assert the AC10/AC14/AC16/AC17/AC18
+  #      contracts. Docker is NOT installed inside the container — the
+  #      AC explicitly says "Docker itself is not required for the install
+  #      assertions" (see step c).
+  #   2. On the host runner (which has docker pre-installed) run
+  #      `docker compose build --no-cache` against the bundled
+  #      docker-compose.yml + SandboxDockerfile. Catches build-context
+  #      drift (the AC29 pitfall: SandboxDockerfile referencing a sibling
+  #      outside host/ would fail here).
+  release-install-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Build release bundle
+        run: ./gradlew :server:bootJar :server:aisandboxctlJar :server:generateOpenApiDocs :server:releaseBundle --no-daemon
+
+      - name: Locate the assembled zip
+        id: zip
+        run: |
+          path="$(ls server/build/release/ai-sandbox-server-*.zip | head -1)"
+          echo "path=$path" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke-test install flow inside ubuntu:24.04
+        env:
+          ZIP_PATH: ${{ steps.zip.outputs.path }}
+        run: |
+          set -euxo pipefail
+          install -d "$RUNNER_TEMP/release"
+          cp "$ZIP_PATH" "$RUNNER_TEMP/release/release.zip"
+
+          docker run --rm \
+              -v "$RUNNER_TEMP/release:/tmp/release:ro" \
+              ubuntu:24.04 \
+              bash -euxc '
+                  export DEBIAN_FRONTEND=noninteractive
+                  apt-get update -qq
+                  apt-get install -y --no-install-recommends \
+                      openjdk-21-jdk-headless unzip
+
+                  install -d /opt/ai-sandbox-server
+                  unzip -q /tmp/release/release.zip -d /opt/ai-sandbox-server
+
+                  # AC10 — install dir tree shape.
+                  test -d /opt/ai-sandbox-server/lib
+                  test -d /opt/ai-sandbox-server/host
+                  test -d /opt/ai-sandbox-server/systemd
+                  test -f /opt/ai-sandbox-server/README.md
+                  test -f /opt/ai-sandbox-server/openapi.yaml
+                  test -f /opt/ai-sandbox-server/sample-config.yaml
+                  test -f /opt/ai-sandbox-server/STREAM_PROTOCOL.md
+                  test -f /opt/ai-sandbox-server/systemd/ai-sandbox-server.service
+
+                  # AC20 — unversioned jar filenames at the install path.
+                  test -f /opt/ai-sandbox-server/lib/aisandbox-server.jar
+                  test -f /opt/ai-sandbox-server/lib/aisandboxctl.jar
+
+                  # AC3,AC4,AC5 — bundled host/ contents + .sh executable.
+                  for f in spawn.sh clean.sh attach.sh lib.sh setup.sh entrypoint.sh; do
+                      test -x "/opt/ai-sandbox-server/host/$f"
+                  done
+                  for f in spawn.ps1 clean.ps1 attach.ps1 lib.ps1 setup.ps1 docker-compose.yml SandboxDockerfile; do
+                      test -f "/opt/ai-sandbox-server/host/$f"
+                  done
+
+                  # AC13-AC18 — first pki init: succeeds, makes the tree.
+                  java -jar /opt/ai-sandbox-server/lib/aisandboxctl.jar pki init
+
+                  # AC14 — directory tree + modes. stat %a returns the
+                  # octal mode (3-digit when leading 0 elided).
+                  assert_mode() {
+                      local p="$1" want="$2" got
+                      got="$(stat -c %a "$p")"
+                      if [ "$got" != "$want" ]; then
+                          echo "FAIL: $p mode is $got, expected $want" >&2
+                          return 1
+                      fi
+                  }
+                  assert_mode /etc/ai-sandbox-server                 750
+                  assert_mode /etc/ai-sandbox-server/pki             700
+                  assert_mode /etc/ai-sandbox-server/clients         700
+                  assert_mode /etc/ai-sandbox-server/enrollment      700
+                  assert_mode /etc/ai-sandbox-server/secrets         700
+                  assert_mode /var/lib/ai-sandbox-server/sessions    750
+                  assert_mode /var/log/ai-sandbox-server             750
+                  assert_mode /etc/ai-sandbox-server/pki/server.key  600
+
+                  # AC15 — cert + key exist.
+                  test -f /etc/ai-sandbox-server/pki/server.crt
+                  test -f /etc/ai-sandbox-server/pki/server.key
+
+                  # AC13 — system user exists.
+                  id ai-sandbox-server >/dev/null
+
+                  # AC16 — config.yaml has the four baked-in defaults.
+                  grep -q "repo-root: /opt/ai-sandbox-server/host" /etc/ai-sandbox-server/config.yaml
+                  grep -q "host-state-root: /var/lib/ai-sandbox-server/sessions" /etc/ai-sandbox-server/config.yaml
+                  grep -q "dir: /etc/ai-sandbox-server/secrets" /etc/ai-sandbox-server/config.yaml
+                  grep -q "dir: /etc/ai-sandbox-server/enrollment" /etc/ai-sandbox-server/config.yaml
+
+                  # AC17 — re-run without --force: exit 2 + conflict lines.
+                  set +e
+                  java -jar /opt/ai-sandbox-server/lib/aisandboxctl.jar pki init >/tmp/rerun.out 2>/tmp/rerun.err
+                  rc=$?
+                  set -e
+                  if [ "$rc" -ne 2 ]; then
+                      echo "FAIL: rerun without --force exited $rc, expected 2" >&2
+                      cat /tmp/rerun.err >&2
+                      exit 1
+                  fi
+                  grep -q "^conflict: " /tmp/rerun.err
+
+                  # AC18 — --force succeeds.
+                  java -jar /opt/ai-sandbox-server/lib/aisandboxctl.jar pki init --force
+
+                  echo "install-flow assertions passed."
+              '
+
+      - name: Build bundled compose context on the host runner
+        env:
+          ZIP_PATH: ${{ steps.zip.outputs.path }}
+        run: |
+          set -euxo pipefail
+          # AC29 sub-bullet d / pitfall mitigation — the bundled
+          # SandboxDockerfile must build with host/ as its context. We
+          # unzip on the GH runner (which has docker + compose-plugin
+          # pre-installed) and run a full `compose build --no-cache`.
+          # --project-directory is harmless for `build` but kept for
+          # parity with AC25.
+          stage="$RUNNER_TEMP/install"
+          install -d "$stage"
+          unzip -q "$ZIP_PATH" -d "$stage"
+
+          project_dir="$(mktemp -d)"
+          docker compose \
+              -f "$stage/host/docker-compose.yml" \
+              --project-directory "$project_dir" \
+              build --no-cache claude-sandbox
