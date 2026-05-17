@@ -76,6 +76,11 @@ public class ProblemDetailsAdvice {
         return build(status, code, ex.getReason() == null ? status.getReasonPhrase() : ex.getReason());
     }
 
+    // UC04 enrollment failure modes live in
+    // com.aisandbox.server.enrollment.api.EnrollmentProblemDetailsAdvice
+    // so the api package never reaches back into the enrollment package
+    // (LayeringTest § no_cycles_between_top_level_feature_packages).
+
     @ExceptionHandler(Throwable.class)
     @ResponseBody
     public ProblemDetail handleAny(Throwable t) {

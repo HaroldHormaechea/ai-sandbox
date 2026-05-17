@@ -11,6 +11,12 @@ public enum AuditAction {
     STREAM_CLOSE,
     CLIENT_ADD,
     CLIENT_REMOVE,
+    // UC04 — successful POST /v1/enrollment redemption.
+    CLIENT_ENROLL,
+    // UC04 — POST /v1/enrollment rejected (invalid/expired/redeemed token,
+    // rate-limited IP, oversized payload). The reason is the lowercase
+    // ErrorCode wire form so dashboards can group rejections by class.
+    CLIENT_ENROLL_REJECT,
     SERVER_CERT_ROTATION,
     HEALTHZ_FAIL;
 
