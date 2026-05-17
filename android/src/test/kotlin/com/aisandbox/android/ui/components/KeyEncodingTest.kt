@@ -42,17 +42,23 @@ class KeyEncodingTest {
 
     @Test
     fun `function keys F5 through F12 use CSI tilde form`() {
-        // CSI[<n>~ — pin as bytes to avoid any string-encoding ambiguity.
-        fun csiTilde(n: String) =
-            (listOf<Byte>(0x5b) + n.toByteArray().toList() + 0x7e).toByteArray()
-        assertThat(KeyEncoding.bytesFor(KeyEvent.Function(5))).containsExactly(*csiTilde("15").toTypedArray())
-        assertThat(KeyEncoding.bytesFor(KeyEvent.Function(6))).containsExactly(*csiTilde("17").toTypedArray())
-        assertThat(KeyEncoding.bytesFor(KeyEvent.Function(7))).containsExactly(*csiTilde("18").toTypedArray())
-        assertThat(KeyEncoding.bytesFor(KeyEvent.Function(8))).containsExactly(*csiTilde("19").toTypedArray())
-        assertThat(KeyEncoding.bytesFor(KeyEvent.Function(9))).containsExactly(*csiTilde("20").toTypedArray())
-        assertThat(KeyEncoding.bytesFor(KeyEvent.Function(10))).containsExactly(*csiTilde("21").toTypedArray())
-        assertThat(KeyEncoding.bytesFor(KeyEvent.Function(11))).containsExactly(*csiTilde("23").toTypedArray())
-        assertThat(KeyEncoding.bytesFor(KeyEvent.Function(12))).containsExactly(*csiTilde("24").toTypedArray())
+        // CSI[<n>~ — 0x5B '[', digits, 0x7E '~'.
+        assertThat(KeyEncoding.bytesFor(KeyEvent.Function(5)))
+            .containsExactly(0x5b.toByte(), 0x31.toByte(), 0x35.toByte(), 0x7e.toByte())
+        assertThat(KeyEncoding.bytesFor(KeyEvent.Function(6)))
+            .containsExactly(0x5b.toByte(), 0x31.toByte(), 0x37.toByte(), 0x7e.toByte())
+        assertThat(KeyEncoding.bytesFor(KeyEvent.Function(7)))
+            .containsExactly(0x5b.toByte(), 0x31.toByte(), 0x38.toByte(), 0x7e.toByte())
+        assertThat(KeyEncoding.bytesFor(KeyEvent.Function(8)))
+            .containsExactly(0x5b.toByte(), 0x31.toByte(), 0x39.toByte(), 0x7e.toByte())
+        assertThat(KeyEncoding.bytesFor(KeyEvent.Function(9)))
+            .containsExactly(0x5b.toByte(), 0x32.toByte(), 0x30.toByte(), 0x7e.toByte())
+        assertThat(KeyEncoding.bytesFor(KeyEvent.Function(10)))
+            .containsExactly(0x5b.toByte(), 0x32.toByte(), 0x31.toByte(), 0x7e.toByte())
+        assertThat(KeyEncoding.bytesFor(KeyEvent.Function(11)))
+            .containsExactly(0x5b.toByte(), 0x32.toByte(), 0x33.toByte(), 0x7e.toByte())
+        assertThat(KeyEncoding.bytesFor(KeyEvent.Function(12)))
+            .containsExactly(0x5b.toByte(), 0x32.toByte(), 0x34.toByte(), 0x7e.toByte())
     }
 
     @Test
