@@ -68,9 +68,9 @@ kotlinxCoroutines        = "1.10.1"
 kotlinxSerializationJson = "1.7.3"
 
 # Android-side tests (QA scope; pinned here as the single source of truth).
-androidTestRunner        = "1.7.1"
-androidTestEspressoCore  = "3.7.1"
-androidTestJunit         = "1.3.0"
+androidTestRunner        = "1.6.2"
+androidTestEspressoCore  = "3.6.1"
+androidTestJunit         = "1.2.1"
 robolectric              = "4.14.1"
 
 # minSdk pinned to 29 per UC04 AC1; compileSdk/targetSdk tracks the
