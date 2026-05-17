@@ -20,47 +20,48 @@ class KeyEncodingTest {
         assertThat(KeyEncoding.bytesFor(KeyEvent.Tab)).containsExactly(0x09.toByte())
     }
 
-    /** Decoded UTF-8 view of the wire bytes — comparing strings sidesteps
-     *  every nullable-/array-/iterable-related AssertJ dispatch ambiguity. */
-    private fun decoded(e: KeyEvent): String? =
-        KeyEncoding.bytesFor(e)?.toString(Charsets.UTF_8)
-
     @Test
     fun `arrow keys emit CSI sequences A B C D`() {
         // xterm CSI: ESC[A/B/C/D — the leading 0x1B is conventionally
         // prepended by the screen on emit (or by tmux); the bar emits
-        // the "[A" suffix only.
-        assertThat(decoded(KeyEvent.ArrowUp)).isEqualTo("[A")
-        assertThat(decoded(KeyEvent.ArrowDown)).isEqualTo("[B")
-        assertThat(decoded(KeyEvent.ArrowRight)).isEqualTo("[C")
-        assertThat(decoded(KeyEvent.ArrowLeft)).isEqualTo("[D")
+        // the "[A" suffix only. Use containsExactly to ensure content
+        // comparison on the ByteArray (same dispatch the Tab test uses).
+        assertThat(KeyEncoding.bytesFor(KeyEvent.ArrowUp)).containsExactly(0x5b.toByte(), 0x41.toByte())
+        assertThat(KeyEncoding.bytesFor(KeyEvent.ArrowDown)).containsExactly(0x5b.toByte(), 0x42.toByte())
+        assertThat(KeyEncoding.bytesFor(KeyEvent.ArrowRight)).containsExactly(0x5b.toByte(), 0x43.toByte())
+        assertThat(KeyEncoding.bytesFor(KeyEvent.ArrowLeft)).containsExactly(0x5b.toByte(), 0x44.toByte())
     }
 
     @Test
     fun `function keys F1 through F4 use SS3 form OP OQ OR OS`() {
-        assertThat(decoded(KeyEvent.Function(1))).isEqualTo("OP")
-        assertThat(decoded(KeyEvent.Function(2))).isEqualTo("OQ")
-        assertThat(decoded(KeyEvent.Function(3))).isEqualTo("OR")
-        assertThat(decoded(KeyEvent.Function(4))).isEqualTo("OS")
+        assertThat(KeyEncoding.bytesFor(KeyEvent.Function(1))).containsExactly(0x4f.toByte(), 0x50.toByte())
+        assertThat(KeyEncoding.bytesFor(KeyEvent.Function(2))).containsExactly(0x4f.toByte(), 0x51.toByte())
+        assertThat(KeyEncoding.bytesFor(KeyEvent.Function(3))).containsExactly(0x4f.toByte(), 0x52.toByte())
+        assertThat(KeyEncoding.bytesFor(KeyEvent.Function(4))).containsExactly(0x4f.toByte(), 0x53.toByte())
     }
 
     @Test
     fun `function keys F5 through F12 use CSI tilde form`() {
-        assertThat(decoded(KeyEvent.Function(5))).isEqualTo("[15~")
-        assertThat(decoded(KeyEvent.Function(6))).isEqualTo("[17~")
-        assertThat(decoded(KeyEvent.Function(7))).isEqualTo("[18~")
-        assertThat(decoded(KeyEvent.Function(8))).isEqualTo("[19~")
-        assertThat(decoded(KeyEvent.Function(9))).isEqualTo("[20~")
-        assertThat(decoded(KeyEvent.Function(10))).isEqualTo("[21~")
-        assertThat(decoded(KeyEvent.Function(11))).isEqualTo("[23~")
-        assertThat(decoded(KeyEvent.Function(12))).isEqualTo("[24~")
+        // CSI[<n>~ — pin as bytes to avoid any string-encoding ambiguity.
+        fun csiTilde(n: String) =
+            (listOf<Byte>(0x5b) + n.toByteArray().toList() + 0x7e).toByteArray()
+        assertThat(KeyEncoding.bytesFor(KeyEvent.Function(5))).containsExactly(*csiTilde("15").toTypedArray())
+        assertThat(KeyEncoding.bytesFor(KeyEvent.Function(6))).containsExactly(*csiTilde("17").toTypedArray())
+        assertThat(KeyEncoding.bytesFor(KeyEvent.Function(7))).containsExactly(*csiTilde("18").toTypedArray())
+        assertThat(KeyEncoding.bytesFor(KeyEvent.Function(8))).containsExactly(*csiTilde("19").toTypedArray())
+        assertThat(KeyEncoding.bytesFor(KeyEvent.Function(9))).containsExactly(*csiTilde("20").toTypedArray())
+        assertThat(KeyEncoding.bytesFor(KeyEvent.Function(10))).containsExactly(*csiTilde("21").toTypedArray())
+        assertThat(KeyEncoding.bytesFor(KeyEvent.Function(11))).containsExactly(*csiTilde("23").toTypedArray())
+        assertThat(KeyEncoding.bytesFor(KeyEvent.Function(12))).containsExactly(*csiTilde("24").toTypedArray())
     }
 
     @Test
     fun `out of range function key falls back to F12 encoding`() {
         // Defensive default for the screen's `Fn` row — anything > 12
         // collapses to F12's CSI[24~ rather than producing no output.
-        assertThat(decoded(KeyEvent.Function(99))).isEqualTo("[24~")
+        // [24~ → 0x5B, 0x32, 0x34, 0x7E
+        assertThat(KeyEncoding.bytesFor(KeyEvent.Function(99)))
+            .containsExactly(0x5b.toByte(), 0x32.toByte(), 0x34.toByte(), 0x7e.toByte())
     }
 
     @Test
