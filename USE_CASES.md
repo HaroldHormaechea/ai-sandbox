@@ -13,5 +13,5 @@ Statuses:
 | 01 | [use-cases/01-bundle-rtk-token-killer.md](use-cases/01-bundle-rtk-token-killer.md) | Bundle RTK (Rust Token Killer) and auto-enable for Claude Code | done | 2026-05-15 |
 | 02 | [use-cases/02-multi-session-containers.md](use-cases/02-multi-session-containers.md) | Multi-session ai-sandbox containers | done | 2026-05-16 |
 | 03 | [use-cases/03-mtls-java-management-server.md](use-cases/03-mtls-java-management-server.md) | mTLS-secured Java management server | done | 2026-05-16 |
-| 04 | [use-cases/04-android-client.md](use-cases/04-android-client.md) | Android client application | pending | 2026-05-17 |
+| 04 | [use-cases/04-android-client.md](use-cases/04-android-client.md) | Android client application | in-progress | 2026-05-17 |
 
