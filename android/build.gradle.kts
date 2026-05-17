@@ -136,6 +136,25 @@ android {
         checkReleaseBuilds = true
         baseline = file("lint-baseline.xml").takeIf { it.exists() }
     }
+
+    // QA — unit-test options. `returnDefaultValues = true` makes
+    // unmocked Android API calls (e.g. android.util.Log.i) return no-op
+    // defaults instead of throwing "Method ... not mocked." This lets
+    // pure-JVM unit tests under src/test/** exercise classes that
+    // sprinkle Log calls (StreamClient et al.) without dragging in
+    // Robolectric for those tests.
+    testOptions {
+        unitTests.isReturnDefaultValues = true
+    }
+}
+
+// QA — JUnit 5 (Jupiter) platform binding for the :android unit tests.
+// The server module uses spring-boot-starter-test which auto-configures
+// useJUnitPlatform(); the Android module has no equivalent so it must
+// be wired explicitly. Without this, JUnit 5 @Test methods are silently
+// skipped.
+tasks.withType<Test>().configureEach {
+    useJUnitPlatform()
 }
 
 dependencies {
@@ -209,6 +228,14 @@ dependencies {
     testImplementation(libs.junit.jupiter)
     testImplementation(libs.robolectric)
     testImplementation(libs.assertj.core)
+    // QA-only — MockWebServer drives EnrollmentClient + StreamClient unit
+    // tests against real WS / HTTP responses without spinning the server.
+    testImplementation(libs.okhttp.mockwebserver)
+    testImplementation(libs.kotlinx.coroutines.test)
+    // Mockito inline-mock-maker is the default in 5.x; lets us mock the
+    // final Kotlin class KeyStoreIdentityManager whose internals require
+    // a real AndroidKeyStore. Used only by net/* unit tests.
+    testImplementation(libs.mockito.core)
 
     androidTestImplementation(libs.androidx.test.runner)
     androidTestImplementation(libs.androidx.test.ext.junit)
