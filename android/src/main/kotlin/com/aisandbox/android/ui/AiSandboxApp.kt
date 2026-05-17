@@ -23,7 +23,7 @@ import com.aisandbox.android.requireContainer
 import com.aisandbox.android.ui.screens.CertRevokedScreen
 import com.aisandbox.android.ui.screens.OnboardingScreen
 import com.aisandbox.android.ui.screens.ServerIdentityChangedScreen
-import com.aisandbox.android.ui.screens.SessionsPlaceholder
+import com.aisandbox.android.ui.screens.SessionsScreen
 import com.aisandbox.android.ui.screens.SettingsPlaceholder
 import com.aisandbox.android.ui.screens.TerminalPlaceholder
 
@@ -105,7 +105,7 @@ fun AiSandboxApp() {
             }
 
             composable(Routes.Sessions) {
-                SessionsPlaceholder(
+                SessionsScreen(
                     onOpen = { n -> navController.navigate(Routes.terminalFor(n)) },
                     onOpenSettings = { navController.navigate(Routes.Settings) },
                 )
