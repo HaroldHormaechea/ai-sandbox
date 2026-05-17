@@ -20,16 +20,30 @@ class KeyEncodingTest {
         assertThat(KeyEncoding.bytesFor(KeyEvent.Tab)).containsExactly(0x09.toByte())
     }
 
+    private fun hex(b: ByteArray?): String =
+        b?.joinToString(" ") { "%02x".format(it.toInt() and 0xff) } ?: "null"
+
     @Test
     fun `arrow keys emit CSI sequences A B C D`() {
         // xterm CSI: ESC[A/B/C/D — the leading 0x1B is conventionally
         // prepended by the screen on emit (or by tmux); the bar emits
-        // the "[A" suffix only. Use containsExactly to ensure content
-        // comparison on the ByteArray (same dispatch the Tab test uses).
-        assertThat(KeyEncoding.bytesFor(KeyEvent.ArrowUp)).containsExactly(0x5b.toByte(), 0x41.toByte())
-        assertThat(KeyEncoding.bytesFor(KeyEvent.ArrowDown)).containsExactly(0x5b.toByte(), 0x42.toByte())
-        assertThat(KeyEncoding.bytesFor(KeyEvent.ArrowRight)).containsExactly(0x5b.toByte(), 0x43.toByte())
-        assertThat(KeyEncoding.bytesFor(KeyEvent.ArrowLeft)).containsExactly(0x5b.toByte(), 0x44.toByte())
+        // the "[A" suffix only.
+        val up = KeyEncoding.bytesFor(KeyEvent.ArrowUp)
+        assertThat(up)
+            .withFailMessage { "ArrowUp got=${hex(up)} (size=${up?.size})" }
+            .containsExactly(0x5b.toByte(), 0x41.toByte())
+        val down = KeyEncoding.bytesFor(KeyEvent.ArrowDown)
+        assertThat(down)
+            .withFailMessage { "ArrowDown got=${hex(down)} (size=${down?.size})" }
+            .containsExactly(0x5b.toByte(), 0x42.toByte())
+        val right = KeyEncoding.bytesFor(KeyEvent.ArrowRight)
+        assertThat(right)
+            .withFailMessage { "ArrowRight got=${hex(right)} (size=${right?.size})" }
+            .containsExactly(0x5b.toByte(), 0x43.toByte())
+        val left = KeyEncoding.bytesFor(KeyEvent.ArrowLeft)
+        assertThat(left)
+            .withFailMessage { "ArrowLeft got=${hex(left)} (size=${left?.size})" }
+            .containsExactly(0x5b.toByte(), 0x44.toByte())
     }
 
     @Test
