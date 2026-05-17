@@ -14,7 +14,6 @@ import java.io.IOException;
 import java.security.cert.CertificateException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Component;
 
 /**
@@ -38,11 +37,11 @@ import org.springframework.stereotype.Component;
  * persistence-atomicity contract is the {@link EnrollmentTokenStore}'s
  * synchronized block + the {@code AllowlistDirectory} tmp+rename.
  *
- * <p>Disabled under {@code docs-only} — the OAS render does not need the
- * mint path active.
+ * <p>Loaded in every profile so the {@link EnrollmentController} can
+ * autowire it; under {@code docs-only} the bean exists but is never
+ * invoked (the docs-only profile doesn't bind the TLS listener).
  */
 @Component
-@Profile("!docs-only")
 public class EnrollmentFacade {
 
     private static final Logger LOG = LoggerFactory.getLogger(EnrollmentFacade.class);

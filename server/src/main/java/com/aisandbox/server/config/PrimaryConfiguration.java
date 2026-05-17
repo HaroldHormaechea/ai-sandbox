@@ -25,9 +25,12 @@ public class PrimaryConfiguration {
      * {@code aisandboxctl client invite} CLI can construct it directly
      * without dragging Spring along; here we expose it as a bean for the
      * server-side {@code EnrollmentTokenService} to consume.
+     *
+     * <p>Available in every profile (including {@code docs-only}) so
+     * springdoc can include {@code POST /v1/enrollment} in the OAS
+     * render without nulling out the facade graph.
      */
     @Bean
-    @Profile("!docs-only")
     public EnrollmentTokenStore enrollmentTokenStore(ServerProperties props) {
         return new EnrollmentTokenStore(props.enrollment().dir());
     }

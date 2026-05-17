@@ -5,6 +5,7 @@ import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import java.nio.file.Path;
 import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.boot.context.properties.bind.ConstructorBinding;
 import org.springframework.validation.annotation.Validated;
 
 /**
@@ -33,6 +34,16 @@ public record ServerProperties(
         @NotNull Shutdown shutdown,
         @NotNull Streams streams,
         @NotNull Enrollment enrollment) {
+
+    /**
+     * Canonical constructor — explicitly tagged
+     * {@link ConstructorBinding} so Spring picks it (not the 8-arg
+     * back-compat ctor below) when binding from YAML. Without this,
+     * Spring 4 sees two ctors on the record and falls back to the
+     * no-arg ctor lookup, which records don't have.
+     */
+    @ConstructorBinding
+    public ServerProperties {}
 
     /**
      * Backwards-compatible 8-arg constructor for QA-owned test fixtures

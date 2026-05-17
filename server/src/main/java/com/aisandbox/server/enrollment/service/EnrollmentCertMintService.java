@@ -15,7 +15,6 @@ import java.security.NoSuchAlgorithmException;
 import java.security.cert.Certificate;
 import java.security.cert.CertificateException;
 import java.security.cert.X509Certificate;
-import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Service;
 
 /**
@@ -34,11 +33,11 @@ import org.springframework.stereotype.Service;
  * writes it to durable storage (AC5 + UC04 § "PKCS#12 transport
  * passphrase is empty").
  *
- * <p>Disabled under {@code docs-only} — OAS rendering does not need to
- * mint anything.
+ * <p>Loaded in every profile (so {@link EnrollmentFacade} can autowire);
+ * never invoked under {@code docs-only} since the TLS listener is also
+ * down there.
  */
 @Service
-@Profile("!docs-only")
 public class EnrollmentCertMintService {
 
     private final ClientCertGenerator generator = new ClientCertGenerator();

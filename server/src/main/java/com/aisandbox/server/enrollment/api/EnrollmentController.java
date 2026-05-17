@@ -9,7 +9,6 @@ import io.swagger.v3.oas.annotations.media.Schema;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.responses.ApiResponses;
 import jakarta.validation.Valid;
-import org.springframework.context.annotation.Profile;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
@@ -43,12 +42,14 @@ import org.springframework.web.bind.annotation.RestController;
  * calls a facade only — never reaches into the cert mint, token store,
  * or allowlist service directly.
  *
- * <p>Disabled under {@code docs-only} so OAS rendering does not need the
- * facade graph live.
+ * <p>Loaded in every profile (including {@code docs-only}) so the
+ * OpenAPI generator picks up the route. The actual mint path is only
+ * exercised when the full enrollment service graph is live; under
+ * {@code docs-only} springdoc introspects the annotations but the bean
+ * is never invoked at runtime.
  */
 @RestController
 @RequestMapping("/v1/enrollment")
-@Profile("!docs-only")
 public class EnrollmentController {
 
     private final EnrollmentFacade facade;

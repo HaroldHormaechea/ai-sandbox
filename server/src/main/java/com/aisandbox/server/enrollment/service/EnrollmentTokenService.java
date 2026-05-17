@@ -10,7 +10,7 @@ import java.time.Duration;
 import java.time.Instant;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.context.annotation.Profile;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 
@@ -31,11 +31,13 @@ import org.springframework.stereotype.Service;
  *       even if the operator forgets that an invite was never redeemed.</li>
  * </ul>
  *
- * <p>Disabled under {@code docs-only} — OAS rendering does not need a
- * scheduled job or an enrollment directory.
+ * <p>Loaded in every profile so {@link EnrollmentFacade} can autowire
+ * it; the @PostConstruct {@code ensureDir} swallows IOExceptions, so a
+ * docs-only boot that points at an unwritable directory just logs a
+ * warning and proceeds (the bean is never invoked at runtime under
+ * docs-only).
  */
 @Service
-@Profile("!docs-only")
 public class EnrollmentTokenService {
 
     private static final Logger LOG = LoggerFactory.getLogger(EnrollmentTokenService.class);
@@ -54,6 +56,7 @@ public class EnrollmentTokenService {
     private final Clock clock;
     private final Duration defaultTtl;
 
+    @Autowired
     public EnrollmentTokenService(EnrollmentTokenStore store, ServerProperties props) {
         this(store, props, new SecureRandom(), Clock.systemUTC());
     }
