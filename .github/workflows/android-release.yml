@@ -5,10 +5,10 @@ name: android-release
 # sideload-only (no Play Store); the partner installs the APK by hand.
 #
 # Required repo secrets:
-#   KEYSTORE_FILE        — base64-encoded keystore.jks
-#   KEYSTORE_PASSWORD    — keystore password
-#   KEY_ALIAS            — signing-key alias (default 'ai-sandbox')
-#   KEY_PASSWORD         — signing-key password
+#   RELEASE_ANDROID_SIGNATURE_KEYSTORE_FILE      — base64-encoded keystore.jks
+#   RELEASE_ANDROID_SIGNATURE_KEYSTORE_PASSWORD  — keystore password
+#   RELEASE_ANDROID_SIGNATURE_KEY_ALIAS          — signing-key alias (default 'ai-sandbox')
+#   RELEASE_ANDROID_SIGNATURE_KEY_PASSWORD       — signing-key password
 #
 # The keystore lands on tmpfs (`/dev/shm`) so it never touches the
 # runner's persistent disk. The secret can be re-rolled by regenerating
@@ -58,13 +58,13 @@ jobs:
 
       - name: Decode keystore to tmpfs
         env:
-          KEYSTORE_FILE: ${{ secrets.KEYSTORE_FILE }}
+          KEYSTORE_FILE: ${{ secrets.RELEASE_ANDROID_SIGNATURE_KEYSTORE_FILE }}
         # /dev/shm is RAM-backed on every Linux runner; the keystore
         # never touches the runner's persistent disk. Removed on job
         # tear-down regardless of success.
         run: |
           if [ -z "$KEYSTORE_FILE" ]; then
-            echo "::error::KEYSTORE_FILE secret is empty"
+            echo "::error::RELEASE_ANDROID_SIGNATURE_KEYSTORE_FILE secret is empty"
             exit 1
           fi
           mkdir -p /dev/shm/ai-sandbox-release
@@ -78,9 +78,9 @@ jobs:
           # The build.gradle.kts signing-config block reads these env
           # vars directly — see android/build.gradle.kts.
           KEYSTORE_FILE: ${{ env.KEYSTORE_FILE_PATH }}
-          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          KEYSTORE_PASSWORD: ${{ secrets.RELEASE_ANDROID_SIGNATURE_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.RELEASE_ANDROID_SIGNATURE_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.RELEASE_ANDROID_SIGNATURE_KEY_PASSWORD }}
         run: |
           ./gradlew \
               -Pai_sandbox_android_version_name=${{ steps.ver.outputs.version }} \
