@@ -223,14 +223,15 @@ jobs:
           # SandboxDockerfile must build with host/ as its context. We
           # unzip on the GH runner (which has docker + compose-plugin
           # pre-installed) and run a full `compose build --no-cache`.
-          # --project-directory is harmless for `build` but kept for
-          # parity with AC25.
+          # --project-directory MUST point at the unpacked host/ dir so
+          # docker-compose.yml's `build.context: .` resolves to where
+          # SandboxDockerfile actually lives (parity with AC25, which
+          # invokes compose from the host/ bundle root).
           stage="$RUNNER_TEMP/install"
           install -d "$stage"
           unzip -q "$ZIP_PATH" -d "$stage"
 
-          project_dir="$(mktemp -d)"
           docker compose \
               -f "$stage/host/docker-compose.yml" \
-              --project-directory "$project_dir" \
+              --project-directory "$stage/host" \
               build --no-cache claude-sandbox
