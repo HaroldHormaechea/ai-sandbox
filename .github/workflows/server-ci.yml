@@ -295,6 +295,112 @@ jobs:
                   grep -q "overwrite: /etc/ai-sandbox-server/secrets/gitconfig" /tmp/seed-force.err
 
                   echo "install-flow assertions passed."
+
+                  # ── UC03 § AC19 — boot smoke ──
+                  # The checks above verify the install LAYOUT. They do
+                  # NOT actually start the service, which means
+                  # bootstrap-ordering regressions (e.g. SSL context
+                  # loaded too late, missing @PostConstruct on a
+                  # SmartLifecycle bean) ship in green CI runs.
+                  # This block boots the bundled jar end-to-end and
+                  # round-trips /v1/healthz over mTLS — catching the
+                  # class of bug that the systemd exit-1-restart spiral
+                  # masks on a production host.
+                  apt-get install -y --no-install-recommends curl
+
+                  # Mint a client cert BEFORE starting the server so the
+                  # in-process allowlist scan picks it up at boot — we
+                  # do not want to race the AllowlistWatcher debounced
+                  # WatchService update from the test side.
+                  java -jar /opt/ai-sandbox-server/lib/aisandboxctl.jar client mint smoke \
+                      --pem --out /tmp/smoke-client
+
+                  # Replicate the systemd unit ExecStart (User=,
+                  # Group=, java argv) without systemd. Hardening
+                  # directives (ProtectSystem=strict, etc.) are not
+                  # exercised here — the boot path under test is the
+                  # Spring bootstrap, not the sandboxing layer.
+                  runuser -u ai-sandbox-server -- bash -c '"'"'
+                      exec /usr/bin/java \
+                          -Xms256m -Xmx1g \
+                          -Dfile.encoding=UTF-8 \
+                          -jar /opt/ai-sandbox-server/lib/aisandbox-server.jar \
+                          --spring.config.additional-location=optional:file:/etc/ai-sandbox-server/config.yaml \
+                          >/tmp/server.out 2>/tmp/server.err
+                  '"'"' &
+                  SERVER_PID=$!
+
+                  # Up to 60s for the TLS listener to bind. Bail early
+                  # if the JVM exits before then — that is the bug
+                  # class we are catching.
+                  ready=0
+                  for i in $(seq 1 60); do
+                      if (exec 3<>/dev/tcp/127.0.0.1/12410) 2>/dev/null; then
+                          exec 3<&- 3>&- || true
+                          ready=1
+                          echo "Boot smoke: port 12410 open after ${i}s."
+                          break
+                      fi
+                      if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+                          echo "FAIL: server JVM exited before port 12410 came up." >&2
+                          echo "── server stderr (tail) ──" >&2
+                          tail -80 /tmp/server.err >&2
+                          exit 1
+                      fi
+                      sleep 1
+                  done
+                  if [ "$ready" -ne 1 ]; then
+                      echo "FAIL: port 12410 never accepted a connection in 60s." >&2
+                      echo "── server stderr (tail) ──" >&2
+                      tail -80 /tmp/server.err >&2
+                      kill -TERM "$SERVER_PID" 2>/dev/null || true
+                      exit 1
+                  fi
+
+                  # Round-trip /v1/healthz over mTLS. The smoke env
+                  # deliberately has no Docker installed, so HealthService
+                  # reports dockerOk=false and the endpoint returns 503
+                  # with a Problem-Details body. Both 200 and 503 are
+                  # valid signals that TLS + mTLS + Spring + the routing
+                  # layer all came up — anything else is a regression.
+                  #
+                  # The self-signed server cert ships with CN=ai-sandbox-server
+                  # and no SAN, so curl is told to connect to 127.0.0.1
+                  # but treat the host as the CN for hostname verification.
+                  http_code="$(curl -sS -o /tmp/health.body -w "%{http_code}" \
+                      --resolve ai-sandbox-server:12410:127.0.0.1 \
+                      --cacert /etc/ai-sandbox-server/pki/server.crt \
+                      --cert /tmp/smoke-client/smoke.crt \
+                      --key /tmp/smoke-client/smoke.key \
+                      https://ai-sandbox-server:12410/v1/healthz || echo 000)"
+                  if [ "$http_code" != "200" ] && [ "$http_code" != "503" ]; then
+                      echo "FAIL: /v1/healthz returned $http_code (expected 200 or 503)." >&2
+                      echo "── response body ──" >&2
+                      cat /tmp/health.body >&2 || true
+                      echo "── server stderr (tail) ──" >&2
+                      tail -80 /tmp/server.err >&2
+                      kill -TERM "$SERVER_PID" 2>/dev/null || true
+                      exit 1
+                  fi
+                  echo "Boot smoke: /v1/healthz returned $http_code (TLS + mTLS + Spring OK)."
+
+                  # Clean shutdown — sanity-check that SIGTERM is
+                  # honoured (the systemd unit relies on it; KillSignal=
+                  # SIGTERM with TimeoutStopSec=70).
+                  kill -TERM "$SERVER_PID"
+                  for i in $(seq 1 30); do
+                      if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+                          break
+                      fi
+                      sleep 1
+                  done
+                  if kill -0 "$SERVER_PID" 2>/dev/null; then
+                      echo "FAIL: server did not exit within 30s of SIGTERM." >&2
+                      kill -KILL "$SERVER_PID" 2>/dev/null || true
+                      exit 1
+                  fi
+                  wait "$SERVER_PID" 2>/dev/null || true
+                  echo "boot smoke assertions passed."
               '
 
       - name: Build bundled compose context on the host runner
