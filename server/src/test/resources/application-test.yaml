@@ -5,8 +5,13 @@
 
 server:
   port: 0
-  http2:
-    enabled: false
+  # Deliberately do NOT set server.http2.* here. Production wiring
+  # relies on NettyServerCustomizer#applyTls calling
+  # .protocol(HttpProtocol.HTTP11, HttpProtocol.H2) — see commit
+  # fe0420f. Setting server.http2.enabled in a test profile would let
+  # Spring repopulate the protocol list with H2C and mask the H2C +
+  # TLS bind-time regression that SslContextBootOrderTest is here to
+  # catch. Mirror prod: silence on this property.
   shutdown: immediate
 
 logging:

@@ -37,8 +37,10 @@ class ReloadableSslContextHolderTest {
         SslContext ctx = holder.current();
         assertThat(ctx).isNotNull();
         assertThat(ctx.isServer()).isTrue();
-        // ALPN config must surface h2 so AC11 (HTTP/2 over TLS) is on.
-        assertThat(ctx.applicationProtocolNegotiator().protocols()).contains("h2", "http/1.1");
+        // ALPN advertises http/1.1 only — v0.0.6 ships HTTP/1.1 only;
+        // HTTP/2 deferred to v0.0.7. See UC03 § AC11 conflict note in
+        // the v0.0.6 release commit.
+        assertThat(ctx.applicationProtocolNegotiator().protocols()).containsExactly("http/1.1");
     }
 
     @Test

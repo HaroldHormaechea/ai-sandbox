@@ -4,7 +4,6 @@ import com.aisandbox.server.config.ServerProperties;
 import com.aisandbox.server.identity.ActiveConnectionRegistry;
 import com.aisandbox.server.identity.ClientIdentity;
 import com.aisandbox.server.pki.PemUtils;
-import io.netty.channel.ChannelHandler;
 import io.netty.handler.ssl.SslHandshakeCompletionEvent;
 import java.security.cert.Certificate;
 import java.security.cert.CertificateException;
@@ -16,6 +15,8 @@ import org.springframework.boot.reactor.netty.NettyReactiveWebServerFactory;
 import org.springframework.boot.web.server.WebServerFactoryCustomizer;
 import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Component;
+import reactor.netty.NettyPipeline;
+import reactor.netty.http.HttpProtocol;
 import reactor.netty.http.server.HttpServer;
 
 /**
@@ -56,15 +57,46 @@ public class NettyServerCustomizer implements WebServerFactoryCustomizer<NettyRe
 
     private HttpServer applyTls(HttpServer server) {
         return server.host(props.tls().bindAddress())
+                // Single source of truth for the listener's protocol set.
+                //
+                // v0.0.6 ships HTTP/1.1 only. Two reasons keep H2 off for this release:
+                //   1. mTLS identity-propagation bug — fixed in this commit by
+                //      installing IdentityCapturingHandler via addBefore(ReactiveBridge)
+                //      instead of addLast, AND looking up SslHandler by class instead
+                //      of by string name. This was the actual cause of the v0.0.5/v0.0.6
+                //      mTLS 401 cascade; it bites HTTP/1.1 and HTTP/2 alike.
+                //   2. Even after #1 is fixed, H2 has a second issue: the per-stream
+                //      Http2StreamChannel does not inherit the parent channel's
+                //      IDENTITY_ATTR, so the L7 MtlsEnforcementFilter still sees no
+                //      identity for H2 requests. Re-adding H2 needs a stream-channel-
+                //      aware identity-propagation mechanism (likely a stream observer
+                //      that copies the parent's identity onto each new stream channel
+                //      OR ServerHttpRequest.getSslInfo() with empirical verification).
+                //
+                // v0.0.7 work: re-introduce H2 with the test-first discipline this PR
+                // finally established — write a mTLS-over-H2 dispatch test FIRST, then
+                // implement the stream-channel propagation, then flip the protocol
+                // list. Don't re-add H2 without the test.
+                //
+                // ALPN advertisements ("http/1.1") are owned by
+                // ReloadableSslContextHolder.rebuild(); keep the two in sync.
+                .protocol(HttpProtocol.HTTP11)
                 .doOnChannelInit((observer, channel, address) -> {
-                    // Install the rate-limit handler upstream of every
-                    // codec — Reactor-Netty's pipeline names: codec, ssl,
-                    // http2 (when negotiated), reactor.left.httpTrafficHandler.
+                    // Install the rate-limit handler upstream of the SSL handler (rawest
+                    // position) and the identity-capture handler immediately BEFORE
+                    // reactor.right.reactiveBridge. Reactor Netty's ChannelOperationsHandler
+                    // (the bridge) is installed at the pipeline tail via addLast and
+                    // consumes user events (releases SslHandshakeCompletionEvent without
+                    // propagating to userland), so our handler MUST sit before it to
+                    // receive the SSL completion event. The SslHandler is also referenced
+                    // by class (not by name) so the lookup survives Reactor Netty version
+                    // bumps that rename pipeline positions.
                     channel.pipeline().addFirst("ai-sandbox-rate-limit", new RateLimitingChannelHandler(rateLimiter));
-                    // Identity capture: when SslHandler completes the
-                    // handshake successfully, build the ClientIdentity and
-                    // store it on the channel + registry.
-                    channel.pipeline().addLast("ai-sandbox-identity", new IdentityCapturingHandler(registry));
+                    channel.pipeline()
+                            .addBefore(
+                                    NettyPipeline.ReactiveBridge,
+                                    "ai-sandbox-identity",
+                                    new IdentityCapturingHandler(registry));
                 })
                 // Reactor-Netty's secure() integrates an SslContext into
                 // its pipeline at the right phase (we don't have to wire
@@ -102,9 +134,13 @@ public class NettyServerCustomizer implements WebServerFactoryCustomizer<NettyRe
         @Override
         public void userEventTriggered(io.netty.channel.ChannelHandlerContext ctx, Object evt) throws Exception {
             if (evt instanceof SslHandshakeCompletionEvent he && he.isSuccess()) {
-                ChannelHandler sslHandler = ctx.pipeline().get("ssl");
-                if (sslHandler instanceof io.netty.handler.ssl.SslHandler ssl) {
-                    SSLSession session = ssl.engine().getSession();
+                io.netty.handler.ssl.SslHandler sslHandler = ctx.pipeline().get(io.netty.handler.ssl.SslHandler.class);
+                if (sslHandler == null) {
+                    LOG.warn(
+                            "SslHandshakeCompletionEvent received but no SslHandler in pipeline — TLS pipeline misconfigured");
+                }
+                if (sslHandler != null) {
+                    SSLSession session = sslHandler.engine().getSession();
                     try {
                         Certificate[] peers = session.getPeerCertificates();
                         if (peers != null && peers.length > 0 && peers[0] instanceof X509Certificate leaf) {

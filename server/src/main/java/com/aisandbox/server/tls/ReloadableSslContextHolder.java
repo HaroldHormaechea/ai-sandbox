@@ -80,7 +80,6 @@ public class ReloadableSslContextHolder {
                         io.netty.handler.ssl.ApplicationProtocolConfig.Protocol.ALPN,
                         io.netty.handler.ssl.ApplicationProtocolConfig.SelectorFailureBehavior.NO_ADVERTISE,
                         io.netty.handler.ssl.ApplicationProtocolConfig.SelectedListenerFailureBehavior.ACCEPT,
-                        "h2",
                         "http/1.1"))
                 .build();
         ref.set(ctx);
