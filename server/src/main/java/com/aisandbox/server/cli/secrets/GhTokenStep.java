@@ -36,7 +36,7 @@ import java.util.List;
  * surfaces to the operator's terminal so they can complete the flow
  * from any browser (UC06 AC5 + the "headless OAuth" clarification).
  */
-final class GhTokenStep {
+public final class GhTokenStep {
 
     /**
      * Image tag for the ephemeral container. The image is built by the
@@ -50,7 +50,7 @@ final class GhTokenStep {
     private final ProcessRunner runner;
     private final ConsoleIO io;
 
-    GhTokenStep(ProcessRunner runner, ConsoleIO io) {
+    public GhTokenStep(ProcessRunner runner, ConsoleIO io) {
         this.runner = runner;
         this.io = io;
     }
@@ -66,7 +66,7 @@ final class GhTokenStep {
      *     land directly there.
      * @param ownership pre-resolved owner/group or {@code null}.
      */
-    void run(Path ghTokenFileFlag, Path outputPath, Path secretsDir, Ownership ownership)
+    public void run(Path ghTokenFileFlag, Path outputPath, Path secretsDir, Ownership ownership)
             throws IOException, InterruptedException {
 
         if (ghTokenFileFlag != null) {

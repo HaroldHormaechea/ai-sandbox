@@ -49,14 +49,14 @@ import java.util.List;
  * CLI version exposes a stable single-file marker, replace the
  * heuristic with the pin.
  */
-final class ClaudePreInitStep {
+public final class ClaudePreInitStep {
 
     private static final String SANDBOX_IMAGE = EnsureSandboxImage.IMAGE_TAG;
 
     private final ProcessRunner runner;
     private final ConsoleIO io;
 
-    ClaudePreInitStep(ProcessRunner runner, ConsoleIO io) {
+    public ClaudePreInitStep(ProcessRunner runner, ConsoleIO io) {
         this.runner = runner;
         this.io = io;
     }
@@ -70,7 +70,7 @@ final class ClaudePreInitStep {
      *     ({@code <templates-dir>/claude-config/}). Created if missing.
      * @param ownership pre-resolved owner/group or {@code null}.
      */
-    void run(Path sourceDirFlag, Path templateDir, Ownership ownership)
+    public void run(Path sourceDirFlag, Path templateDir, Ownership ownership)
             throws IOException, InterruptedException {
 
         // Always make the parent + the templateDir itself exist with the

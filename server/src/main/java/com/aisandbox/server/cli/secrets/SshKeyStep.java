@@ -39,14 +39,14 @@ import java.util.stream.Stream;
  * decrypted into a temp file and the temp is what gets copied to the
  * output. AC3 § "Operator's host key untouched" assertion.
  */
-final class SshKeyStep {
+public final class SshKeyStep {
 
     private final ProcessRunner runner;
     private final ConsoleIO io;
     private final EncryptedKeyDecryptor decryptor;
     private final Path sshDir;
 
-    SshKeyStep(ProcessRunner runner, ConsoleIO io, EncryptedKeyDecryptor decryptor, Path sshDir) {
+    public SshKeyStep(ProcessRunner runner, ConsoleIO io, EncryptedKeyDecryptor decryptor, Path sshDir) {
         this.runner = runner;
         this.io = io;
         this.decryptor = decryptor;
@@ -66,7 +66,7 @@ final class SshKeyStep {
      * @param ownership pre-resolved owner/group to chown the result
      *     to, or {@code null} on hosts where the lookup failed.
      */
-    void run(Path gitKeyFlag, Path passphraseFile, String passphraseEnv, Path outputPath, Ownership ownership)
+    public void run(Path gitKeyFlag, Path passphraseFile, String passphraseEnv, Path outputPath, Ownership ownership)
             throws IOException, InterruptedException {
 
         if (gitKeyFlag != null) {

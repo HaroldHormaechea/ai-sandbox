@@ -38,15 +38,15 @@ import java.util.regex.Pattern;
  *     email = alice@example.com
  * </pre>
  */
-final class GitIdentityStep {
+public final class GitIdentityStep {
 
     /** Mirror of {@code setup.sh:validate_email}. */
-    static final Pattern EMAIL_PATTERN = Pattern.compile("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$");
+    public static final Pattern EMAIL_PATTERN = Pattern.compile("^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$");
 
     private final ProcessRunner runner;
     private final ConsoleIO io;
 
-    GitIdentityStep(ProcessRunner runner, ConsoleIO io) {
+    public GitIdentityStep(ProcessRunner runner, ConsoleIO io) {
         this.runner = runner;
         this.io = io;
     }
@@ -59,7 +59,7 @@ final class GitIdentityStep {
      * @param outputPath destination ({@code <secrets-dir>/gitconfig}).
      * @param ownership pre-resolved owner/group or {@code null}.
      */
-    void run(String nameFlag, String emailFlag, Path outputPath, Ownership ownership)
+    public void run(String nameFlag, String emailFlag, Path outputPath, Ownership ownership)
             throws IOException, InterruptedException {
 
         String name = (nameFlag != null) ? nameFlag.trim() : promptName();

@@ -31,11 +31,11 @@ import java.util.List;
  * with mode 0600 and is bind-mounted read-only into every spawned
  * container. Documented in operator notes (README install section).
  */
-final class EncryptedKeyDecryptor {
+public final class EncryptedKeyDecryptor {
 
     private final ProcessRunner runner;
 
-    EncryptedKeyDecryptor(ProcessRunner runner) {
+    public EncryptedKeyDecryptor(ProcessRunner runner) {
         this.runner = runner;
     }
 
@@ -57,7 +57,7 @@ final class EncryptedKeyDecryptor {
      * @throws IOException on any I/O or ssh-keygen failure (including
      *     wrong passphrase — surfaced as a non-zero exit).
      */
-    Path decrypt(Path source, Path passphraseFile, String passphraseEnv, ConsoleIO io)
+    public Path decrypt(Path source, Path passphraseFile, String passphraseEnv, ConsoleIO io)
             throws IOException, InterruptedException {
         String passphrase = resolvePassphrase(passphraseFile, passphraseEnv, io);
 

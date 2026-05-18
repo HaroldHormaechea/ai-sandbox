@@ -25,18 +25,18 @@ import java.util.List;
  * Mismatching these is a footgun the analyst's pre-impl gate 1
  * resolved.
  */
-final class EnsureSandboxImage {
+public final class EnsureSandboxImage {
 
     /** Image tag emitted by the bundled docker-compose.yml's {@code image:} field. */
-    static final String IMAGE_TAG = "ai-context:latest";
+    public static final String IMAGE_TAG = "ai-context:latest";
 
     /** Compose service name; takes the spot {@code docker compose ... build <service>} consumes. */
-    static final String COMPOSE_SERVICE = "claude-sandbox";
+    public static final String COMPOSE_SERVICE = "claude-sandbox";
 
     private final ProcessRunner runner;
     private final ConsoleIO io;
 
-    EnsureSandboxImage(ProcessRunner runner, ConsoleIO io) {
+    public EnsureSandboxImage(ProcessRunner runner, ConsoleIO io) {
         this.runner = runner;
         this.io = io;
     }
@@ -50,7 +50,7 @@ final class EnsureSandboxImage {
      *     {@code systemd/}, …). The bundled compose file is at
      *     {@code <installDir>/host/docker-compose.yml}.
      */
-    void run(Path installDir) throws IOException, InterruptedException {
+    public void run(Path installDir) throws IOException, InterruptedException {
         if (imagePresent()) {
             return;
         }
