@@ -45,8 +45,7 @@ public record Ownership(UserPrincipal owner, GroupPrincipal group) {
      *     so the message points operators back at the right command).
      */
     public static Ownership resolve(String user, String commandLabel) {
-        UserPrincipalLookupService lookup =
-                FileSystems.getDefault().getUserPrincipalLookupService();
+        UserPrincipalLookupService lookup = FileSystems.getDefault().getUserPrincipalLookupService();
         try {
             UserPrincipal owner = lookup.lookupPrincipalByName(user);
             GroupPrincipal group = lookup.lookupPrincipalByGroupName(user);

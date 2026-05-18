@@ -164,8 +164,8 @@ public final class SshKeyStep {
         Path pub = Path.of(target.toString() + ".pub");
         Files.deleteIfExists(pub);
 
-        ProcessRunner.Result res = runner.runAndCapture(List.of(
-                "ssh-keygen", "-t", "ed25519", "-f", target.toString(), "-N", "", "-C", "ai-sandbox-server"));
+        ProcessRunner.Result res = runner.runAndCapture(
+                List.of("ssh-keygen", "-t", "ed25519", "-f", target.toString(), "-N", "", "-C", "ai-sandbox-server"));
         if (res.exitCode() != 0) {
             throw new IOException("ssh-keygen -t ed25519 failed (exit=" + res.exitCode() + "): "
                     + res.output().trim());
@@ -185,8 +185,7 @@ public final class SshKeyStep {
      * {@code setup.sh} uses inline.
      */
     private boolean isEncrypted(Path key) throws IOException, InterruptedException {
-        ProcessRunner.Result res =
-                runner.runAndCapture(List.of("ssh-keygen", "-y", "-P", "", "-f", key.toString()));
+        ProcessRunner.Result res = runner.runAndCapture(List.of("ssh-keygen", "-y", "-P", "", "-f", key.toString()));
         return res.exitCode() != 0;
     }
 

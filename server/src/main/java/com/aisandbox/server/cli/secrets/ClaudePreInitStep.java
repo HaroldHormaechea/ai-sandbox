@@ -204,11 +204,7 @@ public final class ClaudePreInitStep {
             @Override
             public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) throws IOException {
                 Path target = dest.resolve(source.relativize(file));
-                Files.copy(
-                        file,
-                        target,
-                        StandardCopyOption.REPLACE_EXISTING,
-                        StandardCopyOption.COPY_ATTRIBUTES);
+                Files.copy(file, target, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.COPY_ATTRIBUTES);
                 return FileVisitResult.CONTINUE;
             }
         });

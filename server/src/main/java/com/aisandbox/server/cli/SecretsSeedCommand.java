@@ -85,9 +85,7 @@ public class SecretsSeedCommand implements Runnable {
         @Option(names = "--secrets-dir", description = "Operator-managed secrets dir (default ${DEFAULT-VALUE}).")
         Path secretsDir = Path.of("/etc/ai-sandbox-server/secrets");
 
-        @Option(
-                names = "--templates-dir",
-                description = "Operator-managed templates dir (default ${DEFAULT-VALUE}).")
+        @Option(names = "--templates-dir", description = "Operator-managed templates dir (default ${DEFAULT-VALUE}).")
         Path templatesDir = Path.of("/etc/ai-sandbox-server/templates");
 
         @Option(
@@ -95,9 +93,7 @@ public class SecretsSeedCommand implements Runnable {
                 description = "Install root holding the bundled host/ compose context (default ${DEFAULT-VALUE}).")
         Path installDir = Path.of("/opt/ai-sandbox-server");
 
-        @Option(
-                names = "--user",
-                description = "System user to own written files (default ${DEFAULT-VALUE}).")
+        @Option(names = "--user", description = "System user to own written files (default ${DEFAULT-VALUE}).")
         String systemUserName = "ai-sandbox-server";
 
         // ── step (a) — SSH key ────────────────────────────────────
@@ -143,9 +139,7 @@ public class SecretsSeedCommand implements Runnable {
                         + " Mutually exclusive with --no-claude-preinit.")
         Path claudeConfigSource;
 
-        @Option(
-                names = "--no-claude-preinit",
-                description = "Skip the Claude pre-init step entirely.")
+        @Option(names = "--no-claude-preinit", description = "Skip the Claude pre-init step entirely.")
         boolean noClaudePreInit;
 
         // ── policy ────────────────────────────────────────────────

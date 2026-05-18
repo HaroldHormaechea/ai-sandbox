@@ -57,8 +57,8 @@ public final class EnsureSandboxImage {
         Path hostDir = installDir.resolve("host");
         Path composeFile = hostDir.resolve("docker-compose.yml");
         if (!Files.isRegularFile(composeFile)) {
-            throw new IOException("ai-context:latest is not present and the bundled compose context"
-                    + " at " + composeFile + " is missing — install dir layout looks broken");
+            throw new IOException("ai-context:latest is not present and the bundled compose context" + " at "
+                    + composeFile + " is missing — install dir layout looks broken");
         }
         io.println("");
         io.println("  step 0/4 — building " + IMAGE_TAG + " (one-time, may take a few minutes)");
@@ -75,8 +75,8 @@ public final class EnsureSandboxImage {
             throw new IOException("docker compose build " + COMPOSE_SERVICE + " failed (exit=" + rc + ")");
         }
         if (!imagePresent()) {
-            throw new IOException("docker compose build " + COMPOSE_SERVICE
-                    + " reported success but " + IMAGE_TAG + " is still not present");
+            throw new IOException("docker compose build " + COMPOSE_SERVICE + " reported success but " + IMAGE_TAG
+                    + " is still not present");
         }
     }
 

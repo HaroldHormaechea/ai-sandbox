@@ -218,6 +218,82 @@ jobs:
                   # AC18 — --force succeeds.
                   java -jar /opt/ai-sandbox-server/lib/aisandboxctl.jar pki init --force
 
+                  # ── UC06 § AC20 — secrets seed non-interactive smoke ──
+                  # `ssh-keygen` is part of openssh-client (not in the
+                  # minimal base layer). secrets seed shells out to it
+                  # for the encryption probe + (optionally) the
+                  # ed25519 generator; install only the client subset
+                  # to keep this phase fast.
+                  apt-get install -y --no-install-recommends openssh-client
+
+                  # Generate a fresh key on-the-fly so the smoke is
+                  # self-contained — no test fixture under server/test-resources/.
+                  ssh-keygen -t ed25519 -f /tmp/seed-test-key -N "" -q -C smoke
+
+                  # AC20 — flag-driven, no-TTY, both optional steps opted-out.
+                  java -jar /opt/ai-sandbox-server/lib/aisandboxctl.jar secrets seed \
+                      --no-gh --no-claude-preinit \
+                      --git-key /tmp/seed-test-key \
+                      --git-name "Smoke Test" \
+                      --git-email "smoke@example.com"
+
+                  # AC2/AC4 — outputs at the expected paths.
+                  test -f /etc/ai-sandbox-server/secrets/git-key
+                  test -f /etc/ai-sandbox-server/secrets/gitconfig
+                  # AC5/AC6 — opt-out: gh-token absent, claude template
+                  # dir present-but-empty so the compose RO mount has a
+                  # valid attach target.
+                  test ! -e /etc/ai-sandbox-server/secrets/gh-token
+                  test -d /etc/ai-sandbox-server/templates/claude-config
+                  # AC4 — gitconfig has the expected content shape.
+                  grep -q "name = Smoke Test" /etc/ai-sandbox-server/secrets/gitconfig
+                  grep -q "email = smoke@example.com" /etc/ai-sandbox-server/secrets/gitconfig
+
+                  # AC2/AC4 — modes.
+                  assert_mode /etc/ai-sandbox-server/secrets/git-key   600
+                  assert_mode /etc/ai-sandbox-server/secrets/gitconfig 600
+                  assert_mode /etc/ai-sandbox-server/templates/claude-config 750
+
+                  # AC2/AC4 — ownership.
+                  assert_owner() {
+                      local p="$1" want_user="$2" want_group="$3" got
+                      got="$(stat -c "%U:%G" "$p")"
+                      if [ "$got" != "$want_user:$want_group" ]; then
+                          echo "FAIL: $p owner is $got, expected $want_user:$want_group" >&2
+                          return 1
+                      fi
+                  }
+                  assert_owner /etc/ai-sandbox-server/secrets/git-key       ai-sandbox-server ai-sandbox-server
+                  assert_owner /etc/ai-sandbox-server/secrets/gitconfig     ai-sandbox-server ai-sandbox-server
+                  assert_owner /etc/ai-sandbox-server/templates/claude-config ai-sandbox-server ai-sandbox-server
+
+                  # AC13 — re-run without --force refuses with conflict lines.
+                  set +e
+                  java -jar /opt/ai-sandbox-server/lib/aisandboxctl.jar secrets seed \
+                      --no-gh --no-claude-preinit \
+                      --git-key /tmp/seed-test-key \
+                      --git-name "Smoke Test" \
+                      --git-email "smoke@example.com" \
+                      >/tmp/seed-rerun.out 2>/tmp/seed-rerun.err
+                  rc=$?
+                  set -e
+                  if [ "$rc" -ne 2 ]; then
+                      echo "FAIL: secrets seed rerun without --force exited $rc, expected 2" >&2
+                      cat /tmp/seed-rerun.err >&2
+                      exit 1
+                  fi
+                  grep -q "^conflict: " /tmp/seed-rerun.err
+
+                  # AC13 — --force succeeds + lists the overwrite paths.
+                  java -jar /opt/ai-sandbox-server/lib/aisandboxctl.jar secrets seed --force \
+                      --no-gh --no-claude-preinit \
+                      --git-key /tmp/seed-test-key \
+                      --git-name "Smoke Test" \
+                      --git-email "smoke@example.com" \
+                      2>/tmp/seed-force.err
+                  grep -q "overwrite: /etc/ai-sandbox-server/secrets/git-key" /tmp/seed-force.err
+                  grep -q "overwrite: /etc/ai-sandbox-server/secrets/gitconfig" /tmp/seed-force.err
+
                   echo "install-flow assertions passed."
               '
 
@@ -242,3 +318,60 @@ jobs:
               -f "$stage/host/docker-compose.yml" \
               --project-directory "$stage/host" \
               build --no-cache claude-sandbox
+
+      # UC06 § AC7 — verify entrypoint.sh's `cp -a /etc/claude-template/.
+      # ~/.claude/` block runs exactly once per session (gated by
+      # ~/.claude/.seeded) and treats an empty / absent template as a
+      # no-op. We invoke the container with `true` as argv so it runs
+      # the entrypoint, drops out of the `if [ "$#" -gt 0 ]` branch via
+      # `exec "$@"`, and exits cleanly without launching tmux/claude.
+      # Three cases: fresh start (template applies), restart (marker
+      # blocks re-apply), no template at all (no-op).
+      - name: Verify UC06 entrypoint.sh seeding logic
+        env:
+          ZIP_PATH: ${{ steps.zip.outputs.path }}
+        run: |
+          set -euxo pipefail
+
+          # AC7 fresh-start case.
+          template1="$RUNNER_TEMP/tpl-fresh"
+          install -d -m 0755 "$template1"
+          echo "SENTINEL_MARKER_FILE" > "$template1/marker-file"
+          claude_config="$RUNNER_TEMP/cc-fresh"
+          install -d -m 0777 "$claude_config"
+
+          docker run --rm \
+              -v "$template1:/etc/claude-template:ro" \
+              -v "$claude_config:/home/claude/.claude" \
+              ai-context:latest \
+              true
+
+          test -e "$claude_config/.seeded"
+          test -f "$claude_config/marker-file"
+          grep -q SENTINEL_MARKER_FILE "$claude_config/marker-file"
+
+          # AC7 restart case — marker already present, new template
+          # content must NOT propagate.
+          template2="$RUNNER_TEMP/tpl-changed"
+          install -d -m 0755 "$template2"
+          echo "THIS_SHOULD_NOT_APPEAR" > "$template2/marker-file"
+
+          docker run --rm \
+              -v "$template2:/etc/claude-template:ro" \
+              -v "$claude_config:/home/claude/.claude" \
+              ai-context:latest \
+              true
+
+          ! grep -q THIS_SHOULD_NOT_APPEAR "$claude_config/marker-file"
+
+          # AC7 no-template case — empty template bind-mount (or none)
+          # leaves the session unchanged; no .seeded marker is written
+          # because the seeding `if` short-circuits on the missing dir.
+          claude_config_empty="$RUNNER_TEMP/cc-empty"
+          install -d -m 0777 "$claude_config_empty"
+          docker run --rm \
+              -v "$claude_config_empty:/home/claude/.claude" \
+              ai-context:latest \
+              true
+
+          [ ! -e "$claude_config_empty/.seeded" ]

@@ -71,8 +71,8 @@ public final class EncryptedKeyDecryptor {
         Files.setPosixFilePermissions(temp, PosixFilePermissions.fromString("rw-------"));
 
         // -p = change passphrase mode, -P <old> -N "" = old → empty.
-        ProcessRunner.Result res = runner.runAndCapture(
-                List.of("ssh-keygen", "-p", "-P", passphrase, "-N", "", "-f", temp.toString()));
+        ProcessRunner.Result res =
+                runner.runAndCapture(List.of("ssh-keygen", "-p", "-P", passphrase, "-N", "", "-f", temp.toString()));
         if (res.exitCode() != 0) {
             try {
                 Files.deleteIfExists(temp);
