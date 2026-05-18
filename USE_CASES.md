@@ -14,5 +14,5 @@ Statuses:
 | 02 | [use-cases/02-multi-session-containers.md](use-cases/02-multi-session-containers.md) | Multi-session ai-sandbox containers | done | 2026-05-16 |
 | 03 | [use-cases/03-mtls-java-management-server.md](use-cases/03-mtls-java-management-server.md) | mTLS-secured Java management server | done | 2026-05-16 |
 | 04 | [use-cases/04-android-client.md](use-cases/04-android-client.md) | Android client application | done | 2026-05-17 |
-| 05 | [use-cases/05-self-contained-server-release.md](use-cases/05-self-contained-server-release.md) | Self-contained server release | done | 2026-05-17 |
+| 05 | [use-cases/05-self-contained-server-release.md](use-cases/05-self-contained-server-release.md) | Self-contained server release | done | 2026-05-18 |
 
