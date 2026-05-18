@@ -158,6 +158,9 @@ jobs:
                       test -f "/opt/ai-sandbox-server/host/$f"
                   done
 
+                  # Ensure docker group exists; SystemUserAdmin runs useradd --groups docker per UC05 AC13. The README prereq docker.io would normally provide it, but AC29.b skips Docker in this smoke env.
+                  groupadd -f docker
+
                   # AC13-AC18 — first pki init: succeeds, makes the tree.
                   java -jar /opt/ai-sandbox-server/lib/aisandboxctl.jar pki init
 
