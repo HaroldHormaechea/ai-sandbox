@@ -3,6 +3,7 @@ package com.aisandbox.server.tls;
 import com.aisandbox.server.audit.AuditAction;
 import com.aisandbox.server.audit.AuditLogger;
 import com.aisandbox.server.config.ServerProperties;
+import jakarta.annotation.PostConstruct;
 import java.io.IOException;
 import java.nio.file.FileSystems;
 import java.nio.file.Files;
@@ -45,11 +46,24 @@ public class ServerCertWatcher implements SmartLifecycle {
         this.audit = audit;
     }
 
-    @Override
-    public synchronized void start() {
-        if (running) {
-            return;
-        }
+    /**
+     * Load the server cert+key into the holder during bean
+     * initialisation, BEFORE the reactive web server is created.
+     *
+     * <p>{@link NettyServerCustomizer#customize} calls
+     * {@link ReloadableSslContextHolder#current()} inside
+     * {@code ReactiveWebServerApplicationContext.onRefresh()}, which
+     * runs during context refresh — strictly earlier than any
+     * {@link SmartLifecycle#start()} callback. The
+     * {@link #getPhase()} = -100 below only orders this watcher
+     * relative to other lifecycle beans; it does NOT push start()
+     * ahead of web-server creation. So the initial cert load must
+     * happen here, not in start(), or the customizer hits
+     * {@code IllegalStateException: SSL context not yet initialised}
+     * and the service crash-loops on every fresh boot.
+     */
+    @PostConstruct
+    public void loadInitialContext() {
         Path pkiDir = props.pki().dir();
         Path crt = pkiDir.resolve("server.crt");
         Path key = pkiDir.resolve("server.key");
@@ -58,18 +72,30 @@ public class ServerCertWatcher implements SmartLifecycle {
         }
         try {
             holder.rebuild(crt, key);
-            watchService = FileSystems.getDefault().newWatchService();
-            pkiDir.register(
-                    watchService,
-                    StandardWatchEventKinds.ENTRY_CREATE,
-                    StandardWatchEventKinds.ENTRY_DELETE,
-                    StandardWatchEventKinds.ENTRY_MODIFY);
         } catch (IOException
                 | CertificateException
                 | NoSuchAlgorithmException
                 | KeyManagementException
                 | java.security.KeyStoreException e) {
             throw new IllegalStateException("Cannot initialise server TLS material from " + pkiDir, e);
+        }
+    }
+
+    @Override
+    public synchronized void start() {
+        if (running) {
+            return;
+        }
+        Path pkiDir = props.pki().dir();
+        try {
+            watchService = FileSystems.getDefault().newWatchService();
+            pkiDir.register(
+                    watchService,
+                    StandardWatchEventKinds.ENTRY_CREATE,
+                    StandardWatchEventKinds.ENTRY_DELETE,
+                    StandardWatchEventKinds.ENTRY_MODIFY);
+        } catch (IOException e) {
+            throw new IllegalStateException("Cannot register WatchService for " + pkiDir, e);
         }
         worker = new Thread(this::loop, "ai-sandbox-server-cert-watcher");
         worker.setDaemon(true);
