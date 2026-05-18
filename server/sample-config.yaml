@@ -11,7 +11,10 @@ ai-sandbox:
   server:
 
     tls:
-      # Listen port for both REST/HTTPS (HTTP/2) and WebSocket upgrades.
+      # Listen port for both REST/HTTPS (HTTP/1.1) and WebSocket upgrades.
+      # v0.0.6 ships HTTP/1.1 only; HTTP/2 is deferred to v0.0.7 alongside
+      # the mTLS-over-H2 architectural work. See the v0.0.6 release commit
+      # for the rationale.
       port: 12410
       # Bind interface. "0.0.0.0" listens on every IPv4 + IPv6 address; firewall
       # at the host level if exposure is not desired.

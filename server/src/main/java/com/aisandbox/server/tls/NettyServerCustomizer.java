@@ -58,15 +58,27 @@ public class NettyServerCustomizer implements WebServerFactoryCustomizer<NettyRe
     private HttpServer applyTls(HttpServer server) {
         return server.host(props.tls().bindAddress())
                 // Single source of truth for the listener's protocol set.
-                // application.yaml deliberately does NOT set server.http2.enabled —
-                // if it did, Spring would pick H2C and the .secure() call below would
-                // fail at bind. ALPN advertisements ("h2","http/1.1") are owned by
+                //
+                // v0.0.6 ships HTTP/1.1 only. HTTP/2 was attempted in v0.0.5/v0.0.6
+                // development and dropped: under H2 the per-stream Http2StreamChannel
+                // does not inherit the parent channel's IDENTITY_ATTR, so the L7
+                // MtlsEnforcementFilter sees no client identity and rejects every
+                // request with 401 mtls_required. Re-adding H2 needs (a) a different
+                // cert-propagation mechanism (likely ServerHttpRequest.getSslInfo()
+                // or a stream-channel-aware identity handler) AND (b) a JUnit-tier
+                // mTLS-over-H2 test that exercises the dispatch end-to-end. Both are
+                // scoped for v0.0.7.
+                //
+                // ALPN advertisements ("http/1.1") are owned by
                 // ReloadableSslContextHolder.rebuild(); keep the two in sync.
-                .protocol(HttpProtocol.HTTP11, HttpProtocol.H2)
+                .protocol(HttpProtocol.HTTP11)
                 .doOnChannelInit((observer, channel, address) -> {
                     // Install the rate-limit handler upstream of every
-                    // codec — Reactor-Netty's pipeline names: codec, ssl,
-                    // http2 (when negotiated), reactor.left.httpTrafficHandler.
+                    // codec — Reactor-Netty's HTTP/1.1 pipeline names:
+                    // codec, ssl, reactor.left.httpTrafficHandler.
+                    // (Pre-v0.0.6 also added "http2" between ssl and
+                    // httpTrafficHandler when ALPN selected h2; that path
+                    // is dormant in v0.0.6 — see the .protocol() comment above.)
                     channel.pipeline().addFirst("ai-sandbox-rate-limit", new RateLimitingChannelHandler(rateLimiter));
                     // Identity capture: when SslHandler completes the
                     // handshake successfully, build the ClientIdentity and
