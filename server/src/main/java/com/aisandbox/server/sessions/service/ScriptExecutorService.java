@@ -3,6 +3,7 @@ package com.aisandbox.server.sessions.service;
 import com.aisandbox.server.config.ServerProperties;
 import com.aisandbox.server.sessions.dto.SpawnCommand;
 import java.io.IOException;
+import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -17,9 +18,9 @@ import org.springframework.stereotype.Service;
  * allowed to construct host-script invocations; AC24 (no shell
  * interpolation) hangs off of this rule.
  *
- * <p>UC05 § AC25,AC26,AC27 — every invocation also carries three
- * environment variables so the bundled scripts route writes off the
- * read-only install dir:
+ * <p>UC05 § AC25,AC26,AC27 + UC06 § AC7 — every invocation also carries
+ * four environment variables so the bundled scripts route writes off
+ * the read-only install dir:
  *
  * <ul>
  *   <li>{@code AI_SANDBOX_COMPOSE_FILE} —
@@ -33,6 +34,12 @@ import org.springframework.stereotype.Service;
  *   <li>{@code AI_SANDBOX_SECRETS_HOST_PATH} — {@code secrets.dir},
  *       interpolated by {@code docker-compose.yml}'s secrets bind-mount
  *       source.</li>
+ *   <li>{@code AI_SANDBOX_CLAUDE_TEMPLATE_HOST_PATH} (UC06 § AC7) —
+ *       sibling of {@code secrets.dir} (default
+ *       {@code /etc/ai-sandbox-server/templates/claude-config/}),
+ *       interpolated by {@code docker-compose.yml}'s claude-template
+ *       RO bind-mount source. Captured by
+ *       {@code aisandboxctl secrets seed}'s Claude pre-init step.</li>
  * </ul>
  */
 @Service
@@ -96,6 +103,19 @@ public class ScriptExecutorService {
                 locator.repoRoot().resolve("docker-compose.yml").toString());
         env.put("AI_SANDBOX_HOST_STATE_ROOT", props.sessions().hostStateRoot().toString());
         env.put("AI_SANDBOX_SECRETS_HOST_PATH", props.secrets().dir().toString());
+        // UC06 § AC7 — Claude pre-init template lives as a sibling of
+        // secrets.dir under /etc/ai-sandbox-server/. The leaf segment
+        // matches `aisandboxctl secrets seed`'s --templates-dir default
+        // (templates/claude-config). Deriving from secrets.dir avoids a
+        // new ConfigurationProperties field and a forced re-bind of
+        // existing /etc/ai-sandbox-server/config.yaml on upgrade — the
+        // wizard runs as `secrets seed --force` per AC14's migration
+        // path, no config rewrite needed.
+        Path secretsDir = props.secrets().dir();
+        Path templatesParent =
+                (secretsDir.getParent() != null) ? secretsDir.getParent() : Path.of("/etc/ai-sandbox-server");
+        Path claudeTemplate = templatesParent.resolve("templates").resolve("claude-config");
+        env.put("AI_SANDBOX_CLAUDE_TEMPLATE_HOST_PATH", claudeTemplate.toString());
         return env;
     }
 }

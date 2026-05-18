@@ -5,9 +5,9 @@ import picocli.CommandLine.Command;
 
 /**
  * Root of the {@code aisandboxctl} CLI. Subcommands handle PKI init,
- * client mint, client revoke, and client list. Spring is intentionally
- * not loaded — the CLI is meant to run on operator workstations where
- * the full server context would be wasteful.
+ * secret seeding, client mint, client revoke, and client list. Spring
+ * is intentionally not loaded — the CLI is meant to run on operator
+ * workstations where the full server context would be wasteful.
  */
 @Command(
         name = "aisandboxctl",
@@ -17,6 +17,7 @@ import picocli.CommandLine.Command;
         subcommands = {
             CommandLine.HelpCommand.class,
             PkiInitCommand.class,
+            SecretsSeedCommand.class,
             ClientMintCommand.class,
             ClientRevokeCommand.class,
             ClientListCommand.class

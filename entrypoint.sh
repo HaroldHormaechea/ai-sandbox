@@ -12,6 +12,23 @@ export RTK_TELEMETRY_DISABLED=1
 # mount. Symlink it inside that mounted dir so the state persists across runs.
 ln -sf "$HOME/.claude/.claude.json" "$HOME/.claude.json"
 
+# UC06 § AC7 — seed ~/.claude/ from the operator-built template
+# bind-mounted RO at /etc/claude-template/ exactly once per session.
+# The `.seeded` marker pins this to first-start of a fresh
+# claude-config volume; operators rotating the template on the host
+# must respawn affected sessions to pick it up. The cp is best-effort:
+# a failure (e.g., template held a stale ACL we can't replicate) is
+# warned-and-continued so the session still boots — sessions will just
+# lack the pre-init state, exactly the same as a deployment that ran
+# `secrets seed --no-claude-preinit`. Ordered BEFORE the RTK / CLAUDE.md
+# blocks so those operate on the seeded ~/.claude/ contents.
+if [ -d /etc/claude-template ] && [ ! -e "$HOME/.claude/.seeded" ]; then
+    mkdir -p "$HOME/.claude"
+    cp -a /etc/claude-template/. "$HOME/.claude/" \
+        || echo "WARNING: claude template seeding failed; sessions may lack Claude pre-init state." >&2
+    touch "$HOME/.claude/.seeded"
+fi
+
 # RTK (Rust Token Killer) wiring. MUST run here (post-mount, pre-tmux), NOT in
 # the Dockerfile: anything `rtk init -g` writes lives under ~/.claude/, which is
 # bind-mounted from the host's claude-config/ at runtime — the build-time copy

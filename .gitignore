@@ -7,6 +7,13 @@ claude-config/*
 secrets/*
 !secrets/.gitkeep
 
+# UC06 — Claude pre-init template captured by `aisandboxctl secrets seed`.
+# In developer-mode docker-compose runs this defaults to an in-repo dir;
+# we ship the empty dir (via .gitkeep) so the bind-mount target exists,
+# but the captured contents must never get committed.
+templates/claude-config/*
+!templates/claude-config/.gitkeep
+
 # Monotonic session counter (UC02 — multi-session containers).
 .ai-sandbox-counter
 .ai-sandbox-counter.lock/

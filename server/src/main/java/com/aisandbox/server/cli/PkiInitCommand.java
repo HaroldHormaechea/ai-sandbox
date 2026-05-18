@@ -5,11 +5,7 @@ import com.aisandbox.server.cli.pki.SelfSignedServerCertGenerator;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.attribute.GroupPrincipal;
-import java.nio.file.attribute.PosixFileAttributeView;
 import java.nio.file.attribute.PosixFilePermissions;
-import java.nio.file.attribute.UserPrincipal;
-import java.nio.file.attribute.UserPrincipalLookupService;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.Callable;
@@ -182,14 +178,14 @@ public class PkiInitCommand implements Runnable {
             // UserPrincipalNotFoundException — we log a single warning and
             // skip every chown rather than blowing up mid-flow. The CI
             // smoke job exercises real chown as root in ubuntu:24.04.
-            Ownership ownership = posix ? resolveOwnership(systemUserName) : null;
+            Ownership ownership = posix ? Ownership.resolve(systemUserName, "pki init") : null;
             if (posix && ownership != null) {
-                chownTreeWith(ownership, etcRoot);
+                ownership.chownTree(etcRoot);
                 if (sessionsParent != null) {
-                    chownWith(ownership, sessionsParent);
+                    ownership.chown(sessionsParent);
                 }
-                chownTreeWith(ownership, sessionsDir);
-                chownTreeWith(ownership, logDir);
+                ownership.chownTree(sessionsDir);
+                ownership.chownTree(logDir);
             }
 
             // 5. Cert mint (AC15). The key file gets mode 0600 explicitly,
@@ -203,8 +199,8 @@ public class PkiInitCommand implements Runnable {
                 Files.setPosixFilePermissions(crt, PosixFilePermissions.fromString("rw-r--r--"));
                 Files.setPosixFilePermissions(key, PosixFilePermissions.fromString("rw-------"));
                 if (ownership != null) {
-                    chownWith(ownership, crt);
-                    chownWith(ownership, key);
+                    ownership.chown(crt);
+                    ownership.chown(key);
                 }
             }
 
@@ -215,7 +211,7 @@ public class PkiInitCommand implements Runnable {
             if (posix) {
                 Files.setPosixFilePermissions(configFile, PosixFilePermissions.fromString("rw-r-----"));
                 if (ownership != null) {
-                    chownWith(ownership, configFile);
+                    ownership.chown(configFile);
                 }
             }
 
@@ -273,47 +269,6 @@ public class PkiInitCommand implements Runnable {
             }
             if (posix) {
                 Files.setPosixFilePermissions(p, PosixFilePermissions.fromString(posixMode));
-            }
-        }
-
-        /** Pre-resolved owner + group, captured once so a per-file lookup can't surprise us mid-walk. */
-        private record Ownership(UserPrincipal owner, GroupPrincipal group) {}
-
-        /**
-         * Resolve {@code <user>:<user>} once. Returns {@code null} when the
-         * lookup fails (the user isn't on the host — typical for unit-test
-         * runs). On {@code null} the caller skips every chown; production
-         * environments where {@code aisandboxctl pki init} just created the
-         * user via {@code SystemUserAdmin} reach this path with a live user
-         * and a non-null Ownership.
-         */
-        private static Ownership resolveOwnership(String user) {
-            UserPrincipalLookupService lookup =
-                    java.nio.file.FileSystems.getDefault().getUserPrincipalLookupService();
-            try {
-                UserPrincipal owner = lookup.lookupPrincipalByName(user);
-                GroupPrincipal group = lookup.lookupPrincipalByGroupName(user);
-                return new Ownership(owner, group);
-            } catch (IOException ioe) {
-                System.err.println(
-                        "aisandboxctl pki init: skipping chown — user '" + user + "' not resolvable on this host ("
-                                + ioe.getClass().getSimpleName() + "). Production runs MUST be invoked as root after"
-                                + " the system user has been created.");
-                return null;
-            }
-        }
-
-        private static void chownWith(Ownership ownership, Path p) throws IOException {
-            PosixFileAttributeView view = Files.getFileAttributeView(p, PosixFileAttributeView.class);
-            view.setOwner(ownership.owner());
-            view.setGroup(ownership.group());
-        }
-
-        private static void chownTreeWith(Ownership ownership, Path root) throws IOException {
-            try (var stream = Files.walk(root)) {
-                for (var it = stream.iterator(); it.hasNext(); ) {
-                    chownWith(ownership, it.next());
-                }
             }
         }
 

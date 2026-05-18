@@ -34,3 +34,16 @@ services:
       # override AI_SANDBOX_CLAUDE_CONFIG_HOST_PATH to a per-session folder
       # (e.g. ./claude-config-3) to give a session an isolated Claude config.
       - "${AI_SANDBOX_CLAUDE_CONFIG_HOST_PATH:-./claude-config}:/home/claude/.claude"
+      # Claude pre-init template — read-only seed material captured by
+      # `aisandboxctl secrets seed` (UC06 step d). entrypoint.sh copies
+      # this dir into ~/.claude/ exactly once per session (gated by
+      # ~/.claude/.seeded) so new sessions inherit the operator's
+      # pre-init OAuth state.
+      #
+      # On developer-mode hosts the default points at the in-repo
+      # `./templates/claude-config/` (usually empty — the mount becomes
+      # a no-op when the dir doesn't exist or holds only `.gitkeep`).
+      # Under systemd, the management server overrides via
+      # AI_SANDBOX_CLAUDE_TEMPLATE_HOST_PATH so the bind-source
+      # resolves to /etc/ai-sandbox-server/templates/claude-config/.
+      - "${AI_SANDBOX_CLAUDE_TEMPLATE_HOST_PATH:-./templates/claude-config}:/etc/claude-template:ro"
