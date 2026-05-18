@@ -189,7 +189,7 @@ class MtlsDispatchTest {
      * NOT contain {@code "mtls_required"} either way.
      */
     @Test
-    void allowlisted_client_reaches_healthz_over_mtls() throws Exception {
+    void mtls_get_with_allowlisted_cert_is_admitted() throws Exception {
         assertThat(port).isGreaterThan(0);
 
         HttpClient client = httpClientWith(ALLOWLISTED_CLIENT);
@@ -225,7 +225,7 @@ class MtlsDispatchTest {
      * let the request through.
      */
     @Test
-    void allowlisted_client_can_ws_upgrade_over_mtls() throws Exception {
+    void mtls_websocket_upgrade_with_allowlisted_cert_is_admitted() throws Exception {
         assertThat(port).isGreaterThan(0);
 
         HttpClient client = httpClientWith(ALLOWLISTED_CLIENT);
@@ -276,7 +276,7 @@ class MtlsDispatchTest {
      * silently looser, because L7 handlers can be misordered.
      */
     @Test
-    void unlisted_client_is_rejected_at_tls_layer() throws Exception {
+    void mtls_get_with_unlisted_cert_is_rejected_at_tls() throws Exception {
         assertThat(port).isGreaterThan(0);
 
         HttpClient client = httpClientWith(UNLISTED_CLIENT);
