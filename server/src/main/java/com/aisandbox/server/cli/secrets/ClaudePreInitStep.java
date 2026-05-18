@@ -94,14 +94,52 @@ public final class ClaudePreInitStep {
 
     // ── interactive path ────────────────────────────────────────────
 
+    /**
+     * Runtime uid:gid the {@code ai-context:latest} image runs as, set
+     * by {@code adduser -D -h /home/claude claude} in
+     * {@code SandboxDockerfile}. Alpine's {@code adduser} assigns the
+     * first free uid starting at 1000, which lands here as 1000:1000
+     * on the stock {@code alpine:latest} base. If the Dockerfile ever
+     * pins these to other values (or switches base image), update
+     * this constant pair to match.
+     */
+    static final int CONTAINER_UID = 1000;
+
+    static final int CONTAINER_GID = 1000;
+
     private void interactivePreInit(Path templateDir) throws IOException, InterruptedException {
         Path scratch = Files.createTempDirectory("aisandbox-claude-preinit-");
-        // Mode 0777 so the container user (default `claude`, uid 1000)
-        // can write into the bind-mount even when the wizard runs as
-        // root. We use --user 0 on the container side too, but giving
-        // the host dir maximum freedom keeps the bind-mount permissive
-        // regardless of which user Claude CLI runs as internally.
-        Files.setPosixFilePermissions(scratch, PosixFilePermissions.fromString("rwxrwxrwx"));
+        // Why this is NOT `--user 0`: Claude Code refuses to run with
+        // `--dangerously-skip-permissions` when euid is 0, by design
+        // (running an autonomous agent as root inside a privileged
+        // container is a foot-gun the upstream tool explicitly
+        // rejects). The wizard install flow is always under sudo per
+        // the README, so the previous design (chmod 777 + --user 0)
+        // collided head-on with that check and the bind-mount came
+        // back empty.
+        //
+        // The fix is to run the helper container as its image-default
+        // `claude` user — the same uid that `entrypoint.sh` and
+        // `setup.sh`'s outcome-A flow already use successfully.
+        //
+        // To make the bind-mount writable by that uid we chown the
+        // scratch to it. createTempDirectory leaves the dir at 0700
+        // (owner-only) on Linux; we keep that mode after chown, which
+        // is the security improvement over the old 0777: only the
+        // container's claude user (and root, which reads anything)
+        // can see the captured OAuth state during the brief window
+        // the scratch exists.
+        //
+        // Fallback: when the wizard is NOT running as root (rare —
+        // local dev only, since the documented install flow uses
+        // sudo) the chown is refused with EPERM. We then widen perms
+        // to 0777 so the container's claude user can still write.
+        // This preserves the pre-fix security posture rather than
+        // improving it; the install-time threat model is unchanged.
+        Files.setPosixFilePermissions(scratch, PosixFilePermissions.fromString("rwx------"));
+        if (!tryChownToContainerUser(scratch)) {
+            Files.setPosixFilePermissions(scratch, PosixFilePermissions.fromString("rwxrwxrwx"));
+        }
 
         try {
             io.println("");
@@ -116,7 +154,7 @@ public final class ClaudePreInitStep {
                     "--rm",
                     "-it",
                     "--user",
-                    "0",
+                    CONTAINER_UID + ":" + CONTAINER_GID,
                     "-v",
                     scratch.toAbsolutePath() + ":/home/claude/.claude",
                     "--entrypoint",
@@ -148,6 +186,27 @@ public final class ClaudePreInitStep {
             // a descriptor open), the data also lives at templateDir
             // now, so the operator's audit trail is intact.
             deleteTreeQuietly(scratch);
+        }
+    }
+
+    /**
+     * Hand ownership of {@code scratch} to the container's runtime
+     * uid:gid so the bind-mount is writable at 0700 (only the
+     * container's claude user and root can read the OAuth state).
+     * Uses the numeric {@code unix:uid} / {@code unix:gid} attribute
+     * view rather than name-based lookup because the container's
+     * {@code claude} user does not exist on the host. Returns
+     * {@code true} on success; {@code false} when the JVM lacks the
+     * privilege to chown (typical non-root wizard run), in which case
+     * the caller widens perms instead.
+     */
+    private static boolean tryChownToContainerUser(Path scratch) {
+        try {
+            Files.setAttribute(scratch, "unix:uid", CONTAINER_UID);
+            Files.setAttribute(scratch, "unix:gid", CONTAINER_GID);
+            return true;
+        } catch (IOException | UnsupportedOperationException e) {
+            return false;
         }
     }
 

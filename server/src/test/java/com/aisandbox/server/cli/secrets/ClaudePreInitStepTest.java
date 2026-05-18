@@ -130,12 +130,17 @@ class ClaudePreInitStepTest {
         // Final mode on templateDir is 0750.
         assertThat(Files.getPosixFilePermissions(templateDir)).isEqualTo(PosixFilePermissions.fromString("rwxr-x---"));
 
-        // Argv shape: docker run --rm -it --user 0 -v <scratch>:/home/claude/.claude
-        // --entrypoint sh ai-context:latest -c "claude --dangerously-skip-permissions"
+        // Argv shape: docker run --rm -it --user 1000:1000 -v <scratch>:/home/claude/.claude
+        // --entrypoint sh ai-context:latest -c "claude --dangerously-skip-permissions".
+        // The --user override is the image's runtime claude user
+        // (uid 1000:1000 per SandboxDockerfile), NOT root — Claude
+        // Code refuses to run with --dangerously-skip-permissions as
+        // uid 0, so the previous --user 0 design crashed step 4/4.
         assertThat(runner.inheritCalls).hasSize(1);
         List<String> argv = runner.inheritCalls.get(0);
         assertThat(argv).startsWith("docker", "run", "--rm", "-it");
-        assertThat(argv).containsSequence("--user", "0");
+        assertThat(argv).containsSequence("--user", "1000:1000");
+        assertThat(argv).doesNotContain("0"); // belt-and-suspenders: no stray uid-0 override
         assertThat(argv).containsSequence("--entrypoint", "sh");
         assertThat(argv).contains("ai-context:latest");
         int cIdx = argv.indexOf("-c");
