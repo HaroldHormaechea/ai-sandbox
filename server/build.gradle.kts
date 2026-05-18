@@ -280,6 +280,16 @@ val releaseBundle by tasks.registering(Zip::class) {
     // both relationships.
     from(rootProject.file("docker-compose.yml")) { into("host") }
     from(rootProject.file("SandboxDockerfile")) { into("host") }
+    // UC05 § AC5,AC6 — SandboxDockerfile:42 does `COPY git-hooks/ /etc/git-hooks/`,
+    // so git-hooks/ is part of the container build context and must ship in host/.
+    // Exec bit preserves the convention (matches entrypoint.sh above); the
+    // Dockerfile's `chmod +x` on line 43 would survive without it, but keeping
+    // the bit set is the host-script pattern and avoids surprises if the chmod
+    // is ever removed.
+    from(rootProject.file("git-hooks")) {
+        into("host/git-hooks")
+        filePermissions { unix("rwxr-xr-x") }
+    }
 }
 
 tasks.register("printVersion") {

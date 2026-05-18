@@ -157,6 +157,13 @@ jobs:
                   for f in spawn.ps1 clean.ps1 attach.ps1 lib.ps1 setup.ps1 docker-compose.yml SandboxDockerfile; do
                       test -f "/opt/ai-sandbox-server/host/$f"
                   done
+                  # AC5,AC6 — SandboxDockerfile COPYs git-hooks/ into the image,
+                  # so the bundle must ship it under host/git-hooks/. Catching
+                  # this in the install-flow phase (loud "file missing" error)
+                  # instead of waiting for the later `compose build` to fail with
+                  # a BuildKit cache-key error.
+                  test -d /opt/ai-sandbox-server/host/git-hooks
+                  test -x /opt/ai-sandbox-server/host/git-hooks/pre-commit
 
                   # Ensure docker group exists; SystemUserAdmin runs useradd --groups docker per UC05 AC13. The README prereq docker.io would normally provide it, but AC29.b skips Docker in this smoke env.
                   groupadd -f docker
