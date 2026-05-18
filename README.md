@@ -182,6 +182,13 @@ sudo unzip ai-sandbox-server-*.zip -d /opt/ai-sandbox-server
 # Generate server cert + key + empty allowlist + sample config.
 sudo java -jar /opt/ai-sandbox-server/lib/aisandboxctl.jar pki init
 
+# Walk through the container's pre-flight state: SSH key for git, git
+# author identity, gh PAT, Claude pre-init. Every step has a CLI flag
+# so the same command can run unassisted under Ansible / cloud-init —
+# add `--no-gh` and/or `--no-claude-preinit` to opt out of optional
+# steps. Re-run with `--force` to refresh credentials when they expire.
+sudo java -jar /opt/ai-sandbox-server/lib/aisandboxctl.jar secrets seed
+
 # Mint a client cert, then start the service.
 sudo java -jar /opt/ai-sandbox-server/lib/aisandboxctl.jar client mint alice --out /tmp/alice/
 sudo install -m 0644 /opt/ai-sandbox-server/systemd/ai-sandbox-server.service \
@@ -194,6 +201,31 @@ The unit refuses to start if any of the following is wrong: server key/cert
 unreadable, allowlist folder empty (refuse-to-start policy), Docker socket
 unreachable, UC02 scripts missing or non-executable, audit-log directory
 missing or not writable.
+
+#### What `secrets seed` captures, where, and the at-rest security model
+
+| Step | Output | Mode | At-rest content |
+|------|--------|------|----------------|
+| SSH key | `/etc/ai-sandbox-server/secrets/git-key` | 0600 | **Decrypted** copy of the operator's private key — passphrase is stripped at install time so `entrypoint.sh` can hand the key to `gh` / `git` without an interactive prompt. The operator's source key on disk is never modified. |
+| Git identity | `/etc/ai-sandbox-server/secrets/gitconfig` | 0600 | Plain INI with `user.name` + `user.email`. Bind-mounted RO into containers; `entrypoint.sh` wires it via `git config --global include.path`. |
+| gh PAT | `/etc/ai-sandbox-server/secrets/gh-token` | 0600 | Single-line plaintext token captured by `gh auth login --web` inside an ephemeral container, written to the bind-mounted secrets dir. Skipped with `--no-gh`. |
+| Claude pre-init | `/etc/ai-sandbox-server/templates/claude-config/` | 0750 | Snapshot of `~/.claude/` after one interactive OAuth session in an ephemeral container. RO bind-mounted into every spawned session at `/etc/claude-template/`; `entrypoint.sh` copies it into `~/.claude/` once per session (gated by `.seeded`). Skipped with `--no-claude-preinit`. |
+
+All four outputs are owned by `ai-sandbox-server:ai-sandbox-server`. The whole tree lives under `/etc/ai-sandbox-server/` (mode 0750), so non-root users cannot read it; root and the management server's runtime user can. A subsequent operator can run `claude /login` inside any spawned session to override the seeded template for that session's lifetime — respawns lose the override (sessions are ephemeral).
+
+**Unassisted install example** (Ansible-style, all flags supplied so nothing prompts):
+
+```bash
+sudo aisandboxctl secrets seed \
+    --git-key /home/operator/.ssh/id_ed25519 \
+    --git-name "Alice Operator" --git-email alice@example.com \
+    --gh-token-file /tmp/gh-token \
+    --no-claude-preinit   # or --claude-config-source <workstation-tarball>
+```
+
+##### Alternative for non-wizard deployments
+
+The pre-UC06 manual-drop flow still works: after `pki init`, drop `git-key`, `gitconfig`, and optionally `gh-token` into `/etc/ai-sandbox-server/secrets/` by hand (mode 0600, owned `ai-sandbox-server`). Leave `/etc/ai-sandbox-server/templates/claude-config/` empty (or absent) and sessions will skip the Claude pre-init copy. Operators on this path lose the unattended-install story `secrets seed` provides but retain full control over how secrets land on disk.
 
 ### Client lifecycle
 
