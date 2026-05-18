@@ -4,6 +4,18 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.aisandbox.server.test.CertFixtures;
 import com.aisandbox.server.tls.ReloadableSslContextHolder;
+import io.netty.bootstrap.Bootstrap;
+import io.netty.channel.ChannelInitializer;
+import io.netty.channel.EventLoopGroup;
+import io.netty.channel.nio.NioEventLoopGroup;
+import io.netty.channel.socket.SocketChannel;
+import io.netty.channel.socket.nio.NioSocketChannel;
+import io.netty.handler.ssl.ApplicationProtocolConfig;
+import io.netty.handler.ssl.SslContext;
+import io.netty.handler.ssl.SslContextBuilder;
+import io.netty.handler.ssl.SslHandler;
+import io.netty.handler.ssl.SslProvider;
+import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.Socket;
@@ -13,6 +25,8 @@ import java.nio.file.attribute.PosixFilePermission;
 import java.util.Comparator;
 import java.util.EnumSet;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -160,9 +174,13 @@ class SslContextBootOrderTest {
         // Spring Boot's WebServerInitializedEvent reflects the bound
         // port into local.server.port for @LocalServerPort to read.
         r.add("server.port", () -> 0);
-        // Keep the test profile minimal; explicit disables avoid CI
-        // surprises.
-        r.add("server.http2.enabled", () -> false);
+        // Deliberately do NOT set server.http2.enabled here. Production
+        // wiring relies on NettyServerCustomizer#applyTls calling
+        // .protocol(HttpProtocol.HTTP11, HttpProtocol.H2) — see commit
+        // fe0420f. Setting server.http2.enabled in the test environment
+        // would let Spring repopulate the protocol list with H2C and
+        // mask the very class of bug Change 3+4 is here to catch (H2C
+        // + TLS at bind time). Mirror prod: silence on this property.
         r.add("server.shutdown", () -> "immediate");
         r.add("ai-sandbox.server.shutdown.rest-grace-seconds", () -> 1);
         r.add("ai-sandbox.server.shutdown.total-grace-seconds", () -> 2);
@@ -203,6 +221,90 @@ class SslContextBootOrderTest {
         try (Socket s = new Socket()) {
             s.connect(new InetSocketAddress("127.0.0.1", port), 5_000);
             assertThat(s.isConnected()).isTrue();
+        }
+    }
+
+    /**
+     * Round-2 H2C+TLS regression guard.
+     *
+     * <p>{@code NettyServerCustomizer#applyTls} declares the listener's
+     * protocol set as {@code HTTP11, H2} (commit {@code fe0420f}) and
+     * {@code ReloadableSslContextHolder.rebuild(...)} advertises
+     * {@code "h2"} ahead of {@code "http/1.1"} in the ALPN list. This
+     * test does a real TLS handshake against the running server and
+     * asserts the negotiated application protocol is {@code "h2"}.
+     *
+     * <p>Failure modes this guards against:
+     *
+     * <ul>
+     *   <li>Someone re-adds {@code server.http2.enabled: true} to
+     *       {@code application.yaml} → Spring picks {@code H2C} → bind
+     *       fails (covered by the listener-bound test above) OR a
+     *       silent regression where the customizer's {@code .protocol(...)}
+     *       call is dropped and ALPN downgrades to {@code http/1.1}.</li>
+     *   <li>Someone drops {@code "h2"} from the holder's ALPN list →
+     *       the TLS handshake completes but {@code h2} is never offered,
+     *       so negotiation falls through to {@code http/1.1}.</li>
+     * </ul>
+     *
+     * <p>Reads the ALPN result directly from the SSLEngine via
+     * {@link SslHandler#applicationProtocol()} after handshake
+     * completion. This is the unambiguous TLS-layer assertion — it
+     * sidesteps higher-level HTTP-client behaviour (downgrade rules,
+     * version negotiation, etc.) and tests exactly the
+     * application-protocol selection that fe0420f's wiring is supposed
+     * to deliver.
+     */
+    @Test
+    void alpn_negotiates_h2_over_tls() throws Exception {
+        assertThat(port).isGreaterThan(0);
+
+        // Client-side SslContext mirroring the production stack:
+        //   - SslProvider.JDK matches the holder.
+        //   - InsecureTrustManagerFactory bypasses chain + hostname
+        //     verification; chain verification is owned by
+        //     AllowlistTrustManagerTest, not this test.
+        //   - applicationProtocolConfig advertises "h2","http/1.1" in
+        //     that order so the server-side preference list selects h2.
+        SslContext clientCtx = SslContextBuilder.forClient()
+                .sslProvider(SslProvider.JDK)
+                .trustManager(InsecureTrustManagerFactory.INSTANCE)
+                .applicationProtocolConfig(new ApplicationProtocolConfig(
+                        ApplicationProtocolConfig.Protocol.ALPN,
+                        ApplicationProtocolConfig.SelectorFailureBehavior.NO_ADVERTISE,
+                        ApplicationProtocolConfig.SelectedListenerFailureBehavior.ACCEPT,
+                        "h2",
+                        "http/1.1"))
+                .build();
+
+        EventLoopGroup group = new NioEventLoopGroup(1);
+        CompletableFuture<String> negotiated = new CompletableFuture<>();
+        try {
+            Bootstrap b = new Bootstrap();
+            b.group(group).channel(NioSocketChannel.class).handler(new ChannelInitializer<SocketChannel>() {
+                @Override
+                protected void initChannel(SocketChannel ch) {
+                    SslHandler h = clientCtx.newHandler(ch.alloc(), "127.0.0.1", port);
+                    h.handshakeFuture().addListener(f -> {
+                        if (f.isSuccess()) {
+                            // SslHandler#applicationProtocol returns the
+                            // ALPN-selected protocol or null if ALPN was
+                            // not negotiated. With the production
+                            // ApplicationProtocolConfig on both ends,
+                            // null is itself a failure mode.
+                            negotiated.complete(h.applicationProtocol());
+                        } else {
+                            negotiated.completeExceptionally(f.cause());
+                        }
+                    });
+                    ch.pipeline().addLast(h);
+                }
+            });
+            b.connect("127.0.0.1", port).sync();
+            String alpn = negotiated.get(15, TimeUnit.SECONDS);
+            assertThat(alpn).isEqualTo("h2");
+        } finally {
+            group.shutdownGracefully();
         }
     }
 
