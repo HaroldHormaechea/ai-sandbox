@@ -33,17 +33,51 @@ public record ServerProperties(
         @NotNull Audit audit,
         @NotNull Shutdown shutdown,
         @NotNull Streams streams,
-        @NotNull Enrollment enrollment) {
+        @NotNull Enrollment enrollment,
+        @NotNull Sessions sessions,
+        @NotNull Secrets secrets) {
 
     /**
      * Canonical constructor — explicitly tagged
-     * {@link ConstructorBinding} so Spring picks it (not the 8-arg
-     * back-compat ctor below) when binding from YAML. Without this,
-     * Spring 4 sees two ctors on the record and falls back to the
+     * {@link ConstructorBinding} so Spring picks it (not the
+     * back-compat ctors below) when binding from YAML. Without this,
+     * Spring sees multiple ctors on the record and falls back to the
      * no-arg ctor lookup, which records don't have.
      */
     @ConstructorBinding
     public ServerProperties {}
+
+    /**
+     * Backwards-compatible 9-arg constructor for QA-owned test fixtures
+     * built before UC05 added the {@link Sessions} and {@link Secrets}
+     * fields. Production binding always supplies them from
+     * {@code application.yaml} / {@code /etc/ai-sandbox-server/config.yaml}
+     * so this constructor is never reached by Spring; only QA test code
+     * uses it. New tests should call the canonical 11-arg constructor.
+     */
+    public ServerProperties(
+            Tls tls,
+            Pki pki,
+            Clients clients,
+            Hostscripts hostscripts,
+            Limits limits,
+            Audit audit,
+            Shutdown shutdown,
+            Streams streams,
+            Enrollment enrollment) {
+        this(
+                tls,
+                pki,
+                clients,
+                hostscripts,
+                limits,
+                audit,
+                shutdown,
+                streams,
+                enrollment,
+                new Sessions(Path.of("/var/lib/ai-sandbox-server/sessions")),
+                new Secrets(Path.of("/etc/ai-sandbox-server/secrets")));
+    }
 
     /**
      * Backwards-compatible 8-arg constructor for QA-owned test fixtures
@@ -51,7 +85,7 @@ public record ServerProperties(
      * binding always supplies {@link Enrollment} from
      * {@code application.yaml} / {@code /etc/ai-sandbox-server/config.yaml}
      * so this constructor is never reached by Spring; only QA test code
-     * uses it. New tests should call the canonical 9-arg constructor.
+     * uses it. New tests should call the canonical 11-arg constructor.
      */
     public ServerProperties(
             Tls tls,
@@ -117,4 +151,23 @@ public record ServerProperties(
             @Min(1) int defaultTtlMinutes,
             @Min(1) int rateLimitPerWindow,
             @Min(1) int rateLimitWindowSeconds) {}
+
+    /**
+     * UC05 § AC11,AC25,AC26 — per-session host-state root. Compose is
+     * invoked with {@code --project-directory <hostStateRoot>} so the
+     * counter file, lockdir, and per-session {@code workspace-N/} +
+     * {@code claude-config-N/} directories land here instead of inside
+     * the read-only install dir at {@code /opt/ai-sandbox-server/host/}.
+     * Default in production: {@code /var/lib/ai-sandbox-server/sessions}.
+     */
+    public record Sessions(@NotNull Path hostStateRoot) {}
+
+    /**
+     * UC05 § AC14,AC27 — operator-managed secrets directory bind-mounted
+     * read-only into every sandbox container at {@code /etc/secrets}.
+     * Holds SSH keys and an optional {@code gh-token} populated by the
+     * operator after {@code aisandboxctl pki init}. Default in
+     * production: {@code /etc/ai-sandbox-server/secrets}.
+     */
+    public record Secrets(@NotNull Path dir) {}
 }

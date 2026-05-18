@@ -79,7 +79,7 @@ public class PropertiesValidationStartupCheck implements ApplicationListener<App
         Path auditDir = props.audit().file().getParent();
         if (auditDir == null || !Files.isDirectory(auditDir) || !Files.isWritable(auditDir)) {
             throw new IllegalStateException("Audit log directory missing or not writable: " + auditDir
-                    + ". Create with: install -d -m 0750 -o ai-sandbox-server -g ai-sandbox-server " + auditDir);
+                    + ". Run `sudo aisandboxctl pki init` to bootstrap the host's directory tree.");
         }
 
         LOG.info(

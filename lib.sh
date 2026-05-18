@@ -246,3 +246,36 @@ _aisb_normalize_title() {
         *) printf "%s" "$t" ;;
     esac
 }
+
+# ── docker compose wrapper (UC05 § AC25,AC26,AC27) ───────────────────────────
+#
+# ai_sandbox_compose <docker-compose-args...>
+#
+# Wraps `docker compose` so the management server can route bundled scripts
+# at a non-default compose file and project directory without editing them:
+#
+#   AI_SANDBOX_COMPOSE_FILE
+#       Absolute path to docker-compose.yml. When set, prepended as `-f <path>`.
+#       In install mode the server sets this to
+#       /opt/ai-sandbox-server/host/docker-compose.yml.
+#
+#   AI_SANDBOX_HOST_STATE_ROOT
+#       Absolute path to the per-session host-state root. When set, prepended
+#       as `--project-directory <path>` so workspace + claude-config bind-mount
+#       sources resolve under it (rather than under the read-only install dir).
+#       In install mode the server sets this to /var/lib/ai-sandbox-server/sessions.
+#
+# Both vars unset → behaviour matches plain `docker compose` for developer-
+# mode parity. Both flags are harmless for subcommands that ignore them
+# (e.g. `compose exec` resolves the project by container labels), and are
+# kept for consistency so every invocation is shaped identically.
+ai_sandbox_compose() {
+    local flags=()
+    if [ -n "${AI_SANDBOX_COMPOSE_FILE:-}" ]; then
+        flags+=(-f "$AI_SANDBOX_COMPOSE_FILE")
+    fi
+    if [ -n "${AI_SANDBOX_HOST_STATE_ROOT:-}" ]; then
+        flags+=(--project-directory "$AI_SANDBOX_HOST_STATE_ROOT")
+    fi
+    docker compose "${flags[@]}" "$@"
+}

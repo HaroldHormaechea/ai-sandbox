@@ -14,6 +14,15 @@ cd "$(dirname "$0")"
 # shellcheck source=lib.sh
 . "$(dirname "$0")/lib.sh"
 
+# UC05 § AC11,AC25 — match spawn.sh: route per-session host state under
+# /var/lib/ai-sandbox-server/sessions/ when the management server sets
+# AI_SANDBOX_HOST_STATE_ROOT. Developer-mode runs leave the var unset
+# and clean.sh continues operating against the repo root.
+if [ -n "${AI_SANDBOX_HOST_STATE_ROOT:-}" ]; then
+    mkdir -p "$AI_SANDBOX_HOST_STATE_ROOT"
+    cd "$AI_SANDBOX_HOST_STATE_ROOT"
+fi
+
 usage() {
     cat >&2 <<'EOF'
 Usage: ./clean.sh [<N>] [flags]
@@ -87,7 +96,7 @@ fi
 clean_one() {
     local n="$1" name="ai-sandbox-${n}"
     info "Cleaning $name" >&2
-    docker compose -p "$name" down -v --remove-orphans 2>/dev/null || true
+    ai_sandbox_compose -p "$name" down -v --remove-orphans 2>/dev/null || true
 
     if [ "$KEEP_WORKSPACE" -eq 0 ] && [ -d "./workspace-${n}" ]; then
         info "  rm -rf ./workspace-${n}" >&2

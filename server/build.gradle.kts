@@ -149,6 +149,27 @@ springBoot {
 tasks.named<BootJar>("bootJar") {
     archiveBaseName.set("aisandbox-server")
     archiveClassifier.set("")
+    // UC05 § AC20 — systemd ExecStart points at /opt/ai-sandbox-server/lib/
+    // aisandbox-server.jar. Drop the version from the filename; the version
+    // still lives in the manifest's Implementation-Version (auto-populated
+    // by Spring Boot's BootJar from project.version) and in the release zip
+    // filename. AC32's "rm -rf /opt/.../lib && re-unzip" upgrade depends on
+    // the install-path being version-free.
+    archiveVersion.set("")
+    // Override the default Implementation-Title ("server", from the Gradle
+    // subproject name) so an operator running `unzip -p ... MANIFEST.MF`
+    // can tell the two fat jars apart.
+    manifest { attributes("Implementation-Title" to "aisandbox-server") }
+    doLast {
+        val jar = archiveFile.get().asFile
+        val manifest = providers.exec {
+            commandLine("unzip", "-p", jar.absolutePath, "META-INF/MANIFEST.MF")
+        }.standardOutput.asText.get()
+        check(manifest.contains("Implementation-Version:")) {
+            "bootJar manifest is missing Implementation-Version (jar=$jar). " +
+                "Spring Boot should have populated it from project.version."
+        }
+    }
 }
 
 // Disable the plain `jar` to avoid producing an unrunnable artifact.
@@ -162,10 +183,25 @@ val aisandboxctlJar by tasks.registering(BootJar::class) {
     description = "Builds aisandboxctl.jar (picocli CLI; same classpath, different main)."
     archiveBaseName.set("aisandboxctl")
     archiveClassifier.set("")
-    archiveVersion.set(project.version.toString())
+    // UC05 § AC20 — same rationale as bootJar above; the install path
+    // /opt/ai-sandbox-server/lib/aisandboxctl.jar must not encode the version.
+    archiveVersion.set("")
     mainClass.set("com.aisandbox.server.cli.AisandboxctlCommand")
     classpath(sourceSets["main"].runtimeClasspath)
     targetJavaVersion.set(JavaVersion.toVersion(libs.versions.java.get()))
+    // Same rationale as bootJar — distinguishable manifest title for
+    // operators inspecting either jar.
+    manifest { attributes("Implementation-Title" to "aisandboxctl") }
+    doLast {
+        val jar = archiveFile.get().asFile
+        val manifest = providers.exec {
+            commandLine("unzip", "-p", jar.absolutePath, "META-INF/MANIFEST.MF")
+        }.standardOutput.asText.get()
+        check(manifest.contains("Implementation-Version:")) {
+            "aisandboxctlJar manifest is missing Implementation-Version (jar=$jar). " +
+                "Spring Boot should have populated it from project.version."
+        }
+    }
 }
 
 tasks.named("assemble") {
@@ -173,15 +209,32 @@ tasks.named("assemble") {
 }
 
 // ── Release bundle ───────────────────────────────────────────────────────────
+//
+// UC05 § A — single point of bundling. The release zip is self-contained:
+// jars + OAS + reference config + systemd unit + the entire UC02 host-
+// script set (POSIX + PowerShell) + the container build context. Operators
+// unzip to /opt/ai-sandbox-server/ and never need to clone the repo.
+//
+// Determinism (AC9): preserveFileTimestamps=false zeroes out mtimes inside
+// the zip; reproducibleFileOrder=true sorts entries lexicographically.
+// Combined with the LF/CRLF normalization in /.gitattributes, re-running
+// the same tag produces a byte-identical zip.
 val releaseBundle by tasks.registering(Zip::class) {
     group = "distribution"
-    description = "Assembles the operator-shipped release zip (jars + OAS + systemd + README)."
+    description = "Assembles the self-contained operator zip (jars + host scripts + Compose context + systemd + docs)."
     dependsOn("bootJar", aisandboxctlJar)
     archiveBaseName.set("ai-sandbox-server")
     archiveVersion.set(project.version.toString())
     destinationDirectory.set(layout.buildDirectory.dir("release"))
+    isPreserveFileTimestamps = false
+    isReproducibleFileOrder = true
+    // UC05 § AC2,AC20 — exact filenames, no wildcards. With
+    // `archiveVersion.set("")` the jars now build at fixed names; a glob
+    // like `aisandbox-server*.jar` would additionally pick up any stale
+    // versioned artifacts left over from earlier builds (or sources jars
+    // created by `withSourcesJar()`) and ship a duplicate-jar zip.
     from(layout.buildDirectory.dir("libs")) {
-        include("aisandbox-server*.jar", "aisandboxctl*.jar")
+        include("aisandbox-server.jar", "aisandboxctl.jar")
         into("lib")
     }
     from("$projectDir/openapi.yaml") { into(".") }
@@ -189,6 +242,54 @@ val releaseBundle by tasks.registering(Zip::class) {
     from("$projectDir/README.md") { into(".") }
     from("$projectDir/sample-config.yaml") { into(".") }
     from("$projectDir/systemd") { into("systemd") }
+    // UC05 § AC3,AC5 — POSIX shell scripts shipped under host/ with mode 0755.
+    from(rootProject.file("spawn.sh")) {
+        into("host")
+        filePermissions { unix("rwxr-xr-x") }
+    }
+    from(rootProject.file("clean.sh")) {
+        into("host")
+        filePermissions { unix("rwxr-xr-x") }
+    }
+    from(rootProject.file("attach.sh")) {
+        into("host")
+        filePermissions { unix("rwxr-xr-x") }
+    }
+    from(rootProject.file("lib.sh")) {
+        into("host")
+        filePermissions { unix("rwxr-xr-x") }
+    }
+    from(rootProject.file("setup.sh")) {
+        into("host")
+        filePermissions { unix("rwxr-xr-x") }
+    }
+    from(rootProject.file("entrypoint.sh")) {
+        into("host")
+        filePermissions { unix("rwxr-xr-x") }
+    }
+    // UC05 § AC4 — PowerShell counterparts; not exec'd by v0.0.3 systemd
+    // installer, kept byte-identical for a future Windows installer.
+    from(rootProject.file("spawn.ps1")) { into("host") }
+    from(rootProject.file("clean.ps1")) { into("host") }
+    from(rootProject.file("attach.ps1")) { into("host") }
+    from(rootProject.file("lib.ps1")) { into("host") }
+    from(rootProject.file("setup.ps1")) { into("host") }
+    // UC05 § AC5,AC6 — container build context. SandboxDockerfile sources
+    // entrypoint.sh from the same dir; docker-compose.yml references
+    // SandboxDockerfile by relative path; co-locating in host/ preserves
+    // both relationships.
+    from(rootProject.file("docker-compose.yml")) { into("host") }
+    from(rootProject.file("SandboxDockerfile")) { into("host") }
+    // UC05 § AC5,AC6 — SandboxDockerfile:42 does `COPY git-hooks/ /etc/git-hooks/`,
+    // so git-hooks/ is part of the container build context and must ship in host/.
+    // Exec bit preserves the convention (matches entrypoint.sh above); the
+    // Dockerfile's `chmod +x` on line 43 would survive without it, but keeping
+    // the bit set is the host-script pattern and avoids surprises if the chmod
+    // is ever removed.
+    from(rootProject.file("git-hooks")) {
+        into("host/git-hooks")
+        filePermissions { unix("rwxr-xr-x") }
+    }
 }
 
 tasks.register("printVersion") {

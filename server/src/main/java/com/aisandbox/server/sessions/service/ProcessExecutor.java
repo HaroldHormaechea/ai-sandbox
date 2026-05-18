@@ -6,6 +6,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -34,9 +35,32 @@ public class ProcessExecutor {
     public record Result(int exitCode, String stdout, String stderr) {}
 
     public Result run(List<String> argv, Path workingDir, Duration timeout) throws IOException {
+        return run(argv, workingDir, Map.of(), timeout);
+    }
+
+    /**
+     * Env-aware overload (UC05 § AC25,AC26,AC27). Entries in {@code env}
+     * are written into the child's {@link ProcessBuilder#environment()}
+     * map before {@code start()} so the bundled UC02 scripts pick them up
+     * (AI_SANDBOX_COMPOSE_FILE, AI_SANDBOX_HOST_STATE_ROOT,
+     * AI_SANDBOX_SECRETS_HOST_PATH, the existing AI_SANDBOX_LABEL et al).
+     * An empty map preserves the historical bare-environment behaviour.
+     */
+    public Result run(List<String> argv, Path workingDir, Map<String, String> env, Duration timeout)
+            throws IOException {
         ProcessBuilder pb = new ProcessBuilder(argv);
         if (workingDir != null) {
             pb.directory(workingDir.toFile());
+        }
+        if (env != null && !env.isEmpty()) {
+            Map<String, String> procEnv = pb.environment();
+            for (Map.Entry<String, String> e : env.entrySet()) {
+                if (e.getValue() == null) {
+                    procEnv.remove(e.getKey());
+                } else {
+                    procEnv.put(e.getKey(), e.getValue());
+                }
+            }
         }
         pb.redirectErrorStream(false);
         Process p = pb.start();

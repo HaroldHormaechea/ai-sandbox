@@ -61,7 +61,11 @@ if ($Sessions.Count -eq 0) {
 function Attach-ToN {
     param([int]$N)
     $name = "ai-sandbox-$N"
-    & docker compose -p $name exec claude-sandbox tmux attach -t main
+    # AC25: pass -f and --project-directory on every docker compose call
+    # for consistency; `compose exec` identifies the project by container
+    # labels so the flags are functionally a no-op here. Kept for parity
+    # with spawn/clean so every invocation looks the same.
+    Invoke-AiSandboxCompose -p $name exec claude-sandbox tmux attach -t main
     exit $LASTEXITCODE
 }
 

@@ -205,3 +205,22 @@ function Normalize-TmuxTitle {
         default  { return $t }
     }
 }
+
+# --- docker compose wrapper (UC05 § AC25,AC26,AC27) -------------------------
+#
+# Invoke-AiSandboxCompose <docker-compose-args...>
+#
+# Mirror of lib.sh's `ai_sandbox_compose`. Prepends `-f <AI_SANDBOX_COMPOSE_FILE>`
+# and `--project-directory <AI_SANDBOX_HOST_STATE_ROOT>` when those env vars
+# are non-empty, then invokes `docker compose`. Both unset → behaves
+# identically to a bare `docker compose` call.
+function Invoke-AiSandboxCompose {
+    $flags = @()
+    if ($env:AI_SANDBOX_COMPOSE_FILE) {
+        $flags += @('-f', $env:AI_SANDBOX_COMPOSE_FILE)
+    }
+    if ($env:AI_SANDBOX_HOST_STATE_ROOT) {
+        $flags += @('--project-directory', $env:AI_SANDBOX_HOST_STATE_ROOT)
+    }
+    & docker compose @flags @args
+}

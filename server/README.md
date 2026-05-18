@@ -11,30 +11,75 @@ session lifecycle and attach to live tmux sessions from a remote workstation.
 
 ## Prerequisites
 
-- Host **OpenJDK 21+** at install time.
-- Docker engine reachable on `/var/run/docker.sock`.
-- UC02's `spawn.sh`, `clean.sh`, `attach.sh` present and executable at
-  the path declared by `ai-sandbox.server.hostscripts.repo-root`.
-- A dedicated POSIX user `ai-sandbox-server` in the `docker` group.
+The release zip is **self-contained** (UC05) — drop it on a clean Ubuntu
+Server VM with only the following installed, then run `pki init`:
+
+- **OpenJDK 21+** (`openjdk-21-jdk-headless` on Ubuntu).
+- **Docker engine + Compose plugin** (`docker.io` + `docker-compose-plugin`).
+
+The release zip bundles the UC02 host scripts (`spawn.sh` / `clean.sh` /
+`attach.sh` / `lib.sh` / `setup.sh` + PowerShell counterparts) and the
+container build context (`docker-compose.yml`, `SandboxDockerfile`,
+`entrypoint.sh`). No `git clone` is required; the server is path-locked
+to `/opt/ai-sandbox-server/` (read-only), `/etc/ai-sandbox-server/` (RO),
+`/var/lib/ai-sandbox-server/` (RW), `/var/log/ai-sandbox-server/` (RW).
+
+## What's in the bundle
+
+After `unzip ai-sandbox-server-X.Y.Z.zip -d /opt/ai-sandbox-server/` the
+layout is:
+
+```
+/opt/ai-sandbox-server/
+├── lib/
+│   ├── aisandbox-server.jar       # Spring Boot server (manifest carries Implementation-Version)
+│   └── aisandboxctl.jar           # PKI / allowlist CLI
+├── host/                          # UC02 host-script bundle (frozen at release)
+│   ├── spawn.sh   clean.sh   attach.sh   lib.sh   setup.sh
+│   ├── spawn.ps1  clean.ps1  attach.ps1  lib.ps1  setup.ps1
+│   ├── docker-compose.yml
+│   ├── SandboxDockerfile
+│   └── entrypoint.sh
+├── systemd/
+│   └── ai-sandbox-server.service
+├── README.md
+├── openapi.yaml                   # springdoc-generated OAS, committed in repo
+├── STREAM_PROTOCOL.md
+└── sample-config.yaml             # annotated reference of every tunable knob
+```
+
+**A note on `setup.sh` / `setup.ps1`.** They are bundled for byte parity
+with the repo (groundwork for a future Windows installer), but they
+**must not** be run against the install dir. The wizards expect a writable
+working directory and would fail / corrupt `/opt/ai-sandbox-server/host/`
+on attempt. The systemd installer never invokes them.
 
 ## Install
 
 ```bash
-# Create the runtime user.
-sudo useradd -r -s /usr/sbin/nologin -G docker ai-sandbox-server
-
-# Unpack the release zip (jars + OAS + sample config + systemd unit).
-sudo install -d -m 0755 /opt/ai-sandbox-server /opt/ai-sandbox-server/lib
-sudo install -d -m 0750 -o ai-sandbox-server -g ai-sandbox-server /var/log/ai-sandbox-server
+# 1. Unpack the release zip.
+sudo install -d /opt/ai-sandbox-server
 sudo unzip ai-sandbox-server-*.zip -d /opt/ai-sandbox-server
 
-sudo install -m 0644 /opt/ai-sandbox-server/sample-config.yaml /etc/ai-sandbox-server/config.yaml
-
-# PKI bootstrap — generates server cert + key, makes the allowlist dir,
-# and drops a sample config (idempotent; --force overwrites).
+# 2. One-shot per-host setup — creates the ai-sandbox-server system user,
+#    every operator-managed directory under /etc/ai-sandbox-server/,
+#    /var/lib/ai-sandbox-server/sessions/, /var/log/ai-sandbox-server/,
+#    mints the self-signed server cert + key, and writes
+#    /etc/ai-sandbox-server/config.yaml with install-layout defaults
+#    baked in.
+#
+#    Idempotent only with --force; refuses to overwrite by default.
 sudo java -jar /opt/ai-sandbox-server/lib/aisandboxctl.jar pki init
 
-# systemd unit.
+# 3. Operator populates the secrets directory created by step 2.
+#    SSH key for git (required) + optional gh-token. Mode 0600 each.
+sudo install -m 0600 -o ai-sandbox-server -g ai-sandbox-server \
+    ~/.ssh/id_ed25519 /etc/ai-sandbox-server/secrets/git-key
+# Optional: GitHub token used by gh CLI inside the sandbox.
+# sudo install -m 0600 -o ai-sandbox-server -g ai-sandbox-server \
+#     /path/to/gh-token.txt /etc/ai-sandbox-server/secrets/gh-token
+
+# 4. systemd unit.
 sudo install -m 0644 /opt/ai-sandbox-server/systemd/ai-sandbox-server.service \
     /etc/systemd/system/ai-sandbox-server.service
 sudo systemctl daemon-reload
@@ -44,10 +89,55 @@ sudo systemctl enable --now ai-sandbox-server
 The unit refuses to start (with a journald-logged reason) when any of:
 
 - server key / cert unreadable
-- allowlist folder empty (refuse-to-start policy)
+- allowlist folder empty (refuse-to-start policy — mint a client cert
+  with `aisandboxctl client mint <name>`)
 - Docker socket unreachable
-- UC02 scripts missing or non-executable
+- bundled host scripts missing or non-executable under
+  `/opt/ai-sandbox-server/host/`
 - audit-log directory missing or not writable
+
+## Upgrade (v0.0.2 → v0.0.3 and onwards)
+
+A v0.0.2 → v0.0.3 upgrade is a **clean cutover**. No backwards-compat
+shim is provided; you are expected to stop the service, swap the jars,
+and restart:
+
+```bash
+sudo systemctl stop ai-sandbox-server
+sudo rm -rf /opt/ai-sandbox-server/lib /opt/ai-sandbox-server/host
+sudo unzip ai-sandbox-server-X.Y.Z.zip -d /opt/ai-sandbox-server
+sudo systemctl daemon-reload   # only if the systemd/ unit changed
+sudo systemctl restart ai-sandbox-server
+```
+
+Your operator-managed state (`/etc/ai-sandbox-server/{pki,clients,enrollment,secrets,config.yaml}`
+and `/var/lib/ai-sandbox-server/sessions/`) is preserved across the
+swap — only the install dir under `/opt/` is replaced. The system user
+created by the original `pki init` keeps the same uid/gid.
+
+## Frozen UC02 host scripts
+
+The `host/` bundle is **frozen at server-release time**. If you run into
+a bug in `spawn.sh` / `clean.sh` / `attach.sh` / `lib.sh` / `setup.sh`
+or in the container build context, it ships through the **next server
+release tag** (`server-vX.Y.Z`), not by hand-editing files under
+`/opt/ai-sandbox-server/host/`. The install dir is read-only at runtime
+under the systemd unit's `ReadOnlyPaths` hardening; hand-edits would
+either fail or get silently reverted on the next upgrade.
+
+## Operator notes
+
+- **`pki init` is the only `aisandboxctl` subcommand that requires
+  root.** All other subcommands (`client mint`, `client invite`,
+  `client list`, `client revoke`) run as `ai-sandbox-server`:
+  `sudo -u ai-sandbox-server java -jar /opt/ai-sandbox-server/lib/aisandboxctl.jar client mint alice ...`.
+- **`setup.sh` / `setup.ps1` are bundled but must not be invoked
+  against the install dir** — see "What's in the bundle" above.
+- **The CI smoke test (`release-install-smoke` in `server-ci.yml`) is
+  required-passing for PR merge.** The GitHub branch-protection setting
+  that enforces this lives outside the workflow file; see the repository
+  admin's branch-protection rules. Until that gate is in place, the job
+  exists as a required-passing CI signal but does not gate merges.
 
 ## Mint and revoke clients
 

@@ -10,6 +10,15 @@ $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 . (Join-Path $PSScriptRoot 'lib.ps1')
 
+# UC05 § AC11,AC25 — same install-mode routing as spawn.sh: when the
+# management server sets AI_SANDBOX_HOST_STATE_ROOT, route every write
+# (counter, lockdir, per-session dirs) under that root instead of the
+# read-only install dir. Developer-mode runs leave the var unset.
+if ($env:AI_SANDBOX_HOST_STATE_ROOT) {
+    New-Item -ItemType Directory -Force -Path $env:AI_SANDBOX_HOST_STATE_ROOT | Out-Null
+    Set-Location $env:AI_SANDBOX_HOST_STATE_ROOT
+}
+
 function Show-Usage {
     @"
 Usage: .\spawn.ps1 [flags]
@@ -154,7 +163,7 @@ if ($LabelSet -and $Label) {
     Write-Info "  label         : $Label"
 }
 
-& docker compose -p $Project up -d
+Invoke-AiSandboxCompose -p $Project up -d
 if ($LASTEXITCODE -ne 0) {
     Write-Warn "docker compose up failed for $Project."
     Write-Warn "Counter NOT rolled back (monotonic by design); next spawn will use N=$($N + 1)."
