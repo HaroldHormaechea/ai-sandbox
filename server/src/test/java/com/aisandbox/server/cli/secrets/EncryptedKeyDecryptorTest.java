@@ -103,8 +103,8 @@ class EncryptedKeyDecryptorTest {
         // than fail. (Linux CI hosts always have PATH.)
         String envVar = "PATH";
         String envValue = System.getenv(envVar);
-        org.junit.jupiter.api.Assumptions.assumeTrue(envValue != null && !envValue.isEmpty(),
-                "PATH env var must be set for this test");
+        org.junit.jupiter.api.Assumptions.assumeTrue(
+                envValue != null && !envValue.isEmpty(), "PATH env var must be set for this test");
 
         Path decrypted = new EncryptedKeyDecryptor(runner).decrypt(src, null, envVar, new FakeConsoleIO());
         try {

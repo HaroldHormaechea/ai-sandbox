@@ -30,8 +30,7 @@ class GitIdentityStepTest {
         // The exact body shape — entrypoint.sh's `git config --global
         // include.path` hook depends on this layout. Pin it.
         String body = Files.readString(out);
-        assertThat(body)
-                .isEqualTo("[user]\n\tname = Alice Example\n\temail = alice@example.com\n");
+        assertThat(body).isEqualTo("[user]\n\tname = Alice Example\n\temail = alice@example.com\n");
 
         // Mode 0600 — the file holds the operator's git identity in
         // plaintext but is bind-mounted RO into the container; outside
@@ -56,8 +55,7 @@ class GitIdentityStepTest {
         FakeConsoleIO io = new FakeConsoleIO();
 
         // setup.sh:validate_email accepts ^[^@\s]+@[^@\s]+\.[^@\s]+$
-        assertThatThrownBy(
-                        () -> new GitIdentityStep(runner, io).run("Alice", "not-an-email", out, null))
+        assertThatThrownBy(() -> new GitIdentityStep(runner, io).run("Alice", "not-an-email", out, null))
                 .isInstanceOf(IOException.class)
                 .hasMessageContaining("not RFC-5322-ish");
         assertThat(Files.exists(out)).isFalse();
@@ -91,13 +89,11 @@ class GitIdentityStepTest {
         FakeProcessRunner runner = new FakeProcessRunner();
         FakeConsoleIO io = new FakeConsoleIO();
 
-        new GitIdentityStep(runner, io)
-                .run("  Alice Example  ", "  alice@example.com  ", out, null);
+        new GitIdentityStep(runner, io).run("  Alice Example  ", "  alice@example.com  ", out, null);
 
         // Leading/trailing whitespace in flag values is stripped so the
         // emitted gitconfig matches the setup.sh contract.
-        assertThat(Files.readString(out))
-                .isEqualTo("[user]\n\tname = Alice Example\n\temail = alice@example.com\n");
+        assertThat(Files.readString(out)).isEqualTo("[user]\n\tname = Alice Example\n\temail = alice@example.com\n");
     }
 
     @Test
@@ -127,10 +123,8 @@ class GitIdentityStepTest {
 
         // The two `git config --global --get …` probes fired.
         assertThat(runner.captureCalls).hasSize(2);
-        assertThat(runner.captureCalls.get(0))
-                .containsSubsequence("git", "config", "--global", "--get", "user.name");
-        assertThat(runner.captureCalls.get(1))
-                .containsSubsequence("git", "config", "--global", "--get", "user.email");
+        assertThat(runner.captureCalls.get(0)).containsSubsequence("git", "config", "--global", "--get", "user.name");
+        assertThat(runner.captureCalls.get(1)).containsSubsequence("git", "config", "--global", "--get", "user.email");
         // Prompts displayed the default in [ ] brackets.
         assertThat(io.allOutput()).contains("[Default Alice]").contains("[default-alice@example.com]");
     }
@@ -148,8 +142,7 @@ class GitIdentityStepTest {
 
         new GitIdentityStep(runner, io).run(null, null, out, null);
 
-        assertThat(Files.readString(out))
-                .isEqualTo("[user]\n\tname = Alice\n\temail = alice@example.com\n");
+        assertThat(Files.readString(out)).isEqualTo("[user]\n\tname = Alice\n\temail = alice@example.com\n");
         assertThat(io.allOutput()).contains("Email must look like name@host.tld.");
     }
 
@@ -160,11 +153,19 @@ class GitIdentityStepTest {
      */
     @Test
     void email_regex_mirrors_setup_sh_validate_email() {
-        assertThat(GitIdentityStep.EMAIL_PATTERN.matcher("alice@example.com").matches()).isTrue();
-        assertThat(GitIdentityStep.EMAIL_PATTERN.matcher("a.b+c@sub.example.co").matches()).isTrue();
-        assertThat(GitIdentityStep.EMAIL_PATTERN.matcher("no-at-sign").matches()).isFalse();
-        assertThat(GitIdentityStep.EMAIL_PATTERN.matcher("two@@example.com").matches()).isFalse();
-        assertThat(GitIdentityStep.EMAIL_PATTERN.matcher("no-tld@example").matches()).isFalse();
-        assertThat(GitIdentityStep.EMAIL_PATTERN.matcher("white space@example.com").matches()).isFalse();
+        assertThat(GitIdentityStep.EMAIL_PATTERN.matcher("alice@example.com").matches())
+                .isTrue();
+        assertThat(GitIdentityStep.EMAIL_PATTERN.matcher("a.b+c@sub.example.co").matches())
+                .isTrue();
+        assertThat(GitIdentityStep.EMAIL_PATTERN.matcher("no-at-sign").matches())
+                .isFalse();
+        assertThat(GitIdentityStep.EMAIL_PATTERN.matcher("two@@example.com").matches())
+                .isFalse();
+        assertThat(GitIdentityStep.EMAIL_PATTERN.matcher("no-tld@example").matches())
+                .isFalse();
+        assertThat(GitIdentityStep.EMAIL_PATTERN
+                        .matcher("white space@example.com")
+                        .matches())
+                .isFalse();
     }
 }

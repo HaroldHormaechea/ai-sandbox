@@ -16,6 +16,15 @@ Server VM with only the following installed, then run `pki init`:
 
 - **OpenJDK 21+** (`openjdk-21-jdk-headless` on Ubuntu).
 - **Docker engine + Compose plugin** (`docker.io` + `docker-compose-plugin`).
+- **`curl` + `unzip`** for the download + unpack steps below. Usually
+  already present on Ubuntu Server but not guaranteed on minimal images.
+
+One-line install on a fresh Ubuntu Server VM:
+
+```bash
+sudo apt update && sudo apt install -y \
+    openjdk-21-jdk-headless docker.io docker-compose-plugin curl unzip
+```
 
 The release zip bundles the UC02 host scripts (`spawn.sh` / `clean.sh` /
 `attach.sh` / `lib.sh` / `setup.sh` + PowerShell counterparts) and the
@@ -57,9 +66,19 @@ on attempt. The systemd installer never invokes them.
 ## Install
 
 ```bash
+# 0. Resolve the latest server-v* tag and download the release zip.
+#    The repo's GitHub Releases lives at
+#    https://github.com/HaroldHormaechea/ai-sandbox/releases — pin a specific
+#    tag if you need reproducibility.
+TAG="$(curl -fsSL https://api.github.com/repos/HaroldHormaechea/ai-sandbox/releases \
+    | grep -oE '"tag_name":\s*"server-v[^"]+"' | head -1 | cut -d'"' -f4)"
+VER="${TAG#server-v}"
+curl -fsSL -o /tmp/ai-sandbox-server.zip \
+    "https://github.com/HaroldHormaechea/ai-sandbox/releases/download/${TAG}/ai-sandbox-server-${VER}.zip"
+
 # 1. Unpack the release zip.
 sudo install -d /opt/ai-sandbox-server
-sudo unzip ai-sandbox-server-*.zip -d /opt/ai-sandbox-server
+sudo unzip /tmp/ai-sandbox-server.zip -d /opt/ai-sandbox-server
 
 # 2. One-shot per-host setup — creates the ai-sandbox-server system user,
 #    every operator-managed directory under /etc/ai-sandbox-server/,
@@ -71,13 +90,14 @@ sudo unzip ai-sandbox-server-*.zip -d /opt/ai-sandbox-server
 #    Idempotent only with --force; refuses to overwrite by default.
 sudo java -jar /opt/ai-sandbox-server/lib/aisandboxctl.jar pki init
 
-# 3. Operator populates the secrets directory created by step 2.
-#    SSH key for git (required) + optional gh-token. Mode 0600 each.
-sudo install -m 0600 -o ai-sandbox-server -g ai-sandbox-server \
-    ~/.ssh/id_ed25519 /etc/ai-sandbox-server/secrets/git-key
-# Optional: GitHub token used by gh CLI inside the sandbox.
-# sudo install -m 0600 -o ai-sandbox-server -g ai-sandbox-server \
-#     /path/to/gh-token.txt /etc/ai-sandbox-server/secrets/gh-token
+# 3. Walk through the container's pre-flight state: SSH key for git,
+#    git author identity, gh PAT, Claude pre-init. Every step has a
+#    CLI flag so the same command can run unassisted under Ansible /
+#    cloud-init — add `--no-gh` and/or `--no-claude-preinit` to opt
+#    out of optional steps. Re-run with `--force` to refresh creds
+#    when they expire. See the top-level README for the full at-rest
+#    security model and an unassisted-install flag example.
+sudo java -jar /opt/ai-sandbox-server/lib/aisandboxctl.jar secrets seed
 
 # 4. systemd unit.
 sudo install -m 0644 /opt/ai-sandbox-server/systemd/ai-sandbox-server.service \
@@ -85,6 +105,38 @@ sudo install -m 0644 /opt/ai-sandbox-server/systemd/ai-sandbox-server.service \
 sudo systemctl daemon-reload
 sudo systemctl enable --now ai-sandbox-server
 ```
+
+**Pinning a specific version.** Production rollouts usually want a
+known-good tag, not "latest". Replace the `TAG=` line above with the
+tag you want — for example:
+
+```bash
+TAG=server-v0.0.3
+VER="${TAG#server-v}"
+```
+
+The rest of step 0 stays identical. The GitHub Releases page (link
+above) lists every `server-v*` tag chronologically.
+
+**Alternative — manual secrets drop (pre-UC06 / non-wizard
+deployments).** If you'd rather hand-drop the secrets after `pki init`
+instead of running `secrets seed`, the pre-wizard flow still works.
+Skip step 3 above and drop the files yourself:
+
+```bash
+# SSH key for git (required) + optional gh-token. Mode 0600 each,
+# owned ai-sandbox-server.
+sudo install -m 0600 -o ai-sandbox-server -g ai-sandbox-server \
+    ~/.ssh/id_ed25519 /etc/ai-sandbox-server/secrets/git-key
+# Optional: GitHub token used by gh CLI inside the sandbox.
+# sudo install -m 0600 -o ai-sandbox-server -g ai-sandbox-server \
+#     /path/to/gh-token.txt /etc/ai-sandbox-server/secrets/gh-token
+```
+
+The hand-drop path loses the unassisted-install story `secrets seed`
+provides (and the optional Claude pre-init template), but gives the
+operator full control over how secrets land on disk. Either path is
+supported; pick whichever fits the deployment's automation posture.
 
 The unit refuses to start (with a journald-logged reason) when any of:
 

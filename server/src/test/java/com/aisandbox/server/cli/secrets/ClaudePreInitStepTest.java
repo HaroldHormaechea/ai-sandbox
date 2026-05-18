@@ -79,8 +79,7 @@ class ClaudePreInitStepTest {
                 .isEqualTo(PosixFilePermissions.fromString("rwx------"));
 
         // templateDir root itself is 0750 (AC6 § "mode 0750 owned ai-sandbox-server").
-        assertThat(Files.getPosixFilePermissions(templateDir))
-                .isEqualTo(PosixFilePermissions.fromString("rwxr-x---"));
+        assertThat(Files.getPosixFilePermissions(templateDir)).isEqualTo(PosixFilePermissions.fromString("rwxr-x---"));
 
         // No docker shell-out for the flag-driven path.
         assertThat(runner.inheritCalls).isEmpty();
@@ -93,8 +92,8 @@ class ClaudePreInitStepTest {
         Files.writeString(src, "regular file"); // not a directory
         Path templateDir = tmp.resolve("templates/claude-config");
 
-        assertThatThrownBy(() -> new ClaudePreInitStep(new FakeProcessRunner(), new FakeConsoleIO())
-                        .run(src, templateDir, null))
+        assertThatThrownBy(() ->
+                        new ClaudePreInitStep(new FakeProcessRunner(), new FakeConsoleIO()).run(src, templateDir, null))
                 .isInstanceOf(IOException.class)
                 .hasMessageContaining("source is not a directory");
     }
@@ -129,8 +128,7 @@ class ClaudePreInitStepTest {
         assertThat(templateDir.resolve("statsig").resolve("stableID")).exists();
 
         // Final mode on templateDir is 0750.
-        assertThat(Files.getPosixFilePermissions(templateDir))
-                .isEqualTo(PosixFilePermissions.fromString("rwxr-x---"));
+        assertThat(Files.getPosixFilePermissions(templateDir)).isEqualTo(PosixFilePermissions.fromString("rwxr-x---"));
 
         // Argv shape: docker run --rm -it --user 0 -v <scratch>:/home/claude/.claude
         // --entrypoint sh ai-context:latest -c "claude --dangerously-skip-permissions"
@@ -142,9 +140,7 @@ class ClaudePreInitStepTest {
         assertThat(argv).contains("ai-context:latest");
         int cIdx = argv.indexOf("-c");
         assertThat(cIdx).isGreaterThan(0);
-        assertThat(argv.get(cIdx + 1))
-                .contains("claude")
-                .contains("--dangerously-skip-permissions");
+        assertThat(argv.get(cIdx + 1)).contains("claude").contains("--dangerously-skip-permissions");
     }
 
     @Test

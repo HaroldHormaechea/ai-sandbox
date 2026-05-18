@@ -69,12 +69,12 @@ class SshKeyStepTest {
                 .containsExactlyInAnyOrder(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE);
         // Only the encryption probe ran; no ssh-keygen -p call.
         assertThat(runner.captureCalls).hasSize(1);
-        assertThat(runner.captureCalls.get(0))
-                .containsSubsequence("ssh-keygen", "-y", "-P", "", "-f", src.toString());
+        assertThat(runner.captureCalls.get(0)).containsSubsequence("ssh-keygen", "-y", "-P", "", "-f", src.toString());
     }
 
     @Test
-    void flag_driven_encrypted_key_routes_through_decryptor_without_mutating_source(@TempDir Path tmp) throws Exception {
+    void flag_driven_encrypted_key_routes_through_decryptor_without_mutating_source(@TempDir Path tmp)
+            throws Exception {
         Path src = tmp.resolve("src-encrypted-key");
         Files.write(src, PRIVATE_KEY_BYTES);
         byte[] sourceBytesBefore = Files.readAllBytes(src);
@@ -124,8 +124,7 @@ class SshKeyStepTest {
         FakeProcessRunner runner = new FakeProcessRunner();
         FakeConsoleIO io = new FakeConsoleIO();
 
-        assertThatThrownBy(() -> step(runner, io, tmp.resolve("ssh-dir"))
-                        .run(missing, null, null, out, null))
+        assertThatThrownBy(() -> step(runner, io, tmp.resolve("ssh-dir")).run(missing, null, null, out, null))
                 .isInstanceOf(IOException.class)
                 .hasMessageContaining("SSH key not found");
     }
@@ -215,9 +214,8 @@ class SshKeyStepTest {
         step(runner, io, sshDir).run(null, null, null, out, null);
 
         // Two "Not found:" lines emitted before the successful match.
-        long notFoundCount = io.printed.stream()
-                .filter(s -> s.contains("Not found:"))
-                .count();
+        long notFoundCount =
+                io.printed.stream().filter(s -> s.contains("Not found:")).count();
         assertThat(notFoundCount).isEqualTo(2);
         assertThat(Files.readAllBytes(out)).isEqualTo(PRIVATE_KEY_BYTES);
     }
