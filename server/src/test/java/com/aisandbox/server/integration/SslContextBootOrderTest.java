@@ -225,26 +225,36 @@ class SslContextBootOrderTest {
     }
 
     /**
-     * Round-2 H2C+TLS regression guard.
+     * Round-3 ALPN-stays-on-HTTP/1.1 regression guard.
      *
-     * <p>{@code NettyServerCustomizer#applyTls} declares the listener's
-     * protocol set as {@code HTTP11, H2} (commit {@code fe0420f}) and
-     * {@code ReloadableSslContextHolder.rebuild(...)} advertises
-     * {@code "h2"} ahead of {@code "http/1.1"} in the ALPN list. This
-     * test does a real TLS handshake against the running server and
-     * asserts the negotiated application protocol is {@code "h2"}.
+     * <p>v0.0.6 deliberately drops HTTP/2: under H2, Reactor Netty's
+     * per-request stream channel does not inherit the parent channel's
+     * {@code IDENTITY_ATTR}, so {@code MtlsEnforcementFilter} sees a
+     * null identity on every request and rejects with 401 — see commit
+     * {@code 2a1779e} for the full cascade analysis. After the H2 drop,
+     * {@code NettyServerCustomizer#applyTls} declares the listener's
+     * protocol set as {@code HTTP11} only and
+     * {@code ReloadableSslContextHolder.rebuild(...)} advertises just
+     * {@code "http/1.1"} via ALPN.
      *
-     * <p>Failure modes this guards against:
+     * <p>This test does a real TLS handshake against the running server,
+     * offering BOTH {@code "h2"} AND {@code "http/1.1"} from the client
+     * side, and asserts the server-driven negotiation lands on
+     * {@code "http/1.1"}. Keeping {@code "h2"} on the client list is
+     * intentional — trimming the client offer would make the assertion
+     * tautological. The point is to prove the SERVER is the side
+     * driving the choice (because the server's ALPN list contains only
+     * {@code "http/1.1"}), not that we asked for {@code "http/1.1"} and
+     * got back what we asked for.
+     *
+     * <p>Failure mode this guards against:
      *
      * <ul>
-     *   <li>Someone re-adds {@code server.http2.enabled: true} to
-     *       {@code application.yaml} → Spring picks {@code H2C} → bind
-     *       fails (covered by the listener-bound test above) OR a
-     *       silent regression where the customizer's {@code .protocol(...)}
-     *       call is dropped and ALPN downgrades to {@code http/1.1}.</li>
-     *   <li>Someone drops {@code "h2"} from the holder's ALPN list →
-     *       the TLS handshake completes but {@code h2} is never offered,
-     *       so negotiation falls through to {@code http/1.1}.</li>
+     *   <li>Someone re-adds {@code "h2"} to the holder's ALPN list
+     *       without also re-adding {@code .protocol(HttpProtocol.H2)}
+     *       to the customizer → ALPN negotiates {@code h2} but the
+     *       server can't speak it, producing the protocol-mismatch
+     *       confusion that motivated dropping H2 from v0.0.6.</li>
      * </ul>
      *
      * <p>Reads the ALPN result directly from the SSLEngine via
@@ -252,20 +262,22 @@ class SslContextBootOrderTest {
      * completion. This is the unambiguous TLS-layer assertion — it
      * sidesteps higher-level HTTP-client behaviour (downgrade rules,
      * version negotiation, etc.) and tests exactly the
-     * application-protocol selection that fe0420f's wiring is supposed
-     * to deliver.
+     * application-protocol selection the production wiring delivers.
      */
     @Test
-    void alpn_negotiates_h2_over_tls() throws Exception {
+    void alpn_negotiates_http_1_1_over_tls() throws Exception {
         assertThat(port).isGreaterThan(0);
 
-        // Client-side SslContext mirroring the production stack:
+        // Client-side SslContext mirroring the v0.0.6 production stack:
         //   - SslProvider.JDK matches the holder.
         //   - InsecureTrustManagerFactory bypasses chain + hostname
         //     verification; chain verification is owned by
         //     AllowlistTrustManagerTest, not this test.
-        //   - applicationProtocolConfig advertises "h2","http/1.1" in
-        //     that order so the server-side preference list selects h2.
+        //   - applicationProtocolConfig offers "h2","http/1.1" — keeping
+        //     "h2" on the OFFER list (despite the server no longer
+        //     speaking it) is what proves the server is the side driving
+        //     the choice. Trimming to "http/1.1" only would make the
+        //     assertion below tautological.
         SslContext clientCtx = SslContextBuilder.forClient()
                 .sslProvider(SslProvider.JDK)
                 .trustManager(InsecureTrustManagerFactory.INSTANCE)
@@ -302,7 +314,7 @@ class SslContextBootOrderTest {
             });
             b.connect("127.0.0.1", port).sync();
             String alpn = negotiated.get(15, TimeUnit.SECONDS);
-            assertThat(alpn).isEqualTo("h2");
+            assertThat(alpn).isEqualTo("http/1.1");
         } finally {
             group.shutdownGracefully();
         }
