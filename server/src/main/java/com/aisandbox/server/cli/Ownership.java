@@ -28,7 +28,7 @@ import java.nio.file.attribute.UserPrincipalLookupService;
  * {@code PkiInitCommand.Init}; lifted so {@link SecretsSeedCommand} (and
  * any future install-time CLI step) can reuse the same chown contract.
  */
-record Ownership(UserPrincipal owner, GroupPrincipal group) {
+public record Ownership(UserPrincipal owner, GroupPrincipal group) {
 
     /**
      * Resolve {@code <user>:<user>} once. Returns {@code null} when the
@@ -44,7 +44,7 @@ record Ownership(UserPrincipal owner, GroupPrincipal group) {
      *     lookup fails ({@code "pki init"}, {@code "secrets seed"} —
      *     so the message points operators back at the right command).
      */
-    static Ownership resolve(String user, String commandLabel) {
+    public static Ownership resolve(String user, String commandLabel) {
         UserPrincipalLookupService lookup =
                 FileSystems.getDefault().getUserPrincipalLookupService();
         try {
@@ -60,14 +60,14 @@ record Ownership(UserPrincipal owner, GroupPrincipal group) {
     }
 
     /** Chown a single file or directory to {@code <user>:<user>}. */
-    void chown(Path p) throws IOException {
+    public void chown(Path p) throws IOException {
         PosixFileAttributeView view = Files.getFileAttributeView(p, PosixFileAttributeView.class);
         view.setOwner(owner);
         view.setGroup(group);
     }
 
     /** Recursive chown of every entry under {@code root} (root itself included). */
-    void chownTree(Path root) throws IOException {
+    public void chownTree(Path root) throws IOException {
         try (var stream = Files.walk(root)) {
             for (var it = stream.iterator(); it.hasNext(); ) {
                 chown(it.next());
