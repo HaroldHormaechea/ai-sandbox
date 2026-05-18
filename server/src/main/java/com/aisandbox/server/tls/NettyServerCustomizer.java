@@ -16,6 +16,7 @@ import org.springframework.boot.reactor.netty.NettyReactiveWebServerFactory;
 import org.springframework.boot.web.server.WebServerFactoryCustomizer;
 import org.springframework.context.annotation.Profile;
 import org.springframework.stereotype.Component;
+import reactor.netty.http.HttpProtocol;
 import reactor.netty.http.server.HttpServer;
 
 /**
@@ -56,6 +57,12 @@ public class NettyServerCustomizer implements WebServerFactoryCustomizer<NettyRe
 
     private HttpServer applyTls(HttpServer server) {
         return server.host(props.tls().bindAddress())
+                // Single source of truth for the listener's protocol set.
+                // application.yaml deliberately does NOT set server.http2.enabled —
+                // if it did, Spring would pick H2C and the .secure() call below would
+                // fail at bind. ALPN advertisements ("h2","http/1.1") are owned by
+                // ReloadableSslContextHolder.rebuild(); keep the two in sync.
+                .protocol(HttpProtocol.HTTP11, HttpProtocol.H2)
                 .doOnChannelInit((observer, channel, address) -> {
                     // Install the rate-limit handler upstream of every
                     // codec — Reactor-Netty's pipeline names: codec, ssl,
