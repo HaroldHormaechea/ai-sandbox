@@ -343,6 +343,8 @@ jobs:
                       fi
                       if ! kill -0 "$SERVER_PID" 2>/dev/null; then
                           echo "FAIL: server JVM exited before port 12410 came up." >&2
+                          echo "── server stdout (tail) ──" >&2
+                          tail -120 /tmp/server.out >&2
                           echo "── server stderr (tail) ──" >&2
                           tail -80 /tmp/server.err >&2
                           exit 1
@@ -351,6 +353,8 @@ jobs:
                   done
                   if [ "$ready" -ne 1 ]; then
                       echo "FAIL: port 12410 never accepted a connection in 60s." >&2
+                      echo "── server stdout (tail) ──" >&2
+                      tail -120 /tmp/server.out >&2
                       echo "── server stderr (tail) ──" >&2
                       tail -80 /tmp/server.err >&2
                       kill -TERM "$SERVER_PID" 2>/dev/null || true
@@ -377,6 +381,8 @@ jobs:
                       echo "FAIL: /v1/healthz returned $http_code (expected 200 or 503)." >&2
                       echo "── response body ──" >&2
                       cat /tmp/health.body >&2 || true
+                      echo "── server stdout (tail) ──" >&2
+                      tail -120 /tmp/server.out >&2
                       echo "── server stderr (tail) ──" >&2
                       tail -80 /tmp/server.err >&2
                       kill -TERM "$SERVER_PID" 2>/dev/null || true
