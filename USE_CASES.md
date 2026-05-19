@@ -18,4 +18,5 @@ Statuses:
 | 06 | [use-cases/06-complete-server-install-onboarding.md](use-cases/06-complete-server-install-onboarding.md) | Complete server-install onboarding | done | 2026-05-18 |
 | 07 | [use-cases/07-http2-reenablement-v008-bundle.md](use-cases/07-http2-reenablement-v008-bundle.md) | HTTP/2 re-enablement + v0.0.8 tactical bundle | done | 2026-05-19 |
 | 08 | [use-cases/08-aisandboxctl-cli-wrapper.md](use-cases/08-aisandboxctl-cli-wrapper.md) | aisandboxctl CLI wrapper | done | 2026-05-19 |
+| 09 | [use-cases/09-spki-cert-pin-algorithm.md](use-cases/09-spki-cert-pin-algorithm.md) | SPKI cert-pin algorithm reconciliation | in-progress | 2026-05-19 |
 
