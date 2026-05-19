@@ -87,7 +87,7 @@ ai-sandbox:
     # (mode 0700, owned by ai-sandbox-server); redemption deletes them
     # atomically, so unredeemed/expired tokens leave no cert behind.
     enrollment:
-      dir: /etc/ai-sandbox-server/enrollment
+      dir: /var/lib/ai-sandbox-server/enrollment
       # Token lifetime in minutes (AC32 default).
       default-ttl-minutes: 10
       # Per-IP token bucket. 1 redemption per 60 s by default (AC34).

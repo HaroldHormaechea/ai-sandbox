@@ -105,7 +105,7 @@ public record ServerProperties(
                 audit,
                 shutdown,
                 streams,
-                new Enrollment(Path.of("/etc/ai-sandbox-server/enrollment"), 10, 1, 60));
+                new Enrollment(Path.of("/var/lib/ai-sandbox-server/enrollment"), 10, 1, 60));
     }
 
     public record Tls(@Min(1) int port, @NotBlank String bindAddress) {}
