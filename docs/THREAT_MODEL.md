@@ -236,10 +236,10 @@ not the P12 passphrase. The response carries
 the client can sanity-check without hard-coding the convention.
 Operators MUST NOT redirect the response body to disk.
 
-### Operator hygiene for `/etc/ai-sandbox-server/enrollment/`
+### Operator hygiene for `/var/lib/ai-sandbox-server/enrollment/`
 
 **Threat.** The token store lives at
-`/etc/ai-sandbox-server/enrollment/` by default (operator-owned, mode
+`/var/lib/ai-sandbox-server/enrollment/` by default (operator-owned, mode
 0700). A host-level intruder with read access there can lift unredeemed
 tokens and pre-empt the legitimate enrollment.
 
