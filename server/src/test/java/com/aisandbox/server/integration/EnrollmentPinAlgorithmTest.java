@@ -143,6 +143,47 @@ import org.springframework.test.context.DynamicPropertySource;
  * can use it without dragging in a Spring context, per its class
  * Javadoc). This avoids wiring the full UC-04 mint pipeline just to
  * obtain a redeemable token.
+ *
+ * <h2>Test-first cascade — original false-positive analysis</h2>
+ *
+ * <p>An earlier revision of this test had {@code
+ * TRUST_ALL.getAcceptedIssuers()} returning {@code new
+ * X509Certificate[0]} (mirroring {@link MtlsDispatchOverH2Test}'s
+ * trust manager, which is fine THERE because the JDK
+ * {@code HttpClient} does not consult {@code acceptedIssuers} during
+ * pin verification — it does not perform pinning). With an empty
+ * array, OkHttp 5.3.2's {@code BasicCertificateChainCleaner} builds
+ * its {@code BasicTrustRootIndex} with no roots; the cleaner cannot
+ * walk the self-signed server chain to any trusted issuer and throws
+ * {@code SSLPeerUnverifiedException: Failed to find a trusted cert
+ * that signed …}; {@code Handshake.peerCertificates_delegate$lambda$0}
+ * silently swallows that exception (its bytecode exception table maps
+ * the throw site to a returns-empty-list catch arm); the
+ * {@code CertificatePinner} then iterates over an empty peer-cert
+ * chain, finds zero matches, and throws
+ * {@code Certificate pinning failure!}. The pinner NEVER runs SPKI
+ * computation against the actual server cert — so the failure trace
+ * is identical pre-fix and post-fix, algorithm-independent.
+ *
+ * <p>The original Phase 2b "pre-fix failing as expected" cascade
+ * signal at checkpoint {@code 1d47725} walked into exactly that trap.
+ * The developer's bytecode-level audit during Phase 2c
+ * ({@code javap -c} on {@code Handshake.class} + {@code
+ * BasicCertificateChainCleaner.class}) surfaced the issue. The fix is
+ * the one-line change in this class's {@link
+ * #TRUST_ALL}{@code .getAcceptedIssuers}: return the actual
+ * {@code SERVER.certificate()} so the cleaner resolves the
+ * self-signed chain to itself, {@code peerCertificates} is non-empty,
+ * and the pinner genuinely computes SPKI on the cert — making the
+ * test's pass/fail signal track the production
+ * {@code ClientInviteCommand.autoDiscoverPin} algorithm choice as
+ * intended.
+ *
+ * <p>Post-fix verification (production at {@code ca0afb8}): the test
+ * passes. If a future regression flips {@code autoDiscoverPin} back
+ * to the full-DER algorithm, the {@code CertificatePinner.check$okhttp}
+ * call will surface that exception with the SPKI-vs-pin mismatch as
+ * its REAL cause, not a phantom empty-chain trap.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 class EnrollmentPinAlgorithmTest {
@@ -158,11 +199,16 @@ class EnrollmentPinAlgorithmTest {
 
     /**
      * Server material whose cert is what the OkHttp client must pin
-     * against. Captured at static-init time so the test method can
+     * against. Captured at static-init time so (a) the test method can
      * reflect the SAME {@code pki/server.crt} the Spring Boot context
-     * loads at {@code /v1/enrollment} bind time.
+     * loads at {@code /v1/enrollment} bind time, and (b) the
+     * {@link #TRUST_ALL} trust manager's
+     * {@code getAcceptedIssuers()} can return it as the trust root
+     * OkHttp's {@code BasicCertificateChainCleaner} uses to materialise
+     * the peer cert chain the pinner verifies against (see class
+     * Javadoc § "Test-first cascade — original false-positive
+     * analysis").
      */
-    @SuppressWarnings("unused") // kept for symmetry with MtlsDispatchOverH2Test + future use
     private static final CertFixtures.ServerMaterial SERVER;
 
     static {
@@ -482,7 +528,28 @@ class EnrollmentPinAlgorithmTest {
 
         @Override
         public X509Certificate[] getAcceptedIssuers() {
-            return new X509Certificate[0];
+            // UC-09 § AC4 cascade-signal correctness — return the SERVER
+            // cert (not an empty array). OkHttp 5.3.2's
+            // BasicCertificateChainCleaner uses BasicTrustRootIndex,
+            // which is built from this list, to walk the presented chain
+            // up to a trusted root. With an empty array
+            // BasicTrustRootIndex.findByIssuerAndSignature() returns null
+            // → the cleaner throws SSLPeerUnverifiedException ("Failed to
+            // find a trusted cert that signed…") → Handshake.peerCertificates_delegate$lambda$0
+            // silently catches it (exception table in Handshake.class
+            // confirms) → peerCertificates is an empty list →
+            // CertificatePinner iterates nothing → throws "Certificate
+            // pinning failure!" — REGARDLESS of which algorithm
+            // ClientInviteCommand.autoDiscoverPin uses. That was the
+            // false-positive trap the original "pre-fix failing as
+            // expected" signal walked into.
+            //
+            // Returning the self-signed SERVER cert lets the cleaner
+            // resolve the chain to itself; peerCertificates is non-empty;
+            // the pinner computes SPKI on the real cert; the test's
+            // pass/fail signal genuinely tracks the production
+            // autoDiscoverPin algorithm.
+            return new X509Certificate[] {SERVER.certificate()};
         }
     };
 }
