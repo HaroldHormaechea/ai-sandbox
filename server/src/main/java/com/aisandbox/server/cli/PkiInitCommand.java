@@ -332,11 +332,21 @@ public class PkiInitCommand implements Runnable {
         }
 
         /**
-         * Append {@code raw} to {@code out} iff its lowercased form is not
+         * Append {@code raw} to {@code out} iff its canonical form is not
          * already present in {@code dedup}. Blank / null entries are dropped.
-         * Malformed entries are passed through verbatim so the cert
-         * generator's parser can produce the canonical error message at
-         * mint time (rather than us duplicating its validation here).
+         * Malformed entries (no {@code ':'}) are passed through verbatim so
+         * the cert generator's parser can produce the canonical error
+         * message at mint time (rather than us duplicating its validation
+         * here).
+         *
+         * <p><b>Canonical form:</b> tag uppercased ({@code DNS:}, {@code IP:}),
+         * value lowercased. {@code SelfSignedServerCertGenerator.parseSanEntries}
+         * does a case-sensitive switch on the tag, so an emitted lowercase
+         * {@code dns:} would crash mint — every entry the composer produces
+         * MUST carry the uppercase tag. Lowercasing the value half is what
+         * collapses {@code DNS:Foo} and {@code DNS:foo} to a single entry;
+         * IP values are unaffected by case folding (digits) but get the
+         * same treatment for uniformity.
          */
         private static void addSanEntry(List<String> out, LinkedHashSet<String> dedup, String raw) {
             if (raw == null) {
@@ -346,11 +356,18 @@ public class PkiInitCommand implements Runnable {
             if (entry.isEmpty()) {
                 return;
             }
-            // Lowercase the whole thing for the dedup key. For DNS this
-            // matches the documented case-fold; for IP it is harmless
-            // (IPv6 hex digits are case-insensitive). The emitted form
-            // is the lowercased one — callers see the canonical case.
-            String canonical = entry.toLowerCase(Locale.ROOT);
+            int colon = entry.indexOf(':');
+            String canonical;
+            if (colon < 0) {
+                // Malformed — passed through so the parser emits the
+                // canonical error message. dedup key matches input so
+                // duplicates are still suppressed.
+                canonical = entry;
+            } else {
+                String tag = entry.substring(0, colon).toUpperCase(Locale.ROOT);
+                String value = entry.substring(colon + 1).toLowerCase(Locale.ROOT);
+                canonical = tag + ":" + value;
+            }
             if (dedup.add(canonical)) {
                 out.add(canonical);
             }
