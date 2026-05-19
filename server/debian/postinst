@@ -77,9 +77,8 @@ ai-sandbox-server installed. Next steps:
 
   4. sudo systemctl enable --now ai-sandbox-server
 
-The bundled aisandboxctl jar is at /opt/ai-sandbox-server/lib/aisandboxctl.jar.
-Use it directly (`java -jar /opt/ai-sandbox-server/lib/aisandboxctl.jar ...`)
-or install a small wrapper script under /usr/local/bin/aisandboxctl.
+The CLI wrapper is at /usr/bin/aisandboxctl (a thin POSIX shell shim
+around the bundled aisandboxctl jar — `aisandboxctl --help` for usage).
 
 EOM
         ;;

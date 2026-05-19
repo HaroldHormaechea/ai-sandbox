@@ -179,18 +179,22 @@ sudo install -d -m 0755 /opt/ai-sandbox-server /opt/ai-sandbox-server/lib
 sudo install -d -m 0750 -o ai-sandbox-server -g ai-sandbox-server /var/log/ai-sandbox-server
 sudo unzip ai-sandbox-server-*.zip -d /opt/ai-sandbox-server
 
+# Symlink the CLI wrapper onto PATH.
+# Zip-install only — the .deb auto-installs /usr/bin/aisandboxctl.
+sudo ln -s /opt/ai-sandbox-server/bin/aisandboxctl /usr/local/bin/aisandboxctl
+
 # Generate server cert + key + empty allowlist + sample config.
-sudo java -jar /opt/ai-sandbox-server/lib/aisandboxctl.jar pki init
+sudo aisandboxctl pki init
 
 # Walk through the container's pre-flight state: SSH key for git, git
 # author identity, gh PAT, Claude pre-init. Every step has a CLI flag
 # so the same command can run unassisted under Ansible / cloud-init —
 # add `--no-gh` and/or `--no-claude-preinit` to opt out of optional
 # steps. Re-run with `--force` to refresh credentials when they expire.
-sudo java -jar /opt/ai-sandbox-server/lib/aisandboxctl.jar secrets seed
+sudo aisandboxctl secrets seed
 
 # Mint a client cert, then start the service.
-sudo java -jar /opt/ai-sandbox-server/lib/aisandboxctl.jar client mint alice --out /tmp/alice/
+sudo aisandboxctl client mint alice --out /tmp/alice/
 sudo install -m 0644 /opt/ai-sandbox-server/systemd/ai-sandbox-server.service \
     /etc/systemd/system/ai-sandbox-server.service
 sudo systemctl daemon-reload
