@@ -114,6 +114,20 @@ class DebPackageTest {
         for (String name : new String[] {"README.md", "openapi.yaml", "sample-config.yaml", "STREAM_PROTOCOL.md"}) {
             assertThat(contents).contains("/opt/ai-sandbox-server/" + name);
         }
+
+        // UC08 § AC1 — /usr/bin/aisandboxctl POSIX shell wrapper.
+        // The .deb owns this path directly (the zip-install path
+        // ships the same wrapper at bin/aisandboxctl and asks the
+        // operator to symlink it onto PATH). dpkg-deb -c MUST list
+        // the entry, and its mode column MUST start with -rwxr-xr-x
+        // (0755). The wrapper body itself (byte-equality with the
+        // repo source and the zip's bin/aisandboxctl) is asserted by
+        // ReleaseBundleTest.
+        String wrapperPath = "/usr/bin/aisandboxctl";
+        assertThat(contents).as("missing entry %s", wrapperPath).contains(wrapperPath);
+        assertThat(modeLineFor(contents, wrapperPath))
+                .as("mode on %s", wrapperPath)
+                .startsWith("-rwxr-xr-x");
     }
 
     @Test

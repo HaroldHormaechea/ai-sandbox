@@ -16,6 +16,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.concurrent.TimeUnit;
 import java.util.jar.JarInputStream;
 import java.util.jar.Manifest;
 import java.util.regex.Matcher;
@@ -51,6 +52,8 @@ class ReleaseBundleTest {
     private static final Path REPO_ROOT = PROJECT_DIR.getParent();
 
     private static final Path RELEASE_DIR = PROJECT_DIR.resolve("build").resolve("release");
+
+    private static final Path DIST_DIR = PROJECT_DIR.resolve("build").resolve("distributions");
 
     private static Path findZip() throws IOException {
         if (!Files.isDirectory(RELEASE_DIR)) {
@@ -251,6 +254,66 @@ class ReleaseBundleTest {
         assertThat(jarTitles.get("lib/aisandboxctl.jar")).isEqualTo("aisandboxctl");
     }
 
+    @Test
+    void bin_aisandboxctl_wrapper_present_executable_and_byte_identical_to_repo_source_and_to_deb_wrapper()
+            throws Exception {
+        Path zip = findZip();
+        assumeTrue(zip != null, "release bundle not built: ./gradlew :server:releaseBundle");
+
+        // UC08 § AC2 — three-way byte-equality of the aisandboxctl wrapper:
+        //   (a) on-disk repo source at server/wrapper/aisandboxctl
+        //   (b) the zip's bin/aisandboxctl
+        //   (c) the .deb's ./usr/bin/aisandboxctl
+        // All three MUST be byte-identical so the wrapper body that the
+        // .deb installs is the same one the zip operator drops on PATH
+        // and the same one a developer can `git blame`. Diverging copies
+        // would mean a packaging bug silently shipped a different shim
+        // on one install path. The same hardcoded `/usr/bin/java` line
+        // therefore covers both paths — see UC08 § AC4.
+
+        // (i) bin/aisandboxctl present at mode 0755 (UC08 § AC2).
+        Map<String, Integer> modes = readPosixModes(zip);
+        Integer wrapperMode = modes.get("bin/aisandboxctl");
+        assertThat(wrapperMode).as("mode of bin/aisandboxctl").isNotNull();
+        assertThat(wrapperMode & 0777).as("mode of bin/aisandboxctl").isEqualTo(0755);
+
+        // Read wrapper bytes from the zip once for both equality legs.
+        byte[] zipWrapperBytes;
+        try (ZipFile zf = new ZipFile(zip.toFile())) {
+            ZipEntry e = zf.getEntry("bin/aisandboxctl");
+            assertThat(e).as("entry bin/aisandboxctl").isNotNull();
+            try (InputStream in = zf.getInputStream(e)) {
+                zipWrapperBytes = in.readAllBytes();
+            }
+        }
+
+        // (ii) Bytes equal to the repo source. Bundling MUST be a verbatim
+        // copy — no shell expansions or templating happen at build time.
+        Path repoWrapper = PROJECT_DIR.resolve("wrapper").resolve("aisandboxctl");
+        assertThat(Files.exists(repoWrapper))
+                .as("repo wrapper source at %s", repoWrapper)
+                .isTrue();
+        byte[] onDiskBytes = Files.readAllBytes(repoWrapper);
+        assertThat(zipWrapperBytes)
+                .as("bin/aisandboxctl in zip byte-identical to %s", repoWrapper)
+                .isEqualTo(onDiskBytes);
+
+        // (iii) Bytes equal to the .deb's /usr/bin/aisandboxctl. Gated by
+        // dpkg-deb availability so this method runs cleanly on macOS /
+        // Alpine devboxes (matches DebPackageTest's portability stance);
+        // CI's Ubuntu runner always exercises it.
+        Path deb = findDeb();
+        assumeTrue(
+                deb != null,
+                "deb not built — run `./gradlew :server:debPackage`; CI release-install-smoke builds both .deb and zip");
+        assumeTrue(dpkgDebOnPath() != null, "dpkg-deb not on PATH — skipping .deb byte-equality leg");
+
+        byte[] debWrapperBytes = extractDebFile(deb, "./usr/bin/aisandboxctl");
+        assertThat(zipWrapperBytes)
+                .as("bin/aisandboxctl in zip byte-identical to ./usr/bin/aisandboxctl in .deb")
+                .isEqualTo(debWrapperBytes);
+    }
+
     // ── helpers ──────────────────────────────────────────────────────
 
     private static Set<String> readEntryNames(Path zip) throws IOException {
@@ -313,6 +376,73 @@ class ReleaseBundleTest {
 
     private static long u32(byte[] b, int o) {
         return (b[o] & 0xffL) | ((b[o + 1] & 0xffL) << 8) | ((b[o + 2] & 0xffL) << 16) | ((b[o + 3] & 0xffL) << 24);
+    }
+
+    /** Locate the freshly-built .deb under {@code server/build/distributions}; null when absent. */
+    private static Path findDeb() throws IOException {
+        if (!Files.isDirectory(DIST_DIR)) {
+            return null;
+        }
+        try (DirectoryStream<Path> ds = Files.newDirectoryStream(DIST_DIR, "ai-sandbox-server_*_amd64.deb")) {
+            for (Path p : ds) {
+                if (Files.isRegularFile(p)) {
+                    return p;
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Probe for {@code dpkg-deb} on the host PATH; returns the binary
+     * name when usable, null when missing. Mirrors {@link
+     * DebPackageTest}'s probe so the .deb byte-equality leg of the
+     * wrapper assertion skips cleanly on non-Debian hosts.
+     */
+    private static String dpkgDebOnPath() {
+        try {
+            Process p = new ProcessBuilder("dpkg-deb", "--version")
+                    .redirectErrorStream(true)
+                    .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+                    .start();
+            if (!p.waitFor(5, TimeUnit.SECONDS)) {
+                p.destroyForcibly();
+                return null;
+            }
+            return p.exitValue() == 0 ? "dpkg-deb" : null;
+        } catch (IOException | InterruptedException ignored) {
+            if (ignored instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
+            return null;
+        }
+    }
+
+    /**
+     * Extract a single file from a binary .deb without unpacking the
+     * whole data archive. Pipeline: {@code dpkg-deb --fsys-tarfile <deb>
+     * | tar -xO <pathInDeb>} (Java 9+ {@link ProcessBuilder#startPipeline}).
+     * Caller is responsible for gating on {@link #dpkgDebOnPath()}.
+     */
+    private static byte[] extractDebFile(Path deb, String pathInDeb) throws IOException, InterruptedException {
+        List<ProcessBuilder> builders = List.of(
+                new ProcessBuilder("dpkg-deb", "--fsys-tarfile", deb.toString()),
+                new ProcessBuilder("tar", "-xO", pathInDeb));
+        List<Process> procs = ProcessBuilder.startPipeline(builders);
+        Process last = procs.get(procs.size() - 1);
+        byte[] out = last.getInputStream().readAllBytes();
+        for (Process p : procs) {
+            if (!p.waitFor(60, TimeUnit.SECONDS)) {
+                p.destroyForcibly();
+                throw new IOException("pipeline timed out extracting " + pathInDeb + " from " + deb);
+            }
+        }
+        for (Process p : procs) {
+            if (p.exitValue() != 0) {
+                throw new IOException("non-zero exit (" + p.exitValue() + ") extracting " + pathInDeb + " from " + deb);
+            }
+        }
+        return out;
     }
 
     @SuppressWarnings("unused") // future-proof helper, currently inlined where needed
