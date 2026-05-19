@@ -530,12 +530,16 @@ jobs:
                   # value).
                   # UC-07 AC4 regression guard (softened in UC-08 PR #10 follow-up).
                   # curl 8.x verbose mode does NOT print HTTP/2 SETTINGS frames on
-                  # Ubuntu 24.04's nghttp2 build, so the probe returns empty even
+                  # the Ubuntu 24.04 nghttp2 build, so the probe returns empty even
                   # when the server advertises maxConcurrentStreams(10). Treat
                   # empty as warn-skip; fail only when the probe returns a concrete
-                  # non-10 value. A proper fix would switch to nghttp2-client's
-                  # `nghttp -nv --get-assert` or a Java h2-aware client; deferred
-                  # as a follow-up ticket.
+                  # non-10 value. A proper fix would switch to the nghttp2-client
+                  # binary (nghttp -nv --get-assert) or a Java h2-aware client;
+                  # deferred as a follow-up ticket.
+                  # NB: keep this comment block apostrophe-free — the outer
+                  # bash -euxc heredoc is opened with a single quote that
+                  # would be closed by the first stray apostrophe in any
+                  # line below.
                   streams_n="$(grep -oiE "max[_ ]concurrent[_ ]streams[^0-9]*[0-9]+" /tmp/curl-h2.verbose \
                       | grep -oE "[0-9]+\$" | tail -1 || true)"
                   if [ -z "$streams_n" ]; then
@@ -821,12 +825,16 @@ jobs:
                   # value).
                   # UC-07 AC4 regression guard (softened in UC-08 PR #10 follow-up).
                   # curl 8.x verbose mode does NOT print HTTP/2 SETTINGS frames on
-                  # Ubuntu 24.04's nghttp2 build, so the probe returns empty even
+                  # the Ubuntu 24.04 nghttp2 build, so the probe returns empty even
                   # when the server advertises maxConcurrentStreams(10). Treat
                   # empty as warn-skip; fail only when the probe returns a concrete
-                  # non-10 value. A proper fix would switch to nghttp2-client's
-                  # `nghttp -nv --get-assert` or a Java h2-aware client; deferred
-                  # as a follow-up ticket.
+                  # non-10 value. A proper fix would switch to the nghttp2-client
+                  # binary (nghttp -nv --get-assert) or a Java h2-aware client;
+                  # deferred as a follow-up ticket.
+                  # NB: keep this comment block apostrophe-free — the outer
+                  # bash -euxc heredoc is opened with a single quote that
+                  # would be closed by the first stray apostrophe in any
+                  # line below.
                   streams_n="$(grep -oiE "max[_ ]concurrent[_ ]streams[^0-9]*[0-9]+" /tmp/curl-h2.verbose \
                       | grep -oE "[0-9]+\$" | tail -1 || true)"
                   if [ -z "$streams_n" ]; then
