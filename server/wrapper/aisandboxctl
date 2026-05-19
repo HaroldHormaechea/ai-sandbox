@@ -1,0 +1,24 @@
+#!/bin/sh
+# ai-sandbox-server / aisandboxctl — thin POSIX shell wrapper around
+# the bundled CLI fat jar at /opt/ai-sandbox-server/lib/aisandboxctl.jar.
+#
+# Hardcode /usr/bin/java rather than resolving via $JAVA_HOME or PATH:
+#
+#   * Matches systemd/ai-sandbox-server.service's ExecStart=/usr/bin/java
+#     so wrapper and service use the same JRE byte-for-byte.
+#   * Immune to sudo's default secure_path / env-pruning behaviour. PATH-
+#     based resolution under `sudo` often picks up a different java (or
+#     none at all) than an unprivileged shell would, which is exactly
+#     the failure mode this wrapper exists to prevent.
+#   * The .deb's `Depends: openjdk-21-jre-headless | openjdk-21-jdk-headless`
+#     guarantees /usr/bin/java exists on every install path. The zip-install
+#     README's prereqs (apt install openjdk-21-jdk-headless) provides the
+#     same guarantee for hand-installs.
+#
+# `exec` replaces this shell with the JVM so signals (Ctrl-C, SIGTERM)
+# and the exit code passthrough cleanly — operators see no shell stack
+# frame in process listings, and existing scripts that invoked the long
+# `java -jar …` form see no behavioural change when they switch to the
+# wrapper.
+set -e
+exec /usr/bin/java -jar /opt/ai-sandbox-server/lib/aisandboxctl.jar "$@"
