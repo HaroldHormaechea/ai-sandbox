@@ -95,6 +95,13 @@ dependencies {
     testImplementation(libs.awaitility)
     testImplementation(libs.testcontainers.core)
     testImplementation(libs.testcontainers.junit)
+    // UC09 § AC4 — EnrollmentPinAlgorithmTest wires a real OkHttp client
+    // with CertificatePinner configured from a freshly-issued QR pin and
+    // performs an end-to-end POST /v1/enrollment. The :android module
+    // already pins OkHttp at libs.okhttp (5.3.2); reusing the same
+    // version-catalog entry keeps server-side and Android-side OkHttp
+    // versions aligned (matters for the SPKI-pin contract under test).
+    testImplementation(libs.okhttp)
 }
 
 tasks.withType<JavaCompile>().configureEach {
