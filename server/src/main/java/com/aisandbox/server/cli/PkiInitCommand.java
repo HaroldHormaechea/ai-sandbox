@@ -3,11 +3,15 @@ package com.aisandbox.server.cli;
 import com.aisandbox.server.cli.pki.PemWriter;
 import com.aisandbox.server.cli.pki.SelfSignedServerCertGenerator;
 import java.io.IOException;
+import java.net.InetAddress;
+import java.net.UnknownHostException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.concurrent.Callable;
 import picocli.CommandLine.Command;
 import picocli.CommandLine.Option;
@@ -67,7 +71,7 @@ public class PkiInitCommand implements Runnable {
         Path clientsDir = Path.of("/etc/ai-sandbox-server/clients");
 
         @Option(names = "--enrollment-dir", description = "Enrollment-token directory (default ${DEFAULT-VALUE})")
-        Path enrollmentDir = Path.of("/etc/ai-sandbox-server/enrollment");
+        Path enrollmentDir = Path.of("/var/lib/ai-sandbox-server/enrollment");
 
         @Option(names = "--secrets-dir", description = "Container-mounted secrets directory (default ${DEFAULT-VALUE})")
         Path secretsDir = Path.of("/etc/ai-sandbox-server/secrets");
@@ -83,6 +87,29 @@ public class PkiInitCommand implements Runnable {
 
         @Option(names = "--cn", description = "Server cert Common Name (default ${DEFAULT-VALUE})")
         String cn = "ai-sandbox-server";
+
+        // UC05 § AC15 — SAN composition. Modern TLS clients ignore CN and
+        // verify against the SubjectAlternativeName extension only; an
+        // operator-issued mint without SAN cannot be verified by curl/
+        // OkHttp/browsers even though the cert is otherwise valid.
+        //
+        // `--san` is both repeatable (--san DNS:a --san IP:b) and
+        // comma-splittable (--san DNS:a,IP:b); picocli supports both
+        // simultaneously with arity="0..*" + split=",".
+        @Option(
+                names = "--san",
+                arity = "0..*",
+                split = ",",
+                description = "SAN entries: DNS:<host> or IP:<addr>. Repeatable and comma-splittable.")
+        List<String> sanEntries = new ArrayList<>();
+
+        @Option(names = "--hostname", description = "Convenience for --san DNS:<value>.")
+        String hostnameOption;
+
+        @Option(
+                names = "--no-auto-hostname",
+                description = "Disable auto-derivation of DNS:<getLocalHost().getHostName()>.")
+        boolean noAutoHostname;
 
         @Option(names = "--user", description = "System user to own the directory tree (default ${DEFAULT-VALUE})")
         String systemUserName = "ai-sandbox-server";
@@ -163,13 +190,18 @@ public class PkiInitCommand implements Runnable {
             ensureDir(etcRoot, "rwxr-x---", posix);
             ensureDir(pkiDir, "rwx------", posix);
             ensureDir(clientsDir, "rwx------", posix);
-            ensureDir(enrollmentDir, "rwx------", posix);
             ensureDir(secretsDir, "rwx------", posix);
             Path sessionsParent = sessionsDir.getParent();
             if (sessionsParent != null) {
                 ensureDir(sessionsParent, "rwxr-x---", posix);
             }
             ensureDir(sessionsDir, "rwxr-x---", posix);
+            // UC04 — enrollment dir moved to /var/lib/ai-sandbox-server/enrollment
+            // (FHS: writable runtime state belongs under /var/lib, not /etc).
+            // Created here, after sessionsDir, so its parent already exists at
+            // the right mode. Chown handled separately below — etcRoot's
+            // recursive chown no longer covers it.
+            ensureDir(enrollmentDir, "rwx------", posix);
             ensureDir(logDir, "rwxr-x---", posix);
 
             // Chown the entire tree to ai-sandbox-server:ai-sandbox-server.
@@ -185,14 +217,25 @@ public class PkiInitCommand implements Runnable {
                     ownership.chown(sessionsParent);
                 }
                 ownership.chownTree(sessionsDir);
+                // Enrollment dir lives under /var/lib (sibling of sessions),
+                // so it is not covered by the etcRoot chownTree above.
+                ownership.chownTree(enrollmentDir);
                 ownership.chownTree(logDir);
             }
 
             // 5. Cert mint (AC15). The key file gets mode 0600 explicitly,
             //    overriding the parent dir's permissions.
+            //
+            //    SAN composition (UC07): caller-supplied entries first,
+            //    then auto-derived hostname (unless --no-auto-hostname),
+            //    then loopback (DNS:localhost + IP:127.0.0.1). DNS values
+            //    are lowercased before dedup so '--san DNS:Foo --hostname foo'
+            //    collapses to one entry. See SelfSignedServerCertGenerator
+            //    for the on-the-wire encoding.
+            List<String> finalSan = composeSanEntries(sanEntries, hostnameOption, noAutoHostname);
             Path crt = pkiDir.resolve("server.crt");
             Path key = pkiDir.resolve("server.key");
-            var mat = new SelfSignedServerCertGenerator().generate(cn);
+            var mat = new SelfSignedServerCertGenerator().generate(cn, finalSan);
             PemWriter.writeCert(crt, mat.certificate());
             PemWriter.writePrivateKey(key, mat.keyPair().getPrivate());
             if (posix) {
@@ -220,6 +263,7 @@ public class PkiInitCommand implements Runnable {
             System.out.println("  user    : " + systemUserName);
             System.out.println("  cert    : " + crt + "  (mode 0644)");
             System.out.println("  key     : " + key + "  (mode 0600)");
+            System.out.println("  san     : " + (finalSan.isEmpty() ? "<none>" : String.join(", ", finalSan)));
             System.out.println("  clients : " + clientsDir + "  (mode 0700)");
             System.out.println("  enroll  : " + enrollmentDir + "  (mode 0700)");
             System.out.println("  secrets : " + secretsDir + "  (mode 0700)");
@@ -228,8 +272,88 @@ public class PkiInitCommand implements Runnable {
             System.out.println("  config  : " + configFile);
             System.out.println();
             System.out.println("Next: populate " + secretsDir + " with your SSH key (git-key) and optional gh-token,");
+            System.out.println(
+                    "      then: mint at least one client cert (aisandboxctl client mint <name>) — the server");
+            System.out.println("      refuses to start on an empty allowlist,");
             System.out.println("      then `systemctl enable --now ai-sandbox-server`.");
             return 0;
+        }
+
+        // ── SAN composition ──────────────────────────────────────────
+
+        /**
+         * Compose the final ordered, deduplicated SAN entry list per the
+         * documented policy (see class Javadoc):
+         *
+         * <ol>
+         *   <li>caller-supplied {@code --san} entries (preserved order)</li>
+         *   <li>{@code --hostname <X>} translated to {@code DNS:<X>}</li>
+         *   <li>{@code DNS:<getLocalHost().getHostName()>} unless {@code --no-auto-hostname}</li>
+         *   <li>{@code DNS:localhost}</li>
+         *   <li>{@code IP:127.0.0.1}</li>
+         * </ol>
+         *
+         * <p>Dedup uses a {@link LinkedHashSet} keyed on the lowercased entry
+         * (case-folding applied to the DNS value half so {@code DNS:Foo} and
+         * {@code DNS:foo} collapse). Order is preserved across the composition
+         * — the first occurrence wins. Blank / null entries are dropped.
+         *
+         * <p>{@link UnknownHostException} from {@link InetAddress#getLocalHost()}
+         * emits a single stderr warning and falls through to the loopback-only
+         * baseline (entries 4 + 5).
+         */
+        static List<String> composeSanEntries(List<String> sanEntries, String hostnameOption, boolean noAutoHostname) {
+            LinkedHashSet<String> dedup = new LinkedHashSet<>();
+            List<String> out = new ArrayList<>();
+
+            if (sanEntries != null) {
+                for (String e : sanEntries) {
+                    addSanEntry(out, dedup, e);
+                }
+            }
+            if (hostnameOption != null && !hostnameOption.isBlank()) {
+                addSanEntry(out, dedup, "DNS:" + hostnameOption.trim());
+            }
+            if (!noAutoHostname) {
+                try {
+                    String h = InetAddress.getLocalHost().getHostName();
+                    if (h != null && !h.isBlank()) {
+                        addSanEntry(out, dedup, "DNS:" + h);
+                    }
+                } catch (UnknownHostException uhe) {
+                    System.err.println("aisandboxctl pki init: warning — getLocalHost().getHostName() failed ("
+                            + uhe.getClass().getSimpleName()
+                            + "); falling through to loopback-only SAN. Pass --hostname or --san to fix.");
+                }
+            }
+            addSanEntry(out, dedup, "DNS:localhost");
+            addSanEntry(out, dedup, "IP:127.0.0.1");
+            return out;
+        }
+
+        /**
+         * Append {@code raw} to {@code out} iff its lowercased form is not
+         * already present in {@code dedup}. Blank / null entries are dropped.
+         * Malformed entries are passed through verbatim so the cert
+         * generator's parser can produce the canonical error message at
+         * mint time (rather than us duplicating its validation here).
+         */
+        private static void addSanEntry(List<String> out, LinkedHashSet<String> dedup, String raw) {
+            if (raw == null) {
+                return;
+            }
+            String entry = raw.trim();
+            if (entry.isEmpty()) {
+                return;
+            }
+            // Lowercase the whole thing for the dedup key. For DNS this
+            // matches the documented case-fold; for IP it is harmless
+            // (IPv6 hex digits are case-insensitive). The emitted form
+            // is the lowercased one — callers see the canonical case.
+            String canonical = entry.toLowerCase(Locale.ROOT);
+            if (dedup.add(canonical)) {
+                out.add(canonical);
+            }
         }
 
         // ── helpers ──────────────────────────────────────────────────
@@ -299,7 +423,7 @@ public class PkiInitCommand implements Runnable {
                         secrets:
                           dir: /etc/ai-sandbox-server/secrets
                         enrollment:
-                          dir: /etc/ai-sandbox-server/enrollment
+                          dir: /var/lib/ai-sandbox-server/enrollment
                         audit:
                           file: /var/log/ai-sandbox-server/audit.log
                     """;
