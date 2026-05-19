@@ -76,6 +76,20 @@ class EnrollmentClient(private val payload: QrPayload) {
             // Pin mismatch on the bootstrap request itself — extremely
             // suspicious. Emit the network event so the UI routes
             // straight to ServerIdentityChangedScreen.
+            //
+            // UC09 AC6 — the `<bootstrap>` sentinel exists because there is
+            // no observed pin to extract on the enrollment POST path: OkHttp
+            // aborts the TLS handshake before exposing the peer's SPKI to us,
+            // so we cannot fill in the real observed hash here.
+            // `NetworkEvent.PinMismatch` still needs a non-null value to
+            // render the dialog and route through the existing UI flow, so
+            // the sentinel substitutes. Pre-v0.0.10 this string specifically
+            // masked the UC09 algorithm bug — every enrollment hit this catch
+            // (server emitted full-DER hash, OkHttp verified SPKI; the two
+            // are never equal), and the UI said "pin mismatch" rather than
+            // "your server is computing the wrong algorithm." UC09's v0.0.10
+            // fix (SPKI on both sides) makes this path unreachable in the
+            // happy case; it remains the correct response to a genuine MITM.
             NetworkEvents.tryEmit(
                 NetworkEvent.PinMismatch(
                     expectedPinHex = payload.pinSha256Hex,
