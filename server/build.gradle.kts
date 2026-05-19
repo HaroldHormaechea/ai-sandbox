@@ -314,6 +314,18 @@ val releaseBundle by tasks.registering(Zip::class) {
         into("host/git-hooks")
         filePermissions { unix("rwxr-xr-x") }
     }
+    // UC08 § AC2 — the zip ships the same POSIX shell wrapper as the
+    // .deb, at bin/aisandboxctl (extracts to /opt/ai-sandbox-server/bin/
+    // aisandboxctl). The README's Install section asks the operator to
+    // `sudo ln -s /opt/ai-sandbox-server/bin/aisandboxctl /usr/local/bin/
+    // aisandboxctl` after unzip — the .deb install path symlinks
+    // /usr/bin/aisandboxctl automatically, the zip-install path does not.
+    // Same byte-identical wrapper body either way (asserted by the .deb
+    // smoke test and the ReleaseBundleTest sibling check).
+    from("$projectDir/wrapper/aisandboxctl") {
+        into("bin")
+        filePermissions { unix("rwxr-xr-x") }
+    }
 }
 
 // ── Debian package (.deb) — UC07 Feature E ───────────────────────────────────
@@ -423,6 +435,17 @@ val prepDebStaging by tasks.registering(Copy::class) {
         into("lib/systemd/system")
         filePermissions { unix("rw-r--r--") }
     }
+
+    // /usr/bin/aisandboxctl — UC08 § AC1. Thin POSIX shell wrapper that
+    // execs `/usr/bin/java -jar /opt/ai-sandbox-server/lib/aisandboxctl.jar`
+    // so operators can type `aisandboxctl …` instead of the long form.
+    // The .deb owns /usr/bin/aisandboxctl directly; the zip-install path
+    // ships the same wrapper under bin/ at the bundle root and asks the
+    // operator to symlink it onto PATH (see `releaseBundle` below).
+    from("$projectDir/wrapper/aisandboxctl") {
+        into("usr/bin")
+        filePermissions { unix("rwxr-xr-x") }
+    }
 }
 
 val debPackage by tasks.registering {
@@ -472,6 +495,13 @@ val debPackage by tasks.registering {
         // patterns are file-shaped, so DirectoryScanner reports zero
         // matching directories. No duplicate-entry collisions in the
         // resulting tar.
+        // ---- Named-file include exception (UC08) ----
+        // /usr/bin/aisandboxctl is a wrapper shim with no .sh suffix —
+        // adding it to Block 1 via an explicit `include name="usr/bin/
+        // aisandboxctl"` (with a matching `exclude` on Block 2) keeps
+        // the +x bit without broadening the *.sh pattern to /usr/bin.
+        // Future single-file executables under similar paths should
+        // follow the same named-file include/exclude pattern.
         //
         // Ant has its own classloader and does NOT see the buildscript
         // classpath by default — taskdef must be told where jdeb lives.
@@ -500,6 +530,7 @@ val debPackage by tasks.registering {
                 ) {
                     "include"("name" to "**/*.sh")
                     "include"("name" to "**/git-hooks/pre-commit")
+                    "include"("name" to "usr/bin/aisandboxctl")
                     "mapper"(
                         "type" to "perm",
                         "user" to "root",
@@ -514,6 +545,7 @@ val debPackage by tasks.registering {
                 ) {
                     "exclude"("name" to "**/*.sh")
                     "exclude"("name" to "**/git-hooks/pre-commit")
+                    "exclude"("name" to "usr/bin/aisandboxctl")
                     "mapper"(
                         "type" to "perm",
                         "user" to "root",

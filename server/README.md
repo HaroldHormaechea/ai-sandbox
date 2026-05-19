@@ -43,6 +43,8 @@ layout is:
 ├── lib/
 │   ├── aisandbox-server.jar       # Spring Boot server (manifest carries Implementation-Version)
 │   └── aisandboxctl.jar           # PKI / allowlist CLI
+├── bin/
+│   └── aisandboxctl               # POSIX shell wrapper around aisandboxctl.jar — symlink onto PATH (see Install § step 1b)
 ├── host/                          # UC02 host-script bundle (frozen at release)
 │   ├── spawn.sh   clean.sh   attach.sh   lib.sh   setup.sh
 │   ├── spawn.ps1  clean.ps1  attach.ps1  lib.ps1  setup.ps1
@@ -80,6 +82,21 @@ curl -fsSL -o /tmp/ai-sandbox-server.zip \
 sudo install -d /opt/ai-sandbox-server
 sudo unzip /tmp/ai-sandbox-server.zip -d /opt/ai-sandbox-server
 
+# 1b. Symlink the CLI wrapper onto PATH (zip-install only).
+#     The .deb install path drops /usr/bin/aisandboxctl automatically;
+#     the zip-install path leaves the wrapper at /opt/ai-sandbox-server/
+#     bin/aisandboxctl (where it lands when you unzip) and asks the
+#     operator to symlink it onto PATH. Either /usr/local/bin (the
+#     POSIX convention for operator-installed binaries) or any other
+#     directory on the service-user's PATH works.
+#
+#     Pre-v0.0.9 upgraders: if you had previously hand-rolled this
+#     symlink against /opt/ai-sandbox-server/lib/aisandboxctl.jar via
+#     a wrapper script of your own, point the symlink at the bundled
+#     wrapper instead and remove the old shim — `sudo ln -sf
+#     /opt/ai-sandbox-server/bin/aisandboxctl /usr/local/bin/aisandboxctl`.
+sudo ln -s /opt/ai-sandbox-server/bin/aisandboxctl /usr/local/bin/aisandboxctl
+
 # 2. One-shot per-host setup — creates the ai-sandbox-server system user,
 #    every operator-managed directory under /etc/ai-sandbox-server/,
 #    /var/lib/ai-sandbox-server/sessions/, /var/log/ai-sandbox-server/,
@@ -88,7 +105,7 @@ sudo unzip /tmp/ai-sandbox-server.zip -d /opt/ai-sandbox-server
 #    baked in.
 #
 #    Idempotent only with --force; refuses to overwrite by default.
-sudo java -jar /opt/ai-sandbox-server/lib/aisandboxctl.jar pki init
+sudo aisandboxctl pki init
 
 # 3. Walk through the container's pre-flight state: SSH key for git,
 #    git author identity, gh PAT, Claude pre-init. Every step has a
@@ -97,7 +114,7 @@ sudo java -jar /opt/ai-sandbox-server/lib/aisandboxctl.jar pki init
 #    out of optional steps. Re-run with `--force` to refresh creds
 #    when they expire. See the top-level README for the full at-rest
 #    security model and an unassisted-install flag example.
-sudo java -jar /opt/ai-sandbox-server/lib/aisandboxctl.jar secrets seed
+sudo aisandboxctl secrets seed
 
 # 4. Mint at least one client cert. The server refuses to start on an
 #    empty allowlist (the refuse-to-start gate is intentional — it
@@ -106,7 +123,7 @@ sudo java -jar /opt/ai-sandbox-server/lib/aisandboxctl.jar secrets seed
 #    window between `systemctl enable` and the first `client mint`).
 #    Pick a name for the bootstrap operator; subsequent clients are
 #    added the same way.
-sudo java -jar /opt/ai-sandbox-server/lib/aisandboxctl.jar client mint bootstrap --pem --out /tmp/bootstrap
+sudo aisandboxctl client mint bootstrap --pem --out /tmp/bootstrap
 
 # 5. systemd unit.
 sudo install -m 0644 /opt/ai-sandbox-server/systemd/ai-sandbox-server.service \
@@ -187,7 +204,7 @@ using the old `/etc/ai-sandbox-server/enrollment` path. To adopt the
 new path:
 
 ```bash
-sudo java -jar /opt/ai-sandbox-server/lib/aisandboxctl.jar pki init --force
+sudo aisandboxctl pki init --force
 ```
 
 This rewrites `/etc/ai-sandbox-server/config.yaml` with the new path,
@@ -215,7 +232,7 @@ either fail or get silently reverted on the next upgrade.
 - **`pki init` is the only `aisandboxctl` subcommand that requires
   root.** All other subcommands (`client mint`, `client invite`,
   `client list`, `client revoke`) run as `ai-sandbox-server`:
-  `sudo -u ai-sandbox-server java -jar /opt/ai-sandbox-server/lib/aisandboxctl.jar client mint alice ...`.
+  `sudo -u ai-sandbox-server aisandboxctl client mint alice ...`.
 - **`setup.sh` / `setup.ps1` are bundled but must not be invoked
   against the install dir** — see "What's in the bundle" above.
 - **The CI smoke test (`release-install-smoke` in `server-ci.yml`) is
@@ -228,10 +245,10 @@ either fail or get silently reverted on the next upgrade.
 
 ```bash
 # Mint a PKCS#12 bundle for a remote operator (passphrase prompted at the TTY).
-sudo java -jar /opt/ai-sandbox-server/lib/aisandboxctl.jar client mint alice --out /tmp/alice/
+sudo aisandboxctl client mint alice --out /tmp/alice/
 
 # Mint a PEM trio instead.
-sudo java -jar /opt/ai-sandbox-server/lib/aisandboxctl.jar client mint alice --pem --out /tmp/alice/
+sudo aisandboxctl client mint alice --pem --out /tmp/alice/
 
 # The minted bundle includes:
 #   alice.p12  (or alice.crt + alice.key with --pem)
@@ -241,10 +258,10 @@ sudo java -jar /opt/ai-sandbox-server/lib/aisandboxctl.jar client mint alice --p
 # automatically; the watcher picks it up within 1s.
 
 # Revoke. Tears down in-flight connections from that cert.
-sudo java -jar /opt/ai-sandbox-server/lib/aisandboxctl.jar client revoke alice
+sudo aisandboxctl client revoke alice
 
 # List currently-allowed certs.
-sudo java -jar /opt/ai-sandbox-server/lib/aisandboxctl.jar client list
+sudo aisandboxctl client list
 ```
 
 ## API surface (mTLS-gated, all paths)
