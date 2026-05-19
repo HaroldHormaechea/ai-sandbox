@@ -84,6 +84,19 @@ public class ClientInviteCommand implements Callable<Integer> {
     private static final Set<PosixFilePermission> MODE_600 =
             EnumSet.of(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE);
 
+    /**
+     * Final-token mode (UC07 Bug D). The tmp file is written 0600 (transient,
+     * before atomic rename); 0640 is applied to the canonical path AFTER the
+     * rename, so there is no momentary 0600 window on the public name. The
+     * group bit lets a non-root operator who happens to be in the
+     * {@code ai-sandbox-server} group inspect the token (e.g. when copy-pasting
+     * to debug a stalled enrollment) without sudo, while still keeping the
+     * world bit off. The server process itself reads the file via the owner
+     * bit (it runs as {@code ai-sandbox-server}).
+     */
+    private static final Set<PosixFilePermission> MODE_640 =
+            EnumSet.of(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE, PosixFilePermission.GROUP_READ);
+
     private static final Set<PosixFilePermission> MODE_700 = EnumSet.of(
             PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE, PosixFilePermission.OWNER_EXECUTE);
 
@@ -98,7 +111,9 @@ public class ClientInviteCommand implements Callable<Integer> {
             description = "Server PKI dir (where server.crt lives) (default /etc/ai-sandbox-server/pki)")
     Path pkiDir = Path.of("/etc/ai-sandbox-server/pki");
 
-    @Option(names = "--enrollment-dir", description = "Enrollment token store (default <pki-dir>/../enrollment).")
+    @Option(
+            names = "--enrollment-dir",
+            description = "Enrollment token store (default /var/lib/ai-sandbox-server/enrollment).")
     Path enrollmentDir;
 
     @Option(
@@ -128,8 +143,29 @@ public class ClientInviteCommand implements Callable<Integer> {
             return 2;
         }
 
-        Path effectiveEnrollmentDir = enrollmentDir != null ? enrollmentDir : defaultEnrollmentDir(pkiDir);
+        Path effectiveEnrollmentDir = enrollmentDir != null ? enrollmentDir : defaultEnrollmentDir();
+        // Track whether we will create the dir so we can chown it post-mkdir
+        // (chown-after-creation only — if the dir already exists, it was
+        // either created by `pki init` and already owned correctly, or by
+        // a sibling tool the operator is responsible for. We don't second-
+        // guess existing ownership here.)
+        boolean willCreateEnrollmentDir = !Files.isDirectory(effectiveEnrollmentDir);
         ensureDir(effectiveEnrollmentDir);
+
+        // UC07 Bug D — resolve ownership once at the top so we can chown
+        // both the (possibly freshly-created) dir and the final token
+        // file to ai-sandbox-server:ai-sandbox-server. Null on non-POSIX
+        // hosts (Windows) or when the system user is not present (unit
+        // tests, dev hosts); both branches skip chown silently.
+        Ownership ownership = isPosix() ? Ownership.resolve("ai-sandbox-server", "client invite") : null;
+        if (ownership != null && willCreateEnrollmentDir) {
+            try {
+                ownership.chown(effectiveEnrollmentDir);
+            } catch (IOException ioe) {
+                System.err.println("aisandboxctl client invite: warning — could not chown " + effectiveEnrollmentDir
+                        + ": " + ioe.getMessage());
+            }
+        }
 
         String pin = serverPin != null ? serverPin : autoDiscoverPin(pkiDir);
         if (pin == null) {
@@ -141,6 +177,30 @@ public class ClientInviteCommand implements Callable<Integer> {
         Instant expiresAt = Instant.now().plus(ttlDuration);
         Path file = fileFor(effectiveEnrollmentDir, token);
         writeTokenFile(file, token, name, expiresAt);
+
+        // UC07 Bug D — chown + chmod the final token file. Mode 0640 with
+        // owner=ai-sandbox-server makes the file readable by the server
+        // process (which runs as that user) and by operators in the
+        // ai-sandbox-server group, without exposing it world-wide. Apply
+        // AFTER the atomic rename so there is no 0600 → 0640 window on
+        // the canonical name (writeTokenFile leaves the path at 0600 from
+        // the tmp file). On non-POSIX hosts the setPosixFilePermissions
+        // call would throw; we skip both halves in that case.
+        if (isPosix()) {
+            try {
+                Files.setPosixFilePermissions(file, MODE_640);
+            } catch (UnsupportedOperationException ignored) {
+                // Non-POSIX FS — leave as-is.
+            }
+            if (ownership != null) {
+                try {
+                    ownership.chown(file);
+                } catch (IOException ioe) {
+                    System.err.println(
+                            "aisandboxctl client invite: warning — could not chown " + file + ": " + ioe.getMessage());
+                }
+            }
+        }
 
         String payload = buildQrPayload(serverUrl, token, expiresAt, pin);
         boolean ttyOut = outFile == null && System.console() != null;
@@ -165,14 +225,22 @@ public class ClientInviteCommand implements Callable<Integer> {
     }
 
     /**
-     * Default enrollment dir is a sibling of the PKI dir named
-     * {@code enrollment} — matches {@code application.yaml}'s default
-     * of {@code /etc/ai-sandbox-server/enrollment} when {@code pkiDir}
-     * is the standard {@code /etc/ai-sandbox-server/pki}.
+     * Default enrollment dir is the FHS-canonical runtime-state location
+     * at {@code /var/lib/ai-sandbox-server/enrollment} — matches the
+     * {@code application.yaml} default and what {@code aisandboxctl pki init}
+     * provisions. Previous releases derived this from the {@code --pki-dir}
+     * (sibling {@code ../enrollment}) but tokens are mutable runtime state,
+     * not PKI material, so they belong under {@code /var/lib} per FHS.
      */
-    static Path defaultEnrollmentDir(Path pkiDir) {
-        Path parent = pkiDir.getParent();
-        return parent != null ? parent.resolve("enrollment") : Path.of("enrollment");
+    static Path defaultEnrollmentDir() {
+        return Path.of("/var/lib/ai-sandbox-server/enrollment");
+    }
+
+    /** Same probe as {@link PkiInitCommand} — does the default FS support POSIX attribute views? */
+    private static boolean isPosix() {
+        return java.nio.file.FileSystems.getDefault()
+                .supportedFileAttributeViews()
+                .contains("posix");
     }
 
     /**

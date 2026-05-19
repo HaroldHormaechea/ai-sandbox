@@ -27,23 +27,32 @@ jobs:
           v="${tag#server-v}"
           echo "version=$v" >> "$GITHUB_OUTPUT"
 
-      - name: Build release bundle
+      - name: Build release bundle + .deb package
         run: |
           ./gradlew \
               -Pai_sandbox_server_version=${{ steps.ver.outputs.version }} \
-              :server:bootJar :server:aisandboxctlJar :server:generateOpenApiDocs :server:releaseBundle \
+              :server:bootJar :server:aisandboxctlJar :server:generateOpenApiDocs \
+              :server:releaseBundle :server:debPackage \
               --no-daemon
 
-      - name: Locate the assembled zip
-        id: zip
+      - name: Locate the assembled artifacts
+        id: artifacts
         run: |
-          path="$(ls server/build/release/ai-sandbox-server-*.zip | head -1)"
-          echo "path=$path" >> "$GITHUB_OUTPUT"
+          zip="$(ls server/build/release/ai-sandbox-server-*.zip | head -1)"
+          deb="$(ls server/build/distributions/ai-sandbox-server_*_amd64.deb | head -1)"
+          echo "zip=$zip" >> "$GITHUB_OUTPUT"
+          echo "deb=$deb" >> "$GITHUB_OUTPUT"
 
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
           name: ai-sandbox-server ${{ steps.ver.outputs.version }}
-          files: ${{ steps.zip.outputs.path }}
+          # UC07 § Feature E — release ships BOTH the operator zip and
+          # the .deb. `fail_on_unmatched_files: true` makes the workflow
+          # red if either artifact is missing, catching upstream-build
+          # regressions before the release tag goes public.
+          files: |
+            ${{ steps.artifacts.outputs.zip }}
+            ${{ steps.artifacts.outputs.deb }}
           fail_on_unmatched_files: true
           generate_release_notes: true

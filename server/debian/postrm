@@ -1,0 +1,53 @@
+#!/bin/sh
+# ai-sandbox-server / postrm — Debian package post-removal hook (UC07).
+#
+# Two flavours:
+#   - `remove`: leave operator state (PKI, allowlist, secrets, sessions,
+#     audit log, config.yaml, system user) intact so an `apt install`
+#     of the same/newer version is a no-data-loss upgrade.
+#   - `purge`:  destroy all operator state and the system user. This is
+#     the contract for `dpkg --purge` — explicit opt-in only.
+#
+# Always daemon-reload at the end so systemd forgets the unit that
+# dpkg just removed from /lib/systemd/system/.
+set -e
+
+case "$1" in
+    remove)
+        : # No state changes — preserve /etc/ai-sandbox-server, /var/lib,
+          # /var/log, system user, etc. so reinstall is friction-free.
+        ;;
+
+    purge)
+        # Operator state — explicit opt-in destruction via `dpkg --purge`.
+        rm -rf /opt/ai-sandbox-server || true
+        rm -rf /etc/ai-sandbox-server || true
+        rm -rf /var/lib/ai-sandbox-server || true
+        rm -rf /var/log/ai-sandbox-server || true
+
+        # System user (and its primary group via --user-group, hence the
+        # paired groupdel). Tolerate both being missing — they may have
+        # been removed by hand, or never created on a failed install.
+        if command -v userdel >/dev/null 2>&1; then
+            userdel ai-sandbox-server >/dev/null 2>&1 || true
+        fi
+        if command -v groupdel >/dev/null 2>&1; then
+            groupdel ai-sandbox-server >/dev/null 2>&1 || true
+        fi
+        ;;
+
+    upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
+        : # dpkg recovery paths — no state changes.
+        ;;
+
+    *)
+        echo "postrm called with unknown argument: $1" >&2
+        exit 1
+        ;;
+esac
+
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload || true
+fi
+
+exit 0

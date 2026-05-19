@@ -6,13 +6,21 @@ import com.aisandbox.server.pki.PemUtils;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.PrintStream;
+import java.net.InetAddress;
+import java.net.UnknownHostException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.security.cert.X509Certificate;
+import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashSet;
+import java.util.List;
+import java.util.Locale;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import picocli.CommandLine;
@@ -254,7 +262,10 @@ class PkiInitCommandTest {
         assertThat(cfg).contains("repo-root: /opt/ai-sandbox-server/host");
         assertThat(cfg).contains("host-state-root: /var/lib/ai-sandbox-server/sessions");
         assertThat(cfg).contains("dir: /etc/ai-sandbox-server/secrets");
-        assertThat(cfg).contains("dir: /etc/ai-sandbox-server/enrollment");
+        // UC07 Bug C — enrollment dir moved from /etc/... to /var/lib/...
+        // (FHS: writable runtime state belongs under /var/lib, not /etc).
+        // Mirrors the production change in PkiInitCommand.bakedConfigYaml().
+        assertThat(cfg).contains("dir: /var/lib/ai-sandbox-server/enrollment");
     }
 
     @Test
@@ -316,7 +327,172 @@ class PkiInitCommandTest {
         assertThat(PemUtils.extractCommonName(cert)).isEqualTo("ai-sandbox-server");
     }
 
+    // ── UC07 SAN composition (Bug A — cert SAN) ──────────────────────
+
+    @Test
+    void init_default_san_includes_localhost_and_loopback_when_no_san_flag(@TempDir Path tmp) throws Exception {
+        // UC07 Bug A — even without --san, the composer always appends
+        // DNS:localhost + IP:127.0.0.1 as the safety baseline so curl
+        // localhost works out of the box on every fresh install.
+        Path etc = tmp.resolve("etc/ai-sandbox-server");
+        int exit = new CommandLine(init(new FakeSystemUserAdmin(false)))
+                .execute(stdArgs(etc, tmp.resolve("v/lib"), tmp.resolve("v/log"), "--no-auto-hostname"));
+        assertThat(exit).isZero();
+
+        X509Certificate cert =
+                PemUtils.parseCertificate(Files.readString(etc.resolve("pki").resolve("server.crt")));
+        SanEntries san = SanEntries.from(cert);
+        assertThat(san.dnsNames).contains("localhost");
+        assertThat(san.ipAddresses).contains("127.0.0.1");
+    }
+
+    @Test
+    void init_explicit_san_flag_flows_through_to_cert_extension(@TempDir Path tmp) throws Exception {
+        // UC07 Bug A — caller-supplied --san entries reach the cert as
+        // dNSName / iPAddress GeneralNames. picocli's split="," is
+        // exercised by passing one comma-joined --san value.
+        Path etc = tmp.resolve("etc/ai-sandbox-server");
+        int exit = new CommandLine(init(new FakeSystemUserAdmin(false)))
+                .execute(stdArgs(
+                        etc,
+                        tmp.resolve("v/lib"),
+                        tmp.resolve("v/log"),
+                        "--no-auto-hostname",
+                        "--san",
+                        "DNS:foo.example.com,IP:10.0.0.5"));
+        assertThat(exit).isZero();
+
+        X509Certificate cert =
+                PemUtils.parseCertificate(Files.readString(etc.resolve("pki").resolve("server.crt")));
+        SanEntries san = SanEntries.from(cert);
+        // Caller-supplied entries land in the cert. Lowercase per the
+        // composer's canonical-form contract (tag uppercased, value
+        // lowercased) — see PkiInitCommand.addSanEntry.
+        assertThat(san.dnsNames).contains("foo.example.com");
+        assertThat(san.ipAddresses).contains("10.0.0.5");
+        // Loopback baseline still present.
+        assertThat(san.dnsNames).contains("localhost");
+        assertThat(san.ipAddresses).contains("127.0.0.1");
+    }
+
+    @Test
+    void init_stdout_summary_carries_client_mint_next_step_line(@TempDir Path tmp) throws Exception {
+        // UC07 Bug B (partial) — install-flow nudge: pki init's stdout
+        // summary must direct the operator to `aisandboxctl client mint
+        // <name>` before enabling the unit, because the server refuses
+        // to start on an empty allowlist.
+        Path etc = tmp.resolve("etc/ai-sandbox-server");
+        ByteArrayOutputStream outBuf = new ByteArrayOutputStream();
+        PrintStream origOut = System.out;
+        System.setOut(new PrintStream(outBuf, true));
+        int exit;
+        try {
+            exit = new CommandLine(init(new FakeSystemUserAdmin(false)))
+                    .execute(stdArgs(etc, tmp.resolve("v/lib"), tmp.resolve("v/log"), "--no-auto-hostname"));
+        } finally {
+            System.setOut(origOut);
+        }
+        assertThat(exit).isZero();
+        String stdout = outBuf.toString();
+        assertThat(stdout).contains("aisandboxctl client mint <name>");
+        assertThat(stdout).contains("empty allowlist");
+    }
+
+    @Test
+    void init_auto_hostname_is_included_by_default(@TempDir Path tmp) throws Exception {
+        // UC07 Bug A — the composer auto-derives DNS:<getLocalHost().getHostName()>
+        // unless --no-auto-hostname is passed. Skipped when getLocalHost()
+        // is unstable on the host (rare on Linux CI but possible on dev
+        // boxes with mis-configured /etc/hosts).
+        String hostname;
+        try {
+            hostname = InetAddress.getLocalHost().getHostName();
+        } catch (UnknownHostException uhe) {
+            Assumptions.assumeTrue(false, "InetAddress.getLocalHost() unstable on this host: " + uhe.getMessage());
+            return;
+        }
+        Assumptions.assumeTrue(
+                hostname != null && !hostname.isBlank(), "getLocalHost().getHostName() returned blank — skip");
+
+        Path etc = tmp.resolve("etc/ai-sandbox-server");
+        int exit = new CommandLine(init(new FakeSystemUserAdmin(false)))
+                .execute(stdArgs(etc, tmp.resolve("v/lib"), tmp.resolve("v/log")));
+        assertThat(exit).isZero();
+
+        X509Certificate cert =
+                PemUtils.parseCertificate(Files.readString(etc.resolve("pki").resolve("server.crt")));
+        SanEntries san = SanEntries.from(cert);
+        // Composer lowercases values — match casing for the assertion.
+        assertThat(san.dnsNames).contains(hostname.toLowerCase(Locale.ROOT));
+    }
+
+    @Test
+    void init_no_auto_hostname_excludes_auto_derived_hostname(@TempDir Path tmp) throws Exception {
+        // UC07 Bug A — `--no-auto-hostname` is the operator's escape
+        // hatch when the host's getLocalHost() returns something the
+        // operator does NOT want pinned into the cert. SAN should
+        // contain only the explicit entries plus the loopback baseline.
+        String hostname;
+        try {
+            hostname = InetAddress.getLocalHost().getHostName();
+        } catch (UnknownHostException uhe) {
+            // If we can't resolve the local hostname, the negative-case
+            // test is vacuous — skip rather than assert nothing.
+            Assumptions.assumeTrue(false, "InetAddress.getLocalHost() unstable on this host: " + uhe.getMessage());
+            return;
+        }
+        Assumptions.assumeTrue(
+                hostname != null && !hostname.isBlank(), "getLocalHost().getHostName() returned blank — skip");
+        // Don't apply the test when localhost itself is what
+        // getLocalHost() returns (would conflate explicit + auto entry).
+        Assumptions.assumeTrue(
+                !"localhost".equalsIgnoreCase(hostname), "getLocalHost() returned 'localhost' — skip negative case");
+
+        Path etc = tmp.resolve("etc/ai-sandbox-server");
+        int exit = new CommandLine(init(new FakeSystemUserAdmin(false)))
+                .execute(stdArgs(etc, tmp.resolve("v/lib"), tmp.resolve("v/log"), "--no-auto-hostname"));
+        assertThat(exit).isZero();
+
+        X509Certificate cert =
+                PemUtils.parseCertificate(Files.readString(etc.resolve("pki").resolve("server.crt")));
+        SanEntries san = SanEntries.from(cert);
+        assertThat(san.dnsNames)
+                .as("auto-hostname must NOT appear when --no-auto-hostname is set")
+                .doesNotContain(hostname.toLowerCase(Locale.ROOT));
+        // Baseline entries still present.
+        assertThat(san.dnsNames).contains("localhost");
+        assertThat(san.ipAddresses).contains("127.0.0.1");
+    }
+
     // ── helpers ──────────────────────────────────────────────────────
+
+    /**
+     * X509-extension decoding for SubjectAlternativeName. JDK's native
+     * {@link X509Certificate#getSubjectAlternativeNames()} returns a
+     * {@code Collection<List<?>>} where each entry is a 2-element list
+     * {@code [Integer type, Object value]} — type 2 is dNSName, type 7
+     * is iPAddress (RFC 5280 § 4.2.1.6 / § 4.1.1). We unpack into two
+     * plain {@code List<String>}s so assertions read naturally.
+     */
+    private record SanEntries(List<String> dnsNames, List<String> ipAddresses) {
+        static SanEntries from(X509Certificate cert) throws java.security.cert.CertificateParsingException {
+            Collection<List<?>> raw = cert.getSubjectAlternativeNames();
+            List<String> dns = new ArrayList<>();
+            List<String> ip = new ArrayList<>();
+            if (raw != null) {
+                for (List<?> entry : raw) {
+                    int type = (Integer) entry.get(0);
+                    String value = String.valueOf(entry.get(1));
+                    if (type == 2) {
+                        dns.add(value);
+                    } else if (type == 7) {
+                        ip.add(value);
+                    }
+                }
+            }
+            return new SanEntries(dns, ip);
+        }
+    }
 
     private static boolean isPosixFs(Path tmp) {
         return tmp.getFileSystem().supportedFileAttributeViews().contains("posix");

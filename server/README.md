@@ -99,7 +99,16 @@ sudo java -jar /opt/ai-sandbox-server/lib/aisandboxctl.jar pki init
 #    security model and an unassisted-install flag example.
 sudo java -jar /opt/ai-sandbox-server/lib/aisandboxctl.jar secrets seed
 
-# 4. systemd unit.
+# 4. Mint at least one client cert. The server refuses to start on an
+#    empty allowlist (the refuse-to-start gate is intentional — it
+#    prevents the service from listening on the network without any
+#    valid client credential present, eliminating the misconfiguration
+#    window between `systemctl enable` and the first `client mint`).
+#    Pick a name for the bootstrap operator; subsequent clients are
+#    added the same way.
+sudo java -jar /opt/ai-sandbox-server/lib/aisandboxctl.jar client mint bootstrap --pem --out /tmp/bootstrap
+
+# 5. systemd unit.
 sudo install -m 0644 /opt/ai-sandbox-server/systemd/ai-sandbox-server.service \
     /etc/systemd/system/ai-sandbox-server.service
 sudo systemctl daemon-reload
@@ -162,10 +171,34 @@ sudo systemctl daemon-reload   # only if the systemd/ unit changed
 sudo systemctl restart ai-sandbox-server
 ```
 
-Your operator-managed state (`/etc/ai-sandbox-server/{pki,clients,enrollment,secrets,config.yaml}`
-and `/var/lib/ai-sandbox-server/sessions/`) is preserved across the
-swap — only the install dir under `/opt/` is replaced. The system user
-created by the original `pki init` keeps the same uid/gid.
+Your operator-managed state (`/etc/ai-sandbox-server/{pki,clients,secrets,config.yaml}`
+and `/var/lib/ai-sandbox-server/{sessions,enrollment}/`) is preserved
+across the swap — only the install dir under `/opt/` is replaced. The
+system user created by the original `pki init` keeps the same uid/gid.
+
+### v0.0.6 → v0.0.7 — enrollment directory location moved
+
+Fresh installs now place enrollment tokens at
+`/var/lib/ai-sandbox-server/enrollment` (FHS-correct — tokens are
+runtime state, not PKI material, so they belong under `/var/lib`
+rather than `/etc`). **Existing installs are not auto-migrated**: an
+`apt upgrade` preserves your `config.yaml` and the service keeps
+using the old `/etc/ai-sandbox-server/enrollment` path. To adopt the
+new path:
+
+```bash
+sudo java -jar /opt/ai-sandbox-server/lib/aisandboxctl.jar pki init --force
+```
+
+This rewrites `/etc/ai-sandbox-server/config.yaml` with the new path,
+creates the new directory, and orphans the old one (safe to remove
+manually after — `sudo rm -rf /etc/ai-sandbox-server/enrollment`).
+Tokens at the old path have a 10-minute TTL by default, so the
+cutover window is short either way — schedule the `pki init --force`
+during a maintenance window when no Android enrollment is in flight.
+
+The systemd unit is unchanged: `ReadWritePaths=/var/log/...
+/var/lib/ai-sandbox-server` already covers the new location.
 
 ## Frozen UC02 host scripts
 

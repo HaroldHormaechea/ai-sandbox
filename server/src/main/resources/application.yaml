@@ -102,7 +102,7 @@ ai-sandbox:
     # mTLS-exempt path on the server; see docs/THREAT_MODEL.md §
     # "Enrollment trust boundary" for the trust-surface analysis.
     enrollment:
-      dir: /etc/ai-sandbox-server/enrollment
+      dir: /var/lib/ai-sandbox-server/enrollment
       default-ttl-minutes: 10
       rate-limit-per-window: 1
       rate-limit-window-seconds: 60
