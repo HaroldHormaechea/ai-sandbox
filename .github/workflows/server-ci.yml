@@ -526,12 +526,20 @@ jobs:
                   done
                   [ "$ready" -eq 1 ] || { echo "FAIL: port 12410 never opened in 60s" >&2; exit 1; }
 
-                  # Issue an enrollment invite non-TTY without --out — the CLI
-                  # prints the {u,t,exp,pin} JSON to stdout. Parse with python3
-                  # (no jq dependency required in the smoke env).
+                  # Issue an enrollment invite non-TTY without --out. The CLI
+                  # emits, on stdout: line 1 = single-line {u,t,exp,pin} JSON
+                  # (compact, ObjectMapper.writeValueAsString — no pretty
+                  # print), then a blank line, then a 4-line operator-facing
+                  # summary ("Invite issued: …", token-prefix, expires-at,
+                  # file). Empirically verified by reading ClientInviteCommand
+                  # call() lines 213-223 against the source tree. `head -n 1`
+                  # peels off the JSON; if a future change pretty-prints the
+                  # JSON across multiple lines this filter will break — that
+                  # is a v0.0.8 cleanup tracked separately (add a --json flag
+                  # that suppresses the trailing summary entirely).
                   java -jar /opt/ai-sandbox-server/lib/aisandboxctl.jar client invite alice-phone \
                       --server-url https://127.0.0.1:12410 </dev/null \
-                      >/tmp/invite.json
+                      | head -n 1 >/tmp/invite.json
                   TOKEN="$(python3 -c "import json,sys;print(json.load(sys.stdin)[\"t\"])" </tmp/invite.json)"
                   test -n "$TOKEN"
 
