@@ -376,15 +376,20 @@ jobs:
                   # valid signals that TLS + mTLS + Spring + the routing
                   # layer all came up — anything else is a regression.
                   #
-                  # The self-signed server cert ships with CN=ai-sandbox-server
-                  # and no SAN, so curl is told to connect to 127.0.0.1
-                  # but treat the host as the CN for hostname verification.
+                  # UC07 Bug A — the v0.0.7 server cert now carries a SAN
+                  # extension (DNS:<auto-hostname>, DNS:localhost, IP:127.0.0.1).
+                  # `IP:127.0.0.1` is the one that matters here: curl can
+                  # connect directly to https://127.0.0.1:12410 without the
+                  # pre-v0.0.7 `--resolve ai-sandbox-server:...` shim, which
+                  # was a workaround for the CN-only cert and is now both
+                  # unnecessary AND broken (the auto-hostname inside the
+                  # smoke container is the random docker hash, not
+                  # "ai-sandbox-server"). Same form as the .deb phase below.
                   http_code="$(curl -sS -o /tmp/health.body -w "%{http_code}" \
-                      --resolve ai-sandbox-server:12410:127.0.0.1 \
                       --cacert /etc/ai-sandbox-server/pki/server.crt \
                       --cert /tmp/smoke-client/smoke.crt \
                       --key /tmp/smoke-client/smoke.key \
-                      https://ai-sandbox-server:12410/v1/healthz || echo 000)"
+                      https://127.0.0.1:12410/v1/healthz || echo 000)"
                   if [ "$http_code" != "200" ] && [ "$http_code" != "503" ]; then
                       echo "FAIL: /v1/healthz returned $http_code (expected 200 or 503)." >&2
                       echo "── response body ──" >&2
