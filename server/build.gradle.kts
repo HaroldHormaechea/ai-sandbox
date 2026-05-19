@@ -448,14 +448,31 @@ val debPackage by tasks.registering {
         // Register and invoke the jdeb Ant task. The DebAntTask's
         // public setters (`setDestfile`, `setControl`, `setVerbose`,
         // `addData(Data)`) are empirically confirmed via javap on
-        // jdeb-1.14.jar; the Data type carries `src`/`type`/`addMapper(Mapper)`;
-        // the Mapper type carries `type`/`prefix`/`fileMode`/`dirMode`/`user`/`group`.
+        // jdeb-1.14.jar; the Data type extends PatternSet (so it
+        // carries `include`/`exclude` sub-elements) and adds
+        // `src`/`type`/`addMapper(Mapper)`; the Mapper type carries
+        // `type`/`prefix`/`filemode`/`dirmode`/`user`/`group`.
         //
-        // We stream one Data block of `type=directory` pointing at
-        // build/deb-staging/. The mapper is `type=perm` with NO
-        // fileMode/dirMode set, so jdeb preserves the FS modes set by
-        // prepDebStaging — that's how we get 0755 on .sh files and
-        // 0644 everywhere else without per-pattern Data blocks.
+        // ---- Per-file mode model (CI regression caught 2026-05-19) ----
+        // jdeb's DataProducerDirectory does NOT read FS modes; every
+        // file entry starts from `Producers.defaultFileEntryWithName`
+        // which hardcodes mode 0644. The Mapper only OVERRIDES this if
+        // its `filemode` is set (>-1). My first cut left filemode
+        // unset and relied on FS-mode preservation; the result was
+        // uniform 0644, breaking +x on every host script and crashing
+        // boot at HostScriptLocator.validate.
+        //
+        // Fix: two `<data type=directory>` blocks over the SAME staging
+        // tree, with disjoint include/exclude patterns and explicit
+        // fileMode mappers.
+        //   * Block 1 — *.sh + git-hooks/pre-commit → filemode=755.
+        //   * Block 2 — everything else            → filemode=644.
+        // Directory entries (e.g. opt/, opt/ai-sandbox-server/, host/)
+        // come from Block 2's getIncludedDirectories() ONLY — Block 1's
+        // patterns are file-shaped, so DirectoryScanner reports zero
+        // matching directories. No duplicate-entry collisions in the
+        // resulting tar.
+        //
         // Ant has its own classloader and does NOT see the buildscript
         // classpath by default — taskdef must be told where jdeb lives.
         // The buildscript's `classpath` configuration carries every
@@ -476,14 +493,32 @@ val debPackage by tasks.registering {
                 "control" to controlDir.get().asFile,
                 "verbose" to false,
             ) {
+                // Block 1 — executable bits (0755).
                 "data"(
                     "src" to stagingRoot.get().asFile,
                     "type" to "directory",
                 ) {
+                    "include"("name" to "**/*.sh")
+                    "include"("name" to "**/git-hooks/pre-commit")
                     "mapper"(
                         "type" to "perm",
                         "user" to "root",
                         "group" to "root",
+                        "filemode" to "755",
+                    )
+                }
+                // Block 2 — data files (0644) + every directory entry.
+                "data"(
+                    "src" to stagingRoot.get().asFile,
+                    "type" to "directory",
+                ) {
+                    "exclude"("name" to "**/*.sh")
+                    "exclude"("name" to "**/git-hooks/pre-commit")
+                    "mapper"(
+                        "type" to "perm",
+                        "user" to "root",
+                        "group" to "root",
+                        "filemode" to "644",
                     )
                 }
             }
