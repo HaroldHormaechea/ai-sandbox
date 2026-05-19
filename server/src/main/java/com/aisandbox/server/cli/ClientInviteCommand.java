@@ -146,18 +146,16 @@ public class ClientInviteCommand implements Callable<Integer> {
 
     @Option(
             names = "--out",
-            description =
-                    "Without --json: write a 512x512 PNG QR to this path (default: ASCII QR to stdout if TTY,"
-                            + " JSON-only to stdout otherwise). With --json: write the same compact JSON that"
-                            + " goes to stdout to this path (NOT a PNG — --json suppresses QR generation).")
+            description = "Without --json: write a 512x512 PNG QR to this path (default: ASCII QR to stdout if TTY,"
+                    + " JSON-only to stdout otherwise). With --json: write the same compact JSON that"
+                    + " goes to stdout to this path (NOT a PNG — --json suppresses QR generation).")
     Path outFile;
 
     @Option(
             names = "--json",
-            description =
-                    "Emit machine-clean compact JSON on stdout (single line, no QR, no trailer); operator-facing"
-                            + " trailer goes to stderr. With --out, the same JSON is also written to the file"
-                            + " (no PNG). Replaces the v0.0.7-era `| head -n 1` workaround for CI / scripted use.")
+            description = "Emit machine-clean compact JSON on stdout (single line, no QR, no trailer); operator-facing"
+                    + " trailer goes to stderr. With --out, the same JSON is also written to the file"
+                    + " (no PNG). Replaces the v0.0.7-era `| head -n 1` workaround for CI / scripted use.")
     boolean json;
 
     @Override
