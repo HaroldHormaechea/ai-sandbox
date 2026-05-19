@@ -118,14 +118,19 @@ class MtlsDispatchOverH2Test {
         // "AbstractAsyncSSLConnection: no applications set!" so ALPN
         // is never offered and the connection silently downgrades to
         // HTTP/1.1. The {@code jdk.internal.httpclient.*} system
-        // properties are the documented escape hatch: set BEFORE the
-        // {@code HttpClient} is built (i.e. here, in the static
-        // initialiser that runs at class-load time, before any
-        // {@code @Test} method or {@code @SpringBootTest} fixture
-        // touches a client). The properties are JVM-global; the JUnit
-        // forkEvery=1 isolation in the Gradle test config keeps the
-        // blast radius to this class's JVM and doesn't pollute
-        // sibling tests.
+        // properties are the documented escape hatch.
+        //
+        // Timing: the {@code :server:test} task does NOT set
+        // {@code forkEvery=1}, so all test classes share one JVM. The
+        // property is JVM-global, but empirically the JDK HttpClient
+        // re-reads it per-connection (verified by running
+        // {@link MtlsDispatchTest} immediately before this class in the
+        // same JVM and observing both pass — H1.1 cert auth still
+        // works, H2 ALPN now succeeds). If a future JDK caches the
+        // value at HttpClientImpl class-load time, this static block
+        // may become order-dependent — in that case promote the
+        // property to a {@code systemProperty(...)} on the Gradle
+        // {@code :server:test} task instead.
         System.setProperty("jdk.internal.httpclient.disableHostnameVerification", "true");
         try {
             ROOT = Files.createTempDirectory("ai-sandbox-mtls-dispatch-h2-");

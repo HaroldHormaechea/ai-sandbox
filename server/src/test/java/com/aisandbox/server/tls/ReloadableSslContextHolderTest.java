@@ -37,10 +37,16 @@ class ReloadableSslContextHolderTest {
         SslContext ctx = holder.current();
         assertThat(ctx).isNotNull();
         assertThat(ctx.isServer()).isTrue();
-        // ALPN advertises http/1.1 only — v0.0.6 ships HTTP/1.1 only;
-        // HTTP/2 deferred to v0.0.7. See UC03 § AC11 conflict note in
-        // the v0.0.6 release commit.
-        assertThat(ctx.applicationProtocolNegotiator().protocols()).containsExactly("http/1.1");
+        // UC-07 § AC3 — v0.0.8 re-enables HTTP/2 over TLS via the
+        // parent-channel identity walk in ClientIdentityExtractor.
+        // ALPN advertises "h2" first (server-preferred) with
+        // "http/1.1" as the negotiated fallback. The customizer's
+        // listener protocol set (HttpProtocol.HTTP11, HttpProtocol.H2)
+        // and this ALPN list MUST stay in sync — if either flips back
+        // to HTTP/1.1-only the other must too. Order matters: a
+        // browser/client offering both lands on "h2" because it's
+        // first.
+        assertThat(ctx.applicationProtocolNegotiator().protocols()).containsExactly("h2", "http/1.1");
     }
 
     @Test

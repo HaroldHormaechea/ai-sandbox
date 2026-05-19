@@ -363,6 +363,261 @@ class ClientInviteCommandTest {
         assertThat(errBuf.toString()).contains("skipping chown").contains("ai-sandbox-server");
     }
 
+    // ── UC07 § AC5 — `--json` matrix (v0.0.8 machine-clean output) ───
+
+    /**
+     * AC5 row 1 — {@code --json} alone. Stdout is a single line of
+     * compact JSON (no QR, no operator-facing trailer). The trailer
+     * goes to stderr so stdout remains a clean machine-readable
+     * channel. No PNG is written anywhere.
+     *
+     * <p>The contract this guards: a CI / scripted caller that consumes
+     * stdout as JSON must never have to {@code head -n 1} or similar
+     * workarounds; that was the v0.0.7-era pattern this flag replaces.
+     */
+    @Test
+    void json_alone_emits_clean_payload_to_stdout_and_trailer_to_stderr_no_png(@TempDir Path tmp) throws Exception {
+        Path pki = tmp.resolve("pki");
+        Path enrollment = tmp.resolve("enrollment");
+        Files.createDirectories(pki);
+        CertFixtures.writeServerMaterialTo(pki, "server-cn");
+
+        ByteArrayOutputStream stdoutBuf = new ByteArrayOutputStream();
+        ByteArrayOutputStream stderrBuf = new ByteArrayOutputStream();
+        PrintStream origOut = System.out;
+        PrintStream origErr = System.err;
+        int exit;
+        try {
+            System.setOut(new PrintStream(stdoutBuf, true));
+            System.setErr(new PrintStream(stderrBuf, true));
+            exit = runInvite(
+                    "alice-phone",
+                    "--server-url",
+                    "https://example.com:12410",
+                    "--pki-dir",
+                    pki.toString(),
+                    "--enrollment-dir",
+                    enrollment.toString(),
+                    "--json");
+        } finally {
+            System.setOut(origOut);
+            System.setErr(origErr);
+        }
+
+        assertThat(exit).isZero();
+
+        String stdout = stdoutBuf.toString();
+        String stderr = stderrBuf.toString();
+
+        // Stdout: exactly one line, that line is the compact JSON payload.
+        // (println adds a trailing newline; trim and assert the
+        //  content is a single non-empty line of JSON.)
+        String stdoutTrim = stdout.strip();
+        assertThat(stdoutTrim.lines().count())
+                .as("--json: stdout must be exactly one line — the JSON payload")
+                .isEqualTo(1);
+        assertThat(stdoutTrim).startsWith("{").endsWith("}");
+
+        // Validate the line parses as JSON with the {u, t, exp, pin} shape.
+        ObjectMapper m = new ObjectMapper().registerModule(new JavaTimeModule());
+        JsonNode parsed = m.readTree(stdoutTrim);
+        assertThat(parsed.fieldNames()).toIterable().containsExactlyInAnyOrder("u", "t", "exp", "pin");
+        assertThat(parsed.get("u").asText()).isEqualTo("https://example.com:12410");
+        assertThat(parsed.get("t").asText()).matches("[0-9a-f]{64}");
+        assertThat(parsed.get("pin").asText()).matches("[0-9a-f]+");
+
+        // Stdout has NO operator-facing trailer lines.
+        assertThat(stdout)
+                .as("--json: stdout must NOT contain operator-facing trailer fields")
+                .doesNotContain("Invite issued:")
+                .doesNotContain("token-prefix")
+                .doesNotContain("expires-at")
+                .doesNotContain("Wrote PNG QR:");
+
+        // Stderr carries the operator-facing trailer.
+        assertThat(stderr)
+                .as("--json: trailer (Invite issued / token-prefix / expires-at / file) must be on stderr")
+                .contains("Invite issued: alice-phone")
+                .contains("token-prefix")
+                .contains("expires-at")
+                .contains("file         :");
+
+        // PNG suppression: neither stdout nor any --out path got a PNG.
+        // (PNG signature is the eight bytes 89 50 4E 47 0D 0A 1A 0A; we
+        // check the textual signature here — sufficient since the
+        // command builds PNG only via QrEncoder.writePng on --out.)
+        assertThat(stdoutBuf.toByteArray())
+                .as("--json without --out: stdout must NOT contain a PNG signature")
+                .isNotEmpty();
+        byte[] stdoutBytes = stdoutBuf.toByteArray();
+        if (stdoutBytes.length >= 8) {
+            byte[] firstEight = new byte[8];
+            System.arraycopy(stdoutBytes, 0, firstEight, 0, 8);
+            assertThat(firstEight)
+                    .as("--json: stdout's first 8 bytes must NOT be the PNG signature 89 50 4E 47 0D 0A 1A 0A")
+                    .isNotEqualTo(new byte[] {(byte) 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A});
+        }
+
+        // Token file IS still written under the enrollment dir — that
+        // contract is shared with the no-`--json` flow.
+        assertThat(onlyFile(enrollment)).exists();
+    }
+
+    /**
+     * AC5 row 2 — {@code --json --out <path>}. The flags compose:
+     * stdout still receives the compact JSON (single line) AND the
+     * same JSON is written to {@code <path>}. The {@code <path>} is
+     * deliberately NOT a PNG; {@code --json} suppresses QR generation
+     * entirely, so the file content is bytes-identical to stdout. The
+     * trailer goes to stderr.
+     *
+     * <p>The contract this guards: a CI step that wants the JSON on
+     * disk for downstream tooling AND on stdout for a log capture
+     * gets both, without having to re-derive the JSON from a PNG.
+     */
+    @Test
+    void json_with_out_writes_json_payload_to_file_not_a_png(@TempDir Path tmp) throws Exception {
+        Path pki = tmp.resolve("pki");
+        Path enrollment = tmp.resolve("enrollment");
+        Path outFile = tmp.resolve("invite.json");
+        Files.createDirectories(pki);
+        CertFixtures.writeServerMaterialTo(pki, "server-cn");
+
+        ByteArrayOutputStream stdoutBuf = new ByteArrayOutputStream();
+        ByteArrayOutputStream stderrBuf = new ByteArrayOutputStream();
+        PrintStream origOut = System.out;
+        PrintStream origErr = System.err;
+        int exit;
+        try {
+            System.setOut(new PrintStream(stdoutBuf, true));
+            System.setErr(new PrintStream(stderrBuf, true));
+            exit = runInvite(
+                    "alice-phone",
+                    "--server-url",
+                    "https://example.com:12410",
+                    "--pki-dir",
+                    pki.toString(),
+                    "--enrollment-dir",
+                    enrollment.toString(),
+                    "--out",
+                    outFile.toString(),
+                    "--json");
+        } finally {
+            System.setOut(origOut);
+            System.setErr(origErr);
+        }
+
+        assertThat(exit).isZero();
+        assertThat(outFile)
+                .as("--json --out: the file must exist (with JSON content, NOT a PNG)")
+                .exists();
+
+        // File content: same compact JSON line as stdout, NOT a PNG.
+        byte[] fileBytes = Files.readAllBytes(outFile);
+        assertThat(fileBytes.length).isGreaterThanOrEqualTo(8);
+        byte[] firstEight = new byte[8];
+        System.arraycopy(fileBytes, 0, firstEight, 0, 8);
+        assertThat(firstEight)
+                .as("--json --out: file's first 8 bytes must NOT be the PNG signature")
+                .isNotEqualTo(new byte[] {(byte) 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A});
+
+        // File content parses as the same {u, t, exp, pin} shape.
+        String fileStr = Files.readString(outFile);
+        ObjectMapper m = new ObjectMapper().registerModule(new JavaTimeModule());
+        JsonNode parsedFromFile = m.readTree(fileStr);
+        assertThat(parsedFromFile.fieldNames()).toIterable().containsExactlyInAnyOrder("u", "t", "exp", "pin");
+
+        // Stdout AND file carry the same JSON payload (bytes-equal modulo
+        // trailing newline that println adds on stdout).
+        String stdoutLine = stdoutBuf.toString().strip();
+        assertThat(stdoutLine).isEqualTo(fileStr);
+
+        // Trailer on stderr.
+        assertThat(stderrBuf.toString())
+                .as("--json --out: trailer on stderr")
+                .contains("Invite issued: alice-phone")
+                .contains("token-prefix")
+                .contains("file         :");
+
+        // Stdout has no trailer pieces.
+        assertThat(stdoutBuf.toString())
+                .as("--json --out: stdout must NOT contain trailer text or PNG announcement")
+                .doesNotContain("Invite issued:")
+                .doesNotContain("Wrote PNG QR:");
+    }
+
+    /**
+     * AC5 row 3 — no {@code --json}: byte-for-byte v0.0.7 layout.
+     * Operator-facing trailer (Invite issued / token-prefix /
+     * expires-at / file) lives on STDOUT — same place v0.0.7 scripts
+     * have always read it from. Stderr is silent (no chown warning is
+     * a separate skip-guarded test above).
+     *
+     * <p>This is the explicit back-compat guard: a future refactor
+     * that accidentally promotes the trailer to stderr (e.g. mistakenly
+     * always-on instead of {@code --json}-gated) would break
+     * pre-v0.0.8 callers that scrape the trailer from stdout. This
+     * test pins the unchanged-stream invariant.
+     */
+    @Test
+    void non_json_keeps_trailer_on_stdout_for_v007_backcompat(@TempDir Path tmp) throws Exception {
+        Path pki = tmp.resolve("pki");
+        Path enrollment = tmp.resolve("enrollment");
+        Path outPng = tmp.resolve("invite.png");
+        Files.createDirectories(pki);
+        CertFixtures.writeServerMaterialTo(pki, "server-cn");
+
+        ByteArrayOutputStream stdoutBuf = new ByteArrayOutputStream();
+        ByteArrayOutputStream stderrBuf = new ByteArrayOutputStream();
+        PrintStream origOut = System.out;
+        PrintStream origErr = System.err;
+        int exit;
+        try {
+            System.setOut(new PrintStream(stdoutBuf, true));
+            System.setErr(new PrintStream(stderrBuf, true));
+            exit = runInvite(
+                    "alice-phone",
+                    "--server-url",
+                    "https://example.com:12410",
+                    "--pki-dir",
+                    pki.toString(),
+                    "--enrollment-dir",
+                    enrollment.toString(),
+                    "--out",
+                    outPng.toString());
+        } finally {
+            System.setOut(origOut);
+            System.setErr(origErr);
+        }
+
+        assertThat(exit).isZero();
+
+        String stdout = stdoutBuf.toString();
+        // v0.0.7 stdout layout intact: PNG announcement + payload line + trailer.
+        assertThat(stdout)
+                .as("no --json: stdout still carries Wrote PNG QR + Payload + trailer (v0.0.7 layout)")
+                .contains("Wrote PNG QR: " + outPng)
+                .contains("Payload     : ")
+                .contains("Invite issued: alice-phone")
+                .contains("token-prefix")
+                .contains("expires-at")
+                .contains("file         :");
+
+        // Stderr is silent on the success path (the chown-skip warning is
+        // covered by `chown_assertion_is_gated_on_ai_sandbox_server_user_resolution`
+        // and only fires under that scenario's Assumptions.assumeTrue gate).
+        // Filter to non-empty lines so a trailing newline doesn't false-fail.
+        String stderr = stderrBuf.toString();
+        assertThat(stderr.lines().filter(l -> !l.isBlank()).toList())
+                .as("no --json: stderr should be empty on the success path (no trailer leakage)")
+                .allSatisfy(line ->
+                        // Tolerate the Ownership skip warning when the test host
+                        // happens to lack the ai-sandbox-server user (same skip
+                        // condition as the existing chown test). Anything ELSE
+                        // is a regression.
+                        assertThat(line).containsAnyOf("skipping chown", "ai-sandbox-server"));
+    }
+
     private static Path onlyFile(Path dir) throws Exception {
         try (DirectoryStream<Path> stream = Files.newDirectoryStream(dir, "*.json")) {
             java.util.Iterator<Path> it = stream.iterator();
