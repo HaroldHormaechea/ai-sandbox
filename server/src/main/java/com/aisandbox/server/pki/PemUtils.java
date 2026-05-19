@@ -66,13 +66,47 @@ public final class PemUtils {
         }
     }
 
-    /** SHA-256 fingerprint of a cert's DER body, lowercase hex. */
+    /**
+     * SHA-256 fingerprint of a cert's DER body, lowercase hex.
+     *
+     * <p>Full DER-encoded certificate hash; used for client-cert allowlist
+     * fingerprints (see {@code ClientAllowlistService}, {@code aisandboxctl
+     * client list}, audit log {@code client_*} events, and the TLS hot-path
+     * matchers in {@code AllowlistTrustManager} +
+     * {@code NettyServerCustomizer.IdentityCapturingHandler}). For the
+     * server pin advertised in the QR — and verified by the Android client
+     * via OkHttp's {@code CertificatePinner} — see {@link #spkiFingerprintHex}.
+     */
     public static String fingerprintHex(X509Certificate cert) throws CertificateException {
         try {
             return sha256Hex(cert.getEncoded());
         } catch (java.security.cert.CertificateEncodingException ce) {
             throw new CertificateException("Cannot DER-encode certificate", ce);
         }
+    }
+
+    /**
+     * SHA-256 fingerprint of a cert's SubjectPublicKeyInfo (SPKI), lowercase hex.
+     *
+     * <p>SPKI hash; used for the server pin in the QR + Android OkHttp
+     * {@code CertificatePinner}. Matches HPKP / RFC 7469 — the industry
+     * convention OkHttp's {@code CertificatePinner} verifies against by
+     * default (it computes {@code sha256(cert.publicKey.encoded)} on the
+     * presented chain). Distinct from {@link #fingerprintHex}, which hashes
+     * the full DER-encoded certificate body and is used for the client-cert
+     * allowlist (a different contract with a different threat model — cert
+     * identity vs. public-key continuity).
+     *
+     * <p>Implementation note: {@code X509Certificate.getPublicKey()
+     * .getEncoded()} returns the X.509 {@code SubjectPublicKeyInfo} DER
+     * structure per the {@link java.security.spec.X509EncodedKeySpec}
+     * contract — the same bytes openssl emits from {@code openssl x509
+     * -noout -pubkey | openssl pkey -pubin -outform DER}. UC09 § AC1 pins
+     * this assumption with a unit test against the canonical openssl
+     * invocation.
+     */
+    public static String spkiFingerprintHex(X509Certificate cert) {
+        return sha256Hex(cert.getPublicKey().getEncoded());
     }
 
     public static String extractCommonName(X509Certificate cert) {

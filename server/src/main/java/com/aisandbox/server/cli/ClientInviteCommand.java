@@ -77,10 +77,16 @@ import picocli.CommandLine.Parameters;
  *
  * <p>The {@code --server-pin} flag accepts an explicit pin (when the
  * operator wants to override what's on disk); otherwise the cert at
- * {@code <pki.dir>/server.crt} is read and its SHA-256 fingerprint is
- * used. The pin is the lowercase hex digest — matching the format that
- * {@code PemUtils.fingerprintHex} produces and the Android client's
- * {@code OkHttp CertificatePinner} expects.
+ * {@code <pki.dir>/server.crt} is read and its SubjectPublicKeyInfo
+ * (SPKI) hash is used. The pin is the lowercase hex digest of the
+ * cert's SubjectPublicKeyInfo (SPKI) — matching
+ * {@link com.aisandbox.server.pki.PemUtils#spkiFingerprintHex} and the
+ * Android client's OkHttp {@code CertificatePinner} (RFC 7469 / HPKP).
+ * It is <b>not</b> the full-DER cert fingerprint produced by
+ * {@link com.aisandbox.server.pki.PemUtils#fingerprintHex} — that one
+ * is used for the client-cert allowlist on the server side (a different
+ * contract). UC09 swapped this from full-DER to SPKI in v0.0.10; pre-
+ * v0.0.10 invites were uniformly rejected by OkHttp's pinner.
  */
 @Command(name = "invite", description = "Issue a single-use Android enrollment token + QR.")
 public class ClientInviteCommand implements Callable<Integer> {
@@ -141,7 +147,8 @@ public class ClientInviteCommand implements Callable<Integer> {
 
     @Option(
             names = "--server-pin",
-            description = "Server cert SHA-256 fingerprint (hex). Default: SHA-256 of <pki-dir>/server.crt.")
+            description = "SHA-256 of the server cert's SubjectPublicKeyInfo (SPKI), lowercase hex."
+                    + " Default: SHA-256(SPKI) of <pki-dir>/server.crt.")
     String serverPin;
 
     @Option(
@@ -370,7 +377,15 @@ public class ClientInviteCommand implements Callable<Integer> {
         try {
             String pem = Files.readString(serverCrt);
             X509Certificate cert = PemUtils.parseCertificate(pem);
-            return PemUtils.fingerprintHex(cert);
+            // UC09 — QR pin is the SPKI hash (sha256 of the cert's
+            // SubjectPublicKeyInfo), which is what OkHttp's
+            // CertificatePinner verifies by default (RFC 7469 / HPKP).
+            // Pre-v0.0.10 this called fingerprintHex (full-DER hash),
+            // which OkHttp never matches against — every Android
+            // enrollment failed with SSLPeerUnverifiedException. The
+            // client-cert allowlist on the server still uses
+            // fingerprintHex (different contract; see PemUtils Javadoc).
+            return PemUtils.spkiFingerprintHex(cert);
         } catch (IOException | CertificateException io) {
             System.err.println("Cannot read or parse " + serverCrt + ": " + io.getMessage());
             return null;

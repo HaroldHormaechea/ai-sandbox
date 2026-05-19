@@ -9,13 +9,19 @@ import kotlinx.serialization.json.Json
  *
  * Wire shape:
  * ```json
- * { "u": "https://host:12410", "t": "<hex token>", "exp": "2026-05-17T12:34:56Z", "pin": "<sha256 hex>" }
+ * { "u": "https://host:12410", "t": "<hex token>", "exp": "2026-05-17T12:34:56Z", "pin": "<sha256 hex of SPKI>" }
  * ```
  *
  * Field names match the CLI emitter ([com.aisandbox.server.cli.ClientInviteCommand]).
  * Drift either side breaks onboarding silently — the order of declaration
  * here is preserved by `kotlinx.serialization` so the camera-side decode
  * is forgiving but the encode round-trip is bit-stable.
+ *
+ * @property pinSha256Hex SHA-256 of the server cert's SubjectPublicKeyInfo
+ *   (SPKI), lowercase hex. Matches `PemUtils.spkiFingerprintHex` on the
+ *   server side and the value OkHttp's `CertificatePinner` verifies
+ *   (HPKP / RFC 7469 default). Pre-v0.0.10 was the full-DER cert hash;
+ *   UC09 reconciled the algorithm.
  */
 @Serializable
 data class QrPayload(
@@ -35,7 +41,7 @@ data class QrPayload(
             "t must be 32–256 chars of [A-Za-z0-9._-]"
         }
         require(pinSha256Hex.matches(PIN_RE)) {
-            "pin must be 64 hex chars (SHA-256 of server cert DER)"
+            "pin must be 64 hex chars (SHA-256 of server cert SPKI)"
         }
         require(expiresAtIso.isNotBlank()) { "exp must be a non-empty ISO-8601 instant" }
     }

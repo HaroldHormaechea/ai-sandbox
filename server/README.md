@@ -252,7 +252,7 @@ sudo aisandboxctl client mint alice --pem --out /tmp/alice/
 
 # The minted bundle includes:
 #   alice.p12  (or alice.crt + alice.key with --pem)
-#   server.crt           — for the client to pin
+#   server.crt           — for the client to pin (SHA-256 of SPKI; the QR's pin field)
 #   README.txt           — usage hint
 # The public alice.crt is dropped into /etc/ai-sandbox-server/clients/
 # automatically; the watcher picks it up within 1s.
