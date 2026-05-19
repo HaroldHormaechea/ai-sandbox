@@ -1,0 +1,31 @@
+#!/bin/sh
+# ai-sandbox-server / prerm — Debian package pre-removal hook (UC07).
+#
+# Runs before dpkg removes the package's files. Stop + disable the
+# systemd unit so the JVM doesn't end up writing into half-removed
+# state. Both calls tolerate "service unknown" / "not currently
+# loaded" via `|| true` because:
+#   - On `dpkg --purge` of a never-started install, the unit was
+#     never enabled in the first place.
+#   - Containers / chroots may not have a running systemd at all.
+set -e
+
+case "$1" in
+    remove|upgrade|deconfigure)
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl stop ai-sandbox-server >/dev/null 2>&1 || true
+            systemctl disable ai-sandbox-server >/dev/null 2>&1 || true
+        fi
+        ;;
+
+    failed-upgrade)
+        : # dpkg's recovery path — leave state alone.
+        ;;
+
+    *)
+        echo "prerm called with unknown argument: $1" >&2
+        exit 1
+        ;;
+esac
+
+exit 0

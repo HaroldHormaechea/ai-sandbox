@@ -10,6 +10,30 @@
 // Two jars, one source tree, two main classes. The full source set is
 // repackaged into each fat jar — wasteful but acceptable for an MVP.
 
+// UC07 § Feature E — `.deb` pipeline. jdeb 1.14's published jar at
+// Maven Central contains ONLY the Maven plugin entry points and the
+// Ant task class `org.vafer.jdeb.ant.DebAntTask` (empirically verified
+// via `unzip -l` on the upstream artifact: no `org.vafer.jdeb.gradle.
+// JdebTask` exists in 1.14). We therefore put jdeb on the buildscript
+// classpath, register it as an Ant task, and drive it from a Gradle
+// task via `ant.withGroovyBuilder { … }`. This keeps the build pure-
+// Java (no dpkg-deb dependency on the build host) and matches jdeb's
+// documented "Ant task" surface.
+buildscript {
+    repositories {
+        mavenCentral()
+    }
+    dependencies {
+        // Pinned literal — version is duplicated in
+        // gradle/libs.versions.toml (`jdeb = "1.14"`) for documentation.
+        // Gradle's `libs.*` accessor is not reliably available inside a
+        // subproject's buildscript block, so we use the literal here.
+        // Drift between the two is caught by reviewers, not the build.
+        classpath("org.vafer:jdeb:1.14")
+    }
+}
+
+import org.apache.tools.ant.filters.ReplaceTokens
 import org.springframework.boot.gradle.tasks.bundling.BootJar
 
 plugins {
@@ -290,6 +314,191 @@ val releaseBundle by tasks.registering(Zip::class) {
         into("host/git-hooks")
         filePermissions { unix("rwxr-xr-x") }
     }
+}
+
+// ── Debian package (.deb) — UC07 Feature E ───────────────────────────────────
+//
+// Two-stage pipeline, decoupled so that file-mode preservation is
+// trivial and the actual jdeb invocation stays declarative:
+//
+//   prepDebStaging  →  build/deb-staging/   (Gradle Copy task, per-pattern
+//                                            unix() permissions)
+//   debPackage      →  build/distributions/ai-sandbox-server_<v>_amd64.deb
+//                      (Ant `deb` task; data block of type=directory
+//                       walks the staging tree preserving FS modes)
+//
+// The staging tree is laid out exactly as the .deb will install it
+// (rooted as if at /, with `opt/`, `lib/`, etc. children), so the jdeb
+// data block needs only a single prefix-less mapper. Maintainer
+// scripts live under server/debian/ on the source tree; jdeb's
+// `control` attribute picks them up and rewrites them into the deb's
+// control archive.
+
+val debStagingDir = layout.buildDirectory.dir("deb-staging")
+val debControlStagingDir = layout.buildDirectory.dir("deb-control")
+
+// Templated copy of server/debian/ — `control` carries the @aiSandboxServerVersion@
+// token which gets substituted with project.version. Maintainer scripts
+// (postinst/prerm/postrm) are byte-copied with their +x mode preserved.
+val prepDebControl by tasks.registering(Copy::class) {
+    group = "distribution"
+    description = "Stages server/debian/ to build/deb-control/ with @aiSandboxServerVersion@ interpolated."
+    val captured = project.version.toString()
+    inputs.property("aiSandboxServerVersion", captured)
+
+    from("$projectDir/debian") {
+        include("control")
+        // `filter(ReplaceTokens, …)` substitutes @aiSandboxServerVersion@ →
+        // project.version. Using `expand()` instead would clash with the
+        // `${shlibs:Depends}` syntax Debian's control format reserves.
+        filter(ReplaceTokens::class, mapOf("tokens" to mapOf("aiSandboxServerVersion" to captured)))
+    }
+    from("$projectDir/debian") {
+        include("postinst", "prerm", "postrm")
+        filePermissions { unix("rwxr-xr-x") }
+    }
+    into(debControlStagingDir)
+}
+
+val prepDebStaging by tasks.registering(Copy::class) {
+    group = "distribution"
+    description = "Stages the .deb install tree under build/deb-staging/ with the right per-file unix modes."
+    dependsOn("bootJar", aisandboxctlJar, generateOpenApiDocs)
+    into(debStagingDir)
+
+    // /opt/ai-sandbox-server/lib/*.jar
+    from(layout.buildDirectory.dir("libs")) {
+        include("aisandbox-server.jar", "aisandboxctl.jar")
+        into("opt/ai-sandbox-server/lib")
+        filePermissions { unix("rw-r--r--") }
+    }
+
+    // /opt/ai-sandbox-server/*.md / openapi.yaml / sample-config.yaml
+    from("$projectDir/openapi.yaml") {
+        into("opt/ai-sandbox-server")
+        filePermissions { unix("rw-r--r--") }
+    }
+    from("$projectDir/STREAM_PROTOCOL.md") {
+        into("opt/ai-sandbox-server")
+        filePermissions { unix("rw-r--r--") }
+    }
+    from("$projectDir/README.md") {
+        into("opt/ai-sandbox-server")
+        filePermissions { unix("rw-r--r--") }
+    }
+    from("$projectDir/sample-config.yaml") {
+        into("opt/ai-sandbox-server")
+        filePermissions { unix("rw-r--r--") }
+    }
+
+    // /opt/ai-sandbox-server/host/* — POSIX shell scripts at 0755,
+    // PowerShell counterparts + the compose context at 0644.
+    val hostExecutables = listOf("spawn.sh", "clean.sh", "attach.sh", "lib.sh", "setup.sh", "entrypoint.sh")
+    hostExecutables.forEach { name ->
+        from(rootProject.file(name)) {
+            into("opt/ai-sandbox-server/host")
+            filePermissions { unix("rwxr-xr-x") }
+        }
+    }
+    val hostData = listOf(
+        "spawn.ps1", "clean.ps1", "attach.ps1", "lib.ps1", "setup.ps1",
+        "docker-compose.yml", "SandboxDockerfile",
+    )
+    hostData.forEach { name ->
+        from(rootProject.file(name)) {
+            into("opt/ai-sandbox-server/host")
+            filePermissions { unix("rw-r--r--") }
+        }
+    }
+    // git-hooks/ — preserve exec bit (matches releaseBundle).
+    from(rootProject.file("git-hooks")) {
+        into("opt/ai-sandbox-server/host/git-hooks")
+        filePermissions { unix("rwxr-xr-x") }
+    }
+
+    // /lib/systemd/system/ai-sandbox-server.service — Debian-canonical
+    // location for distro-provided units (vs /etc/systemd/system/ which
+    // is reserved for local-admin overrides per systemd.unit(5)).
+    from("$projectDir/systemd/ai-sandbox-server.service") {
+        into("lib/systemd/system")
+        filePermissions { unix("rw-r--r--") }
+    }
+}
+
+val debPackage by tasks.registering {
+    group = "distribution"
+    description = "Builds ai-sandbox-server_<version>_amd64.deb via jdeb's Ant task."
+    dependsOn(prepDebStaging, prepDebControl)
+
+    val outFile = layout.buildDirectory
+        .file("distributions/ai-sandbox-server_${project.version}_amd64.deb")
+    val controlDir = debControlStagingDir
+    val stagingRoot = debStagingDir
+    val pkgVersion = project.version.toString()
+
+    inputs.dir(stagingRoot)
+    inputs.dir(controlDir)
+    inputs.property("version", pkgVersion)
+    outputs.file(outFile)
+
+    doLast {
+        // Ensure parent dir exists — jdeb does NOT mkdir for destfile.
+        outFile.get().asFile.parentFile.mkdirs()
+
+        // Register and invoke the jdeb Ant task. The DebAntTask's
+        // public setters (`setDestfile`, `setControl`, `setVerbose`,
+        // `addData(Data)`) are empirically confirmed via javap on
+        // jdeb-1.14.jar; the Data type carries `src`/`type`/`addMapper(Mapper)`;
+        // the Mapper type carries `type`/`prefix`/`fileMode`/`dirMode`/`user`/`group`.
+        //
+        // We stream one Data block of `type=directory` pointing at
+        // build/deb-staging/. The mapper is `type=perm` with NO
+        // fileMode/dirMode set, so jdeb preserves the FS modes set by
+        // prepDebStaging — that's how we get 0755 on .sh files and
+        // 0644 everywhere else without per-pattern Data blocks.
+        // Ant has its own classloader and does NOT see the buildscript
+        // classpath by default — taskdef must be told where jdeb lives.
+        // The buildscript's `classpath` configuration carries every
+        // dependency declared in `buildscript { dependencies { ... } }`
+        // (including transitives), so we hand that whole FileCollection
+        // to Ant as the colon-separated path attribute.
+        val jdebClasspath = buildscript.configurations
+            .getByName("classpath")
+            .asPath
+        ant.withGroovyBuilder {
+            "taskdef"(
+                "name" to "deb",
+                "classname" to "org.vafer.jdeb.ant.DebAntTask",
+                "classpath" to jdebClasspath,
+            )
+            "deb"(
+                "destfile" to outFile.get().asFile,
+                "control" to controlDir.get().asFile,
+                "verbose" to false,
+            ) {
+                "data"(
+                    "src" to stagingRoot.get().asFile,
+                    "type" to "directory",
+                ) {
+                    "mapper"(
+                        "type" to "perm",
+                        "user" to "root",
+                        "group" to "root",
+                    )
+                }
+            }
+        }
+
+        logger.lifecycle("Built .deb: ${outFile.get().asFile} (version $pkgVersion)")
+    }
+}
+
+// Wire .deb into `assemble` so a plain `:server:assemble` produces it
+// alongside the two jars. `:server:build` includes `assemble`, so CI's
+// existing `./gradlew :server:build` invocation automatically picks
+// the .deb up. The release zip (`releaseBundle`) is unchanged.
+tasks.named("assemble") {
+    dependsOn(debPackage)
 }
 
 tasks.register("printVersion") {

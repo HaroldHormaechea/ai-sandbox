@@ -32,6 +32,29 @@ public interface SystemUserAdmin {
     /** Production implementation — shells out to {@code getent} + {@code useradd}. */
     final class Default implements SystemUserAdmin {
 
+        /**
+         * Canonical {@code useradd} argv prefix used by {@link #createSystemUser(String)}.
+         * Lifted out as a {@code public static final} list so the Debian
+         * package's {@code postinst} script can be cross-referenced against
+         * it — every flag here MUST match the equivalent flags in
+         * {@code server/debian/postinst} (and vice versa). Drift would
+         * produce a different uid / shell / group set depending on whether
+         * the user was created by {@code aisandboxctl pki init} or by the
+         * .deb install hook, breaking the install-flow's idempotency promise.
+         *
+         * <p>The trailing {@code <name>} argument is NOT in this list — callers
+         * append it at invocation time.
+         */
+        public static final List<String> USERADD_ARGV_PREFIX = List.of(
+                "useradd",
+                "--system",
+                "--no-create-home",
+                "--shell",
+                "/usr/sbin/nologin",
+                "--user-group",
+                "--groups",
+                "docker");
+
         @Override
         public boolean userExists(String name) throws IOException, InterruptedException {
             Process p = new ProcessBuilder("getent", "passwd", name)
@@ -48,16 +71,8 @@ public interface SystemUserAdmin {
 
         @Override
         public void createSystemUser(String name) throws IOException, InterruptedException {
-            List<String> argv = List.of(
-                    "useradd",
-                    "--system",
-                    "--no-create-home",
-                    "--shell",
-                    "/usr/sbin/nologin",
-                    "--user-group",
-                    "--groups",
-                    "docker",
-                    name);
+            java.util.ArrayList<String> argv = new java.util.ArrayList<>(USERADD_ARGV_PREFIX);
+            argv.add(name);
             ProcessBuilder pb = new ProcessBuilder(argv).redirectErrorStream(true);
             Process p = pb.start();
             byte[] out = p.getInputStream().readAllBytes();

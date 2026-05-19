@@ -1,0 +1,19 @@
+Package: ai-sandbox-server
+Version: @aiSandboxServerVersion@
+Section: admin
+Priority: optional
+Architecture: amd64
+Depends: openjdk-21-jre-headless | openjdk-21-jdk-headless, docker.io | docker-ce, unzip, openssh-client
+Maintainer: ai-sandbox <noreply@example.com>
+Homepage: https://github.com/HaroldHormaechea/ai-sandbox
+Description: ai-sandbox mTLS management server (UC03)
+ mTLS-gated REST + WebSocket API for the ai-sandbox multi-session
+ sandbox kit. Ships the Spring Boot server (aisandbox-server.jar),
+ the install / PKI / allowlist CLI (aisandboxctl.jar), the bundled
+ host-script set + container build context, the systemd unit, and
+ the OpenAPI spec.
+ .
+ After installing, run `sudo aisandboxctl pki init` to mint the
+ self-signed server cert + key and provision the operator-managed
+ directory tree, then `sudo aisandboxctl secrets seed` and
+ `sudo aisandboxctl client mint <name>` before enabling the unit.

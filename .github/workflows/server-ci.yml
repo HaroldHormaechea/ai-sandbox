@@ -107,13 +107,19 @@ jobs:
           java-version: '21'
       - uses: gradle/actions/setup-gradle@v4
 
-      - name: Build release bundle
-        run: ./gradlew :server:bootJar :server:aisandboxctlJar :server:generateOpenApiDocs :server:releaseBundle --no-daemon
+      - name: Build release bundle + .deb package
+        run: ./gradlew :server:bootJar :server:aisandboxctlJar :server:generateOpenApiDocs :server:releaseBundle :server:debPackage --no-daemon
 
       - name: Locate the assembled zip
         id: zip
         run: |
           path="$(ls server/build/release/ai-sandbox-server-*.zip | head -1)"
+          echo "path=$path" >> "$GITHUB_OUTPUT"
+
+      - name: Locate the assembled .deb
+        id: deb
+        run: |
+          path="$(ls server/build/distributions/ai-sandbox-server_*_amd64.deb | head -1)"
           echo "path=$path" >> "$GITHUB_OUTPUT"
 
       - name: Smoke-test install flow inside ubuntu:24.04
@@ -407,6 +413,162 @@ jobs:
                   fi
                   wait "$SERVER_PID" 2>/dev/null || true
                   echo "boot smoke assertions passed."
+              '
+
+      # UC07 § Feature E — .deb install-flow smoke, parity with the zip
+      # smoke above but exercising the dpkg install path end-to-end
+      # (postinst hook, /lib/systemd/system/ location, system user
+      # creation, SAN-bearing pki init, mTLS round-trip via enrollment).
+      - name: Smoke-test .deb install flow inside ubuntu:24.04
+        env:
+          DEB_PATH: ${{ steps.deb.outputs.path }}
+        run: |
+          set -euxo pipefail
+          install -d "$RUNNER_TEMP/deb"
+          cp "$DEB_PATH" "$RUNNER_TEMP/deb/release.deb"
+
+          docker run --rm \
+              -v "$RUNNER_TEMP/deb:/tmp/release:ro" \
+              ubuntu:24.04 \
+              bash -euxc '
+                  export DEBIAN_FRONTEND=noninteractive
+                  apt-get update -qq
+                  apt-get install -y --no-install-recommends \
+                      openjdk-21-jdk-headless unzip openssh-client curl ca-certificates python3
+
+                  # `docker.io` is one of the .deb Depends but the smoke env
+                  # cannot run a Docker daemon; pre-create the `docker` group
+                  # the postinst expects, install the .deb, then satisfy
+                  # remaining deps with `apt-get -f install -y`.
+                  groupadd -f docker
+                  dpkg -i /tmp/release/release.deb || true
+                  apt-get install -y --no-install-recommends -f
+                  dpkg --configure -a
+
+                  # AC layout — jars under /opt/ai-sandbox-server/lib/.
+                  test -f /opt/ai-sandbox-server/lib/aisandbox-server.jar
+                  test -f /opt/ai-sandbox-server/lib/aisandboxctl.jar
+                  # systemd unit at the Debian-canonical path.
+                  test -f /lib/systemd/system/ai-sandbox-server.service
+
+                  # postinst — operator dirs at 0750 owned by ai-sandbox-server.
+                  assert_owner_mode() {
+                      local p="$1" want_user="$2" want_group="$3" want_mode="$4" got
+                      got="$(stat -c "%U:%G:%a" "$p")"
+                      if [ "$got" != "${want_user}:${want_group}:${want_mode}" ]; then
+                          echo "FAIL: $p is $got, expected ${want_user}:${want_group}:${want_mode}" >&2
+                          return 1
+                      fi
+                  }
+                  assert_owner_mode /etc/ai-sandbox-server     ai-sandbox-server ai-sandbox-server 750
+                  assert_owner_mode /var/lib/ai-sandbox-server ai-sandbox-server ai-sandbox-server 750
+                  assert_owner_mode /var/log/ai-sandbox-server ai-sandbox-server ai-sandbox-server 750
+
+                  # System user exists with the documented shell + groups.
+                  id ai-sandbox-server >/dev/null
+                  getent passwd ai-sandbox-server | grep -q "/usr/sbin/nologin"
+                  id -nG ai-sandbox-server | tr " " "\n" | grep -qx docker
+
+                  # `pki init` with --san — the cert MUST carry SAN.
+                  java -jar /opt/ai-sandbox-server/lib/aisandboxctl.jar pki init \
+                      --san DNS:localhost,IP:127.0.0.1
+
+                  # Cert SAN must contain DNS:localhost, IP:127.0.0.1, AND the
+                  # auto-derived hostname (per UC07 Bug A composition rules).
+                  AUTO_HOST="$(hostname)"
+                  openssl x509 -in /etc/ai-sandbox-server/pki/server.crt -noout -text \
+                      | grep -A5 "Subject Alternative Name" >/tmp/san-block.txt
+                  grep -q "DNS:localhost"        /tmp/san-block.txt
+                  grep -q "IP Address:127.0.0.1" /tmp/san-block.txt
+                  if ! grep -qiE "DNS:[^,]*${AUTO_HOST}" /tmp/san-block.txt; then
+                      echo "FAIL: SAN missing auto-derived hostname (${AUTO_HOST})" >&2
+                      cat /tmp/san-block.txt >&2
+                      exit 1
+                  fi
+
+                  # Mint a bootstrap client cert (server refuses to start on
+                  # an empty allowlist).
+                  java -jar /opt/ai-sandbox-server/lib/aisandboxctl.jar client mint bootstrap \
+                      --pem --out /tmp/bootstrap
+
+                  # Start the service as ai-sandbox-server (replicates the
+                  # systemd unit ExecStart without invoking systemd).
+                  runuser -u ai-sandbox-server -- bash -c "exec /usr/bin/java \
+                      -Xms256m -Xmx1g \
+                      -Dfile.encoding=UTF-8 \
+                      -jar /opt/ai-sandbox-server/lib/aisandbox-server.jar \
+                      --spring.config.additional-location=optional:file:/etc/ai-sandbox-server/config.yaml \
+                      >/tmp/server.out 2>/tmp/server.err" &
+                  SERVER_PID=$!
+
+                  # Wait up to 60s for port 12410.
+                  ready=0
+                  for i in $(seq 1 60); do
+                      if (exec 3<>/dev/tcp/127.0.0.1/12410) 2>/dev/null; then
+                          exec 3<&- 3>&- || true
+                          ready=1
+                          break
+                      fi
+                      if ! kill -0 "$SERVER_PID" 2>/dev/null; then
+                          echo "FAIL: server JVM exited before port came up." >&2
+                          tail -120 /tmp/server.out >&2 || true
+                          tail -80  /tmp/server.err >&2 || true
+                          exit 1
+                      fi
+                      sleep 1
+                  done
+                  [ "$ready" -eq 1 ] || { echo "FAIL: port 12410 never opened in 60s" >&2; exit 1; }
+
+                  # Issue an enrollment invite non-TTY without --out — the CLI
+                  # prints the {u,t,exp,pin} JSON to stdout. Parse with python3
+                  # (no jq dependency required in the smoke env).
+                  java -jar /opt/ai-sandbox-server/lib/aisandboxctl.jar client invite alice-phone \
+                      --server-url https://127.0.0.1:12410 </dev/null \
+                      >/tmp/invite.json
+                  TOKEN="$(python3 -c "import json,sys;print(json.load(sys.stdin)[\"t\"])" </tmp/invite.json)"
+                  test -n "$TOKEN"
+
+                  # Round-trip /v1/enrollment with the token. SAN now contains
+                  # IP:127.0.0.1 so curl does not need --resolve.
+                  body="$(python3 -c "import json,sys;json.dump({\"token\":sys.argv[1]},sys.stdout)" "$TOKEN")"
+                  http_code="$(curl -sS -o /tmp/bundle.p12 -w "%{http_code}" \
+                      --cacert /etc/ai-sandbox-server/pki/server.crt \
+                      -H "Content-Type: application/json" \
+                      --data-binary "$body" \
+                      https://127.0.0.1:12410/v1/enrollment || echo 000)"
+                  if [ "$http_code" != "201" ]; then
+                      echo "FAIL: /v1/enrollment returned $http_code (expected 201)" >&2
+                      head -c 4096 /tmp/bundle.p12 | od -c | head -20 >&2 || true
+                      tail -80 /tmp/server.out >&2 || true
+                      tail -40 /tmp/server.err >&2 || true
+                      kill -TERM "$SERVER_PID" 2>/dev/null || true
+                      exit 1
+                  fi
+                  # The returned .p12 should parse with an empty passphrase.
+                  openssl pkcs12 -in /tmp/bundle.p12 -nokeys -passin pass: -info -noout 2>&1 \
+                      | tee /tmp/p12-info.txt
+                  grep -q "BEGIN" /tmp/p12-info.txt || {
+                      # Some openssl builds emit the cert via stdout rather
+                      # than -info; retry without -noout to confirm parseability.
+                      openssl pkcs12 -in /tmp/bundle.p12 -nokeys -passin pass: 2>&1 | grep -q "BEGIN"
+                  }
+
+                  # Server drops the public cert into /etc/ai-sandbox-server/clients/.
+                  test -f /etc/ai-sandbox-server/clients/alice-phone.crt
+
+                  # Clean shutdown via SIGTERM (systemd KillSignal contract).
+                  kill -TERM "$SERVER_PID"
+                  for i in $(seq 1 30); do
+                      kill -0 "$SERVER_PID" 2>/dev/null || break
+                      sleep 1
+                  done
+                  if kill -0 "$SERVER_PID" 2>/dev/null; then
+                      echo "FAIL: server did not exit within 30s of SIGTERM" >&2
+                      kill -KILL "$SERVER_PID" 2>/dev/null || true
+                      exit 1
+                  fi
+                  wait "$SERVER_PID" 2>/dev/null || true
+                  echo ".deb install-flow smoke passed."
               '
 
       - name: Build bundled compose context on the host runner

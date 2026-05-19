@@ -26,6 +26,14 @@ logstashLogback    = "8.0"
 picocli            = "4.7.6"
 jacksonYaml        = "2.18.2"
 
+# UC07 — Debian-package builder. jdeb 1.14 (Apache 2.0; Maven Central,
+# fetched 2026-05-18). Empirically verified against the published jar:
+# jdeb 1.14 ships ONLY a Maven plugin + an Ant task
+# (`org.vafer.jdeb.ant.DebAntTask`); the older
+# `org.vafer.jdeb.gradle.JdebTask` does NOT exist in 1.14. The build
+# script drives the Ant task from Gradle via `ant.withGroovyBuilder {…}`.
+jdeb               = "1.14"
+
 # Test-only — fully owned by QA; pinned here so the version catalog is the
 # single source of truth.
 junit              = "5.11.4"
@@ -113,6 +121,10 @@ jackson-dataformat-yaml = { module = "com.fasterxml.jackson.dataformat:jackson-d
 # picocli — aisandboxctl CLI.
 picocli              = { module = "info.picocli:picocli", version.ref = "picocli" }
 picocli-codegen      = { module = "info.picocli:picocli-codegen", version.ref = "picocli" }
+
+# jdeb — buildscript classpath only (used by `:server:debPackage` via the
+# Ant task; see comment on the `jdeb` version above).
+jdeb                 = { module = "org.vafer:jdeb", version.ref = "jdeb" }
 
 # ArchUnit — owned by QA, declared here as a testImplementation entry.
 archunit-junit5      = { module = "com.tngtech.archunit:archunit-junit5", version.ref = "archunit" }

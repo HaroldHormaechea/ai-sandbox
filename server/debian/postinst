@@ -1,0 +1,97 @@
+#!/bin/sh
+# ai-sandbox-server / postinst — Debian package post-install hook (UC07).
+#
+# Idempotent. Runs after dpkg has unpacked the new files. The work here is
+# strictly preparatory:
+#
+#   1. systemd daemon-reload (the unit file under /lib/systemd/system/ may
+#      have been replaced).
+#   2. Create the ai-sandbox-server system user if it does not exist. The
+#      argv MUST match `SystemUserAdmin.Default#USERADD_ARGV_PREFIX` in
+#      `server/src/main/java/com/aisandbox/server/cli/SystemUserAdmin.java`
+#      — drift would cause `dpkg install` and `aisandboxctl pki init` to
+#      produce different uid/shell/group setups, breaking the install-flow
+#      idempotency promise documented in server/README.md.
+#   3. Pre-create the operator-managed directory tree with the documented
+#      modes and ownership, so `aisandboxctl pki init` finds a sensible
+#      baseline and reports "no conflicts" on a clean install. The actual
+#      PKI material + config.yaml are intentionally NOT created here —
+#      operator runs `pki init` afterwards. Same for `secrets seed`.
+#
+# Print a "Next steps" block at the end so the operator never has to dig
+# through README.md to discover the post-install workflow.
+#
+# Exit 0 always. Any failure to chmod / chown / mkdir is reported to
+# stderr but does NOT abort the install — `pki init` will resurface the
+# specific problem with a clearer error message at the right phase.
+set -e
+
+case "$1" in
+    configure)
+        # 1. systemd daemon reload.
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl daemon-reload || true
+        fi
+
+        # 2. System user. The flags MUST match
+        # SystemUserAdmin.Default.USERADD_ARGV_PREFIX exactly — see
+        # the Javadoc on that field for the cross-reference protocol.
+        if ! getent passwd ai-sandbox-server >/dev/null 2>&1; then
+            useradd \
+                --system \
+                --no-create-home \
+                --shell /usr/sbin/nologin \
+                --user-group \
+                --groups docker \
+                ai-sandbox-server
+        fi
+
+        # 3. Operator-managed directory tree. Mode + ownership match
+        # what `aisandboxctl pki init` would set; running pki init
+        # afterwards is therefore idempotent on these directories.
+        # PKI material, allowlist, secrets, enrollment, and
+        # config.yaml are NOT created — those are pki init's job.
+        install -d -m 0750 -o ai-sandbox-server -g ai-sandbox-server /etc/ai-sandbox-server
+        install -d -m 0750 -o ai-sandbox-server -g ai-sandbox-server /var/lib/ai-sandbox-server
+        install -d -m 0750 -o ai-sandbox-server -g ai-sandbox-server /var/log/ai-sandbox-server
+
+        cat <<'EOM'
+
+ai-sandbox-server installed. Next steps:
+
+  1. sudo aisandboxctl pki init
+       Mints the self-signed server cert + key (with SAN), creates the
+       PKI / allowlist / enrollment / secrets / sessions tree, and writes
+       /etc/ai-sandbox-server/config.yaml. Pass --hostname <fqdn> to
+       baked-in the host name; --san DNS:<host>,IP:<addr> for extra
+       entries. Re-run with --force to overwrite.
+
+  2. sudo aisandboxctl secrets seed
+       Walks the container's pre-flight state (SSH key, git identity,
+       optional gh PAT, optional Claude pre-init). Use --no-gh /
+       --no-claude-preinit to opt out.
+
+  3. sudo aisandboxctl client mint <name> --pem --out /tmp/<name>
+       The server refuses to start on an empty allowlist — mint at
+       least one client cert before enabling the unit.
+
+  4. sudo systemctl enable --now ai-sandbox-server
+
+The bundled aisandboxctl jar is at /opt/ai-sandbox-server/lib/aisandboxctl.jar.
+Use it directly (`java -jar /opt/ai-sandbox-server/lib/aisandboxctl.jar ...`)
+or install a small wrapper script under /usr/local/bin/aisandboxctl.
+
+EOM
+        ;;
+
+    abort-upgrade|abort-remove|abort-deconfigure)
+        : # dpkg-internal failure paths — nothing to do.
+        ;;
+
+    *)
+        echo "postinst called with unknown argument: $1" >&2
+        exit 1
+        ;;
+esac
+
+exit 0
