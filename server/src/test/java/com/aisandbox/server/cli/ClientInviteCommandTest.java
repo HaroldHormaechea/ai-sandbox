@@ -14,6 +14,7 @@ import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermission;
 import java.time.Duration;
 import java.util.Set;
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import picocli.CommandLine;
@@ -21,9 +22,9 @@ import picocli.CommandLine;
 /**
  * UC04 AC32 — {@code aisandboxctl client invite <name>} writes a single-
  * use enrollment token to disk (256-bit entropy, hex-encoded) at
- * {@code <enrollment-dir>/<token-prefix>.json}, mode 0600, and emits a
- * QR payload (PNG when {@code --out} provided, otherwise the JSON
- * payload echoed to stdout for non-TTY callers).
+ * {@code <enrollment-dir>/<token-prefix>.json}, mode 0640 (UC07 Bug D),
+ * and emits a QR payload (PNG when {@code --out} provided, otherwise
+ * the JSON payload echoed to stdout for non-TTY callers).
  *
  * <p>The on-disk shape MUST match {@code EnrollmentTokenStore}'s reader.
  * Drift between writer and reader breaks redemption — this test pins
@@ -48,7 +49,7 @@ class ClientInviteCommandTest {
     }
 
     @Test
-    void invite_writes_token_file_with_entropy_and_mode_0600(@TempDir Path tmp) throws Exception {
+    void invite_writes_token_file_with_entropy_and_mode_0640(@TempDir Path tmp) throws Exception {
         Path pki = tmp.resolve("pki");
         Path enrollment = tmp.resolve("enrollment");
         Path outPng = tmp.resolve("invite.png");
@@ -77,9 +78,18 @@ class ClientInviteCommandTest {
         // 16-char hex prefix → filename "<prefix>.json" (16 + 5 = 21 chars).
         assertThat(tokenFile.getFileName().toString()).hasSize(21);
 
-        // Mode 0600 — operator-only readable.
+        // Mode 0640 — UC07 Bug D. Owner=ai-sandbox-server reads as the
+        // server process; ai-sandbox-server group members (the operator
+        // when explicitly added) can inspect via the read bit. World bit
+        // stays off. The tmp file is 0600 for the transient atomic-move
+        // window; the canonical name lands at 0640 after the rename so
+        // we never expose a 0600 → 0640 widening on the final path.
         Set<PosixFilePermission> perms = Files.getPosixFilePermissions(tokenFile);
-        assertThat(perms).containsExactlyInAnyOrder(PosixFilePermission.OWNER_READ, PosixFilePermission.OWNER_WRITE);
+        assertThat(perms)
+                .containsExactlyInAnyOrder(
+                        PosixFilePermission.OWNER_READ,
+                        PosixFilePermission.OWNER_WRITE,
+                        PosixFilePermission.GROUP_READ);
 
         // JSON shape: {token, name, exp} — matches EnrollmentTokenStore's TokenJson.
         ObjectMapper m = new ObjectMapper().registerModule(new JavaTimeModule());
@@ -285,6 +295,72 @@ class ClientInviteCommandTest {
                 .isInstanceOf(
                         com.aisandbox.server.enrollment.service.EnrollmentTokenStore.RedemptionOutcome.Success.class);
         assertThat(outcome.token().name()).isEqualTo("alice-phone");
+    }
+
+    // ── UC07 Bug C + Bug D (defaultEnrollmentDir + chown gating) ─────
+
+    @Test
+    void default_enrollment_dir_is_var_lib_fhs_canonical_path() {
+        // UC07 Bug C — `aisandboxctl client invite` (and `pki init`) now
+        // default to /var/lib/ai-sandbox-server/enrollment, not
+        // /etc/ai-sandbox-server/enrollment. Mutable runtime state
+        // belongs under /var/lib per FHS; /etc is for configuration.
+        // The zero-arg accessor is the contract the rest of the CLI
+        // depends on when `--enrollment-dir` is omitted.
+        assertThat(ClientInviteCommand.defaultEnrollmentDir().toString())
+                .isEqualTo("/var/lib/ai-sandbox-server/enrollment");
+    }
+
+    @Test
+    void chown_assertion_is_gated_on_ai_sandbox_server_user_resolution(@TempDir Path tmp) throws Exception {
+        // UC07 Bug D — Ownership.resolve("ai-sandbox-server", ...) returns
+        // null on hosts where the system user is absent (every dev/CI
+        // sandbox) and on non-POSIX filesystems. When it returns null,
+        // the production code skips chown and emits a single warning to
+        // stderr. This test pins that contract:
+        //  - When the user resolves → chown ran (we can't verify Files.getOwner
+        //    in a portable way without the actual user, so we just confirm
+        //    the command completed and emitted no skip-warning).
+        //  - When the user does NOT resolve → command still succeeds, file
+        //    exists, and the documented stderr warning is present.
+        //
+        // Mirrors the skip pattern in PkiInitCommandTest — the tests run
+        // on a host without the system user, so we expect the negative
+        // branch.
+        Path pki = tmp.resolve("pki");
+        Path enrollment = tmp.resolve("enrollment");
+        Path outPng = tmp.resolve("invite.png");
+        Files.createDirectories(pki);
+        CertFixtures.writeServerMaterialTo(pki, "server-cn");
+
+        Ownership resolved = Ownership.resolve("ai-sandbox-server", "test-probe");
+        Assumptions.assumeTrue(
+                resolved == null,
+                "test host has the ai-sandbox-server user — chown branch is exercised in CI release-install-smoke");
+
+        ByteArrayOutputStream errBuf = new ByteArrayOutputStream();
+        PrintStream origErr = System.err;
+        System.setErr(new PrintStream(errBuf, true));
+        int exit;
+        try {
+            exit = runInvite(
+                    "alice-phone",
+                    "--server-url",
+                    "https://example.com:12410",
+                    "--pki-dir",
+                    pki.toString(),
+                    "--enrollment-dir",
+                    enrollment.toString(),
+                    "--out",
+                    outPng.toString());
+        } finally {
+            System.setErr(origErr);
+        }
+        assertThat(exit).isZero();
+        assertThat(onlyFile(enrollment)).exists();
+        // Documented warning from Ownership.resolve when the user is missing.
+        // Same wording as PkiInitCommand emits.
+        assertThat(errBuf.toString()).contains("skipping chown").contains("ai-sandbox-server");
     }
 
     private static Path onlyFile(Path dir) throws Exception {
