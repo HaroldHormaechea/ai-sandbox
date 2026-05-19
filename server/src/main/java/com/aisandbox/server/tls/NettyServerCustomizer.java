@@ -57,30 +57,55 @@ public class NettyServerCustomizer implements WebServerFactoryCustomizer<NettyRe
 
     private HttpServer applyTls(HttpServer server) {
         return server.host(props.tls().bindAddress())
-                // Single source of truth for the listener's protocol set.
+                // UC07 § AC2/AC3 — v0.0.8 re-enables HTTP/2 over TLS.
                 //
-                // v0.0.6 ships HTTP/1.1 only. Two reasons keep H2 off for this release:
-                //   1. mTLS identity-propagation bug — fixed in this commit by
-                //      installing IdentityCapturingHandler via addBefore(ReactiveBridge)
-                //      instead of addLast, AND looking up SslHandler by class instead
-                //      of by string name. This was the actual cause of the v0.0.5/v0.0.6
-                //      mTLS 401 cascade; it bites HTTP/1.1 and HTTP/2 alike.
-                //   2. Even after #1 is fixed, H2 has a second issue: the per-stream
-                //      Http2StreamChannel does not inherit the parent channel's
-                //      IDENTITY_ATTR, so the L7 MtlsEnforcementFilter still sees no
-                //      identity for H2 requests. Re-adding H2 needs a stream-channel-
-                //      aware identity-propagation mechanism (likely a stream observer
-                //      that copies the parent's identity onto each new stream channel
-                //      OR ServerHttpRequest.getSslInfo() with empirical verification).
-                //
-                // v0.0.7 work: re-introduce H2 with the test-first discipline this PR
-                // finally established — write a mTLS-over-H2 dispatch test FIRST, then
-                // implement the stream-channel propagation, then flip the protocol
-                // list. Don't re-add H2 without the test.
-                //
-                // ALPN advertisements ("http/1.1") are owned by
+                // Single source of truth for the listener's protocol set. ALPN
+                // advertisements ("h2", "http/1.1") are owned by
                 // ReloadableSslContextHolder.rebuild(); keep the two in sync.
-                .protocol(HttpProtocol.HTTP11)
+                //
+                // The mTLS-over-H2 fix.
+                // ---------------------
+                // Under HTTP/2, Reactor Netty splits a TLS connection into a
+                // parent channel (carrying the SslHandler + handshake) and one
+                // Http2StreamChannel per request stream. The parent channel is
+                // where IdentityCapturingHandler attaches the authenticated
+                // ClientIdentity to ActiveConnectionRegistry on
+                // SslHandshakeCompletionEvent. Per-stream channels do NOT
+                // inherit the parent's IDENTITY_ATTR — they have a fresh,
+                // distinct ChannelId — so the v0.0.6 ClientIdentityExtractor
+                // path (channel-id lookup against the registry) found nothing
+                // and MtlsEnforcementFilter 401-ed every H2 request.
+                //
+                // The fix lives in ClientIdentityExtractor#channelIdOf: when
+                // the resolved Reactor Netty Channel is an Http2StreamChannel,
+                // walk to its parent() and use that channel's id. The parent
+                // is the TLS-bearing connection channel and the value matches
+                // what IdentityCapturingHandler already keyed the registry by.
+                // Bytecode precedent for the parent-walk pattern:
+                // HttpServerConfig.configureH2Pipeline and
+                // ReactorServerHttpRequest.initSslInfo both walk to the parent
+                // channel for SSL-state recovery on stream channels in
+                // Reactor Netty / Spring WebFlux.
+                //
+                // WS-over-H2 (the upgraded WebSocket transport for the stream
+                // endpoint) is deferred. SessionStreamHandler#channelIdOf
+                // currently keys by the WebSocket session's channel id and
+                // works for the H1.1-upgrade path that production still uses;
+                // an H2-native WebSocket (RFC 8441 :protocol pseudo-header)
+                // would need the same parent-walk treatment — see the inline
+                // comment block on that method for the full plan.
+                //
+                // Safety cap.
+                // ----------
+                // .http2Settings(maxConcurrentStreams = 10): bounds the number
+                // of in-flight streams per H2 connection. Reactor Netty's
+                // default is Integer.MAX_VALUE, which together with the per-IP
+                // rate limiter would let a single peer monopolize the listener
+                // with thousands of concurrent streams. The cap is the
+                // brief-declared safety bound; CI's release-install-smoke
+                // asserts the negotiated value as a regression guard.
+                .protocol(HttpProtocol.HTTP11, HttpProtocol.H2)
+                .http2Settings(spec -> spec.maxConcurrentStreams(10))
                 .doOnChannelInit((observer, channel, address) -> {
                     // Install the rate-limit handler upstream of the SSL handler (rawest
                     // position) and the identity-capture handler immediately BEFORE

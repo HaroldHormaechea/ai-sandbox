@@ -218,6 +218,40 @@ public class SessionStreamHandler implements WebSocketHandler {
         return cid == null ? null : reg.identityFor(cid);
     }
 
+    /**
+     * Resolve the Netty {@link ChannelId} of the WebSocket session's underlying
+     * transport channel.
+     *
+     * <h2>WS-over-H2 — deferred to a follow-up</h2>
+     *
+     * <p>UC07 re-enabled HTTP/2 for the REST surface (see
+     * {@code ClientIdentityExtractor#channelIdOf} for the parent-walk fix
+     * that makes mTLS identity propagate across {@code Http2StreamChannel}
+     * boundaries). The stream/WebSocket leg is NOT migrated to H2 by UC07
+     * and intentionally remains on the HTTP/1.1 Upgrade path:
+     *
+     * <ul>
+     *   <li>Production browsers and Java {@code HttpClient} open WebSockets
+     *       via the H1.1 {@code Upgrade: websocket} handshake; ALPN-
+     *       negotiated H2 connections back-channel back to H1.1 for the
+     *       WebSocket leg, which keeps this path working unchanged.</li>
+     *   <li>{@code ReactorNettyWebSocketSession#getChannelId()} returns the
+     *       id of the H1.1 upgraded connection channel — the same channel
+     *       that received the TLS handshake — so the registry lookup
+     *       continues to find the {@link ClientIdentity}.</li>
+     * </ul>
+     *
+     * <p>Bringing the WebSocket leg under H2 ("WS-over-H2", per RFC 8441
+     * via the {@code :protocol = websocket} pseudo-header on a CONNECT
+     * stream) is a future ticket. When it lands, this method must
+     * mirror the {@code ClientIdentityExtractor#channelIdOf} pattern:
+     * detect {@link io.netty.handler.codec.http2.Http2StreamChannel}
+     * under the session's transport, walk to {@code parent()}, and use
+     * the parent's id. Reactor Netty's WebSocket support does not
+     * advertise the {@code :protocol} extended-CONNECT pseudo-header
+     * today, which is why we defer rather than pre-emptively walk
+     * here.
+     */
     private static ChannelId channelIdOf(WebSocketSession session) {
         if (session instanceof ReactorNettyWebSocketSession rnws) {
             return rnws.getChannelId();

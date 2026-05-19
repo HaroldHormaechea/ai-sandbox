@@ -1,6 +1,8 @@
 package com.aisandbox.server.identity;
 
+import io.netty.channel.Channel;
 import io.netty.channel.ChannelId;
+import io.netty.handler.codec.http2.Http2StreamChannel;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
@@ -90,15 +92,43 @@ public class ClientIdentityExtractor implements WebFilter {
     /**
      * Reactor-Netty 1.2.x specific: walk
      * {@code ServerHttpRequest → AbstractServerHttpRequest.getNativeRequest()
-     *  → HttpServerRequest → Connection → channel().id()}.
+     *  → HttpServerRequest → Connection → channel()}, then resolve a
+     * channel id that matches what {@code IdentityCapturingHandler}
+     * registered on the registry at handshake-completion time.
      *
      * <p>{@code getNativeRequest()} lives on
      * {@link AbstractServerHttpRequest}, not {@link ServerHttpRequest}
-     * itself, so the cast is required. The Netty {@link io.netty.channel.Channel}
-     * is reached via the {@link reactor.netty.Connection} supertype of
+     * itself, so the cast is required. The Netty {@link Channel} is
+     * reached via the {@link reactor.netty.Connection} supertype of
      * {@link reactor.netty.http.server.HttpServerRequest} —
      * {@code HttpServerRequest} no longer exposes {@code channel()}
      * directly in Reactor-Netty 1.2.x.
+     *
+     * <h2>HTTP/1.1 vs HTTP/2 — the parent-walk</h2>
+     *
+     * <p>Under HTTP/1.1 the {@link Channel} returned above IS the
+     * TLS-bearing connection channel — the one that received the
+     * {@code SslHandshakeCompletionEvent} and the one keyed in
+     * {@link ActiveConnectionRegistry}. Its {@link ChannelId} is the
+     * lookup value we need.
+     *
+     * <p>Under HTTP/2 the request travels on a per-stream
+     * {@link Http2StreamChannel} child of the TLS connection channel.
+     * The stream channel has its OWN {@link ChannelId} that is distinct
+     * from the parent's, and the registry was keyed by the parent's id
+     * — direct lookup misses, and {@code MtlsEnforcementFilter} 401s
+     * every H2 request. The fix is to detect the stream-channel case
+     * and walk to {@code stream.parent()} to get the TLS connection
+     * channel whose id is in the registry.
+     *
+     * <p>Bytecode precedent: {@code HttpServerConfig#configureH2Pipeline}
+     * installs each {@code Http2StreamChannel} as a child of the parent
+     * connection in Reactor Netty, and
+     * {@code ReactorServerHttpRequest#initSslInfo} walks to the parent
+     * channel for SSL-state recovery on stream channels. Same
+     * parent-walk pattern, same justification: the SSL handler (and
+     * therefore everything keyed against the TLS handshake) lives on
+     * the parent.
      *
      * <p>The casts are isolated here so the rest of the codebase keeps
      * a clean abstraction boundary. Returns {@code null} for non-
@@ -112,7 +142,25 @@ public class ClientIdentityExtractor implements WebFilter {
         try {
             Object nativeRequest = abstractReq.getNativeRequest();
             if (nativeRequest instanceof reactor.netty.Connection conn) {
-                return conn.channel().id();
+                Channel channel = conn.channel();
+                if (channel instanceof Http2StreamChannel streamChannel) {
+                    // UC07 § AC2 — per-stream H2 channels do NOT inherit the
+                    // parent TLS channel's IDENTITY_ATTR (the registry was
+                    // keyed by the parent's id at SslHandshakeCompletionEvent
+                    // time). Walk to parent() to get the lookup value.
+                    Channel parent = streamChannel.parent();
+                    if (parent == null) {
+                        // Defensive: never expected for an active stream
+                        // channel — Reactor Netty installs the stream channel
+                        // as a child of the H2 multiplex handler's parent.
+                        // If we ever see this in production it means the H2
+                        // pipeline shape changed; surface so it isn't masked.
+                        LOG.warn("Http2StreamChannel has null parent — H2 pipeline shape changed?");
+                        return null;
+                    }
+                    return parent.id();
+                }
+                return channel.id();
             }
         } catch (RuntimeException re) {
             LOG.trace("Cannot resolve Netty channel id from request: {}", re.toString());
