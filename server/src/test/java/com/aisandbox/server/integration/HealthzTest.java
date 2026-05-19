@@ -20,7 +20,7 @@ import org.springframework.http.ResponseEntity;
  * more than this test buys; the wider boot-startup checks live in the
  * DinD-gated integration tier).
  */
-class HealthzIT {
+class HealthzTest {
 
     @Test
     void healthy_returns_200_with_dto() {

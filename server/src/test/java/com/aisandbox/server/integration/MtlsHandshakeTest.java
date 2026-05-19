@@ -44,7 +44,7 @@ import org.junit.jupiter.api.io.TempDir;
  * fingerprint allowlist actually drives the handshake outcome under a
  * real {@link SSLEngine}, not just under unit-level mocks.
  */
-class MtlsHandshakeIT {
+class MtlsHandshakeTest {
 
     @Test
     void allowlisted_client_completes_handshake(@TempDir Path tmp) throws Exception {

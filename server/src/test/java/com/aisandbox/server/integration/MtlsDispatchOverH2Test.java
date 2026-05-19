@@ -21,7 +21,6 @@ import java.util.Set;
 import javax.net.ssl.KeyManagerFactory;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLEngine;
-import javax.net.ssl.SSLParameters;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.X509ExtendedTrustManager;
 import org.junit.jupiter.api.Test;
@@ -107,6 +106,27 @@ class MtlsDispatchOverH2Test {
     private static final CertFixtures.ClientMaterial ALLOWLISTED_CLIENT;
 
     static {
+        // UC-07 AC1 — bypass JDK HttpClient's HTTPS hostname verification
+        // for the SAN-less self-signed server cert that CertFixtures
+        // mints. Per the empirical evidence captured in this test's
+        // development cycle, JDK 21's HttpClient with
+        // {@code Version.HTTP_2} IGNORES a user-supplied
+        // {@code SSLParameters} (e.g. one with
+        // {@code endpointIdentificationAlgorithm=""}) — the engine's
+        // own diagnostic logging confirms it reverts to {@code HTTPS}
+        // endpoint identification and reports
+        // "AbstractAsyncSSLConnection: no applications set!" so ALPN
+        // is never offered and the connection silently downgrades to
+        // HTTP/1.1. The {@code jdk.internal.httpclient.*} system
+        // properties are the documented escape hatch: set BEFORE the
+        // {@code HttpClient} is built (i.e. here, in the static
+        // initialiser that runs at class-load time, before any
+        // {@code @Test} method or {@code @SpringBootTest} fixture
+        // touches a client). The properties are JVM-global; the JUnit
+        // forkEvery=1 isolation in the Gradle test config keeps the
+        // blast radius to this class's JVM and doesn't pollute
+        // sibling tests.
+        System.setProperty("jdk.internal.httpclient.disableHostnameVerification", "true");
         try {
             ROOT = Files.createTempDirectory("ai-sandbox-mtls-dispatch-h2-");
             PKI_DIR = Files.createDirectories(ROOT.resolve("pki"));
@@ -231,10 +251,23 @@ class MtlsDispatchOverH2Test {
     /**
      * Build a {@link HttpClient} that presents {@code mat}'s cert+key
      * during the TLS handshake, trusts the server unconditionally
-     * (chain verification is owned by other tests), skips hostname
-     * verification (CertFixtures' server cert has no SAN), and
-     * advertises {@code h2} via ALPN by setting the client version to
-     * {@link HttpClient.Version#HTTP_2}.
+     * (chain verification is owned by other tests), and lets the JDK
+     * auto-add {@code "h2", "http/1.1"} to the ALPN offer because
+     * {@code .version(HttpClient.Version.HTTP_2)} is set.
+     *
+     * <p>The H1.1 sibling test ({@link MtlsDispatchTest}) supplies an
+     * {@link SSLParameters} with
+     * {@code endpointIdentificationAlgorithm=""} to bypass hostname
+     * verification for the SAN-less server cert. Under
+     * {@link HttpClient.Version#HTTP_2} the JDK's HttpClient IGNORES a
+     * user-supplied {@code SSLParameters} (empirical: its own diagnostic
+     * log reports "AbstractAsyncSSLConnection: no applications set!"
+     * and reverts to {@code endpointIdAlg=HTTPS}, so ALPN is never
+     * offered and the connection silently downgrades to HTTP/1.1).
+     * The workaround is the {@code disableHostnameVerification} system
+     * property set in this class's static initialiser; with no
+     * {@code SSLParameters} supplied, the JDK adds {@code h2, http/1.1}
+     * to ALPN itself and the connection upgrades cleanly to HTTP/2.
      */
     private static HttpClient httpClientWith(CertFixtures.ClientMaterial mat) throws Exception {
         KeyStore ks = KeyStore.getInstance("PKCS12");
@@ -247,12 +280,8 @@ class MtlsDispatchOverH2Test {
         SSLContext sslCtx = SSLContext.getInstance("TLS");
         sslCtx.init(kmf.getKeyManagers(), new TrustManager[] {TRUST_ALL}, new SecureRandom());
 
-        SSLParameters sslParams = new SSLParameters();
-        sslParams.setEndpointIdentificationAlgorithm("");
-
         return HttpClient.newBuilder()
                 .sslContext(sslCtx)
-                .sslParameters(sslParams)
                 .version(HttpClient.Version.HTTP_2)
                 .connectTimeout(java.time.Duration.ofSeconds(5))
                 .build();

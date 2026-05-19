@@ -30,20 +30,17 @@ import org.junit.jupiter.api.io.TempDir;
  * echoes its argv on stdout, then run each script with the
  * UC05 env vars set/unset and assert the captured docker argv.
  *
- * <p>The {@code IT} suffix follows the analyst's naming convention.
- * The build excludes {@code *IT.class} from the default
- * {@code :server:test} run, so this class is compiled but not
- * executed under that task — that is fine, since the fake-docker
- * approach does not require Docker-in-Docker and the relevant
- * coverage is captured by the {@code release-install-smoke} CI job
- * AND by {@link ScriptExecutorServiceTest}'s wire-level env assertions.
- * Run explicitly via {@code AI_SANDBOX_DIND=1 ./gradlew :server:integrationTest}.
- *
- * <p>Linux only — POSIX permission control and {@code /bin/sh} script
- * invocation are mandatory.
+ * <p>UC-07 § AC7 — this test does NOT require Docker-in-Docker; it
+ * builds its own fake {@code docker} shim per test, so the {@code IT}
+ * suffix was misclassifying it as DinD-gated. Renamed to
+ * {@code HostScriptComposeEnvTest} as part of the v0.0.8 {@code *IT}
+ * audit so the build runs it under the default {@code :server:test}
+ * task on every PR. The {@link EnabledOnOs} gate (Linux / macOS only,
+ * because POSIX permission control and {@code /bin/sh} script
+ * invocation are mandatory) is preserved unchanged.
  */
 @EnabledOnOs({OS.LINUX, OS.MAC})
-class HostScriptComposeEnvIT {
+class HostScriptComposeEnvTest {
 
     private static final Path REPO_ROOT =
             Path.of(System.getProperty("user.dir")).getParent();

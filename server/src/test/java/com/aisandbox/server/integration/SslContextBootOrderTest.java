@@ -225,36 +225,53 @@ class SslContextBootOrderTest {
     }
 
     /**
-     * Round-3 ALPN-stays-on-HTTP/1.1 regression guard.
+     * UC-07 § AC3 ALPN-negotiates-H2 regression guard.
      *
-     * <p>v0.0.6 deliberately drops HTTP/2: under H2, Reactor Netty's
-     * per-request stream channel does not inherit the parent channel's
-     * {@code IDENTITY_ATTR}, so {@code MtlsEnforcementFilter} sees a
-     * null identity on every request and rejects with 401 — see commit
-     * {@code 2a1779e} for the full cascade analysis. After the H2 drop,
+     * <p>v0.0.8 re-enables HTTP/2 over TLS via option (c) — a
+     * parent-channel identity walk in
+     * {@code ClientIdentityExtractor.channelIdOf}. Under HTTP/2 the
+     * per-request {@code Http2StreamChannel} does NOT inherit the parent
+     * TLS connection channel's {@code IDENTITY_ATTR} (the registry was
+     * keyed at {@code SslHandshakeCompletionEvent} time on the parent's
+     * {@code ChannelId}), and a direct lookup on the stream channel's
+     * id missed — {@code MtlsEnforcementFilter} 401-ed every H2 request.
+     * The v0.0.8 fix detects {@code Http2StreamChannel} in
+     * {@code channelIdOf} and walks to {@code streamChannel.parent()} to
+     * recover the registry key.
+     *
+     * <p>With the propagation fix landed,
      * {@code NettyServerCustomizer#applyTls} declares the listener's
-     * protocol set as {@code HTTP11} only and
-     * {@code ReloadableSslContextHolder.rebuild(...)} advertises just
-     * {@code "http/1.1"} via ALPN.
+     * protocol set as {@code HttpProtocol.HTTP11, HttpProtocol.H2} and
+     * {@code ReloadableSslContextHolder.rebuild(...)} advertises
+     * {@code "h2", "http/1.1"} via ALPN — {@code h2} first as the
+     * server-preferred protocol.
      *
      * <p>This test does a real TLS handshake against the running server,
      * offering BOTH {@code "h2"} AND {@code "http/1.1"} from the client
      * side, and asserts the server-driven negotiation lands on
-     * {@code "http/1.1"}. Keeping {@code "h2"} on the client list is
+     * {@code "h2"}. Keeping {@code "http/1.1"} on the client list is
      * intentional — trimming the client offer would make the assertion
      * tautological. The point is to prove the SERVER is the side
-     * driving the choice (because the server's ALPN list contains only
-     * {@code "http/1.1"}), not that we asked for {@code "http/1.1"} and
-     * got back what we asked for.
+     * driving the choice (because the server's ALPN list lists
+     * {@code "h2"} ahead of {@code "http/1.1"} as the negotiated
+     * preference), not that we asked for {@code "h2"} and got back what
+     * we asked for.
      *
-     * <p>Failure mode this guards against:
+     * <p>Failure modes this guards against:
      *
      * <ul>
-     *   <li>Someone re-adds {@code "h2"} to the holder's ALPN list
-     *       without also re-adding {@code .protocol(HttpProtocol.H2)}
-     *       to the customizer → ALPN negotiates {@code h2} but the
-     *       server can't speak it, producing the protocol-mismatch
-     *       confusion that motivated dropping H2 from v0.0.6.</li>
+     *   <li>Someone re-drops {@code "h2"} from the holder's ALPN list
+     *       (e.g. a partial revert of the v0.0.8 propagation fix) but
+     *       leaves {@code .protocol(HttpProtocol.HTTP11, HttpProtocol.H2)}
+     *       on the customizer → ALPN can no longer negotiate {@code h2}
+     *       but the listener still advertises it via its protocol set,
+     *       producing the protocol-mismatch confusion that motivated
+     *       dropping H2 from v0.0.6 in the first place.</li>
+     *   <li>Conversely, if someone trims {@code HttpProtocol.H2} from
+     *       the customizer's protocol set but leaves {@code "h2"} on
+     *       the ALPN list, ALPN selects {@code "h2"} but the listener
+     *       can't speak it. Either drift surfaces here as the negotiated
+     *       ALPN value being something other than {@code "h2"}.</li>
      * </ul>
      *
      * <p>Reads the ALPN result directly from the SSLEngine via
@@ -265,18 +282,18 @@ class SslContextBootOrderTest {
      * application-protocol selection the production wiring delivers.
      */
     @Test
-    void alpn_negotiates_http_1_1_over_tls() throws Exception {
+    void alpn_negotiates_h2_over_tls() throws Exception {
         assertThat(port).isGreaterThan(0);
 
-        // Client-side SslContext mirroring the v0.0.6 production stack:
+        // Client-side SslContext mirroring the v0.0.8 production stack:
         //   - SslProvider.JDK matches the holder.
         //   - InsecureTrustManagerFactory bypasses chain + hostname
         //     verification; chain verification is owned by
         //     AllowlistTrustManagerTest, not this test.
         //   - applicationProtocolConfig offers "h2","http/1.1" — keeping
-        //     "h2" on the OFFER list (despite the server no longer
-        //     speaking it) is what proves the server is the side driving
-        //     the choice. Trimming to "http/1.1" only would make the
+        //     "http/1.1" on the OFFER list (despite the server now
+        //     preferring h2) is what proves the server is the side
+        //     driving the choice. Trimming to "h2" only would make the
         //     assertion below tautological.
         SslContext clientCtx = SslContextBuilder.forClient()
                 .sslProvider(SslProvider.JDK)
@@ -314,7 +331,7 @@ class SslContextBootOrderTest {
             });
             b.connect("127.0.0.1", port).sync();
             String alpn = negotiated.get(15, TimeUnit.SECONDS);
-            assertThat(alpn).isEqualTo("http/1.1");
+            assertThat(alpn).isEqualTo("h2");
         } finally {
             group.shutdownGracefully();
         }
