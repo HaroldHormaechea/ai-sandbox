@@ -76,10 +76,18 @@ public class ReloadableSslContextHolder {
                 // preserved at L7 instead of L5.
                 .clientAuth(ClientAuth.OPTIONAL)
                 .trustManager(new AllowlistTrustManager(allowlist))
+                // UC07 § AC3 — v0.0.8 re-enables HTTP/2 over TLS. ALPN list is
+                // ordered server-preference: "h2" first, then "http/1.1" as the
+                // negotiated fallback. The customizer's listener protocol set
+                // (.protocol(HttpProtocol.HTTP11, HttpProtocol.H2)) and this
+                // ALPN list MUST stay in sync — if either flips back to
+                // HTTP/1.1-only the other must too, otherwise clients negotiate
+                // a protocol the listener can't speak.
                 .applicationProtocolConfig(new io.netty.handler.ssl.ApplicationProtocolConfig(
                         io.netty.handler.ssl.ApplicationProtocolConfig.Protocol.ALPN,
                         io.netty.handler.ssl.ApplicationProtocolConfig.SelectorFailureBehavior.NO_ADVERTISE,
                         io.netty.handler.ssl.ApplicationProtocolConfig.SelectedListenerFailureBehavior.ACCEPT,
+                        "h2",
                         "http/1.1"))
                 .build();
         ref.set(ctx);

@@ -314,7 +314,10 @@ jobs:
                   # round-trips /v1/healthz over mTLS — catching the
                   # class of bug that the systemd exit-1-restart spiral
                   # masks on a production host.
-                  apt-get install -y --no-install-recommends curl
+                  # curl handles the H1.1 + H2 enrollment round-trips; python3
+                  # parses the --json invite payload; openssl verifies the
+                  # returned .p12 (UC07 § AC4 H2 leg).
+                  apt-get install -y --no-install-recommends curl python3 openssl
 
                   # Mint a client cert BEFORE starting the server so the
                   # in-process allowlist scan picks it up at boot — we
@@ -402,6 +405,81 @@ jobs:
                       exit 1
                   fi
                   echo "Boot smoke: /v1/healthz returned $http_code (TLS + mTLS + Spring OK)."
+
+                  # ── UC07 § AC4 — HTTP/2 enrollment round-trip ──
+                  # v0.0.8 re-enabled HTTP/2 over TLS via the parent-channel
+                  # identity walk in ClientIdentityExtractor#channelIdOf. The
+                  # smoke validates the full path: a fresh single-use invite
+                  # token is minted via `--json`, POSTed to /v1/enrollment
+                  # under negotiated H2 (curl --http2 → ALPN selects "h2"
+                  # ahead of "http/1.1"), and the returned .p12 must parse.
+                  # The H1.1 healthz round-trip above already exercised
+                  # H1.1 + mTLS — the two together prove ALPN gives both
+                  # protocols to the listener.
+                  java -jar /opt/ai-sandbox-server/lib/aisandboxctl.jar client invite alice-phone-h2 \
+                      --server-url https://127.0.0.1:12410 \
+                      --json </dev/null >/tmp/invite-h2.json
+                  TOKEN_H2="$(python3 -c "import json,sys;print(json.load(sys.stdin)[\"t\"])" </tmp/invite-h2.json)"
+                  test -n "$TOKEN_H2"
+                  python3 -c "import json,sys;json.dump({\"token\":sys.argv[1]},sys.stdout)" "$TOKEN_H2" > /tmp/enroll-h2.body
+
+                  # curl --http2 forces ALPN-preferred H2 negotiation; %{http_version}
+                  # reflects the version of the final connection (e.g. "2"). The
+                  # SETTINGS frame (max-streams regression guard for AC4) is
+                  # captured from -v output below.
+                  # Single-quote-free shell syntax — the outer install-flow script
+                  # is wrapped in a single-quoted bash -euxc invocation, so any
+                  # literal apostrophe would terminate it. Use double quotes
+                  # throughout this block.
+                  http_pair="$(curl -sS -v --http2 -o /tmp/bundle-h2.p12 \
+                      -w "CODE=%{http_code} VER=%{http_version}" \
+                      --cacert /etc/ai-sandbox-server/pki/server.crt \
+                      -H "Content-Type: application/json" \
+                      --data-binary @/tmp/enroll-h2.body \
+                      https://127.0.0.1:12410/v1/enrollment 2>/tmp/curl-h2.verbose || echo "CODE=000 VER=0")"
+                  http_code_h2="$(echo "$http_pair" | sed -nE "s/.*CODE=([0-9]+).*/\1/p")"
+                  http_version_h2="$(echo "$http_pair" | sed -nE "s/.*VER=([0-9.]+).*/\1/p")"
+                  if [ "$http_code_h2" != "201" ]; then
+                      echo "FAIL: H2 /v1/enrollment returned $http_code_h2 (expected 201)" >&2
+                      sed -n "1,80p" /tmp/curl-h2.verbose >&2 || true
+                      tail -120 /tmp/server.out >&2 || true
+                      tail -80 /tmp/server.err >&2 || true
+                      kill -TERM "$SERVER_PID" 2>/dev/null || true
+                      exit 1
+                  fi
+                  if [ "$http_version_h2" != "2" ]; then
+                      echo "FAIL: H2 enrollment used HTTP/$http_version_h2 (expected HTTP/2 via ALPN)" >&2
+                      sed -n "1,80p" /tmp/curl-h2.verbose >&2 || true
+                      kill -TERM "$SERVER_PID" 2>/dev/null || true
+                      exit 1
+                  fi
+                  openssl pkcs12 -in /tmp/bundle-h2.p12 -nokeys -passin pass: -info -noout 2>&1 \
+                      | tee /tmp/p12-h2-info.txt
+                  grep -q "BEGIN" /tmp/p12-h2-info.txt || {
+                      openssl pkcs12 -in /tmp/bundle-h2.p12 -nokeys -passin pass: 2>&1 | grep -q "BEGIN"
+                  }
+
+                  # AC4 max-streams regression guard. NettyServerCustomizer.applyTls
+                  # caps maxConcurrentStreams at 10; the SETTINGS frame from the
+                  # server surfaces in the verbose curl stream as a token
+                  # "MAX_CONCURRENT_STREAMS" followed by the negotiated value.
+                  # If Reactor Netty ever silently restores its Integer.MAX_VALUE
+                  # default, this assertion fires before a denial-of-service
+                  # vector ships.
+                  # Case-insensitive: curl/nghttp2 output varies across versions
+                  # ("MAX_CONCURRENT_STREAMS == 10", "max_concurrent_streams=10",
+                  # "SETTINGS_MAX_CONCURRENT_STREAMS == 10" — all share the
+                  # max_concurrent_streams token followed by the negotiated
+                  # value).
+                  streams_n="$(grep -oiE "max[_ ]concurrent[_ ]streams[^0-9]*[0-9]+" /tmp/curl-h2.verbose \
+                      | grep -oE "[0-9]+\$" | tail -1 || true)"
+                  if [ "$streams_n" != "10" ]; then
+                      echo "FAIL: HTTP/2 max-concurrent-streams = \"$streams_n\" (expected 10)" >&2
+                      grep -E "SETTINGS|MAX_CONCURRENT_STREAMS|h2" /tmp/curl-h2.verbose | head -40 >&2 || true
+                      kill -TERM "$SERVER_PID" 2>/dev/null || true
+                      exit 1
+                  fi
+                  echo "Boot smoke: H2 /v1/enrollment returned 201 (HTTP/$http_version_h2, max-streams=$streams_n)."
 
                   # Clean shutdown — sanity-check that SIGTERM is
                   # honoured (the systemd unit relies on it; KillSignal=
@@ -526,20 +604,16 @@ jobs:
                   done
                   [ "$ready" -eq 1 ] || { echo "FAIL: port 12410 never opened in 60s" >&2; exit 1; }
 
-                  # Issue an enrollment invite non-TTY without --out. The CLI
-                  # emits, on stdout: line 1 = single-line {u,t,exp,pin} JSON
-                  # (compact, ObjectMapper.writeValueAsString — no pretty
-                  # print), then a blank line, then a 4-line operator-facing
-                  # summary ("Invite issued: …", token-prefix, expires-at,
-                  # file). Empirically verified by reading ClientInviteCommand
-                  # call() lines 213-223 against the source tree. `head -n 1`
-                  # peels off the JSON; if a future change pretty-prints the
-                  # JSON across multiple lines this filter will break — that
-                  # is a v0.0.8 cleanup tracked separately (add a --json flag
-                  # that suppresses the trailing summary entirely).
+                  # Issue an enrollment invite via --json (UC07 § AC5). The
+                  # flag emits machine-clean compact JSON on stdout (single
+                  # line, no QR, no trailer) and sends the operator-facing
+                  # trailer to stderr, so the smoke no longer needs the
+                  # v0.0.7-era `| head -n 1` workaround. If the JSON ever
+                  # gains a newline this assertion still passes — the JSON
+                  # channel is now its own stream.
                   java -jar /opt/ai-sandbox-server/lib/aisandboxctl.jar client invite alice-phone \
-                      --server-url https://127.0.0.1:12410 </dev/null \
-                      | head -n 1 >/tmp/invite.json
+                      --server-url https://127.0.0.1:12410 \
+                      --json </dev/null >/tmp/invite.json
                   TOKEN="$(python3 -c "import json,sys;print(json.load(sys.stdin)[\"t\"])" </tmp/invite.json)"
                   test -n "$TOKEN"
 
@@ -570,6 +644,76 @@ jobs:
 
                   # Server drops the public cert into /etc/ai-sandbox-server/clients/.
                   test -f /etc/ai-sandbox-server/clients/alice-phone.crt
+
+                  # ── UC07 § AC4 — HTTP/2 enrollment round-trip ──
+                  # v0.0.8 re-enabled HTTP/2 over TLS via the parent-channel
+                  # identity walk in ClientIdentityExtractor#channelIdOf. A
+                  # separate single-use token covers the H2 leg; the H1.1
+                  # round-trip above already consumed `alice-phone`. curl
+                  # --http2 negotiates ALPN → "h2" (server-preferred ahead of
+                  # "http/1.1"); %{http_version} confirms which protocol the
+                  # final connection actually used.
+                  java -jar /opt/ai-sandbox-server/lib/aisandboxctl.jar client invite alice-phone-h2 \
+                      --server-url https://127.0.0.1:12410 \
+                      --json </dev/null >/tmp/invite-h2.json
+                  TOKEN_H2="$(python3 -c "import json,sys;print(json.load(sys.stdin)[\"t\"])" </tmp/invite-h2.json)"
+                  test -n "$TOKEN_H2"
+                  python3 -c "import json,sys;json.dump({\"token\":sys.argv[1]},sys.stdout)" "$TOKEN_H2" > /tmp/enroll-h2.body
+
+                  # Single-quote-free shell syntax — the outer install-flow script
+                  # is wrapped in a single-quoted bash -euxc invocation, so any
+                  # literal apostrophe would terminate it. Use double quotes
+                  # throughout this block.
+                  http_pair="$(curl -sS -v --http2 -o /tmp/bundle-h2.p12 \
+                      -w "CODE=%{http_code} VER=%{http_version}" \
+                      --cacert /etc/ai-sandbox-server/pki/server.crt \
+                      -H "Content-Type: application/json" \
+                      --data-binary @/tmp/enroll-h2.body \
+                      https://127.0.0.1:12410/v1/enrollment 2>/tmp/curl-h2.verbose || echo "CODE=000 VER=0")"
+                  http_code_h2="$(echo "$http_pair" | sed -nE "s/.*CODE=([0-9]+).*/\1/p")"
+                  http_version_h2="$(echo "$http_pair" | sed -nE "s/.*VER=([0-9.]+).*/\1/p")"
+                  if [ "$http_code_h2" != "201" ]; then
+                      echo "FAIL: H2 /v1/enrollment returned $http_code_h2 (expected 201)" >&2
+                      sed -n "1,80p" /tmp/curl-h2.verbose >&2 || true
+                      tail -80 /tmp/server.out >&2 || true
+                      tail -40 /tmp/server.err >&2 || true
+                      kill -TERM "$SERVER_PID" 2>/dev/null || true
+                      exit 1
+                  fi
+                  if [ "$http_version_h2" != "2" ]; then
+                      echo "FAIL: H2 enrollment used HTTP/$http_version_h2 (expected HTTP/2 via ALPN)" >&2
+                      sed -n "1,80p" /tmp/curl-h2.verbose >&2 || true
+                      kill -TERM "$SERVER_PID" 2>/dev/null || true
+                      exit 1
+                  fi
+                  openssl pkcs12 -in /tmp/bundle-h2.p12 -nokeys -passin pass: -info -noout 2>&1 \
+                      | tee /tmp/p12-h2-info.txt
+                  grep -q "BEGIN" /tmp/p12-h2-info.txt || {
+                      openssl pkcs12 -in /tmp/bundle-h2.p12 -nokeys -passin pass: 2>&1 | grep -q "BEGIN"
+                  }
+                  test -f /etc/ai-sandbox-server/clients/alice-phone-h2.crt
+
+                  # AC4 max-streams regression guard. NettyServerCustomizer.applyTls
+                  # caps maxConcurrentStreams at 10; the SETTINGS frame from the
+                  # server surfaces in the verbose curl stream as a token
+                  # "MAX_CONCURRENT_STREAMS" followed by the negotiated value.
+                  # If Reactor Netty ever silently restores its Integer.MAX_VALUE
+                  # default, this assertion fires before a denial-of-service
+                  # vector ships.
+                  # Case-insensitive: curl/nghttp2 output varies across versions
+                  # ("MAX_CONCURRENT_STREAMS == 10", "max_concurrent_streams=10",
+                  # "SETTINGS_MAX_CONCURRENT_STREAMS == 10" — all share the
+                  # max_concurrent_streams token followed by the negotiated
+                  # value).
+                  streams_n="$(grep -oiE "max[_ ]concurrent[_ ]streams[^0-9]*[0-9]+" /tmp/curl-h2.verbose \
+                      | grep -oE "[0-9]+\$" | tail -1 || true)"
+                  if [ "$streams_n" != "10" ]; then
+                      echo "FAIL: HTTP/2 max-concurrent-streams = \"$streams_n\" (expected 10)" >&2
+                      grep -E "SETTINGS|MAX_CONCURRENT_STREAMS|h2" /tmp/curl-h2.verbose | head -40 >&2 || true
+                      kill -TERM "$SERVER_PID" 2>/dev/null || true
+                      exit 1
+                  fi
+                  echo ".deb smoke: H2 /v1/enrollment returned 201 (HTTP/$http_version_h2, max-streams=$streams_n)."
 
                   # Clean shutdown via SIGTERM (systemd KillSignal contract).
                   kill -TERM "$SERVER_PID"

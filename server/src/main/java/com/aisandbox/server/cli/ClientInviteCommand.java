@@ -51,12 +51,29 @@ import picocli.CommandLine.Parameters;
  * <p>Output policy:
  *
  * <ul>
- *   <li>If {@code --out} is omitted AND stdout is a TTY → ASCII QR to
- *       stdout, scannable directly from the terminal.</li>
- *   <li>If {@code --out} is provided → 512 × 512 PNG written to that
- *       path; the JSON payload is also echoed to stdout so the operator
- *       can copy-paste it if the scanner can't read the PNG.</li>
+ *   <li><b>No {@code --json}, no {@code --out}, stdout is a TTY</b> →
+ *       ASCII QR + operator-facing trailer to stdout.</li>
+ *   <li><b>No {@code --json}, no {@code --out}, stdout is NOT a TTY</b>
+ *       → compact {@code {u,t,exp,pin}} JSON + operator-facing trailer
+ *       to stdout. The trailer is separated from the JSON by a blank
+ *       line so {@code head -n 1} peels off the machine-clean JSON;
+ *       prefer {@code --json} for new scripts (see below).</li>
+ *   <li><b>No {@code --json}, {@code --out <path>} provided</b> →
+ *       512 × 512 PNG written to {@code <path>}; the JSON payload is
+ *       also echoed to stdout so the operator can copy-paste it if the
+ *       scanner can't read the PNG.</li>
+ *   <li><b>{@code --json}, no {@code --out}</b> → compact
+ *       {@code {u,t,exp,pin}} JSON on stdout (single line, no QR, no
+ *       trailer); operator-facing trailer goes to <b>stderr</b>.</li>
+ *   <li><b>{@code --json --out <path>}</b> → compact JSON on stdout
+ *       AND the same JSON written to {@code <path>} (NOT a PNG —
+ *       {@code --json} suppresses QR generation entirely); operator-
+ *       facing trailer to <b>stderr</b>.</li>
  * </ul>
+ *
+ * <p>The {@code --json} flag is the recommended form for CI / scripted
+ * use, replacing the v0.0.7-era {@code | head -n 1} workaround that
+ * peeled JSON off the mixed stdout stream.
  *
  * <p>The {@code --server-pin} flag accepts an explicit pin (when the
  * operator wants to override what's on disk); otherwise the cert at
@@ -127,8 +144,19 @@ public class ClientInviteCommand implements Callable<Integer> {
             description = "Server cert SHA-256 fingerprint (hex). Default: SHA-256 of <pki-dir>/server.crt.")
     String serverPin;
 
-    @Option(names = "--out", description = "Write a PNG QR to this path (default: ASCII QR to stdout).")
+    @Option(
+            names = "--out",
+            description = "Without --json: write a 512x512 PNG QR to this path (default: ASCII QR to stdout if TTY,"
+                    + " JSON-only to stdout otherwise). With --json: write the same compact JSON that"
+                    + " goes to stdout to this path (NOT a PNG — --json suppresses QR generation).")
     Path outFile;
+
+    @Option(
+            names = "--json",
+            description = "Emit machine-clean compact JSON on stdout (single line, no QR, no trailer); operator-facing"
+                    + " trailer goes to stderr. With --out, the same JSON is also written to the file"
+                    + " (no PNG). Replaces the v0.0.7-era `| head -n 1` workaround for CI / scripted use.")
+    boolean json;
 
     @Override
     public Integer call() throws Exception {
@@ -203,24 +231,42 @@ public class ClientInviteCommand implements Callable<Integer> {
         }
 
         String payload = buildQrPayload(serverUrl, token, expiresAt, pin);
-        boolean ttyOut = outFile == null && System.console() != null;
-        if (outFile != null) {
-            QrEncoder.writePng(payload, outFile);
-            System.out.println("Wrote PNG QR: " + outFile);
-            System.out.println("Payload     : " + payload);
-        } else if (ttyOut) {
-            QrEncoder.writeAscii(payload, System.out);
-        } else {
-            // Non-TTY without --out: print just the payload so the
-            // operator can pipe it.
+        // Output policy — see class Javadoc for the full matrix. --json is the
+        // explicit machine-clean form (JSON to stdout, trailer to stderr); the
+        // pre-v0.0.8 default behaviour is preserved when --json is absent.
+        if (json) {
+            // --json: stdout gets ONLY the compact JSON. No QR (ASCII or PNG)
+            // is emitted on stdout. If --out is provided, the same JSON is
+            // also written to the file — explicitly NOT a PNG, since --json
+            // suppresses QR generation entirely.
             System.out.println(payload);
+            if (outFile != null) {
+                java.nio.file.Files.writeString(outFile, payload);
+            }
+        } else {
+            boolean ttyOut = outFile == null && System.console() != null;
+            if (outFile != null) {
+                QrEncoder.writePng(payload, outFile);
+                System.out.println("Wrote PNG QR: " + outFile);
+                System.out.println("Payload     : " + payload);
+            } else if (ttyOut) {
+                QrEncoder.writeAscii(payload, System.out);
+            } else {
+                // Non-TTY without --out: print just the payload so the
+                // operator can pipe it.
+                System.out.println(payload);
+            }
         }
 
-        System.out.println();
-        System.out.println("Invite issued: " + name);
-        System.out.println("  token-prefix : " + token.substring(0, FILENAME_PREFIX_LEN));
-        System.out.println("  expires-at   : " + expiresAt);
-        System.out.println("  file         : " + file);
+        // Operator-facing trailer. Goes to stderr under --json so stdout
+        // remains a clean JSON channel; otherwise to stdout where it has
+        // always lived (compatible with v0.0.7 scripts that read stdout).
+        java.io.PrintStream trailer = json ? System.err : System.out;
+        trailer.println();
+        trailer.println("Invite issued: " + name);
+        trailer.println("  token-prefix : " + token.substring(0, FILENAME_PREFIX_LEN));
+        trailer.println("  expires-at   : " + expiresAt);
+        trailer.println("  file         : " + file);
         return 0;
     }
 

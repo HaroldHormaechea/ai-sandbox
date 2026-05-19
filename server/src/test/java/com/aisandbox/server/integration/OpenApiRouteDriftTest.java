@@ -25,7 +25,7 @@ import org.junit.jupiter.api.Test;
  * the missing paths so the dev team knows to refresh the baseline. This
  * is the "known limitation #2" the team-lead asked QA to validate.
  */
-class OpenApiRouteDriftIT {
+class OpenApiRouteDriftTest {
 
     @Test
     void committed_openapi_yaml_exists_and_is_non_empty() throws IOException {

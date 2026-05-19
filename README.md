@@ -317,6 +317,15 @@ aisandboxctl client invite alice-phone \
     --server-url https://your-host:12410 \
     --pki-dir /etc/ai-sandbox-server/pki \
     --out /tmp/alice-phone-invite.png
+
+# For CI / scripted use, `--json` emits machine-clean JSON on stdout
+# (single line, no QR, no trailer); the operator-facing trailer goes to
+# stderr. With `--json --out <path>`, the same JSON is also written to
+# the file (NOT a PNG — `--json` suppresses QR generation entirely).
+aisandboxctl client invite alice-phone \
+    --server-url https://your-host:12410 \
+    --pki-dir /etc/ai-sandbox-server/pki \
+    --json > /tmp/invite.json
 ```
 
 The Android client scans the QR, POSTs the token to

@@ -24,10 +24,10 @@ spring:
 # Spring Boot's own server.* properties — we run TLS through a custom
 # NettyServerCustomizer, so most TLS knobs here are intentionally absent.
 #
-# Protocol policy (HTTP/1.1 only — v0.0.6 ships without HTTP/2; the
-# mTLS-over-H2 redesign is deferred to v0.0.7) is owned by
-# NettyServerCustomizer.
-# ALPN advertisements ("http/1.1") are owned by ReloadableSslContextHolder.rebuild().
+# Protocol policy (HTTP/1.1 AND HTTP/2 — v0.0.8 re-enables H2 via the
+# parent-channel identity walk in ClientIdentityExtractor#channelIdOf)
+# is owned by NettyServerCustomizer.
+# ALPN advertisements ("h2", "http/1.1") are owned by ReloadableSslContextHolder.rebuild().
 # Do NOT add server.http2.enabled here — Spring Boot would add H2C, which
 # is incompatible with custom-wired TLS. See the v0.0.6 release commit
 # for context.
