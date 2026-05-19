@@ -763,6 +763,25 @@ jobs:
                   # Server drops the public cert into /etc/ai-sandbox-server/clients/.
                   test -f /etc/ai-sandbox-server/clients/alice-phone.crt
 
+                  # UC-04 AC34 enrollment rate limiter (PR #10 follow-up).
+                  # EnrollmentRateLimiterService is a fixed window of
+                  # DEFAULT_PER_WINDOW=1 redemption per DEFAULT_WINDOW_SECONDS=60s
+                  # keyed on source IP. The H1.1 round-trip above already
+                  # consumed the slot for 127.0.0.1; firing the H2 round-trip
+                  # within the same window lands a 500 INTERNAL_SERVER_ERROR
+                  # (RateLimitedException -> 429 from the controller wrapped
+                  # in the H2 stream-error path). The zip phase happens to
+                  # have enough intervening work (>60s wall time between the
+                  # two enrollments) to avoid this; the .deb phase does not.
+                  # Sleep through the window plus a 25% margin so the next
+                  # tryAcquire call hits the now > windowMillis branch and
+                  # resets the bucket. A proper fix (per-test-fixture rate
+                  # bypass header or a config override that disables the
+                  # limiter when AI_SANDBOX_SMOKE=1) is a follow-up ticket.
+                  # NB: keep this comment block apostrophe-free — the outer
+                  # bash -euxc heredoc would be closed by any stray quote.
+                  sleep 75
+
                   # ── UC07 § AC4 — HTTP/2 enrollment round-trip ──
                   # v0.0.8 re-enabled HTTP/2 over TLS via the parent-channel
                   # identity walk in ClientIdentityExtractor#channelIdOf. A
