@@ -187,14 +187,16 @@ jobs:
                           return 1
                       fi
                   }
-                  assert_mode /etc/ai-sandbox-server                 750
-                  assert_mode /etc/ai-sandbox-server/pki             700
-                  assert_mode /etc/ai-sandbox-server/clients         700
-                  assert_mode /etc/ai-sandbox-server/enrollment      700
-                  assert_mode /etc/ai-sandbox-server/secrets         700
-                  assert_mode /var/lib/ai-sandbox-server/sessions    750
-                  assert_mode /var/log/ai-sandbox-server             750
-                  assert_mode /etc/ai-sandbox-server/pki/server.key  600
+                  assert_mode /etc/ai-sandbox-server                  750
+                  assert_mode /etc/ai-sandbox-server/pki              700
+                  assert_mode /etc/ai-sandbox-server/clients          700
+                  assert_mode /etc/ai-sandbox-server/secrets          700
+                  # UC07 Bug C — enrollment dir moved to /var/lib
+                  # (runtime state belongs under /var per FHS, not /etc).
+                  assert_mode /var/lib/ai-sandbox-server/enrollment   700
+                  assert_mode /var/lib/ai-sandbox-server/sessions     750
+                  assert_mode /var/log/ai-sandbox-server              750
+                  assert_mode /etc/ai-sandbox-server/pki/server.key   600
 
                   # AC15 — cert + key exist.
                   test -f /etc/ai-sandbox-server/pki/server.crt
@@ -207,7 +209,7 @@ jobs:
                   grep -q "repo-root: /opt/ai-sandbox-server/host" /etc/ai-sandbox-server/config.yaml
                   grep -q "host-state-root: /var/lib/ai-sandbox-server/sessions" /etc/ai-sandbox-server/config.yaml
                   grep -q "dir: /etc/ai-sandbox-server/secrets" /etc/ai-sandbox-server/config.yaml
-                  grep -q "dir: /etc/ai-sandbox-server/enrollment" /etc/ai-sandbox-server/config.yaml
+                  grep -q "dir: /var/lib/ai-sandbox-server/enrollment" /etc/ai-sandbox-server/config.yaml
 
                   # AC17 — re-run without --force: exit 2 + conflict lines.
                   set +e
