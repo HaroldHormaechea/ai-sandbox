@@ -184,6 +184,20 @@ import org.springframework.test.context.DynamicPropertySource;
  * to the full-DER algorithm, the {@code CertificatePinner.check$okhttp}
  * call will surface that exception with the SPKI-vs-pin mismatch as
  * its REAL cause, not a phantom empty-chain trap.
+ *
+ * <h2>UC10 cross-reference — Android-side trust-manager configuration
+ * is NOT exercised here</h2>
+ *
+ * <p>This test validates the server's {@code autoDiscoverPin} SPKI
+ * algorithm; it does NOT validate the Android client's production
+ * trust-manager configuration, which is covered by UC10's
+ * {@code EnrollmentClientIntegrationTest}. See the {@link #TRUST_ALL}
+ * field's Javadoc for the OkHttp 5.3.2 chain-cleaning trap this test
+ * sidesteps — that trap was the latent v0.0.10 → v0.0.11 failure
+ * UC10 § AC9 exists to regression-block on the Android side. The
+ * scope of this class was always server-side; the cross-reference
+ * here makes the boundary explicit so a future reader doesn't mistake
+ * this test for end-to-end coverage of the Android client.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 class EnrollmentPinAlgorithmTest {
