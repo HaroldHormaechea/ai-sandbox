@@ -57,7 +57,13 @@ class ClientInviteCommandTest {
         Files.createDirectories(pki);
 
         // Seed server.crt so the command can auto-discover the pin.
-        CertFixtures.writeServerMaterialTo(pki, "server-cn");
+        // UC10 § AC6 fix-back — seed the cert with DNS:example.com so the
+        // command's SAN validation accepts the --server-url host. The
+        // older zero-SAN form would now refuse with exit 2 (no SAN to
+        // match), which is the correct UC10 behaviour — but for tests
+        // that aren't ABOUT that validation, we add the SAN to keep the
+        // happy path on the test's primary contract.
+        CertFixtures.writeServerMaterialTo(pki, "server-cn", List.of("DNS:example.com"));
 
         int exit = runInvite(
                 "alice-phone",
@@ -115,7 +121,13 @@ class ClientInviteCommandTest {
         Path enrollment = tmp.resolve("enrollment");
         Path outPng = tmp.resolve("invite.png");
         Files.createDirectories(pki);
-        CertFixtures.writeServerMaterialTo(pki, "server-cn");
+        // UC10 § AC6 fix-back — seed the cert with DNS:example.com so the
+        // command's SAN validation accepts the --server-url host. The
+        // older zero-SAN form would now refuse with exit 2 (no SAN to
+        // match), which is the correct UC10 behaviour — but for tests
+        // that aren't ABOUT that validation, we add the SAN to keep the
+        // happy path on the test's primary contract.
+        CertFixtures.writeServerMaterialTo(pki, "server-cn", List.of("DNS:example.com"));
 
         ByteArrayOutputStream stdout = new ByteArrayOutputStream();
         PrintStream origOut = System.out;
@@ -166,7 +178,13 @@ class ClientInviteCommandTest {
         Path enrollment = tmp.resolve("enrollment");
         Path outPng = tmp.resolve("invite.png");
         Files.createDirectories(pki);
-        CertFixtures.writeServerMaterialTo(pki, "server-cn");
+        // UC10 § AC6 fix-back — seed the cert with DNS:example.com so the
+        // command's SAN validation accepts the --server-url host. The
+        // older zero-SAN form would now refuse with exit 2 (no SAN to
+        // match), which is the correct UC10 behaviour — but for tests
+        // that aren't ABOUT that validation, we add the SAN to keep the
+        // happy path on the test's primary contract.
+        CertFixtures.writeServerMaterialTo(pki, "server-cn", List.of("DNS:example.com"));
 
         java.time.Instant before = java.time.Instant.now();
         int exit = runInvite(
@@ -196,10 +214,20 @@ class ClientInviteCommandTest {
 
     @Test
     void explicit_server_pin_overrides_auto_discovery(@TempDir Path tmp) throws Exception {
+        Path pki = tmp.resolve("pki");
         Path enrollment = tmp.resolve("enrollment");
-        // No PKI dir at all — operator-supplied --server-pin should make
-        // server.crt auto-discovery unnecessary.
         Path outPng = tmp.resolve("invite.png");
+        Files.createDirectories(pki);
+        // UC10 § AC6 fix-back — even with --server-pin overriding pin
+        // auto-discovery, server.crt must be present so SAN validation
+        // can read the host-claim list. The original test's "no PKI
+        // dir" stance was a UC04-era convenience that UC10 deliberately
+        // removed (validation runs WHETHER the pin came from
+        // autoDiscoverPin or --server-pin — no escape hatch). The pin
+        // override remains the assertion under test: the explicit pin
+        // hex below MUST appear in the emitted QR payload INSTEAD OF
+        // the pin auto-derived from server.crt.
+        CertFixtures.writeServerMaterialTo(pki, "server-cn", List.of("DNS:example.com"));
 
         int exit = runInvite(
                 "alice-phone",
@@ -208,7 +236,7 @@ class ClientInviteCommandTest {
                 "--server-pin",
                 "deadbeef".repeat(8),
                 "--pki-dir",
-                tmp.resolve("nope").toString(),
+                pki.toString(),
                 "--enrollment-dir",
                 enrollment.toString(),
                 "--out",
@@ -268,7 +296,13 @@ class ClientInviteCommandTest {
         Path enrollment = tmp.resolve("enrollment");
         Path outPng = tmp.resolve("invite.png");
         Files.createDirectories(pki);
-        CertFixtures.writeServerMaterialTo(pki, "server-cn");
+        // UC10 § AC6 fix-back — seed the cert with DNS:example.com so the
+        // command's SAN validation accepts the --server-url host. The
+        // older zero-SAN form would now refuse with exit 2 (no SAN to
+        // match), which is the correct UC10 behaviour — but for tests
+        // that aren't ABOUT that validation, we add the SAN to keep the
+        // happy path on the test's primary contract.
+        CertFixtures.writeServerMaterialTo(pki, "server-cn", List.of("DNS:example.com"));
 
         int exit = runInvite(
                 "alice-phone",
@@ -332,7 +366,13 @@ class ClientInviteCommandTest {
         Path enrollment = tmp.resolve("enrollment");
         Path outPng = tmp.resolve("invite.png");
         Files.createDirectories(pki);
-        CertFixtures.writeServerMaterialTo(pki, "server-cn");
+        // UC10 § AC6 fix-back — seed the cert with DNS:example.com so the
+        // command's SAN validation accepts the --server-url host. The
+        // older zero-SAN form would now refuse with exit 2 (no SAN to
+        // match), which is the correct UC10 behaviour — but for tests
+        // that aren't ABOUT that validation, we add the SAN to keep the
+        // happy path on the test's primary contract.
+        CertFixtures.writeServerMaterialTo(pki, "server-cn", List.of("DNS:example.com"));
 
         Ownership resolved = Ownership.resolve("ai-sandbox-server", "test-probe");
         Assumptions.assumeTrue(
@@ -381,7 +421,13 @@ class ClientInviteCommandTest {
         Path pki = tmp.resolve("pki");
         Path enrollment = tmp.resolve("enrollment");
         Files.createDirectories(pki);
-        CertFixtures.writeServerMaterialTo(pki, "server-cn");
+        // UC10 § AC6 fix-back — seed the cert with DNS:example.com so the
+        // command's SAN validation accepts the --server-url host. The
+        // older zero-SAN form would now refuse with exit 2 (no SAN to
+        // match), which is the correct UC10 behaviour — but for tests
+        // that aren't ABOUT that validation, we add the SAN to keep the
+        // happy path on the test's primary contract.
+        CertFixtures.writeServerMaterialTo(pki, "server-cn", List.of("DNS:example.com"));
 
         ByteArrayOutputStream stdoutBuf = new ByteArrayOutputStream();
         ByteArrayOutputStream stderrBuf = new ByteArrayOutputStream();
@@ -482,7 +528,13 @@ class ClientInviteCommandTest {
         Path enrollment = tmp.resolve("enrollment");
         Path outFile = tmp.resolve("invite.json");
         Files.createDirectories(pki);
-        CertFixtures.writeServerMaterialTo(pki, "server-cn");
+        // UC10 § AC6 fix-back — seed the cert with DNS:example.com so the
+        // command's SAN validation accepts the --server-url host. The
+        // older zero-SAN form would now refuse with exit 2 (no SAN to
+        // match), which is the correct UC10 behaviour — but for tests
+        // that aren't ABOUT that validation, we add the SAN to keep the
+        // happy path on the test's primary contract.
+        CertFixtures.writeServerMaterialTo(pki, "server-cn", List.of("DNS:example.com"));
 
         ByteArrayOutputStream stdoutBuf = new ByteArrayOutputStream();
         ByteArrayOutputStream stderrBuf = new ByteArrayOutputStream();
@@ -566,7 +618,13 @@ class ClientInviteCommandTest {
         Path enrollment = tmp.resolve("enrollment");
         Path outPng = tmp.resolve("invite.png");
         Files.createDirectories(pki);
-        CertFixtures.writeServerMaterialTo(pki, "server-cn");
+        // UC10 § AC6 fix-back — seed the cert with DNS:example.com so the
+        // command's SAN validation accepts the --server-url host. The
+        // older zero-SAN form would now refuse with exit 2 (no SAN to
+        // match), which is the correct UC10 behaviour — but for tests
+        // that aren't ABOUT that validation, we add the SAN to keep the
+        // happy path on the test's primary contract.
+        CertFixtures.writeServerMaterialTo(pki, "server-cn", List.of("DNS:example.com"));
 
         ByteArrayOutputStream stdoutBuf = new ByteArrayOutputStream();
         ByteArrayOutputStream stderrBuf = new ByteArrayOutputStream();
