@@ -2,15 +2,10 @@ package com.aisandbox.android.net
 
 import com.aisandbox.android.identity.KeyStoreIdentityManager
 import java.security.SecureRandom
-import java.security.cert.X509Certificate
 import java.util.concurrent.TimeUnit
 import javax.net.ssl.SSLContext
-import javax.net.ssl.SSLPeerUnverifiedException
-import javax.net.ssl.X509TrustManager
-import okhttp3.CertificatePinner
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
-import okhttp3.Response
 
 /**
  * Single OkHttp instance the Android app uses for ALL traffic to the
@@ -22,15 +17,28 @@ import okhttp3.Response
  *   <li><b>mTLS identity</b> — the client cert + key live in the Android
  *       KeyStore. [KeyStoreIdentityManager.keyManagerFactory] wires the
  *       SSLContext with a hardware-backed [javax.net.ssl.X509KeyManager]
- *       so the private key never leaves the keystore.</li>
- *   <li><b>Server pinning</b> — [okhttp3.CertificatePinner] is set from
- *       the [ServerProfile.pinSha256Hex] persisted during enrollment.
- *       Any other server cert raises an [SSLPeerUnverifiedException]
- *       which the [pinObservingInterceptor] catches and translates into
- *       a [NetworkEvent.PinMismatch] on the global [NetworkEvents]
- *       bus — the AiSandboxApp composable then force-routes to
- *       ServerIdentityChangedScreen.</li>
+ *       so the private key never leaves the keystore. UC10 leaves this
+ *       half UNTOUCHED — the only change is on the trust-manager side.</li>
+ *   <li><b>Server pinning via [SpkiPinningTrustManager]</b> — UC10
+ *       replaces the pre-UC10 {@code lenient TrustManager +
+ *       okhttp3.CertificatePinner} pair with a single trust manager
+ *       that performs the SPKI check inside {@code checkServerTrusted}.
+ *       That sidesteps OkHttp 5.3.2's
+ *       {@code BasicCertificateChainCleaner} trap (empty
+ *       {@code getAcceptedIssuers()} → cleaner throws →
+ *       {@code Handshake.peerCertificates_delegate} swallows →
+ *       {@code CertificatePinner} iterates an empty chain → unconditional
+ *       "Certificate pinning failure!" regardless of the real pin).</li>
  * </ol>
+ *
+ * <p>UC10 § AC4 — exception dispatch is structural (by class) via
+ * [TlsFailureTranslation.translate]: SPKI mismatch routes to
+ * [NetworkEvent.PinMismatch] with the REAL observed cert SPKI hex
+ * (lifted from the structured [SpkiPinningTrustManager] exception);
+ * hostname / SAN mismatch routes to [NetworkEvent.HostnameMismatch];
+ * everything else routes to [NetworkEvent.HandshakeError]. The
+ * pre-UC10 {@code extractObservedPin} message-prefix parser, the
+ * lenient TM, and the {@code pinObservingInterceptor} are all gone.
  *
  * <p>The OkHttp client is intentionally short-lived: re-scanning a QR
  * builds a new client. The expensive bit is the SSLContext init, not
@@ -47,18 +55,23 @@ class AiSandboxHttpClient(
     val baseUrl: String = profile.serverUrl.trimEnd('/')
 
     private fun build(): OkHttpClient {
-        val sslContext = buildSslContext()
-        val trustManager = lenientTrustManager() // pinning is the actual auth
+        // One trust manager instance — passed both to SSLContext.init and
+        // to OkHttp's sslSocketFactory(.., TrustManager) overload (OkHttp
+        // uses it to build chain-cleaning structures, but since the
+        // pinning decision happens BEFORE the cleaner runs and our TM
+        // accepts/rejects in checkServerTrusted, the cleaner is no longer
+        // on the security-critical path).
+        val trustManager = SpkiPinningTrustManager(HexCodec.hexToBytes(profile.pinSha256Hex))
+        val sslContext = buildSslContext(trustManager)
 
         return OkHttpClient.Builder()
             .sslSocketFactory(sslContext.socketFactory, trustManager)
-            .certificatePinner(
-                CertificatePinner.Builder()
-                    .add(hostFromUrl(profile.serverUrl), profile.toOkHttpPin())
-                    .build()
-            )
-            // Surface pin-mismatch as a structured NetworkEvent.
-            .addInterceptor(pinObservingInterceptor())
+            // No CertificatePinner — SpkiPinningTrustManager performs
+            // the pin check inside checkServerTrusted, so the cleaner
+            // + CertificatePinner path is no longer used. Default
+            // HostnameVerifier is left untouched so SAN matching still
+            // fires after the TM accepts.
+            .addInterceptor(tlsFailureTranslatingInterceptor())
             // ai-sandbox.v1 subprotocol is enforced by StreamClient on
             // the WebSocket; REST has no subprotocol.
             .connectTimeout(10, TimeUnit.SECONDS)
@@ -70,66 +83,37 @@ class AiSandboxHttpClient(
             .build()
     }
 
-    private fun buildSslContext(): SSLContext {
+    private fun buildSslContext(trustManager: SpkiPinningTrustManager): SSLContext {
         val ctx = SSLContext.getInstance("TLSv1.3")
         ctx.init(
             identity.keyManagerFactory().keyManagers,
-            arrayOf(lenientTrustManager()),
+            arrayOf(trustManager),
             SecureRandom(),
         )
         return ctx
     }
 
     /**
-     * The pin check is performed by [CertificatePinner], not by the
-     * trust manager. The trust manager accepts every chain so that
-     * non-pinning code paths (none today) don't accidentally short-
-     * circuit the pin. Equivalent to OkHttp's documented pattern.
+     * UC10 § AC4 — translate TLS-layer exceptions into structured
+     * [NetworkEvent] variants and re-throw so the call still fails.
+     * Replaces the pre-UC10 [pinObservingInterceptor] which lifted the
+     * observed pin from OkHttp's pin-mismatch message text (a parser
+     * that returned {@code <unknown>} on the chain-cleaning-trap path).
      */
-    private fun lenientTrustManager(): X509TrustManager = object : X509TrustManager {
-        override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
-        override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
-        override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
-    }
-
-    /**
-     * Catch [SSLPeerUnverifiedException] anywhere in the request chain
-     * — this is the exception OkHttp throws when [CertificatePinner]
-     * rejects the server's cert. Map to [NetworkEvent.PinMismatch] and
-     * re-throw so the call still fails; the UI observes the event and
-     * navigates.
-     */
-    private fun pinObservingInterceptor(): Interceptor = Interceptor { chain ->
+    private fun tlsFailureTranslatingInterceptor(): Interceptor = Interceptor { chain ->
+        val request = chain.request()
         try {
-            chain.proceed(chain.request())
-        } catch (mis: SSLPeerUnverifiedException) {
-            val observed = extractObservedPin(mis.message) ?: "<unknown>"
-            NetworkEvents.tryEmit(
-                NetworkEvent.PinMismatch(expectedPinHex = profile.pinSha256Hex, observedPinHex = observed)
+            chain.proceed(request)
+        } catch (t: Throwable) {
+            val event = TlsFailureTranslation.translate(
+                throwable = t,
+                expectedPinHex = profile.pinSha256Hex,
+                expectedHost = request.url.host,
             )
-            throw mis
+            if (event != null) {
+                NetworkEvents.tryEmit(event)
+            }
+            throw t
         }
-    }
-
-    /**
-     * OkHttp's pin-mismatch message contains "Pinned certificates for &lt;host&gt;:\n
-     * Peer certificate chain:\n  sha256/<base64>..." — we lift the first
-     * sha256 hash from the body for the dialog. Best-effort: failure to
-     * extract just yields {@code <unknown>}.
-     */
-    private fun extractObservedPin(message: String?): String? {
-        if (message == null) return null
-        val marker = "sha256/"
-        val idx = message.indexOf(marker)
-        if (idx < 0) return null
-        val tail = message.substring(idx + marker.length)
-        val end = tail.indexOfAny(charArrayOf(' ', '\n', '\r', ':', ','))
-        return if (end < 0) tail else tail.substring(0, end)
-    }
-
-    private fun hostFromUrl(url: String): String {
-        val noScheme = url.substringAfter("://")
-        val noPath = noScheme.substringBefore('/')
-        return noPath.substringBefore(':')
     }
 }
