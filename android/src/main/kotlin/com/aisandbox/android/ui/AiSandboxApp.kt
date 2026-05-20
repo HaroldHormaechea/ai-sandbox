@@ -81,6 +81,15 @@ fun AiSandboxApp() {
                 is NetworkEvent.StreamGaveUp -> {
                     // Handled inside TerminalScreen — root composable is a no-op.
                 }
+                is NetworkEvent.HostnameMismatch,
+                is NetworkEvent.HandshakeError -> {
+                    // UC10 § AC4 — Phase 2a lands these new error variants
+                    // without yet wiring the catch blocks that emit them.
+                    // Routing to ServerIdentityChangedScreen's Hostname /
+                    // HandshakeError branches (AC8) lands in Phase 2b once
+                    // QA has the failing tests in place. Until then this is
+                    // a guaranteed no-op — no producer emits them.
+                }
             }
         }
     }
