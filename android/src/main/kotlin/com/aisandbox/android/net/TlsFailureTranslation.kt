@@ -42,13 +42,20 @@ import javax.net.ssl.SSLPeerUnverifiedException
 sealed interface Mismatch {
 
     /**
+     * Shared raw exception detail — declared on the interface so the
+     * screen's "Show technical details" expander can render it without
+     * per-variant casting. Every concrete variant carries one.
+     */
+    val rawMessage: String
+
+    /**
      * SPKI pin mismatch — the server presented a cert whose public
      * key hash differs from the QR-time pin we persisted.
      */
     data class Pin(
         val expectedHex: String,
         val observedHex: String,
-        val rawMessage: String,
+        override val rawMessage: String,
     ) : Mismatch
 
     /**
@@ -58,14 +65,14 @@ sealed interface Mismatch {
      */
     data class Hostname(
         val expectedHost: String,
-        val rawMessage: String,
+        override val rawMessage: String,
     ) : Mismatch
 
     /**
      * Any other TLS handshake / I/O failure surfaced to the screen
      * via the [NetworkEvent.HandshakeError] route.
      */
-    data class HandshakeError(val rawMessage: String) : Mismatch
+    data class HandshakeError(override val rawMessage: String) : Mismatch
 }
 
 object TlsFailureTranslation {

@@ -246,6 +246,14 @@ dependencies {
     // final Kotlin class KeyStoreIdentityManager whose internals require
     // a real AndroidKeyStore. Used only by net/* unit tests.
     testImplementation(libs.mockito.core)
+    // UC10 § AC8 — Robolectric-driven Compose unit tests for
+    // ServerIdentityChangedScreen's three variants. The catalog aliases
+    // are also wired into androidTestImplementation below; the
+    // testImplementation edges here let the JVM unit-test classpath
+    // resolve `androidx.compose.ui.test.junit4.createComposeRule` and
+    // friends.
+    testImplementation(libs.androidx.compose.ui.test.junit4)
+    testImplementation(libs.androidx.compose.ui.test.manifest)
 
     androidTestImplementation(libs.androidx.test.runner)
     androidTestImplementation(libs.androidx.test.ext.junit)
