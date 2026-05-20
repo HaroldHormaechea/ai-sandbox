@@ -54,8 +54,8 @@ import com.aisandbox.android.ui.theme.ErrorTone
  * <ul>
  *   <li><b>[Mismatch.Pin]</b> — SPKI pin mismatch. Renders the
  *       pinned and observed SHA-256 hex blocks. Pre-UC10 the observed
- *       hex was the {@code <bootstrap>} sentinel forced by the OkHttp
- *       5.3.2 chain-cleaning trap; UC10's
+ *       hex was a fixed sentinel forced by the OkHttp 5.3.2
+ *       chain-cleaning trap; UC10's
  *       [com.aisandbox.android.net.SpkiPinningTrustManager] emits the
  *       real hex now.</li>
  *   <li><b>[Mismatch.Hostname]</b> — server's cert SAN doesn't claim
@@ -166,8 +166,10 @@ fun ServerIdentityChangedScreen(
 /**
  * Pin-variant context — mono-font expected / observed SHA-256 hex blocks.
  * The operator-readable diagnostic block round-trips cleanly through a
- * screenshot. Phase 2a-onwards the observed hex is the REAL SPKI of the
- * cert the server presented (no more `<bootstrap>` sentinel).
+ * screenshot. Post-UC10 the observed hex is the REAL SPKI of the cert
+ * the server presented — extracted from the structured
+ * [com.aisandbox.android.net.SpkiPinningTrustManager] exception by
+ * [com.aisandbox.android.net.TlsFailureTranslation.extractObservedSpkiHex].
  */
 @Composable
 private fun PinContextBlock(cause: Mismatch.Pin) {

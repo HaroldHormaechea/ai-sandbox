@@ -32,8 +32,8 @@ import okhttp3.RequestBody.Companion.toRequestBody
  *       5.3.2 chain-cleaning trap (empty {@code getAcceptedIssuers()}
  *       → cleaner throws → peerCertificates swallowed → unconditional
  *       "Certificate pinning failure!"). UC10 replaces the pair with
- *       the single TM and removes the {@code <bootstrap>} sentinel
- *       the trap forced us into.</li>
+ *       the single TM and removes the legacy {@code observedPinHex}
+ *       sentinel the trap forced us into.</li>
  *   <li><b>No client KeyManager</b> — the Android device has no
  *       identity yet; presenting one would trip the server's
  *       MtlsEnforcementFilter bypass logic on `/v1/enrollment` and
@@ -94,8 +94,9 @@ class EnrollmentClient(private val payload: QrPayload) {
             // the cause chain to lift the real observed SPKI hex.
             // Hostname-only failures (default OkHostnameVerifier fires
             // AFTER our TM accepts) emit HostnameMismatch. Everything
-            // else falls to HandshakeError. The legacy `<bootstrap>`
-            // sentinel is gone — observed pin is always real now.
+            // else falls to HandshakeError. The legacy observed-pin
+            // sentinel (pre-v0.0.11) is gone — observed pin is now
+            // always the real cert SPKI lifted by extractObservedSpkiHex.
             val event = TlsFailureTranslation.translate(
                 throwable = t,
                 expectedPinHex = payload.pinSha256Hex,

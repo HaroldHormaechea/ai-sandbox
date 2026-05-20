@@ -19,7 +19,8 @@ import javax.net.ssl.SSLPeerUnverifiedException
  *       {@link SpkiPinningTrustManager}-emitted
  *       {@code "SPKI pin mismatch: expected=… observed=…"} message
  *       → {@link NetworkEvent.PinMismatch} with the REAL observed
- *       SPKI hex (no more {@code <bootstrap>} sentinel).</li>
+ *       SPKI hex lifted from the structured cause (no more legacy
+ *       observed-pin sentinel).</li>
  *   <li>{@link SSLPeerUnverifiedException} (Android's default
  *       {@code OkHostnameVerifier} fires AFTER the trust manager
  *       — by the time we see this class, the SPKI pin already
