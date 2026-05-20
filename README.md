@@ -309,6 +309,11 @@ analytics / telemetry / crash-reporter SDK.
 
 Per-device enrollment is QR-based:
 
+> The host portion of `--server-url` MUST appear in `server.crt`'s SAN
+> list (UC10 § AC6/AC7) — the command refuses with exit 2 otherwise.
+> Re-issue with `aisandboxctl pki init --force --san <tag>:<host>` if
+> needed.
+
 ```bash
 # On the server host — issue a single-use 10-minute token + show its QR.
 aisandboxctl client invite alice-phone \

@@ -19,9 +19,12 @@ import kotlinx.serialization.json.Json
  *
  * @property pinSha256Hex SHA-256 of the server cert's SubjectPublicKeyInfo
  *   (SPKI), lowercase hex. Matches `PemUtils.spkiFingerprintHex` on the
- *   server side and the value OkHttp's `CertificatePinner` verifies
- *   (HPKP / RFC 7469 default). Pre-v0.0.10 was the full-DER cert hash;
- *   UC09 reconciled the algorithm.
+ *   server side and the digest [SpkiPinningTrustManager] computes against
+ *   the presented cert at handshake time (HPKP / RFC 7469 convention).
+ *   Pre-v0.0.10 was the full-DER cert hash; UC09 reconciled the algorithm.
+ *   UC10 then removed OkHttp's `CertificatePinner` from the verification
+ *   path entirely — the hex is consumed directly by
+ *   [SpkiPinningTrustManager] via [HexCodec.hexToBytes].
  */
 @Serializable
 data class QrPayload(

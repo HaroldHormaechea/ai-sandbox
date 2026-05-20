@@ -100,9 +100,19 @@
     <string name="cert_revoked_later">Later</string>
     <string name="cert_revoked_scan">Scan new QR</string>
 
-    <!-- Server identity changed (server pin mismatch — separate from cert-revoked) -->
-    <string name="server_identity_changed_title">Server identity changed</string>
-    <string name="server_identity_changed_body">The server\'s TLS certificate no longer matches the pin we stored during enrollment. This could be a server re-key or a man-in-the-middle. Re-scan a fresh invite QR from the operator to proceed.</string>
+    <!-- Server identity changed (UC10 § AC8 — three variants: pin mismatch, hostname mismatch,
+         generic handshake error). Shared chrome (badge + Quit / Scan new QR actions) + a shared
+         "Show technical details" expander that surfaces the raw exception text. -->
+    <string name="server_identity_changed_pin_title">Server identity changed</string>
+    <string name="server_identity_changed_pin_body">The server\'s TLS certificate no longer matches the pin we stored during enrollment. This could be a server re-key or a man-in-the-middle. Re-scan a fresh invite QR from the operator to proceed.</string>
+    <string name="server_identity_changed_hostname_title">Server host mismatch</string>
+    <string name="server_identity_changed_hostname_body">The server\'s TLS certificate does not claim this hostname. The operator must re-issue the server certificate with this host in its SAN list, then re-invite this device.</string>
+    <string name="server_identity_changed_handshake_title">Couldn\'t reach the server securely</string>
+    <string name="server_identity_changed_handshake_body">The TLS handshake with the server failed for a reason other than pin or hostname mismatch. Check the server is reachable on this network, then re-scan a fresh invite QR if the problem persists.</string>
+    <string name="server_identity_changed_show_details">Show technical details</string>
+    <string name="server_identity_changed_hide_details">Hide technical details</string>
+    <string name="server_identity_changed_copy_raw">Copy</string>
+    <string name="server_identity_changed_copy_raw_label">TLS failure detail</string>
     <string name="server_identity_changed_quit">Quit</string>
     <string name="server_identity_changed_rescan">Scan new QR</string>
 

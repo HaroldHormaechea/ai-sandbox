@@ -45,8 +45,53 @@ sealed interface NetworkEvent {
      * at enrollment. Routes to [ServerIdentityChangedScreen]. The
      * pinned hex and observed hex are surfaced for the "Quit / Scan
      * new QR" copy.
+     *
+     * <p>UC10 § AC4 — [rawMessage] carries the unredacted exception
+     * detail (the [SpkiPinningTrustManager]-emitted "SPKI pin mismatch:
+     * expected=… observed=…" string, or whatever OkHttp wrapped it in)
+     * so the screen's "Show technical details" expander can render it
+     * verbatim for operator troubleshooting. Default empty preserves
+     * source-compatibility with pre-UC10 call sites during the
+     * test-first cascade (Phase 2a lands the field without yet
+     * wiring the production catch blocks; Phase 2b passes the real
+     * value via [TlsFailureTranslation.translate]).
      */
-    data class PinMismatch(val expectedPinHex: String, val observedPinHex: String) : NetworkEvent
+    data class PinMismatch(
+        val expectedPinHex: String,
+        val observedPinHex: String,
+        val rawMessage: String = "",
+    ) : NetworkEvent
+
+    /**
+     * UC10 § AC4 — the request URL's host is not in the server cert's
+     * SubjectAlternativeName list. Android's default {@code OkHostnameVerifier}
+     * fires AFTER the [SpkiPinningTrustManager], so by the time we see
+     * this variant the SPKI pin already matched — only the SAN is wrong.
+     * Routes to [ServerIdentityChangedScreen]'s "Hostname" variant
+     * (Phase 2b will extend the screen with the `cause: Mismatch`
+     * parameter per AC8).
+     *
+     * <p>Phase 2a lands this variant without yet emitting it; Phase 2b
+     * wires [TlsFailureTranslation.translate] into the catch blocks of
+     * [EnrollmentClient] and [AiSandboxHttpClient].
+     */
+    data class HostnameMismatch(
+        val expectedHost: String,
+        val rawMessage: String,
+    ) : NetworkEvent
+
+    /**
+     * UC10 § AC4 — any TLS / handshake failure that is neither a pin
+     * mismatch nor a hostname mismatch (connection reset, protocol
+     * downgrade, malformed cert, generic I/O). Carries the raw
+     * exception detail so the screen's diagnostics expander can render
+     * it verbatim.
+     *
+     * <p>Phase 2a lands this variant without yet emitting it; Phase 2b
+     * wires [TlsFailureTranslation.translate] into the catch blocks of
+     * [EnrollmentClient] and [AiSandboxHttpClient].
+     */
+    data class HandshakeError(val rawMessage: String) : NetworkEvent
 
     /**
      * AC25 — the server tore the WebSocket down with close code 4401

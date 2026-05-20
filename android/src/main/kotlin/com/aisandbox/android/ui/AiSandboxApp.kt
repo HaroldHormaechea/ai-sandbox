@@ -17,8 +17,10 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
+import com.aisandbox.android.net.Mismatch
 import com.aisandbox.android.net.NetworkEvent
 import com.aisandbox.android.net.NetworkEvents
+import com.aisandbox.android.net.TlsFailureTranslation
 import com.aisandbox.android.requireContainer
 import com.aisandbox.android.ui.screens.CertRevokedScreen
 import com.aisandbox.android.ui.screens.OnboardingScreen
@@ -59,14 +61,20 @@ fun AiSandboxApp() {
         }
     }
 
-    // PinMismatch / CertRevoked surface globally — subscribe once.
-    val pinMismatchState = remember { mutableStateOf<NetworkEvent.PinMismatch?>(null) }
+    // UC10 § AC4 / AC8 — three TLS-failure variants share one screen.
+    // [TlsFailureTranslation.toMismatch] converts a NetworkEvent into
+    // the screen's parameter shape; CertRevoked + Stream* fall through
+    // to their own routes. The Mismatch value is held in state and
+    // surfaced to the ServerIdentityChanged composable below.
+    val mismatchState = remember { mutableStateOf<Mismatch?>(null) }
     val certRevokedState = remember { mutableStateOf(false) }
     LaunchedEffect(Unit) {
         NetworkEvents.flow.collect { event ->
             when (event) {
-                is NetworkEvent.PinMismatch -> {
-                    pinMismatchState.value = event
+                is NetworkEvent.PinMismatch,
+                is NetworkEvent.HostnameMismatch,
+                is NetworkEvent.HandshakeError -> {
+                    mismatchState.value = TlsFailureTranslation.toMismatch(event)
                     navController.navigate(Routes.ServerIdentityChanged) {
                         launchSingleTop = true
                     }
@@ -143,21 +151,21 @@ fun AiSandboxApp() {
             }
 
             composable(Routes.ServerIdentityChanged) {
-                val event = pinMismatchState.value
-                val expected = event?.expectedPinHex ?: ""
-                val observed = event?.observedPinHex ?: ""
+                // Defensive fallback: routing here without a Mismatch loaded
+                // shouldn't happen, but render the generic handshake-error
+                // variant rather than crashing if it does.
+                val cause = mismatchState.value ?: Mismatch.HandshakeError(rawMessage = "")
                 ServerIdentityChangedScreen(
-                    expectedPinHex = expected,
-                    observedPinHex = observed,
+                    cause = cause,
                     onScanNewQr = {
-                        pinMismatchState.value = null
+                        mismatchState.value = null
                         navController.navigate(Routes.Onboarding) {
                             popUpTo(start) { inclusive = true }
                             launchSingleTop = true
                         }
                     },
                     onQuit = {
-                        pinMismatchState.value = null
+                        mismatchState.value = null
                         (context as? Activity)?.finish()
                     },
                 )

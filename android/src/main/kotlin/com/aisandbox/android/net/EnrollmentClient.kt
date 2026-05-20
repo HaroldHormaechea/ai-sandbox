@@ -2,17 +2,13 @@ package com.aisandbox.android.net
 
 import com.aisandbox.android.identity.KeyStoreIdentityManager
 import java.security.SecureRandom
-import java.security.cert.X509Certificate
 import javax.net.ssl.SSLContext
-import javax.net.ssl.SSLPeerUnverifiedException
-import javax.net.ssl.X509TrustManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
-import okhttp3.CertificatePinner
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -27,27 +23,46 @@ import okhttp3.RequestBody.Companion.toRequestBody
  * build a dedicated OkHttp instance with:
  *
  * <ul>
- *   <li><b>Pinning ONLY</b> — pin the server cert against
- *       [QrPayload.pinSha256Hex] before sending the request, so a MITM
- *       can't intercept the token-redemption.</li>
+ *   <li><b>SPKI pin in the trust manager</b> — UC10's
+ *       [SpkiPinningTrustManager] does the pin check inside
+ *       {@code checkServerTrusted}, bypassing OkHttp's
+ *       {@code CertificatePinner} + {@code BasicCertificateChainCleaner}
+ *       path entirely. Pre-UC10 we wired a lenient trust manager and
+ *       relied on {@code CertificatePinner}; that tripped the OkHttp
+ *       5.3.2 chain-cleaning trap (empty {@code getAcceptedIssuers()}
+ *       → cleaner throws → peerCertificates swallowed → unconditional
+ *       "Certificate pinning failure!"). UC10 replaces the pair with
+ *       the single TM and removes the legacy {@code observedPinHex}
+ *       sentinel the trap forced us into.</li>
  *   <li><b>No client KeyManager</b> — the Android device has no
  *       identity yet; presenting one would trip the server's
  *       MtlsEnforcementFilter bypass logic on `/v1/enrollment` and
  *       wedge the bootstrap.</li>
+ *   <li><b>Default HostnameVerifier</b> — Android's
+ *       {@code OkHostnameVerifier} enforces SAN matching, so a QR
+ *       pointing at a host the cert doesn't claim still fails the
+ *       handshake (now routed to [NetworkEvent.HostnameMismatch], not
+ *       [NetworkEvent.PinMismatch]).</li>
  * </ul>
  *
  * <p>Success returns the raw PKCS#12 byte-array which the caller hands
  * to [KeyStoreIdentityManager.importPkcs12]. Failures map to a sealed
  * [Outcome] so the onboarding screen can render the AC35 error codes.
+ *
+ * <p>UC10 § AC4 — exception dispatch is structural (by class) via
+ * [TlsFailureTranslation.translate]: SPKI pin mismatch surfaces as
+ * [NetworkEvent.PinMismatch] carrying the REAL observed cert SPKI hex
+ * (extracted from the structured [SpkiPinningTrustManager]
+ * {@code CertificateException}); hostname / SAN mismatch surfaces as
+ * [NetworkEvent.HostnameMismatch]; any other TLS / I/O failure surfaces
+ * as [NetworkEvent.HandshakeError].
  */
 class EnrollmentClient(private val payload: QrPayload) {
-
-    private val pin: String =
-        "sha256/" + java.util.Base64.getEncoder().encodeToString(hexToBytes(payload.pinSha256Hex))
 
     suspend fun redeem(): Outcome = withContext(Dispatchers.IO) {
         val client = buildClient()
         val body = buildBody().toRequestBody(JSON_MEDIA_TYPE)
+        val expectedHost = hostFromUrl(payload.serverUrl)
         val request = Request.Builder()
             .url(payload.serverUrl.trimEnd('/') + "/v1/enrollment")
             .post(body)
@@ -72,51 +87,46 @@ class EnrollmentClient(private val payload: QrPayload) {
                     )
                 }
             }
-        } catch (mis: SSLPeerUnverifiedException) {
-            // Pin mismatch on the bootstrap request itself — extremely
-            // suspicious. Emit the network event so the UI routes
-            // straight to ServerIdentityChangedScreen.
-            //
-            // UC09 AC6 — the `<bootstrap>` sentinel exists because there is
-            // no observed pin to extract on the enrollment POST path: OkHttp
-            // aborts the TLS handshake before exposing the peer's SPKI to us,
-            // so we cannot fill in the real observed hash here.
-            // `NetworkEvent.PinMismatch` still needs a non-null value to
-            // render the dialog and route through the existing UI flow, so
-            // the sentinel substitutes. Pre-v0.0.10 this string specifically
-            // masked the UC09 algorithm bug — every enrollment hit this catch
-            // (server emitted full-DER hash, OkHttp verified SPKI; the two
-            // are never equal), and the UI said "pin mismatch" rather than
-            // "your server is computing the wrong algorithm." UC09's v0.0.10
-            // fix (SPKI on both sides) makes this path unreachable in the
-            // happy case; it remains the correct response to a genuine MITM.
-            NetworkEvents.tryEmit(
-                NetworkEvent.PinMismatch(
-                    expectedPinHex = payload.pinSha256Hex,
-                    observedPinHex = "<bootstrap>"
-                )
-            )
-            Outcome.Failure(code = "pin_mismatch", message = mis.message ?: "Server cert pin mismatch.")
         } catch (t: Throwable) {
-            Outcome.Failure(code = "io_error", message = t.message ?: t.javaClass.simpleName)
+            // UC10 § AC4 — three-arm dispatch via TlsFailureTranslation.
+            // SpkiPinningTrustManager throws a structured
+            // CertificateException on pin mismatch; the translator walks
+            // the cause chain to lift the real observed SPKI hex.
+            // Hostname-only failures (default OkHostnameVerifier fires
+            // AFTER our TM accepts) emit HostnameMismatch. Everything
+            // else falls to HandshakeError. The legacy observed-pin
+            // sentinel (pre-v0.0.11) is gone — observed pin is now
+            // always the real cert SPKI lifted by extractObservedSpkiHex.
+            val event = TlsFailureTranslation.translate(
+                throwable = t,
+                expectedPinHex = payload.pinSha256Hex,
+                expectedHost = expectedHost,
+            )
+            if (event != null) {
+                NetworkEvents.tryEmit(event)
+            }
+            Outcome.Failure(
+                code = failureCodeFor(event),
+                message = t.message ?: t.javaClass.simpleName,
+            )
         }
     }
 
     private fun buildClient(): OkHttpClient {
+        val trustManager = SpkiPinningTrustManager(HexCodec.hexToBytes(payload.pinSha256Hex))
         val ctx = SSLContext.getInstance("TLSv1.3")
         ctx.init(
             // Bootstrap has no identity — null KeyManager array.
             null,
-            arrayOf(acceptAllTrustManager()),
+            arrayOf(trustManager),
             SecureRandom(),
         )
         return OkHttpClient.Builder()
-            .sslSocketFactory(ctx.socketFactory, acceptAllTrustManager())
-            .certificatePinner(
-                CertificatePinner.Builder()
-                    .add(hostFromUrl(payload.serverUrl), pin)
-                    .build()
-            )
+            // SpkiPinningTrustManager handles the pin check inside
+            // checkServerTrusted — no CertificatePinner, no chain cleaner
+            // on the verification path. Default HostnameVerifier is left
+            // untouched so SAN matching still fires.
+            .sslSocketFactory(ctx.socketFactory, trustManager)
             .build()
     }
 
@@ -137,25 +147,22 @@ class EnrollmentClient(private val payload: QrPayload) {
         }
     }
 
-    private fun acceptAllTrustManager(): X509TrustManager = object : X509TrustManager {
-        override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
-        override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
-        override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
-    }
-
     private fun hostFromUrl(url: String): String =
         url.substringAfter("://").substringBefore('/').substringBefore(':')
 
-    private fun hexToBytes(hex: String): ByteArray {
-        require(hex.length % 2 == 0) { "hex must have even length" }
-        val out = ByteArray(hex.length / 2)
-        for (i in out.indices) {
-            val hi = Character.digit(hex[i * 2], 16)
-            val lo = Character.digit(hex[i * 2 + 1], 16)
-            require(hi >= 0 && lo >= 0)
-            out[i] = ((hi shl 4) or lo).toByte()
-        }
-        return out
+    /**
+     * Map the structured [NetworkEvent] (if any) the translator emitted
+     * into the legacy [Outcome.Failure.code] strings the onboarding
+     * screen renders. AC35 error-code copy is unchanged for the
+     * pre-existing `pin_mismatch` / `io_error` paths; the new
+     * `hostname_mismatch` / `handshake_error` codes are surfaced for
+     * UC10's expanded failure-mode split (AC4).
+     */
+    private fun failureCodeFor(event: NetworkEvent?): String = when (event) {
+        is NetworkEvent.PinMismatch -> "pin_mismatch"
+        is NetworkEvent.HostnameMismatch -> "hostname_mismatch"
+        is NetworkEvent.HandshakeError -> "handshake_error"
+        else -> "io_error"
     }
 
     /** Result of [redeem] — Success carries the PKCS#12 blob; Failure carries the code + detail. */

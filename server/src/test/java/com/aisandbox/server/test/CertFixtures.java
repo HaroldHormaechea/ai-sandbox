@@ -9,6 +9,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.KeyPair;
 import java.security.cert.X509Certificate;
+import java.util.List;
 import org.bouncycastle.openssl.jcajce.JcaPEMWriter;
 
 /**
@@ -43,6 +44,20 @@ public final class CertFixtures {
         return new ServerMaterial(mat.certificate(), mat.keyPair());
     }
 
+    /**
+     * UC10 § AC7 — generate a server cert with the supplied SAN entries.
+     * Each {@code sanEntries} value follows the {@code DNS:&lt;value&gt;} /
+     * {@code IP:&lt;value&gt;} convention defined by
+     * {@link SelfSignedServerCertGenerator#generate(String, java.util.List)}.
+     * An empty list mints a cert with NO SAN extension (legacy CN-only
+     * identity), exercising the {@code extractSanEntries} empty-list path
+     * that UC10's {@code ClientInviteCommand} refusal must handle.
+     */
+    public static ServerMaterial newServer(String cn, List<String> sanEntries) throws Exception {
+        SelfSignedServerCertGenerator.Material mat = new SelfSignedServerCertGenerator().generate(cn, sanEntries);
+        return new ServerMaterial(mat.certificate(), mat.keyPair());
+    }
+
     /** Write a fresh client PEM into the given allowlist directory. */
     public static Path writeClientPemTo(Path allowlistDir, String name) throws Exception {
         Files.createDirectories(allowlistDir);
@@ -56,6 +71,26 @@ public final class CertFixtures {
     public static ServerMaterial writeServerMaterialTo(Path pkiDir, String cn) throws Exception {
         Files.createDirectories(pkiDir);
         ServerMaterial m = newServer(cn);
+        PemWriter.writeCert(pkiDir.resolve("server.crt"), m.certificate());
+        PemWriter.writePrivateKey(pkiDir.resolve("server.key"), m.keyPair().getPrivate());
+        return m;
+    }
+
+    /**
+     * UC10 § AC7 — write server.crt + server.key with the supplied SAN
+     * entries. The default
+     * {@link #writeServerMaterialTo(Path, String)} overload (no SAN) is
+     * kept verbatim so existing tests don't churn; new UC10-era tests
+     * that need to exercise the SAN-vs-URL refusal call this overload
+     * to mint a cert whose SAN list is deterministic and controllable.
+     *
+     * @param sanEntries ordered list of {@code DNS:<value>} / {@code IP:<value>}
+     *                   entries; may be empty (mints a SAN-less cert).
+     */
+    public static ServerMaterial writeServerMaterialTo(Path pkiDir, String cn, List<String> sanEntries)
+            throws Exception {
+        Files.createDirectories(pkiDir);
+        ServerMaterial m = newServer(cn, sanEntries);
         PemWriter.writeCert(pkiDir.resolve("server.crt"), m.certificate());
         PemWriter.writePrivateKey(pkiDir.resolve("server.key"), m.keyPair().getPrivate());
         return m;

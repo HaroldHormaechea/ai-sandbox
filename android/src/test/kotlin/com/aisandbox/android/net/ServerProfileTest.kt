@@ -1,70 +1,24 @@
 package com.aisandbox.android.net
 
 import org.assertj.core.api.Assertions.assertThat
-import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.jupiter.api.Test
 
 /**
- * UC04 AC7 — hex-pin → OkHttp `sha256/<base64>` pin format conversion.
+ * UC04 — persisted [ServerProfile] shape pinning.
  *
- * <p>The on-disk format is operator-friendly lowercase hex (matches
- * `openssl x509 ... -fingerprint -sha256` output without the colons);
- * OkHttp's [okhttp3.CertificatePinner] wants `sha256/<base64>`. Converting
- * at the call site keeps the persisted profile readable.
+ * <p>UC10 deleted [ServerProfile.toOkHttpPin] (alongside the OkHttp
+ * {@code CertificatePinner} path); the pin hex is now consumed by
+ * [SpkiPinningTrustManager] via [HexCodec.hexToBytes]. The on-disk
+ * format remains operator-friendly lowercase hex, matching
+ * {@code com.aisandbox.server.pki.PemUtils.spkiFingerprintHex} on
+ * the server side.
+ *
+ * <p>Hex-validation coverage moved to [HexCodecTest], which exercises
+ * the production code path the production now actually uses. The
+ * tests that survive here pin invariants intrinsic to the
+ * [ServerProfile] data class itself — primarily serialization shape.
  */
 class ServerProfileTest {
-
-    @Test
-    fun `lowercase hex pin converts to canonical OkHttp sha256 base64`() {
-        // 64 hex chars = 32 bytes. SHA-256 of an empty input is the
-        // well-known constant e3b0c4...855 — pin against that so the
-        // expected base64 (`47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=`)
-        // is reproducible.
-        val pin = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-        val profile = ServerProfile(
-            serverUrl = "https://example.com:12410",
-            pinSha256Hex = pin,
-            clientCertCn = "alice-phone",
-            clientCertExpiresAtMs = 0L,
-        )
-
-        val okhttpPin = profile.toOkHttpPin()
-
-        // Format: sha256/<base64 of the raw 32 bytes>.
-        assertThat(okhttpPin).isEqualTo("sha256/47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=")
-    }
-
-    @Test
-    fun `mixed-case hex pin converts identically to lowercase`() {
-        val lower = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-        val upper = lower.uppercase()
-        val mixed = "E3b0C44298Fc1C149afbf4c8996fb92427ae41e4649B934Ca495991B7852B855"
-
-        val pLower = ServerProfile("https://e", lower, "x", 0L)
-        val pUpper = ServerProfile("https://e", upper, "x", 0L)
-        val pMixed = ServerProfile("https://e", mixed, "x", 0L)
-
-        assertThat(pLower.toOkHttpPin()).isEqualTo(pUpper.toOkHttpPin())
-        assertThat(pLower.toOkHttpPin()).isEqualTo(pMixed.toOkHttpPin())
-    }
-
-    @Test
-    fun `odd-length hex pin throws`() {
-        val odd = "abc" // 3 chars
-        val profile = ServerProfile("https://e", odd, "x", 0L)
-        assertThatThrownBy { profile.toOkHttpPin() }
-            .isInstanceOf(IllegalArgumentException::class.java)
-            .hasMessageContaining("even hex length")
-    }
-
-    @Test
-    fun `non-hex pin throws`() {
-        val bad = "z".repeat(64)
-        val profile = ServerProfile("https://e", bad, "x", 0L)
-        assertThatThrownBy { profile.toOkHttpPin() }
-            .isInstanceOf(IllegalArgumentException::class.java)
-            .hasMessageContaining("hex")
-    }
 
     @Test
     fun `serialization round trip preserves all four fields`() {

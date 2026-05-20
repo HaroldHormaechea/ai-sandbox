@@ -94,8 +94,9 @@ class KeyStoreIdentityManager {
      * Build a [KeyManagerFactory] wrapping the AndroidKeyStore so OkHttp
      * can authenticate every mTLS request without ever touching the raw
      * private key bytes. Caller initializes its SSLContext with the
-     * returned KeyManagers + a custom trust manager (per-server pinning
-     * via [okhttp3.CertificatePinner], not via the trust manager).
+     * returned KeyManagers + a per-server trust manager (UC10 wires
+     * `com.aisandbox.android.net.SpkiPinningTrustManager`, which performs
+     * the SPKI pin check inside `checkServerTrusted`).
      */
     fun keyManagerFactory(): KeyManagerFactory {
         val ks = KeyStore.getInstance(KEYSTORE_PROVIDER)
