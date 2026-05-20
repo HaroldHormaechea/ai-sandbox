@@ -7,6 +7,11 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import java.io.IOException;
+import java.net.Inet4Address;
+import java.net.InetAddress;
+import java.net.URI;
+import java.net.URISyntaxException;
+import java.net.UnknownHostException;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -20,9 +25,12 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.EnumSet;
 import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.Callable;
+import java.util.stream.Collectors;
 import picocli.CommandLine.Command;
 import picocli.CommandLine.Option;
 import picocli.CommandLine.Parameters;
@@ -208,6 +216,22 @@ public class ClientInviteCommand implements Callable<Integer> {
             return 2;
         }
 
+        // UC10 § AC6 / AC7 — refuse to mint a QR for an unclaimed host. The
+        // host portion of --server-url MUST be present in server.crt's
+        // SubjectAlternativeName list. Validation runs whether the pin came
+        // from autoDiscoverPin or from --server-pin (no escape-hatch flag).
+        // Catches the empirical UC10 case where an operator with a default
+        // `pki init` SAN list (potato-server / localhost / 127.0.0.1) mints
+        // a QR pointing at https://192.168.0.28:12410 — the phone hits a
+        // host the cert doesn't claim, the hostname verifier rejects, and
+        // (before the chain-cleaning fix) the failure masquerades as a pin
+        // mismatch. Catching this at mint time removes one class of silent
+        // enrollment failures.
+        int sanValidation = validateServerUrlAgainstSan(serverUrl, pkiDir);
+        if (sanValidation != 0) {
+            return sanValidation;
+        }
+
         String token = generateHexToken();
         Instant expiresAt = Instant.now().plus(ttlDuration);
         Path file = fileFor(effectiveEnrollmentDir, token);
@@ -367,6 +391,157 @@ public class ClientInviteCommand implements Callable<Integer> {
                 .registerModule(new JavaTimeModule())
                 .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS);
         return m.writeValueAsString(body);
+    }
+
+    /**
+     * UC10 § AC6 / AC7 — refuse to mint a QR for a server URL whose host
+     * is not in {@code server.crt}'s {@code SubjectAlternativeName} list.
+     *
+     * <p>Three refusal cases (in evaluation order):
+     *
+     * <ol>
+     *   <li><b>Case A — IPv6 literal.</b> Bracketed {@code [...]} (or any
+     *       host containing {@code :}, which only IPv6 literals do)
+     *       refused up-front with the verbatim AC6 message
+     *       <pre>--server-url with an IPv6 literal is not supported yet; pass a DNS name or IPv4 address</pre>
+     *       SAN read is skipped — IPv6 refusal fires before the cert is
+     *       opened. A unit test pins this exact string; do not edit
+     *       without updating the test.</li>
+     *   <li><b>Case B — host not in SAN.</b> Reads {@code server.crt},
+     *       extracts SAN entries via {@link PemUtils#extractSanEntries},
+     *       compares normalised values (lowercased DNS, canonical IPv4)
+     *       against the URL host. Refusal stderr names the URL host,
+     *       enumerates the cert's actual SAN entries, and emits the
+     *       remediation command
+     *       {@code aisandboxctl pki init --force --san <tag>:<host>}.</li>
+     *   <li><b>Case C — {@code --server-pin} override does not bypass.</b>
+     *       Validation runs regardless of whether the pin came from
+     *       {@link #autoDiscoverPin} or from {@code --server-pin}. The
+     *       cert MUST be readable; if {@code server.crt} is missing,
+     *       refuses with a structured error (since silent acceptance
+     *       defeats the validation's purpose).</li>
+     * </ol>
+     *
+     * @return 0 on success (URL host is in SAN); 2 on any refusal
+     *         (caller propagates as the picocli exit code)
+     */
+    private static int validateServerUrlAgainstSan(String serverUrl, Path pkiDir) {
+        URI uri;
+        try {
+            uri = new URI(serverUrl);
+        } catch (URISyntaxException use) {
+            System.err.println("Invalid --server-url '" + serverUrl + "': " + use.getMessage());
+            return 2;
+        }
+        String host = uri.getHost();
+        if (host == null || host.isBlank()) {
+            System.err.println("Invalid --server-url '" + serverUrl + "': cannot parse host portion.");
+            return 2;
+        }
+        // URI.getHost() returns the IPv6 literal WITH brackets on some JDKs
+        // and WITHOUT on others — strip them defensively before classifying.
+        String unbracketed = host.startsWith("[") && host.endsWith("]") ? host.substring(1, host.length() - 1) : host;
+
+        // Case A — IPv6 literal: refuse with the verbatim AC6 message.
+        // Any colon in the host portion (after de-bracketing) signals
+        // IPv6: IPv4 dotted-quads and DNS names never contain ':'.
+        if (unbracketed.contains(":")) {
+            System.err.println(
+                    "--server-url with an IPv6 literal is not supported yet; pass a DNS name or IPv4 address");
+            return 2;
+        }
+
+        Path serverCrt = pkiDir.resolve("server.crt");
+        if (!Files.isRegularFile(serverCrt)) {
+            System.err.println("Cannot validate --server-url against SAN: " + serverCrt
+                    + " is missing. server.crt must be readable to enforce SAN validation,"
+                    + " even when --server-pin is supplied.");
+            return 2;
+        }
+        List<PemUtils.SanEntry> sanEntries;
+        try {
+            String pem = Files.readString(serverCrt);
+            X509Certificate cert = PemUtils.parseCertificate(pem);
+            sanEntries = PemUtils.extractSanEntries(cert);
+        } catch (IOException | CertificateException ce) {
+            System.err.println("Cannot validate --server-url against SAN: failed to read or parse " + serverCrt + ": "
+                    + ce.getMessage());
+            return 2;
+        }
+
+        // Normalise the URL host for comparison. DNS names are matched
+        // case-insensitively (RFC 6125 § 6.4); IPv4 dotted-quads need
+        // canonicalisation so `127.000.000.001` and `127.0.0.1` both
+        // match a `IP:127.0.0.1` SAN entry. Two parallel forms are kept:
+        // the lowercased string for DNS comparisons, the canonical IPv4
+        // string (null when the host is not a v4 literal) for IP
+        // comparisons.
+        String normalizedHost = unbracketed.toLowerCase(Locale.ROOT);
+        String canonicalIpv4 = canonicaliseIpv4(unbracketed);
+
+        for (PemUtils.SanEntry entry : sanEntries) {
+            switch (entry.type()) {
+                case DNS -> {
+                    if (entry.value().equals(normalizedHost)) {
+                        return 0;
+                    }
+                }
+                case IP -> {
+                    if (canonicalIpv4 != null && entry.value().equals(canonicalIpv4)) {
+                        return 0;
+                    }
+                }
+            }
+        }
+
+        // Case B / Case C refusal — stderr enumerates the URL host, the
+        // cert's SAN entries, and the remediation command. Substring-style
+        // assertions in ClientInviteCommandTest pin three contract points
+        // (URL host, at least one SAN value, "aisandboxctl pki init --san");
+        // the verbose multi-line form below is the cleanest UX for the
+        // human operator who'll read this on their terminal.
+        String sanList = sanEntries.isEmpty()
+                ? "<none>"
+                : sanEntries.stream()
+                        .map(e -> (e.type() == PemUtils.SanType.DNS ? "DNS:" : "IP:") + e.value())
+                        .collect(Collectors.joining(", "));
+        String remediationTag = canonicalIpv4 != null ? "ip" : "dns";
+        System.err.println("Refusing to mint a QR: --server-url host '" + unbracketed + "' is not in " + serverCrt
+                + "'s SubjectAlternativeName list.");
+        System.err.println("  cert SAN entries: " + sanList);
+        System.err.println("Remediate by re-issuing the server cert with this host claimed:");
+        System.err.println("  aisandboxctl pki init --force --san " + remediationTag + ":" + unbracketed);
+        return 2;
+    }
+
+    /**
+     * Return the canonical IPv4 dotted-quad form of {@code host} (e.g.
+     * {@code 127.0.0.1}), or {@code null} when {@code host} is a DNS name
+     * or an IPv6 literal. We only canonicalise v4 here because Case A
+     * already refused IPv6 literals and DNS hosts have no IP form.
+     *
+     * <p>{@link InetAddress#getByName(String)} would happily resolve a DNS
+     * name to a runtime IP — that's NOT what we want; the SAN check must
+     * compare literals only. We sidestep DNS lookup by short-circuiting on
+     * anything that doesn't look like a dotted-quad before calling the JDK.
+     */
+    private static String canonicaliseIpv4(String host) {
+        // Cheap pre-check: dotted-quad is the only IPv4 form we accept.
+        // A DNS name like "potato-server" won't match; a v4 literal like
+        // "127.000.000.001" or "127.0.0.1" will. Reject anything that
+        // isn't all-digits-and-dots so we don't issue a DNS lookup.
+        for (int i = 0; i < host.length(); i++) {
+            char c = host.charAt(i);
+            if (c != '.' && (c < '0' || c > '9')) {
+                return null;
+            }
+        }
+        try {
+            InetAddress addr = InetAddress.getByName(host);
+            return (addr instanceof Inet4Address) ? addr.getHostAddress() : null;
+        } catch (UnknownHostException uhe) {
+            return null;
+        }
     }
 
     private static String autoDiscoverPin(Path pkiDir) {

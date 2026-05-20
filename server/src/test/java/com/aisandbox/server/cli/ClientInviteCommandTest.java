@@ -699,9 +699,9 @@ class ClientInviteCommandTest {
         }
 
         assertThat(exit)
-                .as("UC10 § AC7 Case B — URL host '192.168.0.28' is not in the cert's SAN " +
-                        "list (DNS:potato-server, DNS:localhost, IP:127.0.0.1); the command MUST " +
-                        "exit 2. Pre-fix: FAILS — no SAN validation wired, command exits 0.")
+                .as("UC10 § AC7 Case B — URL host '192.168.0.28' is not in the cert's SAN "
+                        + "list (DNS:potato-server, DNS:localhost, IP:127.0.0.1); the command MUST "
+                        + "exit 2. Pre-fix: FAILS — no SAN validation wired, command exits 0.")
                 .isEqualTo(2);
 
         // No token file written on refusal.
@@ -722,8 +722,8 @@ class ClientInviteCommandTest {
                 .contains("potato-server")
                 .contains("127.0.0.1");
         assertThat(stderr)
-                .as("UC10 § AC7 Case B — stderr must surface the remediation command " +
-                        "(aisandboxctl pki init --force --san <tag>:<host>)")
+                .as("UC10 § AC7 Case B — stderr must surface the remediation command "
+                        + "(aisandboxctl pki init --force --san <tag>:<host>)")
                 .contains("aisandboxctl pki init")
                 .contains("--san");
     }
@@ -771,8 +771,8 @@ class ClientInviteCommandTest {
         }
 
         assertThat(exit)
-                .as("UC10 § AC7 Case C — --server-pin override does NOT bypass SAN validation; " +
-                        "URL host not in SAN must still refuse with exit 2.")
+                .as("UC10 § AC7 Case C — --server-pin override does NOT bypass SAN validation; "
+                        + "URL host not in SAN must still refuse with exit 2.")
                 .isEqualTo(2);
         // No token file written on refusal.
         assertThat(Files.exists(enrollment) ? Files.list(enrollment).count() : 0L)
@@ -825,8 +825,8 @@ class ClientInviteCommandTest {
         }
 
         assertThat(exit)
-                .as("UC10 § AC6 Case A — IPv6-literal --server-url must exit 2. " +
-                        "Pre-fix: FAILS — no IPv6 detection wired.")
+                .as("UC10 § AC6 Case A — IPv6-literal --server-url must exit 2. "
+                        + "Pre-fix: FAILS — no IPv6 detection wired.")
                 .isEqualTo(2);
         // No token file written on refusal.
         assertThat(Files.exists(enrollment) ? Files.list(enrollment).count() : 0L)
@@ -834,11 +834,10 @@ class ClientInviteCommandTest {
                 .isZero();
         // The AC6 message text is quoted verbatim in the use case.
         assertThat(errBuf.toString())
-                .as("UC10 § AC6 Case A — stderr must contain the exact AC6 IPv6 refusal text " +
-                        "verbatim. A change to this string is a contract break.")
+                .as("UC10 § AC6 Case A — stderr must contain the exact AC6 IPv6 refusal text "
+                        + "verbatim. A change to this string is a contract break.")
                 .contains(
-                        "--server-url with an IPv6 literal is not supported yet; "
-                                + "pass a DNS name or IPv4 address");
+                        "--server-url with an IPv6 literal is not supported yet; " + "pass a DNS name or IPv4 address");
     }
 
     private static Path onlyFile(Path dir) throws Exception {
