@@ -76,8 +76,16 @@ public class ProblemDetailsAdvice {
         return build(status, code, ex.getReason() == null ? status.getReasonPhrase() : ex.getReason());
     }
 
-    // UC04 enrollment failure modes live in
-    // com.aisandbox.server.enrollment.api.EnrollmentProblemDetailsAdvice
+    // UC04 / UC11 — the five enrollment failure modes
+    // (RateLimitedException, TokenInvalid / TokenExpired / TokenRedeemed,
+    // and CertAlreadyExistsException added in UC11 § AC4 / S3.4) are
+    // mapped by com.aisandbox.server.enrollment.api.EnrollmentWebExceptionHandler,
+    // a reactive-aware WebExceptionHandler bean. UC11 replaced the
+    // previous @RestControllerAdvice sibling because the @ExceptionHandler
+    // mechanism did not fire under WebFlux — every documented error path
+    // landed in handleAny(Throwable) below with a wrapped
+    // UnsupportedOperationException ("ServerHttpResponse already committed").
+    // The handler still lives in enrollment.api (not here in api.error)
     // so the api package never reaches back into the enrollment package
     // (LayeringTest § no_cycles_between_top_level_feature_packages).
 
