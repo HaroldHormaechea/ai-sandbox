@@ -103,26 +103,6 @@ public class ProblemDetailsAdvice {
         return build(status, code, ex.getReason() == null ? status.getReasonPhrase() : ex.getReason());
     }
 
-    // UC04 / UC11 — the five enrollment failure modes
-    // (RateLimitedException, TokenInvalid / TokenExpired / TokenRedeemed,
-    // and CertAlreadyExistsException added in UC11 § AC4 / S3.4) are
-    // mapped by com.aisandbox.server.enrollment.api.EnrollmentWebExceptionHandler,
-    // a reactive-aware WebExceptionHandler bean. UC11 replaced the
-    // previous @RestControllerAdvice sibling because the @ExceptionHandler
-    // mechanism did not fire under WebFlux — every documented error path
-    // landed in handleAny(Throwable) below with a wrapped
-    // UnsupportedOperationException ("ServerHttpResponse already committed").
-    // The handler still lives in enrollment.api (not here in api.error)
-    // so the api package never reaches back into the enrollment package
-    // (LayeringTest § no_cycles_between_top_level_feature_packages).
-
-    @ExceptionHandler(Throwable.class)
-    @ResponseBody
-    public ProblemDetail handleAny(Throwable t) {
-        LOG.warn("Unmapped exception in REST flow: {}", t.toString(), t);
-        return build(HttpStatus.INTERNAL_SERVER_ERROR, ErrorCode.INTERNAL_ERROR, t.getMessage());
-    }
-
     public static ProblemDetail build(HttpStatus status, ErrorCode code, String detail) {
         ProblemDetail pd = ProblemDetail.forStatus(status);
         pd.setType(URI.create(TYPE_BASE + code.wire()));
@@ -150,6 +130,27 @@ public class ProblemDetailsAdvice {
             return RENDER_MAPPER.writeValueAsString(build(status, code, detail));
         } catch (JsonProcessingException e) {
             return "{\"status\":" + status.value() + ",\"code\":\"" + code.wire() + "\"}";
+        }
+    }
+
+    /**
+     * Overload for callers that need to attach extra problem-detail
+     * properties before serialization (e.g.
+     * {@link com.aisandbox.server.stream.api.StreamWebExceptionHandler}
+     * sets {@code n} and {@code state} on top of the standard envelope).
+     * The caller builds the {@link ProblemDetail} via
+     * {@link #build(HttpStatus, ErrorCode, String)} and then calls
+     * {@link ProblemDetail#setProperty(String, Object)} as needed; this
+     * overload pushes the result through the same {@link #RENDER_MAPPER}
+     * so the flat-object byte shape stays consistent with every other
+     * call site.
+     */
+    public static String renderJson(ProblemDetail pd) {
+        try {
+            return RENDER_MAPPER.writeValueAsString(pd);
+        } catch (JsonProcessingException e) {
+            Object code = pd.getProperties() == null ? "" : pd.getProperties().getOrDefault("code", "");
+            return "{\"status\":" + pd.getStatus() + ",\"code\":\"" + code + "\"}";
         }
     }
 

@@ -72,8 +72,28 @@ import reactor.core.publisher.Mono;
  * already committed"} log noise; we cover that by invoking the filter
  * directly with an oversize payload and asserting the response body
  * + log silence.
+ *
+ * <h2>UC-12 cross-reference — routing concern moved out</h2>
+ *
+ * <p>UC-12 renamed this file from
+ * {@code EnrollmentWebExceptionHandlerIntegrationTest} to drop the
+ * "IntegrationTest" suffix that was always misleading: the assertions
+ * here are unit-style — they drive the handler directly against a
+ * {@link MockServerWebExchange} and never boot a Spring context, never
+ * cross the {@code WebHttpHandlerBuilder} dispatch ordering, and never
+ * exercise the {@code @RestControllerAdvice} vs. {@link
+ * org.springframework.web.server.WebExceptionHandler} layering that
+ * UC-11's v0.0.12 release got wrong. The routing concern (does the
+ * exception actually reach this handler when both {@link
+ * ProblemDetailsAdvice} and this bean are registered in the same
+ * Spring context?) is now covered by
+ * {@code EnrollmentExceptionRoutingTest} — a real
+ * {@code @SpringBootTest(RANDOM_PORT)} test that boots both advices in
+ * the same context and POSTs over the wire. The two tests are
+ * complementary: this one pins the wire shape per exception; that one
+ * pins that the chain delivers the exception to this handler.
  */
-class EnrollmentWebExceptionHandlerIntegrationTest {
+class EnrollmentWebExceptionHandlerTest {
 
     private static final String FAKE_TOKEN =
             "fake-test-token-not-a-real-key" + "0".repeat(33); // 63+ chars, matches body validator pattern.
@@ -202,29 +222,14 @@ class EnrollmentWebExceptionHandlerIntegrationTest {
                 .isInstanceOf(EnrollmentFacade.RateLimitedException.class);
     }
 
-    @Test
-    void problem_details_advice_handleAny_catches_truly_unmapped_exceptions() {
-        // UC11 § AC6 — sibling regression: ProblemDetailsAdvice's
-        // generic Throwable fallback still produces the documented
-        // 500 / internal_error shape for exceptions that no other
-        // handler processes. This is the safety net for endpoints
-        // outside the enrollment domain.
-        ProblemDetailsAdvice advice = new ProblemDetailsAdvice();
-        org.springframework.http.ProblemDetail pd = advice.handleAny(new RuntimeException("genuinely unmapped"));
-
-        assertThat(pd.getStatus()).isEqualTo(500);
-        assertThat(pd.getType().toString()).endsWith("/internal_error");
-        assertThat(pd.getProperties()).containsEntry("code", "internal_error");
-
-        // The "Unmapped exception in REST flow" line MUST fire — this
-        // is the operational signal that a domain-specific handler is
-        // missing (the exact line UC11 § AC5 verifies is silent for
-        // enrollment exceptions).
-        assertThat(problemDetailsLogAppender.list)
-                .as(
-                        "ProblemDetailsAdvice.handleAny must log the unmapped-exception line for genuinely unmapped throwables")
-                .anySatisfy(evt -> assertThat(evt.getFormattedMessage()).contains("Unmapped exception in REST flow"));
-    }
+    // UC-12 — `problem_details_advice_handleAny_catches_truly_unmapped_exceptions`
+    // removed. The catch-all `@ExceptionHandler(Throwable.class)` was
+    // deleted from `ProblemDetailsAdvice` (UC-12 option (a)); the
+    // generic-fallback wire contract (HTTP 500 + `internal_error` body
+    // + "Unmapped exception in REST flow" WARN line) is now pinned by
+    // `com.aisandbox.server.api.error.GenericProblemFallbackHandlerTest`,
+    // which exercises the same contract end-to-end via a real
+    // {@code @SpringBootTest(RANDOM_PORT)} dispatch.
 
     @Test
     void request_size_limit_filter_returns_413_payload_too_large_with_no_unmapped_log() {
