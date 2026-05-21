@@ -283,10 +283,9 @@ class GenericProblemFallbackHandlerTest {
         // genuinely-unmapped exceptions. This is the canary that makes
         // the AC3 silence assertion non-vacuous.
         assertThat(problemDetailsLogAppender.list)
-                .as(
-                        "UC-12 § AC4 — the 'Unmapped exception in REST flow' WARN line MUST still fire for"
-                                + " genuinely-unmapped exceptions; this is the operational signal that a"
-                                + " domain-specific handler is missing.")
+                .as("UC-12 § AC4 — the 'Unmapped exception in REST flow' WARN line MUST still fire for"
+                        + " genuinely-unmapped exceptions; this is the operational signal that a"
+                        + " domain-specific handler is missing.")
                 .anySatisfy(evt -> {
                     assertThat(evt.getLevel()).isEqualTo(Level.WARN);
                     assertThat(evt.getFormattedMessage())

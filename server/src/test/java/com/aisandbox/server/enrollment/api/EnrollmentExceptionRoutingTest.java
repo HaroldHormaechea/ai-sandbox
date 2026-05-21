@@ -311,7 +311,10 @@ class EnrollmentExceptionRoutingTest {
                 .returnResult()
                 .getResponseBody();
 
-        assertThat(respBody).as("response body must not be empty for %s", exType.getSimpleName()).isNotNull().isNotEmpty();
+        assertThat(respBody)
+                .as("response body must not be empty for %s", exType.getSimpleName())
+                .isNotNull()
+                .isNotEmpty();
 
         JsonNode root = new ObjectMapper().readTree(respBody);
         assertThat(root.path("status").asInt(-1))
@@ -436,5 +439,4 @@ class EnrollmentExceptionRoutingTest {
             target.toFile().setExecutable(true, false);
         }
     }
-
 }
