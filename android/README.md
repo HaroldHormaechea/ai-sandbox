@@ -11,6 +11,11 @@ never will be.
   `aisandboxctl client invite <name>`, redeem the token via
   `POST /v1/enrollment`, import the PKCS#12 bundle into the Android
   KeyStore as a non-exportable client identity.
+- **Cold-start resume** (UC-16): when a valid `ServerProfile` and a
+  non-expired client cert are already on disk, a fresh launch goes
+  straight to the sessions list — no QR re-prompt. A stale profile
+  without a cert (or vice versa, or an expired cert) is wiped and the
+  QR scanner is shown for a clean re-enroll.
 - **Sessions list** (UC04-2): show `ai-sandbox-N` sessions and their
   state (`running` / `starting` / `stopped`) over mTLS. Filter chips,
   spawn via bottom sheet, delete with optional force.
