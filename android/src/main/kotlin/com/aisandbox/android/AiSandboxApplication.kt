@@ -5,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
 import androidx.core.content.getSystemService
+import com.aisandbox.android.identity.BouncyCastleClientProvider
 
 /**
  * Process-level [Application] instance for the ai-sandbox Android client.
@@ -26,6 +27,16 @@ class AiSandboxApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        // UC13 — Register the real BouncyCastle JCE provider under the
+        // project-specific name `BC-ai-sandbox-client` BEFORE AppContainer
+        // is constructed. AppContainer eagerly builds KeyStoreIdentityManager
+        // and the network stack; the PKCS#12 import path inside
+        // KeyStoreIdentityManager.importPkcs12 looks up the provider by
+        // name, so it must be present in `java.security.Security` before
+        // any KeyStore call. See identity/BouncyCastleClientProvider.kt
+        // for the full rationale (OID 1.2.840.113549.1.5.12, distinct
+        // name, `addProvider` vs `insertProviderAt`, PKCS#12-only scope).
+        BouncyCastleClientProvider.register()
         container = AppContainer(this)
         registerTerminalStreamNotificationChannel()
     }
