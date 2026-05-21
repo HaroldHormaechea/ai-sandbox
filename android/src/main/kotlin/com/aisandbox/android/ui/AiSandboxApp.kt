@@ -5,7 +5,6 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -28,36 +27,52 @@ import com.aisandbox.android.ui.screens.ServerIdentityChangedScreen
 import com.aisandbox.android.ui.screens.SessionsScreen
 import com.aisandbox.android.ui.screens.SettingsScreen
 import com.aisandbox.android.ui.screens.TerminalScreen
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /**
  * Root composable. Hosts the navigation graph and the network-event
  * subscription that force-routes to [Routes.ServerIdentityChanged] /
  * [Routes.CertRevoked] from anywhere in the app.
  *
- * <p>Start destination is decided once at composition time by the
- * presence/absence of a persisted [com.aisandbox.android.net.ServerProfile]:
+ * <p>UC-16 — Start destination is decided once at process start by
+ * [decideStartDestination] against the persisted
+ * [com.aisandbox.android.net.ServerProfile] and the AndroidKeyStore
+ * client cert. While that one-shot suspending read is in flight, a
+ * full-screen [SplashScreen] holds the surface so the QR scanner never
+ * flashes on devices that already have a valid identity (AC1, AC5). The
+ * decider also reports whether stale profile / cert artefacts need to
+ * be wiped before the QR scanner is shown (AC3 / AC4); those writes
+ * complete before [decision] is assigned, so a back-press from the QR
+ * scanner cannot land on a half-cleared state.
  *
- * <ul>
- *   <li>No profile → [Routes.Onboarding] (first run, or after AC6 replace).</li>
- *   <li>Profile present → [Routes.Sessions] (the warm-start path).</li>
- * </ul>
+ * <p>Subscriptions to {@link NetworkEvents} for the UC-09 / UC-10
+ * pin-mismatch + cert-revoke flows are unchanged.
  */
 @Composable
 fun AiSandboxApp() {
     val context = LocalContext.current
     val container = remember { requireContainer(context) }
-    val profile by container.profileStore.profile.collectAsState(initial = null)
 
     val navController = rememberNavController()
 
-    // Routing decision: first composition uses whatever the cold-start
-    // profile read returns; subsequent profile changes (after clear()
-    // in the replace-flow) don't auto-route — those flows navigate
-    // explicitly.
-    var startDestination by remember { mutableStateOf<String?>(null) }
-    LaunchedEffect(profile) {
-        if (startDestination == null) {
-            startDestination = if (profile == null) Routes.Onboarding else Routes.Sessions
+    // UC-16 — one-shot suspending probe of the persisted profile + the
+    // AndroidKeyStore cert; the pure [decideStartDestination] function
+    // owns the routing matrix (AC1–AC4 + orphan-cert edge). Any wipe
+    // the decider asks for completes BEFORE `decision` is set so the
+    // NavHost composes against a settled disk state — back-press from
+    // Onboarding cannot fall through to a half-cleared profile/cert.
+    var decision by remember { mutableStateOf<StartDestinationDecision?>(null) }
+    LaunchedEffect(Unit) {
+        withContext(Dispatchers.IO) {
+            val profile = container.profileStore.current()
+            val cert = container.identity.leafCertificate()
+            val d = decideStartDestination(profile, cert, System.currentTimeMillis())
+            if (d is RouteToOnboarding) {
+                if (d.wipeProfile) container.profileStore.clear()
+                if (d.wipeCert) container.identity.wipe()
+            }
+            decision = d
         }
     }
 
@@ -98,7 +113,21 @@ fun AiSandboxApp() {
         color = MaterialTheme.colorScheme.background,
         contentColor = MaterialTheme.colorScheme.onBackground,
     ) {
-        val start = startDestination ?: return@Surface
+        // UC-16 — hold a themed empty surface until the cold-start
+        // decision lands. Avoids the AC1/AC5 regression of flashing
+        // the QR scanner before the decider notices a valid identity.
+        val resolved = decision
+        if (resolved == null) {
+            SplashScreen()
+            return@Surface
+        }
+        // Single source of truth for both `NavHost(startDestination)`
+        // and the `popUpTo(start)` callbacks on the cert-revoked /
+        // server-identity-changed screens — keeps the back-stack
+        // bottom aligned with the cold-start destination so re-scan
+        // flows fully clear it (UC-16 pitfall note: keep both
+        // popUpTo call sites converted).
+        val start: String = resolved.route
         NavHost(navController = navController, startDestination = start) {
 
             composable(Routes.Onboarding) {
