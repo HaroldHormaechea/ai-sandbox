@@ -138,7 +138,8 @@ public class EnrollmentWebExceptionHandler implements WebExceptionHandler {
         response.setStatusCode(status);
         response.getHeaders().setContentType(MediaType.APPLICATION_PROBLEM_JSON);
 
-        byte[] body = ProblemDetailsAdvice.renderJson(status, code, ex.getMessage()).getBytes(StandardCharsets.UTF_8);
+        byte[] body =
+                ProblemDetailsAdvice.renderJson(status, code, ex.getMessage()).getBytes(StandardCharsets.UTF_8);
         DataBuffer buffer = response.bufferFactory().wrap(body);
         return response.writeWith(Mono.just(buffer));
     }

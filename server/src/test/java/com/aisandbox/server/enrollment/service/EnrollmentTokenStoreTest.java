@@ -85,7 +85,9 @@ class EnrollmentTokenStoreTest {
 
         // markRedeemed deletes the file and populates the tombstone.
         boolean deleted = store.markRedeemed(FULL_TOKEN_A, fixed(now.plusSeconds(2)));
-        assertThat(deleted).as("first markRedeemed call MUST return true (file was on disk)").isTrue();
+        assertThat(deleted)
+                .as("first markRedeemed call MUST return true (file was on disk)")
+                .isTrue();
         assertThat(Files.exists(store.fileFor(FULL_TOKEN_A)))
                 .as("UC11 § AC7 — markRedeemed deletes the on-disk file")
                 .isFalse();

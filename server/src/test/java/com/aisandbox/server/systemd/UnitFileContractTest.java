@@ -60,9 +60,8 @@ class UnitFileContractTest {
 
         // UC11 § AC1 — the actual carve-out under test.
         assertThat(rwPaths)
-                .as(
-                        "UC11 § AC1 — /etc/ai-sandbox-server/clients MUST be in ReadWritePaths so "
-                                + "EnrollmentFacade can write <name>.crt into the allowlist directory")
+                .as("UC11 § AC1 — /etc/ai-sandbox-server/clients MUST be in ReadWritePaths so "
+                        + "EnrollmentFacade can write <name>.crt into the allowlist directory")
                 .contains("/etc/ai-sandbox-server/clients");
     }
 
@@ -79,9 +78,8 @@ class UnitFileContractTest {
         // writable. Security model: config files (cert, key, config.yaml,
         // secrets) immutable; allowlist directory mutable.
         assertThat(roPaths)
-                .as(
-                        "UC11 § AC1 — /etc/ai-sandbox-server parent tree MUST stay in ReadOnlyPaths; "
-                                + "only the clients/ subdir is carved out")
+                .as("UC11 § AC1 — /etc/ai-sandbox-server parent tree MUST stay in ReadOnlyPaths; "
+                        + "only the clients/ subdir is carved out")
                 .contains("/etc/ai-sandbox-server");
     }
 

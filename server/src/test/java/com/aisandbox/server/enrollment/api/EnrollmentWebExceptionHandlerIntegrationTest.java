@@ -11,6 +11,8 @@ import com.aisandbox.server.api.RequestSizeLimitFilter;
 import com.aisandbox.server.api.error.ProblemDetailsAdvice;
 import com.aisandbox.server.config.ServerProperties;
 import com.aisandbox.server.enrollment.facade.EnrollmentFacade;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.file.FileAlreadyExistsException;
 import java.nio.file.Path;
 import org.junit.jupiter.api.AfterEach;
@@ -237,18 +239,33 @@ class EnrollmentWebExceptionHandlerIntegrationTest {
         RequestSizeLimitFilter filter = new RequestSizeLimitFilter(propsWithMaxBytes(65536));
         HttpHeaders headers = new HttpHeaders();
         headers.setContentLength(512); // > 256-byte enrollment cap.
-        MockServerWebExchange ex = MockServerWebExchange.from(MockServerHttpRequest.post("/v1/enrollment")
-                .headers(headers)
-                .contentType(MediaType.APPLICATION_JSON));
+        MockServerWebExchange ex = MockServerWebExchange.from(
+                MockServerHttpRequest.post("/v1/enrollment").headers(headers).contentType(MediaType.APPLICATION_JSON));
         WebFilterChain chain = e -> Mono.error(new AssertionError("filter should have short-circuited"));
 
         filter.filter(ex, chain).block();
 
         assertThat(ex.getResponse().getStatusCode()).isEqualTo(HttpStatus.PAYLOAD_TOO_LARGE);
         assertThat(ex.getResponse().getHeaders().getContentType()).isEqualTo(MediaType.APPLICATION_PROBLEM_JSON);
+
+        // Pin the wire shape — top-level `code`, NOT nested under
+        // `properties`. The 413 path was the pre-UC11 latent home of
+        // the nested-properties bug; this assertion ensures the
+        // developer's RENDER_MAPPER fix covers it too.
         String body = readBody(ex);
-        assertThat(body).contains("\"code\":\"payload_too_large\"");
-        assertThat(body).contains("\"status\":413");
+        JsonNode root;
+        try {
+            root = new ObjectMapper().readTree(body);
+        } catch (Exception e) {
+            throw new AssertionError("413 problem+json body must parse as JSON; got: " + body, e);
+        }
+        assertThat(root.path("code").asText(null))
+                .as("RFC-9457: top-level `code` for 413 path. body=%s", body)
+                .isEqualTo("payload_too_large");
+        assertThat(root.path("status").asInt(-1)).isEqualTo(413);
+        assertThat(root.path("properties").path("code").asText(null))
+                .as("regression guard: 413 path MUST NOT nest `code` under `properties`. body=%s", body)
+                .isNull();
 
         assertProblemDetailsAdviceNeverLoggedUnmapped();
     }
@@ -268,12 +285,42 @@ class EnrollmentWebExceptionHandlerIntegrationTest {
         assertThat(exchange.getResponse().getHeaders().getContentType())
                 .as("content-type for code=%s", code)
                 .isEqualTo(MediaType.APPLICATION_PROBLEM_JSON);
+
+        // Parse the body as JSON and assert RFC-9457-compliant shape:
+        // status / type / detail / code MUST live at the TOP LEVEL of
+        // the document. The `code` MUST NOT be nested under a
+        // `properties` object — that nested shape would break the
+        // Android client's `parseProblemJson` and was the exact
+        // regression UC11 § AC4 / S2 surfaced. ProblemDetailsAdvice's
+        // static RENDER_MAPPER registers ProblemDetailJacksonMixin so
+        // the @JsonAnyGetter on getProperties flattens onto the top
+        // level. We pin the wire shape here so any future drop of that
+        // mixin (or replacement with a raw ObjectMapper) breaks this
+        // test loudly.
         String body = readBody(exchange);
-        assertThat(body)
-                .as("problem+json body for code=%s", code)
-                .contains("\"code\":\"" + code + "\"")
-                .contains("\"status\":" + status.value())
-                .contains("/" + code); // type URI base + code.
+        JsonNode root;
+        try {
+            root = new ObjectMapper().readTree(body);
+        } catch (Exception e) {
+            throw new AssertionError("problem+json body must parse as JSON; got: " + body, e);
+        }
+        assertThat(root.path("code").asText(null))
+                .as("RFC-9457: `code` MUST be at the top level (not nested under `properties`). body=%s", body)
+                .isEqualTo(code);
+        assertThat(root.path("status").asInt(-1))
+                .as("RFC-9457: `status` MUST be at the top level. body=%s", body)
+                .isEqualTo(status.value());
+        assertThat(root.path("type").asText(""))
+                .as("RFC-9457: `type` URI MUST end with the lowercase wire code. body=%s", body)
+                .endsWith("/" + code);
+        // Negative pin — the pre-UC11 latent / pre-developer-fix bug
+        // shape had `code` under a nested `properties` object. Asserting
+        // it is NOT there ensures regressions can't slip back in even if
+        // someone happens to set both a top-level `code` AND a nested
+        // properties.code.
+        assertThat(root.path("properties").path("code").asText(null))
+                .as("regression guard: `code` MUST NOT be nested under `properties`. body=%s", body)
+                .isNull();
     }
 
     private static String readBody(MockServerWebExchange exchange) {
