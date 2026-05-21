@@ -110,11 +110,16 @@ preflight() {
 # ---------------------------------------------------------------------
 bootstrap_pki() {
     log "bootstrap_pki: creating scratch tree at $SCRATCH"
-    mkdir -p "$SCRATCH" "$SCRATCH/hostscripts" "$SCRATCH/compose"
+    mkdir -p "$SCRATCH" "$SCRATCH/compose"
     # pki init creates: pki/, clients/, enrollment/, secrets/,
     # sessions/, audit/, config.yaml — under $SCRATCH because we pass
     # --pki-dir $SCRATCH/pki, etc., and PkiInitCommand derives etcRoot
     # from pkiDir.parent.
+    #
+    # hostscripts.repo-root is NOT created here — see start_server's
+    # comment on why we point the server at $ROOT_DIR (the live repo
+    # root, which already contains spawn.sh / clean.sh / attach.sh)
+    # rather than at a synthetic scratch dir.
 
     local aisbx_user
     aisbx_user="$(id -un)"
@@ -201,6 +206,18 @@ start_server() {
     # hermetic — no /etc/ai-sandbox-server/ writes, no /var/log/
     # writes. Bind to loopback only.
     #
+    # NOTE on --ai-sandbox.server.hostscripts.repo-root=$ROOT_DIR:
+    # HostScriptLocator.validate() (server/.../sessions/service/
+    # HostScriptLocator.java) requires `spawn.sh`, `clean.sh`, and
+    # `attach.sh` to exist at the repo-root path AT STARTUP, regardless
+    # of whether any endpoint actually invokes them. We point it at
+    # the live repo root (which has all three files checked in) rather
+    # than copying them into a scratch dir — this integration test
+    # exercises only GET endpoints (/v1/healthz, /v1/sessions[/{n}]),
+    # so the scripts are never executed by the server, only validated
+    # as files-on-disk. See QA's UC-17 fix-back round 3 for the
+    # IllegalStateException trace this fix resolves.
+    #
     # NOTE on -Dai-sandbox.server.audit.file (passed BEFORE -jar):
     # logback-spring.xml's ${ai-sandbox.server.audit.file:-/var/log/...}
     # placeholder is resolved by logback's own variable substitution,
@@ -224,7 +241,7 @@ start_server() {
         --ai-sandbox.server.tls.bind-address=127.0.0.1 \
         --ai-sandbox.server.pki.dir="$SCRATCH/pki" \
         --ai-sandbox.server.clients.dir="$SCRATCH/clients" \
-        --ai-sandbox.server.hostscripts.repo-root="$SCRATCH/hostscripts" \
+        --ai-sandbox.server.hostscripts.repo-root="$ROOT_DIR" \
         --ai-sandbox.server.sessions.host-state-root="$SCRATCH/sessions" \
         --ai-sandbox.server.secrets.dir="$SCRATCH/secrets" \
         --ai-sandbox.server.enrollment.dir="$SCRATCH/enrollment" \
