@@ -133,6 +133,27 @@ public class ProblemDetailsAdvice {
         }
     }
 
+    /**
+     * Overload for callers that need to attach extra problem-detail
+     * properties before serialization (e.g.
+     * {@link com.aisandbox.server.stream.api.StreamWebExceptionHandler}
+     * sets {@code n} and {@code state} on top of the standard envelope).
+     * The caller builds the {@link ProblemDetail} via
+     * {@link #build(HttpStatus, ErrorCode, String)} and then calls
+     * {@link ProblemDetail#setProperty(String, Object)} as needed; this
+     * overload pushes the result through the same {@link #RENDER_MAPPER}
+     * so the flat-object byte shape stays consistent with every other
+     * call site.
+     */
+    public static String renderJson(ProblemDetail pd) {
+        try {
+            return RENDER_MAPPER.writeValueAsString(pd);
+        } catch (JsonProcessingException e) {
+            Object code = pd.getProperties() == null ? "" : pd.getProperties().getOrDefault("code", "");
+            return "{\"status\":" + pd.getStatus() + ",\"code\":\"" + code + "\"}";
+        }
+    }
+
     /** Convenience for content-type. */
     public static final MediaType PROBLEM_JSON = MediaType.APPLICATION_PROBLEM_JSON;
 }
