@@ -32,8 +32,22 @@
 # rules, but recover anything stripped by aggressive minify.
 -keep class androidx.compose.runtime.** { *; }
 
-# BouncyCastle (used only by tests today; included defensively).
+# BouncyCastle — production dependency since UC13 (PKCS#12 import).
+# `bcprov-jdk18on` is registered at process start as a JCE provider
+# under the distinct name `BC-ai-sandbox-client` (see
+# identity/BouncyCastleClientProvider.kt) and is consumed via
+# `KeyStore.getInstance("PKCS12", "BC-ai-sandbox-client")` in
+# identity/KeyStoreIdentityManager.kt. The provider's algorithm
+# registrations are looked up reflectively via the JCA's
+# `Provider.Service` machinery, so R8 / ProGuard must keep both the
+# top-level provider class and the implementation tree intact for any
+# future minified release build.
 -dontwarn org.bouncycastle.**
+-keep class org.bouncycastle.jce.provider.BouncyCastleProvider { *; }
+-keep class org.bouncycastle.jcajce.provider.** { *; }
+# Defensive — covers any reflective lookup that walks `Provider.Service`
+# implementations under the BC tree (member access, not class signature).
+-keepclassmembers class org.bouncycastle.** implements java.security.Provider$Service$* { *; }
 
 # Android KeyStore wrappers in androidx.security.crypto.
 -keep class androidx.security.crypto.** { *; }

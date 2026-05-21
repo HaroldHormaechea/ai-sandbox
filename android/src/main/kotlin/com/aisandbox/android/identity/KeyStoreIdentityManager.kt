@@ -52,7 +52,23 @@ class KeyStoreIdentityManager {
      */
     fun importPkcs12(p12Bytes: ByteArray): ImportResult {
         // 1. Parse the P12 with empty passphrase.
-        val source = KeyStore.getInstance("PKCS12")
+        //
+        // UC13 — Route this specific PKCS#12 unwrap through the real
+        // BouncyCastle provider (registered under the project-specific
+        // name `BC-ai-sandbox-client`; see
+        // [BouncyCastleClientProvider]). Android's stock PKCS12 stack
+        // (Conscrypt + the stripped-down `"BC"` provider) does NOT
+        // register a SecretKeyFactory under the bare PBKDF2 OID
+        // `1.2.840.113549.1.5.12` that the server-emitted PBES2
+        // PKCS#12 bundles require during private-key unwrap, so this
+        // call without the explicit provider name fails with
+        // `NoSuchAlgorithmException: 1.2.840.113549.1.5.12 SecretKeyFactory not available`.
+        // Naming the provider explicitly here keeps TLS (Conscrypt) and
+        // every other JCA consumer on Android's defaults.
+        // NOTE: `KEYSTORE_PROVIDER` in the companion below is
+        // `"AndroidKeyStore"` and is *unrelated* to this provider name —
+        // it refers to the destination KeyStore type, not a JCE Provider.
+        val source = KeyStore.getInstance("PKCS12", BouncyCastleClientProvider.NAME)
         source.load(ByteArrayInputStream(p12Bytes), EMPTY_PASSWORD)
         val aliases = source.aliases().toList()
         require(aliases.isNotEmpty()) { "PKCS#12 contains no aliases" }
