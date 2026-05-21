@@ -23,5 +23,7 @@ Statuses:
 | 11 | [use-cases/11-enrollment-runtime-fixes.md](use-cases/11-enrollment-runtime-fixes.md) | Enrollment-flow latent bug fixes — systemd ReadWritePaths + WebFlux exception advice + token rollback | done | 2026-05-21 |
 | 12 | [use-cases/12-webflux-exception-advice-routing-fix.md](use-cases/12-webflux-exception-advice-routing-fix.md) | Fix UC-11 regression — WebFlux exception chain bypasses EnrollmentWebExceptionHandler | pending | 2026-05-21 |
 | 13 | [use-cases/13-android-bouncycastle-pkcs12-import-fix.md](use-cases/13-android-bouncycastle-pkcs12-import-fix.md) | Android client adopts BouncyCastle for PKCS#12 enrollment-cert import | done | 2026-05-21 |
-| 14 | [use-cases/14-pkcs12-empty-password-sentinel.md](use-cases/14-pkcs12-empty-password-sentinel.md) | Fix UC-13 regression — sentinel passphrase for enrollment PKCS#12 (BouncyCastle 1.79 rejects empty char[]) | in-progress | 2026-05-21 |
+| 14 | [use-cases/14-pkcs12-empty-password-sentinel.md](use-cases/14-pkcs12-empty-password-sentinel.md) | Fix UC-13 regression — sentinel passphrase for enrollment PKCS#12 (BouncyCastle 1.79 rejects empty char[]) | done | 2026-05-21 |
+| 15 | [use-cases/15-server-sessions-enumeration-and-post-response-error-noise.md](use-cases/15-server-sessions-enumeration-and-post-response-error-noise.md) | Server `/v1/sessions` enumeration broken — `docker compose ls --all` rejected, `.docker/config.json` unreadable, downstream `handleAny` log noise | pending | 2026-05-21 |
+| 16 | [use-cases/16-android-resume-to-sessions-instead-of-onboarding.md](use-cases/16-android-resume-to-sessions-instead-of-onboarding.md) | Android client — cold-start after enrollment should resume to the sessions list, not re-prompt for QR | pending | 2026-05-21 |
 
