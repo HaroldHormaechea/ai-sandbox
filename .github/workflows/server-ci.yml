@@ -919,6 +919,17 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
               openjdk-21-jdk-headless curl ca-certificates python3 openssl
 
+          # UC-15 — documentary echo of the runner's docker-compose
+          # capabilities. The server probes `docker compose ls --all` at
+          # runtime and falls back to `docker ps -a --filter
+          # label=com.docker.compose.project` when --all is rejected, but
+          # capturing the version + `ls --help` here makes the cause of
+          # any future regression obvious in the CI log without a re-run.
+          # `|| true` because the surrounding step uses `set -e`; these
+          # diagnostics must never abort the smoke leg.
+          docker compose version || true
+          docker compose ls --help 2>&1 | head -25 || true
+
           # Install the .deb. dpkg + `apt-get -f install` follows the
           # same pattern as the docker .deb phase above so missing
           # Depends are satisfied automatically.

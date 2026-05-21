@@ -53,6 +53,14 @@ case "$1" in
         # config.yaml are NOT created — those are pki init's job.
         install -d -m 0750 -o ai-sandbox-server -g ai-sandbox-server /etc/ai-sandbox-server
         install -d -m 0750 -o ai-sandbox-server -g ai-sandbox-server /var/lib/ai-sandbox-server
+        # UC-15 — docker config root for the service. The systemd unit sets
+        # DOCKER_CONFIG=/var/lib/ai-sandbox-server/docker-config so docker
+        # never reaches into the user's locked-down $HOME (ProtectHome=true).
+        # Mode 0700 because docker writes credentials in config.json. We do
+        # NOT pre-create config.json itself — docker writes it on first
+        # invocation. Idempotent on re-installs (install -d is a no-op when
+        # the directory already exists at the requested mode/owner).
+        install -d -m 0700 -o ai-sandbox-server -g ai-sandbox-server /var/lib/ai-sandbox-server/docker-config
         install -d -m 0750 -o ai-sandbox-server -g ai-sandbox-server /var/log/ai-sandbox-server
 
         cat <<'EOM'

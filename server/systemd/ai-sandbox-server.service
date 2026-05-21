@@ -9,6 +9,14 @@ Requires=docker.service
 Type=simple
 User=ai-sandbox-server
 Group=docker
+# UC-15 — point docker at a state-directory-managed config root instead of
+# $HOME/.docker. Avoids the "WARNING: Error loading config file: open
+# /home/ai-sandbox-server/.docker/config.json: permission denied" noise on
+# every `docker compose` invocation, since ProtectHome=true (below) hides
+# the user's real $HOME from the sandboxed service. The path lives under
+# the already-writable /var/lib/ai-sandbox-server tree (see ReadWritePaths
+# below); .deb postinst pre-creates the directory with mode 0700.
+Environment=DOCKER_CONFIG=/var/lib/ai-sandbox-server/docker-config
 ExecStart=/usr/bin/java \
     -Xms256m -Xmx1g \
     -Dfile.encoding=UTF-8 \
