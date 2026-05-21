@@ -510,10 +510,10 @@ jobs:
                       kill -TERM "$SERVER_PID" 2>/dev/null || true
                       exit 1
                   fi
-                  openssl pkcs12 -in /tmp/bundle-h2.p12 -nokeys -passin pass: -info -noout 2>&1 \
+                  openssl pkcs12 -in /tmp/bundle-h2.p12 -nokeys -passin pass:ai-sandbox-enrollment -info -noout 2>&1 \
                       | tee /tmp/p12-h2-info.txt
                   grep -q "BEGIN" /tmp/p12-h2-info.txt || {
-                      openssl pkcs12 -in /tmp/bundle-h2.p12 -nokeys -passin pass: 2>&1 | grep -q "BEGIN"
+                      openssl pkcs12 -in /tmp/bundle-h2.p12 -nokeys -passin pass:ai-sandbox-enrollment 2>&1 | grep -q "BEGIN"
                   }
 
                   # AC4 max-streams regression guard. NettyServerCustomizer.applyTls
@@ -752,12 +752,12 @@ jobs:
                       exit 1
                   fi
                   # The returned .p12 should parse with an empty passphrase.
-                  openssl pkcs12 -in /tmp/bundle.p12 -nokeys -passin pass: -info -noout 2>&1 \
+                  openssl pkcs12 -in /tmp/bundle.p12 -nokeys -passin pass:ai-sandbox-enrollment -info -noout 2>&1 \
                       | tee /tmp/p12-info.txt
                   grep -q "BEGIN" /tmp/p12-info.txt || {
                       # Some openssl builds emit the cert via stdout rather
                       # than -info; retry without -noout to confirm parseability.
-                      openssl pkcs12 -in /tmp/bundle.p12 -nokeys -passin pass: 2>&1 | grep -q "BEGIN"
+                      openssl pkcs12 -in /tmp/bundle.p12 -nokeys -passin pass:ai-sandbox-enrollment 2>&1 | grep -q "BEGIN"
                   }
 
                   # Server drops the public cert into /etc/ai-sandbox-server/clients/.
@@ -823,10 +823,10 @@ jobs:
                       kill -TERM "$SERVER_PID" 2>/dev/null || true
                       exit 1
                   fi
-                  openssl pkcs12 -in /tmp/bundle-h2.p12 -nokeys -passin pass: -info -noout 2>&1 \
+                  openssl pkcs12 -in /tmp/bundle-h2.p12 -nokeys -passin pass:ai-sandbox-enrollment -info -noout 2>&1 \
                       | tee /tmp/p12-h2-info.txt
                   grep -q "BEGIN" /tmp/p12-h2-info.txt || {
-                      openssl pkcs12 -in /tmp/bundle-h2.p12 -nokeys -passin pass: 2>&1 | grep -q "BEGIN"
+                      openssl pkcs12 -in /tmp/bundle-h2.p12 -nokeys -passin pass:ai-sandbox-enrollment 2>&1 | grep -q "BEGIN"
                   }
                   test -f /etc/ai-sandbox-server/clients/alice-phone-h2.crt
 
@@ -1004,10 +1004,10 @@ jobs:
           fi
 
           # Parseable PKCS#12 (empty passphrase, matches the docker leg).
-          openssl pkcs12 -in /tmp/uc11-systemd-bundle.p12 -nokeys -passin pass: -info -noout 2>&1 \
+          openssl pkcs12 -in /tmp/uc11-systemd-bundle.p12 -nokeys -passin pass:ai-sandbox-enrollment -info -noout 2>&1 \
               | tee /tmp/uc11-systemd-p12-info.txt
           grep -q "BEGIN" /tmp/uc11-systemd-p12-info.txt || {
-              openssl pkcs12 -in /tmp/uc11-systemd-bundle.p12 -nokeys -passin pass: 2>&1 | grep -q "BEGIN"
+              openssl pkcs12 -in /tmp/uc11-systemd-bundle.p12 -nokeys -passin pass:ai-sandbox-enrollment 2>&1 | grep -q "BEGIN"
           }
 
           # The actual AC3 assertion — the freshly-minted client cert

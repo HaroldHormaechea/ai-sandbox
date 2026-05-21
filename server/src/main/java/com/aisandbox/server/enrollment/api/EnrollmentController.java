@@ -23,7 +23,8 @@ import org.springframework.web.bind.annotation.RestController;
  * {@code POST /v1/enrollment} (UC04 AC33) — the only mTLS-exempt path on
  * the server. The Android client POSTs an opaque token (previously issued
  * by {@code aisandboxctl client invite <name>}) and receives a freshly-
- * minted PKCS#12 bundle (private key + cert, empty transport passphrase)
+ * minted PKCS#12 bundle (private key + cert) wrapped with the sentinel
+ * transport passphrase ({@code "ai-sandbox-enrollment"} — see UC14)
  * as {@code application/octet-stream}.
  *
  * <p>Failure modes (RFC 9457 {@code application/problem+json}, mapped by
@@ -61,7 +62,9 @@ public class EnrollmentController {
     @Operation(
             summary = "Redeem a single-use enrollment token (UC04).",
             description = "The only mTLS-exempt path on the server. Returns a freshly-minted PKCS#12 bundle "
-                    + "(private key + cert, empty transport passphrase). The newly-minted public cert is "
+                    + "(private key + cert) wrapped with the agreed transport passphrase 'ai-sandbox-enrollment' "
+                    + "(UC14 — not a secret; required because the JDK 21 default PKCS#12 emitter and "
+                    + "BouncyCastle 1.79 cannot agree on an empty char[]). The newly-minted public cert is "
                     + "written to the server allowlist before the response is returned, so the client can "
                     + "immediately use the new identity on the next request.")
     @ApiResponses({
