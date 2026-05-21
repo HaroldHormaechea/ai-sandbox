@@ -883,6 +883,151 @@ jobs:
                   echo ".deb install-flow smoke passed."
               '
 
+      # UC11 § AC3 — systemd-driven enrollment-write smoke. The sibling
+      # .deb-in-docker leg above runs the server via `runuser -u
+      # ai-sandbox-server`, which bypasses systemd entirely: the unit
+      # file's ReadOnlyPaths / ReadWritePaths sandbox is never applied,
+      # so the leg cannot prove the UC11 fix for Bug A actually
+      # carved out `/etc/ai-sandbox-server/clients` correctly. This
+      # step installs the SAME .deb on the GHA runner host (which has
+      # systemd as PID 1), starts the service via real systemd, and
+      # exercises the enrollment-write path end-to-end through the
+      # service's mount namespace. A regression that drops
+      # `/etc/ai-sandbox-server/clients` from the ReadWritePaths= line
+      # would land an EROFS on the cert write and fail here (the
+      # symptom seen on potato-server v0.0.11 that motivated UC11).
+      #
+      # Per the analyst proposal we try the packaged unit file first
+      # (so we test the actual shipped unit, not a hand-crafted
+      # systemd-run override); if `systemctl start` ever stops working
+      # on the GHA runner (e.g. a hardened runner image that blocks
+      # arbitrary unit starts), the fallback is `systemd-run --scope
+      # -p ReadOnlyPaths=… -p ReadWritePaths=…` with the unit file's
+      # property set copied verbatim — that path is not wired in here
+      # but is documented for the next iteration if needed.
+      - name: Smoke-test .deb install flow on the host runner (UC11 systemd-driven)
+        env:
+          DEB_PATH: ${{ steps.deb.outputs.path }}
+        run: |
+          set -euxo pipefail
+
+          # The .deb's postinst expects /usr/bin/java + the `docker`
+          # group on the host. ubuntu-latest GHA runners pre-install
+          # docker; openjdk-21 is not always present, so install it
+          # explicitly.
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+              openjdk-21-jdk-headless curl ca-certificates python3 openssl
+
+          # Install the .deb. dpkg + `apt-get -f install` follows the
+          # same pattern as the docker .deb phase above so missing
+          # Depends are satisfied automatically.
+          sudo dpkg -i "$DEB_PATH" || true
+          sudo apt-get install -f -y --no-install-recommends
+          sudo dpkg --configure -a
+
+          # Sanity-check the install before touching the unit.
+          test -f /opt/ai-sandbox-server/lib/aisandbox-server.jar
+          test -f /lib/systemd/system/ai-sandbox-server.service
+          test -x /usr/bin/aisandboxctl
+
+          # Regression guard for the UC11 fix itself — the packaged
+          # unit MUST list /etc/ai-sandbox-server/clients on the
+          # ReadWritePaths= line. Catches an accidental rollback of
+          # the unit-file edit before the service even starts.
+          grep -E '^ReadWritePaths=.*/etc/ai-sandbox-server/clients' \
+              /lib/systemd/system/ai-sandbox-server.service
+
+          # pki init with SAN — same flags as the docker .deb phase
+          # so the resulting cert chain is identical.
+          sudo aisandboxctl pki init --san DNS:localhost,IP:127.0.0.1
+
+          # Server refuses to start on an empty allowlist — mint a
+          # bootstrap cert first.
+          sudo aisandboxctl client mint bootstrap --pem --out /tmp/bootstrap
+
+          # Start the service via the packaged systemd unit. The unit
+          # carries the full sandbox (ProtectSystem=strict,
+          # ReadOnlyPaths=/etc/ai-sandbox-server …, ReadWritePaths=…
+          # /etc/ai-sandbox-server/clients), so any subsequent write
+          # into /etc/ai-sandbox-server/clients/ exercises the real
+          # carve-out we are validating.
+          sudo systemctl daemon-reload
+          sudo systemctl start ai-sandbox-server
+
+          # Wait up to 60s for the listener.
+          ready=0
+          for i in $(seq 1 60); do
+              if (exec 3<>/dev/tcp/127.0.0.1/12410) 2>/dev/null; then
+                  exec 3<&- 3>&- || true
+                  ready=1
+                  break
+              fi
+              if ! sudo systemctl is-active --quiet ai-sandbox-server; then
+                  echo "FAIL: ai-sandbox-server became inactive before the port came up." >&2
+                  sudo systemctl status ai-sandbox-server --no-pager || true
+                  sudo journalctl -u ai-sandbox-server --no-pager | tail -120 >&2 || true
+                  exit 1
+              fi
+              sleep 1
+          done
+          if [ "$ready" -ne 1 ]; then
+              echo "FAIL: port 12410 never opened in 60s under systemd start." >&2
+              sudo systemctl status ai-sandbox-server --no-pager || true
+              sudo journalctl -u ai-sandbox-server --no-pager | tail -120 >&2 || true
+              exit 1
+          fi
+
+          # UC11 § AC3 — mint a third unique name (the docker .deb
+          # phase already burned alice-phone + alice-phone-h2 on the
+          # same /etc/ai-sandbox-server/clients namespace in its own
+          # container; on the host this directory starts fresh so
+          # uc11-systemd-smoke is the first and only entry).
+          sudo aisandboxctl client invite uc11-systemd-smoke \
+              --server-url https://127.0.0.1:12410 \
+              --json </dev/null | sudo tee /tmp/uc11-systemd-invite.json >/dev/null
+          TOKEN="$(sudo python3 -c "import json;print(json.load(open('/tmp/uc11-systemd-invite.json'))['t'])")"
+          test -n "$TOKEN"
+
+          body="$(python3 -c "import json,sys;json.dump({'token':sys.argv[1]},sys.stdout)" "$TOKEN")"
+          http_code="$(curl -sS -o /tmp/uc11-systemd-bundle.p12 -w "%{http_code}" \
+              --cacert /etc/ai-sandbox-server/pki/server.crt \
+              -H "Content-Type: application/json" \
+              --data-binary "$body" \
+              https://127.0.0.1:12410/v1/enrollment || echo 000)"
+          if [ "$http_code" != "201" ]; then
+              echo "FAIL: systemd-driven /v1/enrollment returned $http_code (expected 201)" >&2
+              head -c 4096 /tmp/uc11-systemd-bundle.p12 | od -c | head -20 >&2 || true
+              sudo journalctl -u ai-sandbox-server --no-pager | tail -160 >&2 || true
+              sudo systemctl stop ai-sandbox-server || true
+              exit 1
+          fi
+
+          # Parseable PKCS#12 (empty passphrase, matches the docker leg).
+          openssl pkcs12 -in /tmp/uc11-systemd-bundle.p12 -nokeys -passin pass: -info -noout 2>&1 \
+              | tee /tmp/uc11-systemd-p12-info.txt
+          grep -q "BEGIN" /tmp/uc11-systemd-p12-info.txt || {
+              openssl pkcs12 -in /tmp/uc11-systemd-bundle.p12 -nokeys -passin pass: 2>&1 | grep -q "BEGIN"
+          }
+
+          # The actual AC3 assertion — the freshly-minted client cert
+          # must land in /etc/ai-sandbox-server/clients/ through the
+          # service's mount-namespace sandbox. Pre-UC11 this would be
+          # an EROFS on the atomic-rename (.<name>.crt.tmp →
+          # <name>.crt) and the curl above would already have failed
+          # with 500. The defence-in-depth check below catches a
+          # plausible future regression where the curl returns 201 but
+          # the cert is silently routed elsewhere.
+          sudo test -f /etc/ai-sandbox-server/clients/uc11-systemd-smoke.crt
+
+          echo "UC11 systemd-driven smoke: POST /v1/enrollment returned 201 and uc11-systemd-smoke.crt is on disk under the ReadWritePaths carve-out."
+
+          # Clean shutdown so subsequent steps in this job (compose
+          # build, entrypoint.sh smoke) are not racing the live server
+          # for /tmp or the docker daemon.
+          sudo systemctl stop ai-sandbox-server
+          sudo systemctl disable ai-sandbox-server || true
+
       - name: Build bundled compose context on the host runner
         env:
           ZIP_PATH: ${{ steps.zip.outputs.path }}
