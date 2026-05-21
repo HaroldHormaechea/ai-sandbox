@@ -42,10 +42,37 @@ import reactor.core.publisher.Mono;
  * <p>UC12 chose fix-shape (a): remove the {@code @ExceptionHandler(
  * Throwable.class)} entirely so the per-domain {@code
  * WebExceptionHandler} beans (enrollment + stream) get first crack at
- * the exception, and reintroduce the catch-all as this bean at
- * {@link Ordered#LOWEST_PRECEDENCE} so truly-unmapped exceptions still
- * produce a documented {@code internal_error} envelope instead of
- * falling through to Spring's default error response.
+ * the exception, and reintroduce the catch-all as this bean at the
+ * end of the application-level handler band so truly-unmapped
+ * exceptions still produce a documented {@code internal_error}
+ * envelope instead of falling through to Spring's default error
+ * response.
+ *
+ * <h2>Order precedence — must beat Spring's framework default</h2>
+ *
+ * <p>{@link Ordered#HIGHEST_PRECEDENCE} + 1000. WebFlux iterates
+ * {@code WebExceptionHandler} beans in ascending {@code Order}, so the
+ * fallback has to sit before Spring Boot's
+ * {@code DefaultErrorWebExceptionHandler} (registered by
+ * {@code ErrorWebFluxAutoConfiguration} at {@code Order(-1)}) — otherwise
+ * the framework default wins the race for every truly-unmapped
+ * exception and serves its own {@code application/json}
+ * "Internal Server Error" body, never reaching this handler. UC12
+ * round-1 shipped {@link Ordered#LOWEST_PRECEDENCE} ({@code
+ * Integer.MAX_VALUE}) and tripped exactly that bug
+ * (caught by QA in {@code GenericProblemFallbackHandlerTest}).
+ *
+ * <p>The chosen value parks the fallback inside the same
+ * "application-level" precedence band as the domain handlers
+ * ({@link com.aisandbox.server.enrollment.api.EnrollmentWebExceptionHandler}
+ * and
+ * {@link com.aisandbox.server.stream.api.StreamWebExceptionHandler},
+ * both at {@code HIGHEST_PRECEDENCE + 200}) but a comfortable 800 slots
+ * after them, so every domain handler still gets first crack. The band
+ * as a whole sits well before Spring's {@code -1}, which is in turn
+ * orders of magnitude before {@code LOWEST_PRECEDENCE}, so this
+ * handler always wins the race for anything no domain handler
+ * claimed.
  *
  * <h2>Log contract</h2>
  *
@@ -77,7 +104,7 @@ import reactor.core.publisher.Mono;
  * unaffected (see {@code profile-java-server-architecture}).
  */
 @Component
-@Order(Ordered.LOWEST_PRECEDENCE)
+@Order(Ordered.HIGHEST_PRECEDENCE + 1000)
 public class GenericProblemFallbackHandler implements WebExceptionHandler {
 
     private static final Logger LOG = LoggerFactory.getLogger(ProblemDetailsAdvice.class);
