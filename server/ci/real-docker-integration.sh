@@ -369,10 +369,27 @@ assert_endpoints() {
         log "── /v1/sessions/$SESSION_N response body ──"; cat "$ARTIFACT_DIR/session-detail.body" >&2 || true
         fail "/v1/sessions/$SESSION_N returned $detail_code (expected 200)"
     fi
-    jq -e --argjson n "$SESSION_N" '.n == $n' \
+    # NOTE on the collection-vs-detail response asymmetry:
+    # GET /v1/sessions   -> List<SessionSummary> at top level:
+    #                          [{"n":99, "label":"", ...}, ...]
+    # GET /v1/sessions/N -> SessionDetailDto envelope (one summary
+    #                       field wrapping the SessionSummary plus
+    #                       detail-only sibling fields):
+    #                          {"summary":{"n":99, ...},
+    #                           "workspaceHostPath": "...",
+    #                           "claudeConfigHostPath": "...",
+    #                           "connectedClients": [...]}
+    # See ApiMappers#toDetail (server/.../api/mapper/ApiMappers.java:29-31).
+    # The assertion below checks `.summary.n` for the detail endpoint;
+    # the sibling check at line 359 stays at top-level `.n` because
+    # the listing flattens the summary.
+    jq -e --argjson n "$SESSION_N" '.summary.n == $n' \
         < "$ARTIFACT_DIR/session-detail.body" >/dev/null \
-        || { cat "$ARTIFACT_DIR/session-detail.body" >&2; fail "/v1/sessions/$SESSION_N body missing \"n\":$SESSION_N"; }
-    log "assert_endpoints: /v1/sessions/$SESSION_N -> 200, n=$SESSION_N confirmed"
+        || {
+            cat "$ARTIFACT_DIR/session-detail.body" >&2
+            fail "/v1/sessions/$SESSION_N body missing .summary.n=$SESSION_N (got $(jq -c . < "$ARTIFACT_DIR/session-detail.body"))"
+        }
+    log "assert_endpoints: /v1/sessions/$SESSION_N -> 200, .summary.n=$SESSION_N confirmed"
 }
 
 # ---------------------------------------------------------------------
