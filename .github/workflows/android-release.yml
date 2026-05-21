@@ -115,10 +115,16 @@ jobs:
           echo "AC13 release APK check OK: BouncyCastleProvider descriptor present in $apk"
 
       - name: Verify BouncyCastle survives in release AAB (UC13 AC13)
-        # Same check against the AAB, plus a Maven-coord cross-check
-        # against the bundle's dependency-info protobuf as forward
-        # defence (catches future shrinker variants that might rewrite
-        # descriptors but leave dependency-info intact).
+        # The primary AC13 evidence is the BC type descriptor surviving
+        # in the base DEX (R8 is currently off — `isMinifyEnabled = false`
+        # — so the ProGuard keep-rules are forward-defence; nothing
+        # should be shrinking BC out). The BUNDLE-METADATA Maven-coord
+        # cross-check is intentionally omitted: AGP does not reliably
+        # emit `dependencies.pb` for unminified release bundles, and
+        # making it conditional on the build variant adds maintenance
+        # cost for marginal forward-defence value. If R8 is ever turned
+        # on for release, revisit this step to add the cross-check
+        # under that variant only.
         run: |
           # See AC13 release APK step above for the no-pipefail rationale.
           set -eu
@@ -127,11 +133,7 @@ jobs:
             echo "::error::BouncyCastleProvider descriptor not found in $aab base/dex/*.dex — UC13 AC13 violated"
             exit 1
           fi
-          if ! unzip -p "$aab" BUNDLE-METADATA/com.android.tools.build.libraries/dependencies.pb | strings | grep -q 'bcprov-jdk18on'; then
-            echo "::error::bcprov-jdk18on coordinate missing from $aab dependencies.pb — UC13 AC13 cross-check failed"
-            exit 1
-          fi
-          echo "AC13 release AAB check OK: BouncyCastleProvider descriptor + bcprov-jdk18on coord present in $aab"
+          echo "AC13 release AAB check OK: BouncyCastleProvider descriptor present in $aab"
 
       - name: Publish release
         uses: softprops/action-gh-release@v2
