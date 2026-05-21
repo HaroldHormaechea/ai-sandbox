@@ -6,7 +6,6 @@ import java.security.Security
 import javax.net.ssl.KeyManagerFactory
 import javax.net.ssl.SSLContext
 import org.assertj.core.api.Assertions.assertThat
-import org.bouncycastle.jce.provider.BouncyCastleProvider
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -80,13 +79,37 @@ class BouncyCastleClientProviderTest {
         assertThat(didRegister).isTrue()
         val provider = Security.getProvider(BouncyCastleClientProvider.NAME)
         assertThat(provider)
-            .describedAs("Security.getProvider(\"BC-ai-sandbox-client\") should return a real BouncyCastleProvider")
+            .describedAs(
+                "Security.getProvider(\"BC-ai-sandbox-client\") should return the registered provider",
+            )
             .isNotNull()
-            .isInstanceOf(BouncyCastleProvider::class.java)
-        // The anonymous subclass overrides getName() so the JCA tables index
-        // under the distinct project-specific name (and the stock Android
-        // "BC" slot is left untouched).
+        // The JCA tables index this provider under the distinct
+        // project-specific name (and the stock Android "BC" slot is
+        // left untouched). We do NOT assert on the concrete class —
+        // `BouncyCastleProvider` is final in bcprov-jdk18on:1.79 so the
+        // production code wraps it in a `java.security.Provider`
+        // subclass that copies BC's algorithm registrations. The
+        // functional contract is what matters, asserted below.
         assertThat(provider!!.name).isEqualTo("BC-ai-sandbox-client")
+
+        // AC3 functional contract — the registered provider MUST expose
+        // a SecretKeyFactory for the bare PBKDF2 OID
+        // 1.2.840.113549.1.5.12. That is the JCA lookup the stock
+        // Android "BC" provider misses, and the entire reason this
+        // provider exists. Both the OID form and the named-string form
+        // ("PBKDF2WithHmacSHA256") are offered by upstream BC.
+        assertThat(provider.getService("SecretKeyFactory", "1.2.840.113549.1.5.12"))
+            .describedAs(
+                "Registered provider must expose SecretKeyFactory for the PBKDF2 OID " +
+                    "1.2.840.113549.1.5.12 — the lookup PKCS#12 v3 / PBES2 unwrap performs.",
+            )
+            .isNotNull()
+        assertThat(provider.getService("SecretKeyFactory", "PBKDF2WithHmacSHA256"))
+            .describedAs(
+                "Registered provider must also expose SecretKeyFactory under the named-string " +
+                    "form PBKDF2WithHmacSHA256 (BC indexes the algorithm under both keys).",
+            )
+            .isNotNull()
     }
 
     @Test

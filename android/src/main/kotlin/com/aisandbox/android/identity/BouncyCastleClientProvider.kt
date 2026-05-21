@@ -1,6 +1,7 @@
 package com.aisandbox.android.identity
 
 import android.util.Log
+import java.security.Provider
 import java.security.Security
 import org.bouncycastle.jce.provider.BouncyCastleProvider
 
@@ -84,17 +85,20 @@ object BouncyCastleClientProvider {
         if (Security.getProvider(NAME) != null) {
             return false
         }
-        // Anonymous subclass so we can override the provider's reported
-        // name. The upstream `BouncyCastleProvider` hard-codes its
-        // identifier as `"BC"`; we need it to report `BC-ai-sandbox-client`
-        // so `Security.addProvider` indexes it under the distinct name
-        // (and so the stock `"BC"` slot remains untouched). The provider
-        // contents — supported algorithms, OID mappings, the
-        // SecretKeyFactory for PBKDF2 OID 1.2.840.113549.1.5.12 — are
-        // inherited unchanged from upstream BC.
-        val provider = object : BouncyCastleProvider() {
-            override fun getName(): String = NAME
-        }
+        // Wrap upstream BC in a `java.security.Provider` subclass so we
+        // can publish it under our distinct name. We can NOT subclass
+        // `BouncyCastleProvider` directly: as of `bcprov-jdk18on:1.79`
+        // the class is `final`, so the anonymous-subclass-overrides-
+        // `getName()` trick stopped compiling. `java.security.Provider`
+        // itself is NOT final, so we extend it instead and copy
+        // upstream BC's algorithm registrations — supported algorithms,
+        // OID mappings, the SecretKeyFactory for PBKDF2 OID
+        // 1.2.840.113549.1.5.12 — into our instance via the entries
+        // map. Functionally equivalent to using BC under a renamed
+        // identifier; the JCA indexes our instance under
+        // `BC-ai-sandbox-client` and the stock Android `"BC"` slot is
+        // left untouched.
+        val provider: Provider = NamedBouncyCastleProvider()
         // addProvider appends at the lowest priority — Conscrypt stays
         // the default for everything (especially TLS).
         val position = Security.addProvider(provider)
@@ -107,5 +111,36 @@ object BouncyCastleClientProvider {
         }
         Log.i(TAG, "Registered $NAME at position $position (lowest priority)")
         return true
+    }
+
+    /**
+     * Private `java.security.Provider` subclass that republishes the
+     * algorithm registrations of a fresh [BouncyCastleProvider]
+     * instance under our distinct [NAME].
+     *
+     * We can NOT subclass [BouncyCastleProvider] directly because it is
+     * `final` in `bcprov-jdk18on:1.79`. [Provider] itself is not final,
+     * so we extend it, then copy every entry of a transient
+     * [BouncyCastleProvider] into this instance via `put`. The
+     * `Provider.id *` entries (`Provider.id name`, `Provider.id
+     * version`, `Provider.id info`) are skipped — the base-class
+     * constructor has already set the right ones for our distinct
+     * name + version + info combination, and re-putting BC's would
+     * stomp them.
+     */
+    private class NamedBouncyCastleProvider : Provider(
+        NAME,
+        "1.79",
+        "ai-sandbox repackaging of BouncyCastle (bcprov-jdk18on) for PKCS#12 enrollment-cert import — see BouncyCastleClientProvider KDoc",
+    ) {
+        init {
+            val src = BouncyCastleProvider()
+            for ((k, v) in src.entries) {
+                val ks = k.toString()
+                if (!ks.startsWith("Provider.id ")) {
+                    put(k, v)
+                }
+            }
+        }
     }
 }
