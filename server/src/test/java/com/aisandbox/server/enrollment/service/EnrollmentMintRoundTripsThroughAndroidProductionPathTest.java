@@ -131,10 +131,9 @@ class EnrollmentMintRoundTripsThroughAndroidProductionPathTest {
         // future edit changes one but not the other, this test fails
         // with a crisp signal pointing at the drift.
         assertThat(EnrollmentCertMintService.ENROLLMENT_PKCS12_PASSPHRASE)
-                .as(
-                        "Server-side ENROLLMENT_PKCS12_PASSPHRASE must equal the Android-side hard-coded "
-                                + "value 'ai-sandbox-enrollment' (UC14 contract); drift between the two means the "
-                                + "phone cannot import the server's enrollment bundle.")
+                .as("Server-side ENROLLMENT_PKCS12_PASSPHRASE must equal the Android-side hard-coded "
+                        + "value 'ai-sandbox-enrollment' (UC14 contract); drift between the two means the "
+                        + "phone cannot import the server's enrollment bundle.")
                 .isEqualTo("ai-sandbox-enrollment");
     }
 
