@@ -207,14 +207,7 @@ public class DockerEnumerationService {
      */
     private boolean enumerateViaDockerPs(Map<Integer, String> projectNames, Duration timeout) throws IOException {
         ProcessExecutor.Result ps = executor.run(
-                List.of(
-                        "docker",
-                        "ps",
-                        "-a",
-                        "--format",
-                        "json",
-                        "--filter",
-                        "label=com.docker.compose.project"),
+                List.of("docker", "ps", "-a", "--format", "json", "--filter", "label=com.docker.compose.project"),
                 null,
                 Map.of("LC_ALL", "C"),
                 timeout);
@@ -265,7 +258,9 @@ public class DockerEnumerationService {
         if (labels.isTextual()) {
             for (String kv : labels.asText().split(",")) {
                 int eq = kv.indexOf('=');
-                if (eq > 0 && "com.docker.compose.project".equals(kv.substring(0, eq).trim())) {
+                if (eq > 0
+                        && "com.docker.compose.project"
+                                .equals(kv.substring(0, eq).trim())) {
                     return kv.substring(eq + 1).trim();
                 }
             }
