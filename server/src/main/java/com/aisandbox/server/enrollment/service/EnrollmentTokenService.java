@@ -24,8 +24,14 @@ import org.springframework.stereotype.Service;
  *       its own JVM and instantiates {@link EnrollmentTokenStore}
  *       directly — but the method is exposed here for test convenience
  *       and future "issue via REST" follow-ups).</li>
- *   <li>{@link #redeem(String)} — single-use consume. Called by the
- *       facade; never by HTTP layer.</li>
+ *   <li>{@link #verify(String)} — side-effect-free check of a token's
+ *       status. Called by the facade before the cert mint step; never
+ *       by the HTTP layer directly.</li>
+ *   <li>{@link #markRedeemed(String)} — apply the single-use side
+ *       effects (delete the file + record the tombstone). The facade
+ *       invokes this only AFTER the freshly-minted cert has landed in
+ *       the allowlist, so a failed cert write leaves the token alive
+ *       for a retry (UC11 § AC7 — transactional rollback).</li>
  *   <li>{@link #purgeExpired()} — runs every {@code purgeIntervalMinutes}
  *       to drop stale token files. Keeps the on-disk footprint bounded
  *       even if the operator forgets that an invite was never redeemed.</li>
@@ -96,11 +102,31 @@ public class EnrollmentTokenService {
     }
 
     /**
-     * Single-use consume. Result discriminates the four UC04 outcomes —
-     * see {@link EnrollmentTokenStore.RedemptionOutcome}.
+     * Side-effect-free check of a token's status. Result discriminates
+     * the four UC04 outcomes — see {@link
+     * EnrollmentTokenStore.RedemptionOutcome}. The caller must invoke
+     * {@link #markRedeemed(String)} once the downstream cert write has
+     * succeeded; until then the token remains alive (UC11 § AC7).
      */
-    public EnrollmentTokenStore.RedemptionOutcome redeem(String token) {
-        return store.redeem(token, clock);
+    public EnrollmentTokenStore.RedemptionOutcome verify(String token) {
+        return store.verify(token, clock);
+    }
+
+    /**
+     * Apply the single-use consume side effects (delete the on-disk
+     * file + record the in-memory tombstone). The facade calls this
+     * AFTER successfully landing the freshly-minted cert in the
+     * allowlist — see {@link
+     * com.aisandbox.server.enrollment.facade.EnrollmentFacade#redeem(String, String)}.
+     *
+     * @return {@code true} iff the file was actually deleted by this
+     *     call. {@code false} indicates a race-loser (some other path
+     *     already consumed it); the facade emits a warning but does
+     *     not fail the request because by that point the cert has
+     *     already been provisioned.
+     */
+    public boolean markRedeemed(String token) {
+        return store.markRedeemed(token, clock);
     }
 
     /**

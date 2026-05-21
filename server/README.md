@@ -32,6 +32,12 @@ container build context (`docker-compose.yml`, `SandboxDockerfile`,
 `entrypoint.sh`). No `git clone` is required; the server is path-locked
 to `/opt/ai-sandbox-server/` (read-only), `/etc/ai-sandbox-server/` (RO),
 `/var/lib/ai-sandbox-server/` (RW), `/var/log/ai-sandbox-server/` (RW).
+The one intentional exception to the `/etc/ai-sandbox-server/` RO rule
+is `/etc/ai-sandbox-server/clients/`, the allowlist directory the
+service writes to during `POST /v1/enrollment` (UC04 / UC11 § AC1). The
+systemd unit carves it out via `ReadWritePaths=` so the service can
+land freshly-minted client certs without losing the broader RO sandbox
+on cert / key / config files.
 
 ## What's in the bundle
 
@@ -214,8 +220,12 @@ Tokens at the old path have a 10-minute TTL by default, so the
 cutover window is short either way — schedule the `pki init --force`
 during a maintenance window when no Android enrollment is in flight.
 
-The systemd unit is unchanged: `ReadWritePaths=/var/log/...
-/var/lib/ai-sandbox-server` already covers the new location.
+The systemd unit (v0.0.12+) declares
+`ReadWritePaths=/var/log/ai-sandbox-server /var/lib/ai-sandbox-server /etc/ai-sandbox-server/clients`,
+so the new `/var/lib/ai-sandbox-server/enrollment/` location is already
+writable, and the enrollment-time write of `/etc/ai-sandbox-server/clients/<name>.crt`
+also goes through (the UC11 fix — earlier v0.0.11 unit files masked the
+clients/ subdir as RO and the redemption path returned HTTP 500).
 
 ## Frozen UC02 host scripts
 

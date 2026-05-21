@@ -11,6 +11,7 @@ import com.aisandbox.server.enrollment.service.EnrollmentRateLimiterService;
 import com.aisandbox.server.enrollment.service.EnrollmentTokenService;
 import com.aisandbox.server.enrollment.service.EnrollmentTokenStore;
 import java.io.IOException;
+import java.nio.file.FileAlreadyExistsException;
 import java.security.cert.CertificateException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -68,24 +69,35 @@ public class EnrollmentFacade {
     /**
      * Redeem the supplied {@code token} on behalf of the request coming
      * from {@code sourceIp}. Returns the minted bundle on success;
-     * otherwise throws one of the four typed exceptions, which the
-     * {@code ProblemDetailsAdvice} maps to the correct
-     * {@link com.aisandbox.server.api.error.ErrorCode}.
+     * otherwise throws one of the typed exceptions, which the
+     * enrollment-specific WebFlux exception handler maps to the
+     * correct {@link com.aisandbox.server.api.error.ErrorCode}.
      *
-     * @throws RateLimitedException     429 — IP burned through the cap.
-     * @throws TokenInvalidException    401 — token unknown.
-     * @throws TokenExpiredException    401 — token past expiry.
-     * @throws TokenRedeemedException   401 — token already consumed.
+     * @throws RateLimitedException      429 — IP burned through the cap.
+     * @throws TokenInvalidException     401 — token unknown.
+     * @throws TokenExpiredException     401 — token past expiry.
+     * @throws TokenRedeemedException    401 — token already consumed.
+     * @throws CertAlreadyExistsException 409 — UC11 § AC7. The minted
+     *     client cert collides with an existing entry under the
+     *     allowlist directory; the token is left in its pre-redeemed
+     *     state so the operator can either revoke the existing cert
+     *     or accept that the previous enrollment attempt already
+     *     succeeded.
      */
     public MintedBundle redeem(String token, String sourceIp)
             throws RateLimitedException, TokenInvalidException, TokenExpiredException, TokenRedeemedException,
-                    IOException, CertificateException {
+                    CertAlreadyExistsException, IOException, CertificateException {
         if (!rateLimiter.tryAcquire(sourceIp)) {
             audit.logEvent(AuditAction.CLIENT_ENROLL_REJECT, "rate-limited", "sourceIp", safe(sourceIp));
             throw new RateLimitedException(sourceIp);
         }
 
-        EnrollmentTokenStore.RedemptionOutcome outcome = tokenService.redeem(token);
+        // UC11 § AC7 — split the original redeem call into verify (no
+        // side effects) + markRedeemed (delete the on-disk file +
+        // tombstone). The mark step happens only AFTER the cert has
+        // been successfully written to the allowlist, so a failed
+        // cert write leaves the token alive for a retry.
+        EnrollmentTokenStore.RedemptionOutcome outcome = tokenService.verify(token);
         switch (outcome) {
             case EnrollmentTokenStore.RedemptionOutcome.Success s -> {
                 /* fall through below */
@@ -111,11 +123,67 @@ public class EnrollmentFacade {
         }
         EnrollmentToken consumed = ((EnrollmentTokenStore.RedemptionOutcome.Success) outcome).token();
 
-        MintedBundle bundle = certMint.mint(consumed.name());
+        final MintedBundle bundle;
+        try {
+            bundle = certMint.mint(consumed.name());
+        } catch (IOException | CertificateException ex) {
+            // Mint-side failure — cert was never produced. Token is
+            // unchanged, operator can retry. Audit with the same
+            // outcome string as the allowlist-write failure case so
+            // dashboards group both under one bucket.
+            audit.logEvent(
+                    AuditAction.CLIENT_ENROLL_REJECT,
+                    "cert-write-failed",
+                    "sourceIp",
+                    safe(sourceIp),
+                    "name",
+                    safe(consumed.name()));
+            throw ex;
+        }
 
         // Cross-domain facade-to-facade hand-off — never reach into the
-        // allowlist service directly.
-        AllowedClient added = allowlistFacade.addClient(consumed.name(), bundle.certPem());
+        // allowlist service directly. If this throws, the token has NOT
+        // been marked redeemed yet, so the operator can retry with the
+        // same QR (UC11 § AC7 — transactional rollback).
+        final AllowedClient added;
+        try {
+            added = allowlistFacade.addClient(consumed.name(), bundle.certPem());
+        } catch (FileAlreadyExistsException ex) {
+            // UC11 § AC7 / S3.4 — a client with this name is already on
+            // disk. The token still has not been marked redeemed; the
+            // operator can either revoke the existing cert or accept
+            // that the previous attempt already provisioned the
+            // identity. Surface as 409 client_name_conflict.
+            audit.logEvent(
+                    AuditAction.CLIENT_ENROLL_REJECT,
+                    "cert-already-exists",
+                    "sourceIp",
+                    safe(sourceIp),
+                    "name",
+                    safe(consumed.name()));
+            throw new CertAlreadyExistsException(consumed.name(), ex);
+        } catch (IOException | CertificateException ex) {
+            audit.logEvent(
+                    AuditAction.CLIENT_ENROLL_REJECT,
+                    "cert-write-failed",
+                    "sourceIp",
+                    safe(sourceIp),
+                    "name",
+                    safe(consumed.name()));
+            throw ex;
+        }
+
+        // Cert is on disk. Now and only now mark the token redeemed.
+        // If the file is already gone (race loser, hand-edit), the
+        // tombstone still gets set so subsequent verify() calls return
+        // AlreadyRedeemed — warn-log but don't fail the request, since
+        // the operator's identity has been successfully provisioned.
+        if (!tokenService.markRedeemed(token)) {
+            LOG.warn(
+                    "Enrollment token already consumed on disk when marking redeemed (race loser?); "
+                            + "cert was successfully written for client={}",
+                    added.name());
+        }
 
         audit.logEvent(
                 AuditAction.CLIENT_ENROLL,
@@ -170,6 +238,34 @@ public class EnrollmentFacade {
     public static final class TokenRedeemedException extends RuntimeException {
         public TokenRedeemedException() {
             super("Enrollment token already redeemed.");
+        }
+    }
+
+    /**
+     * 409 — UC11 § AC7 / S3.4. A client cert with the supplied name is
+     * already on disk in the allowlist directory; the freshly-minted
+     * cert was NOT written. The token remains in its pre-redeemed
+     * state so the operator can either revoke the existing entry
+     * (then re-run with the same QR) or accept that the previous
+     * enrollment attempt successfully provisioned the identity.
+     *
+     * <p>Maps to {@link
+     * com.aisandbox.server.api.error.ErrorCode#CLIENT_NAME_CONFLICT}.
+     * Wraps the native {@link FileAlreadyExistsException} surfaced by
+     * {@link
+     * com.aisandbox.server.clients.service.AllowlistDirectory#write(String, String)}
+     * so operators can chase the underlying path if needed.
+     */
+    public static final class CertAlreadyExistsException extends RuntimeException {
+        private final String name;
+
+        public CertAlreadyExistsException(String name, FileAlreadyExistsException cause) {
+            super("Allowlist already contains a client cert for name=" + (name == null ? "<unknown>" : name), cause);
+            this.name = name;
+        }
+
+        public String name() {
+            return name;
         }
     }
 }

@@ -36,14 +36,31 @@ MemoryDenyWriteExecute=false
 RestrictRealtime=true
 SystemCallArchitectures=native
 
-# Writable directories — UC05 § AC23. /var/log holds the audit log;
-# /var/lib holds per-session workspace + claude-config bind-mount targets
-# created by spawn.sh under sessions/workspace-N/.
-ReadWritePaths=/var/log/ai-sandbox-server /var/lib/ai-sandbox-server
+# Writable directories — UC05 § AC23, extended by UC11 § AC1.
+#   /var/log/ai-sandbox-server          → audit log.
+#   /var/lib/ai-sandbox-server          → per-session workspace +
+#                                         claude-config bind-mount targets
+#                                         created by spawn.sh under
+#                                         sessions/workspace-N/, plus the
+#                                         enrollment-token store (UC07 Bug C
+#                                         moved it under /var/lib).
+#   /etc/ai-sandbox-server/clients      → allowlist directory. The
+#                                         EnrollmentFacade redemption path
+#                                         drops <name>.crt here via the
+#                                         AllowlistDirectory tmp+rename;
+#                                         the rest of /etc/ai-sandbox-server
+#                                         (cert, key, config.yaml, secrets)
+#                                         stays read-only via the
+#                                         ReadOnlyPaths= line below.
+#                                         systemd applies ReadWritePaths as
+#                                         a sub-mount carve-out over the
+#                                         ReadOnlyPaths tree.
+ReadWritePaths=/var/log/ai-sandbox-server /var/lib/ai-sandbox-server /etc/ai-sandbox-server/clients
 
 # Read-only directories the server needs — UC05 § AC22. The bundled host
 # scripts + Compose context live under /opt/ai-sandbox-server/host/ and
-# must not be writable by the service.
+# must not be writable by the service. /etc/ai-sandbox-server stays RO
+# except for the clients/ subdir explicitly carved out above (UC11 § AC1).
 ReadOnlyPaths=/etc/ai-sandbox-server /opt/ai-sandbox-server/host
 
 [Install]

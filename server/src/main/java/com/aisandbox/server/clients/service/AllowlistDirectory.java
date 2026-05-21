@@ -66,18 +66,31 @@ public class AllowlistDirectory {
 
     /**
      * Atomic write: tmp + rename. The {@code name} is the filename stem; we
-     * always append {@code .crt}. Throws {@link IOException} if the file
-     * already exists (caller responsibility to revoke first if updating).
+     * always append {@code .crt}.
+     *
+     * <p>Throws {@link java.nio.file.FileAlreadyExistsException} if a
+     * client cert with this name is already on disk (caller's
+     * responsibility to revoke first if updating). UC11 § AC7 — the
+     * exception bubbles up natively from {@link Files#move(Path, Path,
+     * java.nio.file.CopyOption...)} (no {@code REPLACE_EXISTING}), so
+     * the enrollment facade can pattern-match on the concrete subtype
+     * and surface it as a 409 {@code client_name_conflict} instead of
+     * a generic 500. Prior to UC11 this method did a {@link
+     * Files#exists(Path, java.nio.file.LinkOption...)} pre-check + threw
+     * a plain {@link IOException}, which opened a TOCTOU window (a
+     * sibling process creating the file between the check and the
+     * rename) AND threw away the typed information.
      */
     public void write(String name, String certPem) throws IOException {
         String stem = sanitize(name);
         Path target = dir.resolve(stem + ".crt");
-        if (Files.exists(target)) {
-            throw new IOException("Allowlist entry already exists: " + target);
-        }
         Path tmp = dir.resolve("." + stem + ".crt.tmp");
         Files.writeString(tmp, certPem);
         try {
+            // No REPLACE_EXISTING — Files.move natively throws
+            // FileAlreadyExistsException when target exists. Closes the
+            // TOCTOU window the old exists()-then-move pattern left
+            // open.
             Files.move(tmp, target, StandardCopyOption.ATOMIC_MOVE);
         } catch (IOException io) {
             Files.deleteIfExists(tmp);

@@ -97,7 +97,12 @@ class EnrollmentTokenServiceTest {
     }
 
     @Test
-    void issue_persists_to_disk_so_redeem_can_consume(@TempDir Path dir) throws Exception {
+    void issue_persists_to_disk_so_verify_can_consume(@TempDir Path dir) throws Exception {
+        // UC11 § AC7 — the on-disk shape is the contract between
+        // `aisandboxctl client invite` (which constructs a store
+        // directly) and the HTTP redemption path. verify() reads the
+        // file without consuming it; markRedeemed() consumes it. We
+        // exercise both halves here so the round-trip stays pinned.
         EnrollmentTokenStore store = new EnrollmentTokenStore(dir);
         Instant fixedNow = Instant.parse("2026-05-17T10:00:00Z");
         EnrollmentTokenService svc =
@@ -105,12 +110,47 @@ class EnrollmentTokenServiceTest {
 
         EnrollmentToken issued = svc.issue("alice-phone", null);
 
-        // Same service can consume what it issued — the on-disk shape is
-        // the contract between `aisandboxctl client invite` (which
-        // constructs a store directly) and the HTTP redemption path.
-        RedemptionOutcome outcome = svc.redeem(issued.token());
+        RedemptionOutcome outcome = svc.verify(issued.token());
         assertThat(outcome).isInstanceOf(RedemptionOutcome.Success.class);
         assertThat(outcome.token().name()).isEqualTo("alice-phone");
+        // verify is side-effect-free — the on-disk file is still there.
+        assertThat(store.fileFor(issued.token())).exists();
+
+        boolean deleted = svc.markRedeemed(issued.token());
+        assertThat(deleted)
+                .as("UC11 § AC7 — first markRedeemed call must return true (the file was on disk)")
+                .isTrue();
+        assertThat(store.fileFor(issued.token())).doesNotExist();
+
+        // A follow-up verify returns AlreadyRedeemed thanks to the
+        // in-memory tombstone the store recorded inside markRedeemed.
+        assertThat(svc.verify(issued.token())).isInstanceOf(RedemptionOutcome.AlreadyRedeemed.class);
+    }
+
+    @Test
+    void verify_then_markRedeemed_is_the_documented_split(@TempDir Path dir) throws Exception {
+        // UC11 § AC7 — the regression guard: verifying a token MUST NOT
+        // delete it, MUST NOT update the tombstone, and MUST be safe
+        // to call repeatedly until the caller (the facade) succeeds
+        // in writing the cert and then invokes markRedeemed. This is
+        // what enables the "token survives cert-write failure" flow
+        // tested in EnrollmentFacadeTest.
+        EnrollmentTokenStore store = new EnrollmentTokenStore(dir);
+        Instant fixedNow = Instant.parse("2026-05-17T10:00:00Z");
+        EnrollmentTokenService svc =
+                new EnrollmentTokenService(store, propsWith(dir, 10), new SecureRandom(), fixed(fixedNow));
+
+        EnrollmentToken issued = svc.issue("alice-phone", null);
+
+        // Verify three times in a row — each one returns Success and
+        // leaves the file alone.
+        for (int i = 0; i < 3; i++) {
+            assertThat(svc.verify(issued.token())).isInstanceOf(RedemptionOutcome.Success.class);
+            assertThat(store.fileFor(issued.token())).exists();
+        }
+        // markRedeemed is the only operation that removes the file.
+        assertThat(svc.markRedeemed(issued.token())).isTrue();
+        assertThat(store.fileFor(issued.token())).doesNotExist();
     }
 
     @Test
@@ -151,7 +191,7 @@ class EnrollmentTokenServiceTest {
     }
 
     @Test
-    void redeem_returns_unknown_for_never_issued_token(@TempDir Path dir) throws Exception {
+    void verify_returns_unknown_for_never_issued_token(@TempDir Path dir) throws Exception {
         EnrollmentTokenStore store = new EnrollmentTokenStore(dir);
         Instant fixedNow = Instant.parse("2026-05-17T10:00:00Z");
         EnrollmentTokenService svc =
@@ -159,7 +199,7 @@ class EnrollmentTokenServiceTest {
 
         // Cleanly-formed but never-issued — the controller maps this to
         // 401 enrollment_token_invalid via the facade's typed exception.
-        RedemptionOutcome outcome = svc.redeem("f".repeat(64));
+        RedemptionOutcome outcome = svc.verify("f".repeat(64));
         assertThat(outcome).isInstanceOf(RedemptionOutcome.Unknown.class);
     }
 }

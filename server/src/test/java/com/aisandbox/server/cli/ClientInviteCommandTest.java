@@ -325,7 +325,12 @@ class ClientInviteCommandTest {
 
         com.aisandbox.server.enrollment.service.EnrollmentTokenStore store =
                 new com.aisandbox.server.enrollment.service.EnrollmentTokenStore(enrollment);
-        var outcome = store.redeem(token, java.time.Clock.systemUTC());
+        // UC11 § AC7 — verify() reads the file without consuming it;
+        // the server's POST /v1/enrollment handler invokes verify()
+        // before the cert mint and markRedeemed() only after the cert
+        // has landed on disk. The on-disk shape that aisandboxctl
+        // produces must satisfy verify().
+        var outcome = store.verify(token, java.time.Clock.systemUTC());
         assertThat(outcome)
                 .isInstanceOf(
                         com.aisandbox.server.enrollment.service.EnrollmentTokenStore.RedemptionOutcome.Success.class);
