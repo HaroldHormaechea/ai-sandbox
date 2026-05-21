@@ -220,21 +220,34 @@ The 256-byte hard cap on the request body (`RequestSizeLimitFilter`
 specialization for `/v1/enrollment`) prevents amplification attempts
 that pad the JSON to extract differential timing.
 
-### PKCS#12 transport-passphrase-empty
+### PKCS#12 transport-passphrase — fixed sentinel (UC14)
 
-**Threat.** A PKCS#12 file with an empty passphrase looks like a
-mishandled secret — naive log scanners see the empty-string field and
-flag it as a credentials leak.
+**Threat.** A PKCS#12 file wrapped with a publicly-known passphrase
+looks like a mishandled secret — naive log scanners see the constant
+string in the source code and flag it as a credentials leak.
 
-**Mitigation by design.** The empty passphrase is intentional: the
-bundle is delivered over the same TLS connection that authenticated
-the single-use token, consumed entirely in-memory by the Android
-client (no `Files.write`), and the imported key lives in the Android
-KeyStore as non-exportable. The wire envelope (TLS) is the secret,
-not the P12 passphrase. The response carries
-`X-AI-Sandbox-P12-Passphrase:` (empty) as an informational header so
-the client can sanity-check without hard-coding the convention.
-Operators MUST NOT redirect the response body to disk.
+**Mitigation by design.** The sentinel passphrase
+`ai-sandbox-enrollment` is intentional and not a secret. The bundle is
+delivered over the same TLS connection that authenticated the
+single-use token, consumed entirely in-memory by the Android client
+(no `Files.write`), and the imported key lives in the Android KeyStore
+as non-exportable. The wire envelope (TLS) is the secret, not the P12
+passphrase. The response carries
+`X-AI-Sandbox-P12-Passphrase: ai-sandbox-enrollment` as an
+informational header so the client can sanity-check without
+hard-coding the convention. Operators MUST NOT redirect the response
+body to disk.
+
+**Why not empty?** The JDK 21 default PKCS#12 emitter wraps the
+private-key bag with PBES2 (PBKDF2-HMAC-SHA256 + AES-256) regardless
+of whether the passphrase is empty. The Android-side parser is
+BouncyCastle 1.79 (bundled by UC13 because Android's stock providers
+don't register `SecretKeyFactory` under the bare PBKDF2 OID
+`1.2.840.113549.1.5.12`). BouncyCastle 1.79 hard-rejects an empty
+`char[]` during PBKDF2 key derivation —
+`IllegalArgumentException("password empty")`. No system property
+disables that check. The fixed sentinel is the smallest coordinated
+change that gets the two sides to agree.
 
 ### Operator hygiene for `/var/lib/ai-sandbox-server/enrollment/`
 

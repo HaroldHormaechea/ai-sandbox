@@ -392,13 +392,16 @@ class EnrollmentPinAlgorithmTest {
             byte[] p12Bytes = response.body().bytes();
             assertThat(p12Bytes).as("UC-09 § AC4 — response body is non-empty").isNotEmpty();
 
-            // 6. Parse the response body as a PKCS#12. UC-04 contracts
-            //    the empty transport passphrase (confirmed via the
-            //    X-AI-Sandbox-P12-Passphrase response header — but we
-            //    only assert the body-side invariants here; header
-            //    assertions belong in dedicated UC-04 tests).
+            // 6. Parse the response body as a PKCS#12. UC-14 contracts
+            //    the agreed sentinel transport passphrase (confirmed via
+            //    the X-AI-Sandbox-P12-Passphrase response header — but
+            //    we only assert the body-side invariants here; header
+            //    assertions belong in dedicated UC-04/UC-14 tests).
             KeyStore ks = KeyStore.getInstance("PKCS12");
-            ks.load(new ByteArrayInputStream(p12Bytes), new char[0]);
+            ks.load(
+                    new ByteArrayInputStream(p12Bytes),
+                    com.aisandbox.server.enrollment.service.EnrollmentCertMintService.ENROLLMENT_PKCS12_PASSPHRASE
+                            .toCharArray());
 
             // Exactly one alias.
             int aliasCount = 0;

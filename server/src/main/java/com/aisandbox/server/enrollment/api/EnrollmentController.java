@@ -95,11 +95,15 @@ public class EnrollmentController {
         headers.setContentType(MediaType.APPLICATION_OCTET_STREAM);
         headers.setContentLength(bundle.pkcs12().length);
         headers.setContentDispositionFormData("attachment", filename);
-        // The PKCS#12 transport passphrase is empty — surface that as an
+        // UC14 — Surface the agreed PKCS#12 transport passphrase as an
         // out-of-band header so the client can sanity-check without
         // hard-coding the convention. The header is informational only;
-        // protocol semantics are unaffected.
-        headers.set("X-AI-Sandbox-P12-Passphrase", "");
+        // protocol semantics are unaffected. The actual server-side
+        // emission uses the same constant, see
+        // EnrollmentCertMintService.ENROLLMENT_PKCS12_PASSPHRASE.
+        headers.set(
+                "X-AI-Sandbox-P12-Passphrase",
+                com.aisandbox.server.enrollment.service.EnrollmentCertMintService.ENROLLMENT_PKCS12_PASSPHRASE);
         return new ResponseEntity<>(bundle.pkcs12(), headers, HttpStatus.CREATED);
     }
 

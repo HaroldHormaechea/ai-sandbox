@@ -245,6 +245,13 @@ dependencies {
     // when useJUnitPlatform() is used; otherwise Gradle Test Executor
     // fails to start with "Failed to load JUnit Platform".
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+    // UC14 — Vintage engine for JUnit-4-style tests (notably the
+    // Robolectric @RunWith(RobolectricTestRunner::class) tests in this
+    // module). Without it, `useJUnitPlatform()` silently skips every
+    // JUnit-4 test — which is what masked the BC empty-password regression
+    // landing through UC13 (KeyStoreIdentityManagerPkcs12ImportTest was
+    // discovered to be silently skipping in CI).
+    testRuntimeOnly(libs.junit.vintage.engine)
     // Global per-test timeout so a hung test fails the build instead
     // of stalling android-ci until the GH Actions job timeout.
     testImplementation("org.junit.jupiter:junit-jupiter-params")

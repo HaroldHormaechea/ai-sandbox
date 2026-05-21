@@ -45,9 +45,12 @@ paths:
       - enrollment-controller
       summary: Redeem a single-use enrollment token (UC04).
       description: "The only mTLS-exempt path on the server. Returns a freshly-minted\
-        \ PKCS#12 bundle (private key + cert, empty transport passphrase). The newly-minted\
-        \ public cert is written to the server allowlist before the response is returned,\
-        \ so the client can immediately use the new identity on the next request."
+        \ PKCS#12 bundle (private key + cert) wrapped with the agreed transport\
+        \ passphrase 'ai-sandbox-enrollment' (UC14 — not a secret; required because\
+        \ the JDK 21 default PKCS#12 emitter and BouncyCastle 1.79 cannot agree on\
+        \ an empty char[]). The newly-minted public cert is written to the server\
+        \ allowlist before the response is returned, so the client can immediately\
+        \ use the new identity on the next request."
       operationId: redeem
       requestBody:
         content:

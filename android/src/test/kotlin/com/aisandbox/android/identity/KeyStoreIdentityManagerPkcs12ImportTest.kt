@@ -94,7 +94,14 @@ import org.robolectric.annotation.Config
 @Config(sdk = [29])
 class KeyStoreIdentityManagerPkcs12ImportTest {
 
-    private val transportPassphrase: CharArray = CharArray(0)
+    // UC14 — Sentinel passphrase the server emits the PKCS#12 with and
+    // the Android side consumes it with. BouncyCastle 1.79 hard-rejects
+    // empty char[] during PBKDF2 key derivation; the transport-side
+    // fixture has to mirror the production constant or the load would
+    // fail with `password empty`. Kept in sync with
+    // `EnrollmentCertMintService.ENROLLMENT_PKCS12_PASSPHRASE` (server)
+    // and the private constant in `KeyStoreIdentityManager.kt` (production).
+    private val transportPassphrase: CharArray = "ai-sandbox-enrollment".toCharArray()
 
     @Before
     fun ensureBouncyCastleClientProviderRegistered() {

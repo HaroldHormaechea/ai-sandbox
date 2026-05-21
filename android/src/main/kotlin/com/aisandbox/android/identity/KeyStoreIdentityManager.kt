@@ -41,7 +41,30 @@ class KeyStoreIdentityManager {
         const val KEYSTORE_PROVIDER = "AndroidKeyStore"
         const val KEYSTORE_ALIAS = "ai-sandbox-client-cert"
         private const val TAG = "KeyStoreIdentity"
-        /** PKCS#12 transport passphrase from POST /v1/enrollment is always empty. */
+
+        /**
+         * UC14 — Sentinel passphrase for the enrollment PKCS#12 bundle
+         * returned by `POST /v1/enrollment`. The matching constant on
+         * the server side is `EnrollmentCertMintService.ENROLLMENT_PKCS12_PASSPHRASE`.
+         *
+         * This is NOT a secret. JDK 21's default PKCS#12 emitter wraps
+         * the key bag with PBES2 (PBKDF2-HMAC-SHA256 + AES-256) even
+         * when given an empty passphrase, and BouncyCastle 1.79 (the
+         * Android-side parser bundled by UC13) hard-rejects an empty
+         * `char[]` during PBKDF2 key derivation with
+         * `IllegalArgumentException("password empty")`. No system
+         * property disables that check. Both sides therefore agree on
+         * a fixed non-empty sentinel; the bundle's confidentiality
+         * comes from the mTLS tunnel, not from PBES2.
+         */
+        private val ENROLLMENT_PKCS12_PASSPHRASE = "ai-sandbox-enrollment".toCharArray()
+
+        /**
+         * AndroidKeyStore has no separate passphrase (key material is
+         * managed by the platform). The `KeyManagerFactory.init` call
+         * site below passes this empty char[] purely to satisfy the
+         * JCA API signature.
+         */
         private val EMPTY_PASSWORD = CharArray(0)
     }
 
@@ -51,7 +74,7 @@ class KeyStoreIdentityManager {
      * CN + expiry on the "Identity imported" confirmation panel.
      */
     fun importPkcs12(p12Bytes: ByteArray): ImportResult {
-        // 1. Parse the P12 with empty passphrase.
+        // 1. Parse the P12 with the UC14 sentinel passphrase.
         //
         // UC13 — Route this specific PKCS#12 unwrap through the real
         // BouncyCastle provider (registered under the project-specific
@@ -68,13 +91,18 @@ class KeyStoreIdentityManager {
         // NOTE: `KEYSTORE_PROVIDER` in the companion below is
         // `"AndroidKeyStore"` and is *unrelated* to this provider name —
         // it refers to the destination KeyStore type, not a JCE Provider.
+        //
+        // UC14 — The passphrase is the agreed sentinel
+        // `ENROLLMENT_PKCS12_PASSPHRASE`, NOT empty. BouncyCastle 1.79
+        // rejects empty char[] during PBKDF2 key derivation; see the
+        // KDoc on the constant for the full rationale.
         val source = KeyStore.getInstance("PKCS12", BouncyCastleClientProvider.NAME)
-        source.load(ByteArrayInputStream(p12Bytes), EMPTY_PASSWORD)
+        source.load(ByteArrayInputStream(p12Bytes), ENROLLMENT_PKCS12_PASSPHRASE)
         val aliases = source.aliases().toList()
         require(aliases.isNotEmpty()) { "PKCS#12 contains no aliases" }
         val sourceAlias = aliases.first()
 
-        val privateKey = source.getKey(sourceAlias, EMPTY_PASSWORD) as PrivateKey
+        val privateKey = source.getKey(sourceAlias, ENROLLMENT_PKCS12_PASSPHRASE) as PrivateKey
         val chain = source.getCertificateChain(sourceAlias)
             ?: arrayOf(source.getCertificate(sourceAlias))
         val leaf = chain.first() as X509Certificate

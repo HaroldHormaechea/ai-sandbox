@@ -97,9 +97,11 @@ class EnrollmentControllerTest {
                 .contentType(MediaType.APPLICATION_OCTET_STREAM)
                 .expectHeader()
                 .valueMatches(HttpHeaders.CONTENT_DISPOSITION, ".*filename.*alice-phone\\.p12.*")
-                // Empty passphrase surfaced as an out-of-band hint.
+                // UC14 — Sentinel passphrase surfaced as an out-of-band hint.
                 .expectHeader()
-                .valueEquals("X-AI-Sandbox-P12-Passphrase", "")
+                .valueEquals(
+                        "X-AI-Sandbox-P12-Passphrase",
+                        com.aisandbox.server.enrollment.service.EnrollmentCertMintService.ENROLLMENT_PKCS12_PASSPHRASE)
                 .expectBody(byte[].class)
                 .isEqualTo(p12);
     }
