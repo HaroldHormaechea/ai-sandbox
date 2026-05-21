@@ -31,13 +31,26 @@ import org.slf4j.LoggerFactory;
  * <h2>Concurrency contract</h2>
  *
  * Two simultaneous redemptions of the same token MUST NOT both succeed.
- * The store enforces this with a {@code synchronized} block guarding the
- * read-verify-delete critical section; within the JVM only one caller
- * can be inside {@link #redeem(String, Clock)} at a time. The
- * {@code Files.deleteIfExists} call is the atomic primitive on POSIX
- * (the same trick {@code AllowlistDirectory#deleteByName} uses). Cross-
- * process safety is provided by the same atomic primitive — at most one
- * deleter wins.
+ * The store enforces this with a {@code synchronized} block guarding
+ * both the read-only verification critical section ({@link
+ * #verify(String, Clock)}) and the consume / mark-redeemed step ({@link
+ * #markRedeemed(String, Clock)}). Within the JVM only one caller can be
+ * inside either method at a time. The {@code Files.deleteIfExists} call
+ * inside {@link #markRedeemed(String, Clock)} is the atomic primitive
+ * on POSIX (the same trick {@code AllowlistDirectory#deleteByName}
+ * uses); cross-process safety comes from that atomic primitive — at
+ * most one deleter wins.
+ *
+ * <h2>Verify + mark, separated (UC11 § AC7)</h2>
+ *
+ * Prior to UC11 a single {@code redeem(String, Clock)} method performed
+ * the verify + delete + tombstone in one atomic step. UC11 splits that
+ * into a side-effect-free {@link #verify(String, Clock)} (no file
+ * delete, no tombstone) and a {@link #markRedeemed(String, Clock)} that
+ * applies the original side effects only AFTER the cert has been
+ * successfully written to the allowlist. The split lets the facade
+ * roll back on a failed cert write — the token stays in its pre-
+ * redeemed state and the operator can retry the same QR.
  *
  * <h2>Single-server constraint</h2>
  *
@@ -140,25 +153,40 @@ public class EnrollmentTokenStore {
     }
 
     /**
-     * Attempt to consume the supplied {@code token}. Returns the parsed
-     * token on success; the empty Optional encodes "invalid OR expired OR
-     * redeemed" — the caller maps that to the correct
+     * Inspect the supplied {@code token} without consuming it. Returns
+     * the parsed token on success; the {@link RedemptionOutcome}
+     * variants encode "invalid OR expired OR redeemed" — the caller
+     * maps that to the correct
      * {@link com.aisandbox.server.api.error.ErrorCode}.
+     *
+     * <p>UC11 § AC7 — this method has NO side effects. It never deletes
+     * the on-disk token file, never updates the recently-redeemed
+     * tombstone, and never mutates any shared state. The caller invokes
+     * {@link #markRedeemed(String, Clock)} only after the downstream
+     * cert write has succeeded, so a failed cert write leaves the
+     * token in its pre-redeemed state and the operator can retry the
+     * same QR.
      *
      * <p>Discrimination rules (see {@link #wasRecentlyRedeemed(String)}):
      * <ul>
-     *   <li>file exists, parses, in-window → {@code Success(token)}, delete.</li>
-     *   <li>file exists, parses, past expiry → {@code Empty}, delete; caller
-     *       reports {@code enrollment_token_expired}.</li>
+     *   <li>file exists, parses, in-window → {@code Success(token)} —
+     *       caller proceeds to cert mint + {@link
+     *       #markRedeemed(String, Clock)}.</li>
+     *   <li>file exists, parses, past expiry → {@code Expired(token)};
+     *       caller reports {@code enrollment_token_expired}.</li>
      *   <li>file exists, parses, wrong full token (prefix collision) →
-     *       {@code Empty}; caller reports {@code enrollment_token_invalid}.</li>
-     *   <li>file missing, token in tombstone set → {@code Empty}; caller
-     *       reports {@code enrollment_token_redeemed}.</li>
-     *   <li>file missing, token NOT in tombstone → {@code Empty}; caller
-     *       reports {@code enrollment_token_invalid}.</li>
+     *       {@code Unknown}; caller reports {@code enrollment_token_invalid}.</li>
+     *   <li>file exists, cannot parse → {@code Unknown}; caller reports
+     *       {@code enrollment_token_invalid}. The unparseable file
+     *       lingers on disk until the scheduled {@link
+     *       #purgeExpired(Clock)} sweep picks it up.</li>
+     *   <li>file missing, token in tombstone set → {@code AlreadyRedeemed};
+     *       caller reports {@code enrollment_token_redeemed}.</li>
+     *   <li>file missing, token NOT in tombstone → {@code Unknown};
+     *       caller reports {@code enrollment_token_invalid}.</li>
      * </ul>
      */
-    public RedemptionOutcome redeem(String token, Clock clock) {
+    public RedemptionOutcome verify(String token, Clock clock) {
         Path file = fileFor(token);
         synchronized (lock) {
             if (!Files.exists(file)) {
@@ -169,12 +197,11 @@ public class EnrollmentTokenStore {
                 TokenJson raw = mapper.readValue(file.toFile(), TokenJson.class);
                 parsed = new EnrollmentToken(raw.token(), raw.name(), raw.exp());
             } catch (IOException io) {
+                // UC11 § AC7 — verify is side-effect-free. Surface the
+                // unparseable file's existence to logs (so operators
+                // notice corruption) but leave it on disk for the
+                // scheduled purgeExpired() to clean up.
                 LOG.warn("Cannot parse enrollment token at {}: {}", file, io.toString());
-                try {
-                    Files.deleteIfExists(file);
-                } catch (IOException ignored) {
-                    // best-effort cleanup
-                }
                 return RedemptionOutcome.UNKNOWN;
             }
             if (!parsed.token().equals(token)) {
@@ -185,26 +212,42 @@ public class EnrollmentTokenStore {
             }
             Instant now = clock.instant();
             if (parsed.isExpiredAt(now)) {
-                try {
-                    Files.deleteIfExists(file);
-                } catch (IOException ignored) {
-                    // best-effort cleanup
-                }
                 return RedemptionOutcome.expired(parsed);
             }
+            return RedemptionOutcome.success(parsed);
+        }
+    }
+
+    /**
+     * Consume the supplied {@code token}: delete the on-disk file and
+     * record an in-memory tombstone so a subsequent {@link
+     * #verify(String, Clock)} returns {@code AlreadyRedeemed}.
+     *
+     * <p>UC11 § AC7 — invoked only after the caller has successfully
+     * written the freshly-minted cert into the allowlist. Splitting
+     * verify + mark into two calls keeps the token alive across a
+     * failed cert write: the facade can roll back simply by returning
+     * without calling this method.
+     *
+     * @return {@code true} iff this call deleted a file that was on
+     *     disk at entry. {@code false} indicates the file was already
+     *     gone — either a concurrent winner consumed it (race loser),
+     *     a hand-edit removed it, or the token was never persisted to
+     *     begin with. The tombstone is recorded either way, so a
+     *     subsequent {@link #verify(String, Clock)} sees {@code
+     *     AlreadyRedeemed}.
+     */
+    public boolean markRedeemed(String token, Clock clock) {
+        Path file = fileFor(token);
+        synchronized (lock) {
             boolean deleted;
             try {
                 deleted = Files.deleteIfExists(file);
             } catch (IOException io) {
                 throw new UncheckedIOException(io);
             }
-            if (!deleted) {
-                // Lost the race to another process / hand-edit.
-                rememberRedeemed(token, now);
-                return RedemptionOutcome.ALREADY_REDEEMED;
-            }
-            rememberRedeemed(token, now);
-            return RedemptionOutcome.success(parsed);
+            rememberRedeemed(token, clock.instant());
+            return deleted;
         }
     }
 
@@ -280,8 +323,9 @@ public class EnrollmentTokenStore {
     private record TokenJson(String token, String name, Instant exp) {}
 
     /**
-     * Result of {@link #redeem(String, Clock)} — distinguishes the three
-     * UC04 failure modes from a successful single-use consumption.
+     * Result of {@link #verify(String, Clock)} — distinguishes the
+     * three UC04 failure modes from a verified-good token ready to be
+     * consumed via {@link #markRedeemed(String, Clock)}.
      */
     public sealed interface RedemptionOutcome
             permits RedemptionOutcome.Success,

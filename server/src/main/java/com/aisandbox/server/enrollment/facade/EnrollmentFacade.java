@@ -85,7 +85,12 @@ public class EnrollmentFacade {
             throw new RateLimitedException(sourceIp);
         }
 
-        EnrollmentTokenStore.RedemptionOutcome outcome = tokenService.redeem(token);
+        // UC11 § AC7 — split the original redeem call into verify (no
+        // side effects) + markRedeemed (delete the on-disk file +
+        // tombstone). The mark step happens only AFTER the cert has
+        // been successfully written to the allowlist, so a failed
+        // cert write leaves the token alive for a retry.
+        EnrollmentTokenStore.RedemptionOutcome outcome = tokenService.verify(token);
         switch (outcome) {
             case EnrollmentTokenStore.RedemptionOutcome.Success s -> {
                 /* fall through below */
@@ -114,8 +119,22 @@ public class EnrollmentFacade {
         MintedBundle bundle = certMint.mint(consumed.name());
 
         // Cross-domain facade-to-facade hand-off — never reach into the
-        // allowlist service directly.
+        // allowlist service directly. If this throws (IOException /
+        // CertificateException), the token has NOT been marked redeemed
+        // yet, so the operator can retry with the same QR.
         AllowedClient added = allowlistFacade.addClient(consumed.name(), bundle.certPem());
+
+        // Cert is on disk. Now and only now mark the token redeemed.
+        // If the file is already gone (race loser, hand-edit), the
+        // tombstone still gets set so subsequent verify() calls return
+        // AlreadyRedeemed — warn-log but don't fail the request, since
+        // the operator's identity has been successfully provisioned.
+        if (!tokenService.markRedeemed(token)) {
+            LOG.warn(
+                    "Enrollment token already consumed on disk when marking redeemed (race loser?); "
+                            + "cert was successfully written for client={}",
+                    added.name());
+        }
 
         audit.logEvent(
                 AuditAction.CLIENT_ENROLL,
