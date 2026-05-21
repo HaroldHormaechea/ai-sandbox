@@ -217,6 +217,21 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.kotlinx.serialization.json)
 
+    // ── Crypto (PKCS#12 import) — UC13 ────────────────────────────────
+    // Android's stock "BC" provider (the stripped-down one bundled with
+    // the platform) does not register a SecretKeyFactory under the bare
+    // PBKDF2 OID 1.2.840.113549.1.5.12, which the JDK 21 default
+    // `KeyStore.getInstance("PKCS12")` emission (PBES2 / PBKDF2-HMAC-SHA256
+    // + AES-256) requires during private-key unwrap. We ship the real
+    // BouncyCastle alongside Android's stock provider, register it under
+    // a distinct project-specific name (`BC-ai-sandbox-client`), and
+    // route ONLY the PKCS#12 unwrap through it. TLS continues through
+    // Conscrypt — see identity/BouncyCastleClientProvider.kt for the
+    // full rationale, including why we use `Security.addProvider` and
+    // not `insertProviderAt`. Version pinned via the catalog
+    // (`bouncycastle = "1.79"`) — no range, no `latest.release`.
+    implementation(libs.bouncycastle.prov)
+
     // ── Compose tooling (debug-only) ──────────────────────────────────
     debugImplementation(libs.androidx.compose.ui.tooling)
     debugImplementation(libs.androidx.compose.ui.test.manifest)
