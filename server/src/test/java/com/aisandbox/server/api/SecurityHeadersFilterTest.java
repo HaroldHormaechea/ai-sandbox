@@ -147,12 +147,11 @@ class SecurityHeadersFilterTest {
 
         String finalCsp = ex.getResponse().getHeaders().getFirst("Content-Security-Policy");
         assertThat(finalCsp)
-                .as(
-                        "UC-17 controller-override contract — a controller's explicit "
-                                + "Content-Security-Policy value MUST win over the filter's default. "
-                                + "If this assertion sees the filter default, the filter is "
-                                + "post-processing headers after the chain runs (regression of the "
-                                + "UC-17 ordering fix).")
+                .as("UC-17 controller-override contract — a controller's explicit "
+                        + "Content-Security-Policy value MUST win over the filter's default. "
+                        + "If this assertion sees the filter default, the filter is "
+                        + "post-processing headers after the chain runs (regression of the "
+                        + "UC-17 ordering fix).")
                 .isEqualTo(sentinel);
     }
 }
