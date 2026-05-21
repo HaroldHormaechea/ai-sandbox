@@ -200,8 +200,25 @@ start_server() {
     # All paths overridden via Spring CLI args so the run is
     # hermetic — no /etc/ai-sandbox-server/ writes, no /var/log/
     # writes. Bind to loopback only.
+    #
+    # NOTE on -Dai-sandbox.server.audit.file (passed BEFORE -jar):
+    # logback-spring.xml's ${ai-sandbox.server.audit.file:-/var/log/...}
+    # placeholder is resolved by logback's own variable substitution,
+    # which reads JVM system properties at logback-init time — Spring's
+    # CLI argument property source is NOT yet wired into logback when
+    # logback initializes. A `--ai-sandbox.server.audit.file=...` CLI
+    # arg therefore reaches Spring (too late) but not logback, and the
+    # RollingFileAppender falls back to the default /var/log path,
+    # which doesn't exist on this hermetic run -> FileNotFoundException
+    # -> "Logback configuration error detected" -> JVM exits before
+    # the port opens. Pass it as `-D` before `-jar` so logback sees it
+    # during startup; Spring's StandardEnvironment also reads system
+    # properties so the Spring-side binding still works (no need to
+    # keep both forms). See QA's UC-17 fix-back round 2 for the
+    # empirical trace.
     nohup java \
         -Dfile.encoding=UTF-8 \
+        -Dai-sandbox.server.audit.file="$SCRATCH/audit/audit.log" \
         -jar "$SERVER_JAR" \
         --ai-sandbox.server.tls.port="$SERVER_PORT" \
         --ai-sandbox.server.tls.bind-address=127.0.0.1 \
@@ -211,7 +228,6 @@ start_server() {
         --ai-sandbox.server.sessions.host-state-root="$SCRATCH/sessions" \
         --ai-sandbox.server.secrets.dir="$SCRATCH/secrets" \
         --ai-sandbox.server.enrollment.dir="$SCRATCH/enrollment" \
-        --ai-sandbox.server.audit.file="$SCRATCH/audit/audit.log" \
         >"$ARTIFACT_DIR/server.stdout.log" \
         2>"$ARTIFACT_DIR/server.stderr.log" &
     SERVER_PID=$!
