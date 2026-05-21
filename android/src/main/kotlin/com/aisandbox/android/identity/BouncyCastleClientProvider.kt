@@ -71,6 +71,13 @@ object BouncyCastleClientProvider {
 
     private const val TAG = "BCClientProvider"
 
+    // Version reported by the wrapped Provider — kept in sync with the
+    // `bouncycastle` pin in `gradle/libs.versions.toml`. Double rather
+    // than String because the Provider(String, double, String) ctor is
+    // the one resolvable under current compileSdk; see
+    // `NamedBouncyCastleProvider` below.
+    private const val BC_VERSION: Double = 1.79
+
     /**
      * Idempotently register the real BouncyCastle under
      * [NAME]. Safe to call from [com.aisandbox.android.AiSandboxApplication.onCreate]
@@ -128,9 +135,17 @@ object BouncyCastleClientProvider {
      * name + version + info combination, and re-putting BC's would
      * stomp them.
      */
+    // Provider(String name, double version, String info) — the legacy
+    // protected ctor. The newer (String, String, String) overload added in
+    // JDK 9 / Android API 28 is not resolved by the Kotlin compiler under
+    // our current compileSdk / Android stubs combo (the stub apparently
+    // only exposes the double-version form), so we use the double form
+    // explicitly. The version literal is the BC pin (`bouncycastle =
+    // "1.79"` in `gradle/libs.versions.toml`) carried verbatim into the
+    // provider's reported version property.
     private class NamedBouncyCastleProvider : Provider(
         NAME,
-        "1.79",
+        BC_VERSION,
         "ai-sandbox repackaging of BouncyCastle (bcprov-jdk18on) for PKCS#12 enrollment-cert import — see BouncyCastleClientProvider KDoc",
     ) {
         init {
