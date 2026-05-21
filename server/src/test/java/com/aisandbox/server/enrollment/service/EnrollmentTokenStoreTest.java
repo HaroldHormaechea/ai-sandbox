@@ -17,17 +17,36 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 /**
- * UC04 — single-use semantics for {@link EnrollmentTokenStore}.
+ * UC04 + UC11 — single-use semantics for {@link EnrollmentTokenStore}.
  *
- * <p>Covers AC32–AC35 surface: save → redeem happy path, expiry, the
- * three "redeem fails" branches (unknown / expired / already-redeemed),
- * the on-disk fixture (mode 0600 + 0700 dir), atomic delete after
- * success, the concurrent-redeem race (only one of N threads wins), and
- * the purge sweep.
+ * <p>UC04 covered the original AC32–AC35 surface: save → redeem happy
+ * path, expiry, the three "redeem fails" branches (unknown / expired /
+ * already-redeemed), the on-disk fixture (mode 0600 + 0700 dir), atomic
+ * delete after success, the concurrent-redeem race (only one of N
+ * threads wins), and the purge sweep.
+ *
+ * <p>UC11 § AC7 split the original single {@code redeem(String, Clock)}
+ * into a side-effect-free {@link EnrollmentTokenStore#verify(String,
+ * Clock)} and a downstream {@link EnrollmentTokenStore#markRedeemed(
+ * String, Clock)} so the facade can roll back on a failed cert write.
+ * These tests pin the split contract:
+ *
+ * <ul>
+ *   <li>{@code verify} never deletes a file, never updates the
+ *       tombstone, and never mutates any shared state.</li>
+ *   <li>{@code markRedeemed} deletes the file and records the
+ *       tombstone, returning {@code true} iff a file was actually
+ *       removed by this call.</li>
+ *   <li>Concurrency: under N concurrent {@code verify+markRedeemed}
+ *       pairs, exactly one {@code markRedeemed} call returns
+ *       {@code true} — the others see {@code false} because the file
+ *       is already gone.</li>
+ * </ul>
  */
 class EnrollmentTokenStoreTest {
 
@@ -44,23 +63,58 @@ class EnrollmentTokenStoreTest {
     }
 
     @Test
-    void issued_token_redeems_once_and_is_then_unknown(@TempDir Path dir) throws Exception {
+    void verify_then_markRedeemed_happy_path(@TempDir Path dir) throws Exception {
         EnrollmentTokenStore store = new EnrollmentTokenStore(dir);
         Instant now = Instant.parse("2026-05-17T10:00:00Z");
         store.save(token(FULL_TOKEN_A, "alice-phone", now.plusSeconds(600)));
 
-        // First redeem → Success.
-        RedemptionOutcome first = store.redeem(FULL_TOKEN_A, fixed(now));
-        assertThat(first).isInstanceOf(RedemptionOutcome.Success.class);
-        assertThat(first.token().name()).isEqualTo("alice-phone");
+        // verify alone leaves the file on disk and does NOT tombstone.
+        RedemptionOutcome verified = store.verify(FULL_TOKEN_A, fixed(now));
+        assertThat(verified).isInstanceOf(RedemptionOutcome.Success.class);
+        assertThat(verified.token().name()).isEqualTo("alice-phone");
+        assertThat(Files.exists(store.fileFor(FULL_TOKEN_A)))
+                .as("UC11 § AC7 — verify must NOT delete the on-disk token file")
+                .isTrue();
 
-        // File is gone after a successful redeem (single-use, atomic delete).
-        assertThat(Files.exists(store.fileFor(FULL_TOKEN_A))).isFalse();
+        // Re-verifying the same token is still Success (no tombstone
+        // was set by the first verify call).
+        RedemptionOutcome reVerified = store.verify(FULL_TOKEN_A, fixed(now.plusSeconds(1)));
+        assertThat(reVerified)
+                .as("UC11 § AC7 — verify is side-effect-free so a follow-up verify still returns Success")
+                .isInstanceOf(RedemptionOutcome.Success.class);
 
-        // Second redeem hits the in-memory tombstone — distinguishes "already
-        // redeemed" from "never existed".
-        RedemptionOutcome second = store.redeem(FULL_TOKEN_A, fixed(now.plusSeconds(1)));
-        assertThat(second).isInstanceOf(RedemptionOutcome.AlreadyRedeemed.class);
+        // markRedeemed deletes the file and populates the tombstone.
+        boolean deleted = store.markRedeemed(FULL_TOKEN_A, fixed(now.plusSeconds(2)));
+        assertThat(deleted).as("first markRedeemed call MUST return true (file was on disk)").isTrue();
+        assertThat(Files.exists(store.fileFor(FULL_TOKEN_A)))
+                .as("UC11 § AC7 — markRedeemed deletes the on-disk file")
+                .isFalse();
+
+        // Now verify returns AlreadyRedeemed (file missing + tombstone set).
+        RedemptionOutcome afterMark = store.verify(FULL_TOKEN_A, fixed(now.plusSeconds(3)));
+        assertThat(afterMark).isInstanceOf(RedemptionOutcome.AlreadyRedeemed.class);
+    }
+
+    @Test
+    void markRedeemed_returns_false_when_file_already_gone(@TempDir Path dir) throws Exception {
+        // UC11 § AC7 — the boolean return distinguishes "this call did
+        // the delete" from "another caller raced past us / the file
+        // was never there". Either way, the tombstone gets set so
+        // subsequent verifies see AlreadyRedeemed.
+        EnrollmentTokenStore store = new EnrollmentTokenStore(dir);
+        store.ensureDir();
+
+        boolean deleted = store.markRedeemed(FULL_TOKEN_A, fixed(Instant.now()));
+        assertThat(deleted)
+                .as("markRedeemed on a never-issued token must return false (no file to delete)")
+                .isFalse();
+
+        // Tombstone is still set — subsequent verify returns AlreadyRedeemed
+        // rather than Unknown, so a race-loser caller can be distinguished
+        // from a never-existed token.
+        assertThat(store.verify(FULL_TOKEN_A, fixed(Instant.now())))
+                .as("UC11 § AC7 — tombstone is set even when the file delete is a no-op")
+                .isInstanceOf(RedemptionOutcome.AlreadyRedeemed.class);
     }
 
     @Test
@@ -68,24 +122,28 @@ class EnrollmentTokenStoreTest {
         EnrollmentTokenStore store = new EnrollmentTokenStore(dir);
         store.ensureDir();
 
-        RedemptionOutcome outcome = store.redeem(FULL_TOKEN_B, fixed(Instant.now()));
+        RedemptionOutcome outcome = store.verify(FULL_TOKEN_B, fixed(Instant.now()));
         assertThat(outcome).isInstanceOf(RedemptionOutcome.Unknown.class);
     }
 
     @Test
-    void expired_token_returns_Expired_and_is_deleted(@TempDir Path dir) throws Exception {
+    void expired_token_returns_Expired_and_is_not_deleted_by_verify(@TempDir Path dir) throws Exception {
+        // UC11 § AC7 — pre-UC11 the original redeem deleted the
+        // expired file on the way out. Post-UC11 verify is purely
+        // read-only. The on-disk Expired file is cleaned up later by
+        // the scheduled purgeExpired() sweep.
         EnrollmentTokenStore store = new EnrollmentTokenStore(dir);
         Instant issued = Instant.parse("2026-05-17T10:00:00Z");
         store.save(token(FULL_TOKEN_A, "alice-phone", issued.plusSeconds(60)));
 
-        // Clock advanced past the expiry → Expired outcome and the file
-        // is cleaned up on the way out.
         Instant later = issued.plusSeconds(120);
-        RedemptionOutcome outcome = store.redeem(FULL_TOKEN_A, fixed(later));
+        RedemptionOutcome outcome = store.verify(FULL_TOKEN_A, fixed(later));
         assertThat(outcome).isInstanceOf(RedemptionOutcome.Expired.class);
         assertThat(outcome.token().name()).isEqualTo("alice-phone");
 
-        assertThat(Files.exists(store.fileFor(FULL_TOKEN_A))).isFalse();
+        assertThat(Files.exists(store.fileFor(FULL_TOKEN_A)))
+                .as("UC11 § AC7 — verify on an expired token must NOT delete; that is purgeExpired's job")
+                .isTrue();
     }
 
     @Test
@@ -98,7 +156,7 @@ class EnrollmentTokenStoreTest {
         Instant exp = Instant.parse("2026-05-17T10:10:00Z");
         store.save(token(FULL_TOKEN_A, "alice-phone", exp));
 
-        RedemptionOutcome outcome = store.redeem(FULL_TOKEN_A, fixed(exp));
+        RedemptionOutcome outcome = store.verify(FULL_TOKEN_A, fixed(exp));
         assertThat(outcome).isInstanceOf(RedemptionOutcome.Expired.class);
     }
 
@@ -147,7 +205,7 @@ class EnrollmentTokenStoreTest {
         String attacker = "0".repeat(16) + "ffff".repeat(12); // same prefix, different tail
         store.save(token(stored, "alice-phone", Instant.now().plusSeconds(600)));
 
-        RedemptionOutcome outcome = store.redeem(attacker, fixed(Instant.now()));
+        RedemptionOutcome outcome = store.verify(attacker, fixed(Instant.now()));
         assertThat(outcome).isInstanceOf(RedemptionOutcome.Unknown.class);
 
         // The legitimate token file MUST still exist — we matched by prefix
@@ -156,11 +214,15 @@ class EnrollmentTokenStoreTest {
     }
 
     @Test
-    void concurrent_redeem_only_one_thread_wins(@TempDir Path dir) throws Exception {
-        // The synchronized-block + atomic-delete contract: exactly one of N
-        // concurrent redemptions of the same token succeeds; every other
-        // thread sees AlreadyRedeemed (or Unknown if it raced past the
-        // tombstone window). UC04 § Edge cases — "Token-store concurrency".
+    void concurrent_verify_plus_markRedeemed_exactly_one_winner(@TempDir Path dir) throws Exception {
+        // UC11 § AC7 — the verify+markRedeemed pair under contention.
+        // Threads each call verify() (no side effects, all see Success)
+        // and then markRedeemed(). Exactly one markRedeemed call MUST
+        // return true (the one whose Files.deleteIfExists actually
+        // removed the file); the others return false because by the
+        // time they enter the synchronized block the file is already
+        // gone. Verifies the AC9 single-shot guarantee survives the
+        // verify/mark split.
         EnrollmentTokenStore store = new EnrollmentTokenStore(dir);
         Instant now = Instant.parse("2026-05-17T10:00:00Z");
         store.save(token(FULL_TOKEN_A, "alice-phone", now.plusSeconds(600)));
@@ -169,22 +231,24 @@ class EnrollmentTokenStoreTest {
         ExecutorService pool = Executors.newFixedThreadPool(threads);
         CountDownLatch ready = new CountDownLatch(threads);
         CountDownLatch go = new CountDownLatch(1);
-        java.util.concurrent.atomic.AtomicInteger successes = new java.util.concurrent.atomic.AtomicInteger();
-        java.util.concurrent.atomic.AtomicInteger alreadyRedeemed = new java.util.concurrent.atomic.AtomicInteger();
-        java.util.concurrent.atomic.AtomicInteger unknown = new java.util.concurrent.atomic.AtomicInteger();
+        AtomicInteger verifySuccesses = new AtomicInteger();
+        AtomicInteger markTrue = new AtomicInteger();
+        AtomicInteger markFalse = new AtomicInteger();
         try {
             for (int i = 0; i < threads; i++) {
                 pool.submit(() -> {
                     try {
                         ready.countDown();
                         go.await();
-                        RedemptionOutcome o = store.redeem(FULL_TOKEN_A, fixed(now));
-                        if (o instanceof RedemptionOutcome.Success) {
-                            successes.incrementAndGet();
-                        } else if (o instanceof RedemptionOutcome.AlreadyRedeemed) {
-                            alreadyRedeemed.incrementAndGet();
-                        } else if (o instanceof RedemptionOutcome.Unknown) {
-                            unknown.incrementAndGet();
+                        RedemptionOutcome v = store.verify(FULL_TOKEN_A, fixed(now));
+                        if (v instanceof RedemptionOutcome.Success) {
+                            verifySuccesses.incrementAndGet();
+                        }
+                        boolean deleted = store.markRedeemed(FULL_TOKEN_A, fixed(now));
+                        if (deleted) {
+                            markTrue.incrementAndGet();
+                        } else {
+                            markFalse.incrementAndGet();
                         }
                     } catch (InterruptedException ie) {
                         Thread.currentThread().interrupt();
@@ -199,18 +263,21 @@ class EnrollmentTokenStoreTest {
             pool.shutdownNow();
         }
 
-        // Exactly one Success. The rest split between AlreadyRedeemed (saw
-        // the tombstone) and Unknown (raced past, file already gone, not
-        // yet in tombstone) — but the AlreadyRedeemed count is the dominant
-        // one in practice because the tombstone write is inside the
-        // synchronized block.
-        assertThat(successes.get()).isEqualTo(1);
-        assertThat(alreadyRedeemed.get() + unknown.get()).isEqualTo(threads - 1);
-        // Defensive — at least most losers should land in AlreadyRedeemed.
-        assertThat(alreadyRedeemed.get()).isGreaterThanOrEqualTo(threads - 2);
+        // Exactly one markRedeemed wins the delete race.
+        assertThat(markTrue.get())
+                .as("UC11 § AC7 — exactly one markRedeemed call may delete the file")
+                .isEqualTo(1);
+        assertThat(markTrue.get() + markFalse.get()).isEqualTo(threads);
+        // Most verifies should see Success (since they ran before the
+        // first markRedeemed completed). Not strictly required by the
+        // contract but a useful sanity check.
+        assertThat(verifySuccesses.get())
+                .as("at least one concurrent verify() lands before the first markRedeemed completes")
+                .isGreaterThan(0);
 
-        // File is gone.
+        // File is gone, tombstone is set.
         assertThat(Files.exists(store.fileFor(FULL_TOKEN_A))).isFalse();
+        assertThat(store.verify(FULL_TOKEN_A, fixed(now))).isInstanceOf(RedemptionOutcome.AlreadyRedeemed.class);
     }
 
     @Test
@@ -248,6 +315,29 @@ class EnrollmentTokenStoreTest {
     }
 
     @Test
+    void verify_on_unparseable_file_returns_Unknown_and_does_not_delete(@TempDir Path dir) throws IOException {
+        // UC11 § AC7 — verify is side-effect-free even for corrupt
+        // files. The unparseable file lingers on disk until the
+        // scheduled purgeExpired() sweep picks it up. Pre-UC11 the
+        // single redeem call deleted the corrupt file on the way out;
+        // post-UC11 that responsibility shifts to purge.
+        Files.createDirectories(dir);
+        String junkPrefix = "0".repeat(16);
+        Path junkFile = dir.resolve(junkPrefix + ".json");
+        Files.writeString(junkFile, "{ not valid json");
+
+        EnrollmentTokenStore store = new EnrollmentTokenStore(dir);
+        String fakeFullToken = junkPrefix + "a".repeat(48);
+        RedemptionOutcome outcome = store.verify(fakeFullToken, fixed(Instant.now()));
+        assertThat(outcome).isInstanceOf(RedemptionOutcome.Unknown.class);
+
+        // Side-effect-free — the corrupt file is still there.
+        assertThat(Files.exists(junkFile))
+                .as("UC11 § AC7 — verify must NOT delete unparseable files")
+                .isTrue();
+    }
+
+    @Test
     void ensureDir_is_idempotent(@TempDir Path tmp) throws Exception {
         Path dir = tmp.resolve("enr");
         EnrollmentTokenStore store = new EnrollmentTokenStore(dir);
@@ -258,20 +348,22 @@ class EnrollmentTokenStoreTest {
 
     @Test
     void recently_redeemed_set_distinguishes_redeemed_from_unknown(@TempDir Path dir) throws Exception {
-        // Persist + redeem two distinct tokens; the never-issued third token
-        // must come back Unknown, never AlreadyRedeemed.
+        // Persist + verify+markRedeemed two distinct tokens; the never-
+        // issued third token must come back Unknown, never AlreadyRedeemed.
         EnrollmentTokenStore store = new EnrollmentTokenStore(dir);
         Instant now = Instant.parse("2026-05-17T10:00:00Z");
         store.save(token(FULL_TOKEN_A, "alice", now.plusSeconds(600)));
         store.save(token(FULL_TOKEN_B, "bob", now.plusSeconds(600)));
-        store.redeem(FULL_TOKEN_A, fixed(now));
-        store.redeem(FULL_TOKEN_B, fixed(now));
+        store.verify(FULL_TOKEN_A, fixed(now));
+        store.markRedeemed(FULL_TOKEN_A, fixed(now));
+        store.verify(FULL_TOKEN_B, fixed(now));
+        store.markRedeemed(FULL_TOKEN_B, fixed(now));
 
         Set<String> redeemed = new HashSet<>(Set.of(FULL_TOKEN_A, FULL_TOKEN_B));
         for (String t : redeemed) {
-            assertThat(store.redeem(t, fixed(now))).isInstanceOf(RedemptionOutcome.AlreadyRedeemed.class);
+            assertThat(store.verify(t, fixed(now))).isInstanceOf(RedemptionOutcome.AlreadyRedeemed.class);
         }
         String neverIssued = "c".repeat(64);
-        assertThat(store.redeem(neverIssued, fixed(now))).isInstanceOf(RedemptionOutcome.Unknown.class);
+        assertThat(store.verify(neverIssued, fixed(now))).isInstanceOf(RedemptionOutcome.Unknown.class);
     }
 }
