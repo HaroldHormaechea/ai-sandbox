@@ -29,8 +29,8 @@ class EnrollmentCertMintServiceTest {
         // PKCS#12 round-trip — re-parse the bundle to assert the inner
         // shape the Android client will see.
         KeyStore ks = KeyStore.getInstance("PKCS12");
-        char[] empty = new char[0];
-        ks.load(new ByteArrayInputStream(bundle.pkcs12()), empty);
+        char[] passphrase = EnrollmentCertMintService.ENROLLMENT_PKCS12_PASSPHRASE.toCharArray();
+        ks.load(new ByteArrayInputStream(bundle.pkcs12()), passphrase);
 
         // Exactly one alias, matching the requested name.
         Enumeration<String> aliases = ks.aliases();
@@ -41,7 +41,7 @@ class EnrollmentCertMintServiceTest {
 
         // Cert + key entry under that alias.
         assertThat(ks.isKeyEntry(alias)).isTrue();
-        PrivateKey key = (PrivateKey) ks.getKey(alias, empty);
+        PrivateKey key = (PrivateKey) ks.getKey(alias, passphrase);
         assertThat(key).isNotNull();
         assertThat(key.getAlgorithm()).isEqualTo("RSA");
 
@@ -63,15 +63,18 @@ class EnrollmentCertMintServiceTest {
     }
 
     @Test
-    void empty_passphrase_is_required_to_open_the_bundle() throws Exception {
-        // UC04 § "PKCS#12 transport passphrase is empty" — clients open
-        // the bundle with an empty passphrase. A non-empty password
-        // attempt must fail.
+    void sentinel_passphrase_is_required_to_open_the_bundle() throws Exception {
+        // UC14 — the bundle is wrapped with the agreed sentinel
+        // passphrase (see KDoc on
+        // EnrollmentCertMintService.ENROLLMENT_PKCS12_PASSPHRASE for the
+        // BouncyCastle empty-password rationale). A wrong passphrase
+        // attempt must fail with an IOException (PKCS#12 MAC mismatch
+        // surfaces this way under SunJSSE).
         EnrollmentCertMintService svc = new EnrollmentCertMintService();
         MintedBundle bundle = svc.mint("alice-phone");
 
         KeyStore ks = KeyStore.getInstance("PKCS12");
-        assertThatThrownBy(() -> ks.load(new ByteArrayInputStream(bundle.pkcs12()), "not-empty".toCharArray()))
+        assertThatThrownBy(() -> ks.load(new ByteArrayInputStream(bundle.pkcs12()), "not-the-sentinel".toCharArray()))
                 .isInstanceOf(java.io.IOException.class);
     }
 
@@ -84,7 +87,9 @@ class EnrollmentCertMintServiceTest {
         MintedBundle bundle = svc.mint("alice-phone");
 
         KeyStore ks = KeyStore.getInstance("PKCS12");
-        ks.load(new ByteArrayInputStream(bundle.pkcs12()), new char[0]);
+        ks.load(
+                new ByteArrayInputStream(bundle.pkcs12()),
+                EnrollmentCertMintService.ENROLLMENT_PKCS12_PASSPHRASE.toCharArray());
         X509Certificate p12Cert = (X509Certificate) ks.getCertificate("alice-phone");
 
         // Re-parse the PEM to a cert and compare.
@@ -122,9 +127,9 @@ class EnrollmentCertMintServiceTest {
 
         KeyStore ksA = KeyStore.getInstance("PKCS12");
         KeyStore ksB = KeyStore.getInstance("PKCS12");
-        char[] empty = new char[0];
-        ksA.load(new ByteArrayInputStream(a.pkcs12()), empty);
-        ksB.load(new ByteArrayInputStream(b.pkcs12()), empty);
+        char[] passphrase = EnrollmentCertMintService.ENROLLMENT_PKCS12_PASSPHRASE.toCharArray();
+        ksA.load(new ByteArrayInputStream(a.pkcs12()), passphrase);
+        ksB.load(new ByteArrayInputStream(b.pkcs12()), passphrase);
 
         X509Certificate cA = (X509Certificate) ksA.getCertificate("alice-phone");
         X509Certificate cB = (X509Certificate) ksB.getCertificate("alice-phone");

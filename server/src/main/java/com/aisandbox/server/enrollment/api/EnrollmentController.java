@@ -23,7 +23,8 @@ import org.springframework.web.bind.annotation.RestController;
  * {@code POST /v1/enrollment} (UC04 AC33) — the only mTLS-exempt path on
  * the server. The Android client POSTs an opaque token (previously issued
  * by {@code aisandboxctl client invite <name>}) and receives a freshly-
- * minted PKCS#12 bundle (private key + cert, empty transport passphrase)
+ * minted PKCS#12 bundle (private key + cert) wrapped with the sentinel
+ * transport passphrase ({@code "ai-sandbox-enrollment"} — see UC14)
  * as {@code application/octet-stream}.
  *
  * <p>Failure modes (RFC 9457 {@code application/problem+json}, mapped by
@@ -61,7 +62,9 @@ public class EnrollmentController {
     @Operation(
             summary = "Redeem a single-use enrollment token (UC04).",
             description = "The only mTLS-exempt path on the server. Returns a freshly-minted PKCS#12 bundle "
-                    + "(private key + cert, empty transport passphrase). The newly-minted public cert is "
+                    + "(private key + cert) wrapped with the agreed transport passphrase 'ai-sandbox-enrollment' "
+                    + "(UC14 — not a secret; required because the JDK 21 default PKCS#12 emitter and "
+                    + "BouncyCastle 1.79 cannot agree on an empty char[]). The newly-minted public cert is "
                     + "written to the server allowlist before the response is returned, so the client can "
                     + "immediately use the new identity on the next request.")
     @ApiResponses({
@@ -95,11 +98,15 @@ public class EnrollmentController {
         headers.setContentType(MediaType.APPLICATION_OCTET_STREAM);
         headers.setContentLength(bundle.pkcs12().length);
         headers.setContentDispositionFormData("attachment", filename);
-        // The PKCS#12 transport passphrase is empty — surface that as an
+        // UC14 — Surface the agreed PKCS#12 transport passphrase as an
         // out-of-band header so the client can sanity-check without
         // hard-coding the convention. The header is informational only;
-        // protocol semantics are unaffected.
-        headers.set("X-AI-Sandbox-P12-Passphrase", "");
+        // protocol semantics are unaffected. The actual server-side
+        // emission uses the same constant, see
+        // EnrollmentCertMintService.ENROLLMENT_PKCS12_PASSPHRASE.
+        headers.set(
+                "X-AI-Sandbox-P12-Passphrase",
+                com.aisandbox.server.enrollment.service.EnrollmentCertMintService.ENROLLMENT_PKCS12_PASSPHRASE);
         return new ResponseEntity<>(bundle.pkcs12(), headers, HttpStatus.CREATED);
     }
 
