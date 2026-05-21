@@ -138,7 +138,7 @@ class BouncyCastleClientProviderTest {
         // The invariance claim is independent of which one it is.
         val tlsProviderBefore: Provider = SSLContext.getInstance("TLS").provider
         val tlsProviderBeforeName = tlsProviderBefore.name
-        val tlsProviderBeforeVersion = tlsProviderBefore.versionStr
+        val tlsProviderBeforeVersion = tlsProviderBefore.version
 
         BouncyCastleClientProvider.register()
 
@@ -150,12 +150,12 @@ class BouncyCastleClientProviderTest {
         // equality, which still proves nothing was displaced.
         assertThat(tlsProviderAfter === tlsProviderBefore || (
             tlsProviderAfter.name == tlsProviderBeforeName &&
-                tlsProviderAfter.versionStr == tlsProviderBeforeVersion
+                tlsProviderAfter.version == tlsProviderBeforeVersion
         ))
             .describedAs(
                 "TLS provider must be unchanged after register(); " +
                     "before=$tlsProviderBeforeName/$tlsProviderBeforeVersion, " +
-                    "after=${tlsProviderAfter.name}/${tlsProviderAfter.versionStr}",
+                    "after=${tlsProviderAfter.name}/${tlsProviderAfter.version}",
             )
             .isTrue()
 
