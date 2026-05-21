@@ -64,45 +64,100 @@ public class DockerEnumerationService {
 
     private final ProcessExecutor executor;
 
+    /**
+     * UC-15 sticky flag for {@code docker compose ls --all} support on this
+     * runner's docker-compose binary.
+     *
+     * <ul>
+     *   <li>{@code null} — unknown; the next {@link #enumerate()} probes the
+     *       modern argv and may flip the flag.</li>
+     *   <li>{@link Boolean#TRUE} — sticky supported; the modern argv
+     *       ({@code docker compose ls --all} / {@code docker compose -p … ps
+     *       --all}) is used everywhere.</li>
+     *   <li>{@link Boolean#FALSE} — sticky unsupported; enumerate falls back
+     *       to {@code docker ps -a --filter label=com.docker.compose.project}
+     *       and {@link #containerId(String, Duration)} falls back to
+     *       {@code docker ps -a -q --filter label=…}.</li>
+     * </ul>
+     *
+     * <p>Volatile because Spring shares the singleton across request threads;
+     * the write happens at most once per binary capability transition, the
+     * reads are lock-free.
+     */
+    private volatile Boolean composeListAllSupported;
+
     public DockerEnumerationService(ProcessExecutor executor) {
         this.executor = executor;
     }
 
     public List<SessionRecord> enumerate() throws IOException {
         Duration timeout = Duration.ofSeconds(15);
-        // UC04 § B4 — --all so stopped projects show up too.
-        ProcessExecutor.Result ls =
-                executor.run(List.of("docker", "compose", "ls", "--all", "--format", "json"), null, timeout);
-        if (ls.exitCode() != 0) {
-            LOG.warn("docker compose ls failed (exit={}): {}", ls.exitCode(), ls.stderr());
-            return List.of();
-        }
 
         Map<Integer, String> projectNames = new LinkedHashMap<>();
-        try {
-            JsonNode root = JSON.readTree(ls.stdout().isBlank() ? "[]" : ls.stdout());
-            // Compose may emit either an array or NDJSON.
-            if (root.isArray()) {
-                for (JsonNode n : root) {
-                    addProject(projectNames, n);
-                }
-            } else if (root.isObject()) {
-                addProject(projectNames, root);
-                // Continue parsing NDJSON tail manually if present.
-                try (var p = JSON.getFactory().createParser(ls.stdout())) {
-                    while (p.nextToken() != null) {
-                        if (p.currentToken() == com.fasterxml.jackson.core.JsonToken.START_OBJECT) {
-                            JsonNode node = JSON.readTree(p);
-                            addProject(projectNames, node);
+        Boolean flag = composeListAllSupported;
+
+        if (Boolean.FALSE.equals(flag)) {
+            // UC-15: this runner's docker-compose has already been observed to
+            // reject --all. Skip the probe and go straight to the fallback.
+            if (!enumerateViaDockerPs(projectNames, timeout)) {
+                return List.of();
+            }
+        } else {
+            // null (unknown — probe) or TRUE (sticky supported): modern argv.
+            // LC_ALL=C keeps the stderr in English so the --all substring
+            // check below stays meaningful regardless of the runner's locale.
+            // UC04 § B4 — --all so stopped projects show up too.
+            ProcessExecutor.Result ls = executor.run(
+                    List.of("docker", "compose", "ls", "--all", "--format", "json"),
+                    null,
+                    Map.of("LC_ALL", "C"),
+                    timeout);
+            if (ls.exitCode() == 0) {
+                composeListAllSupported = Boolean.TRUE;
+                try {
+                    JsonNode root = JSON.readTree(ls.stdout().isBlank() ? "[]" : ls.stdout());
+                    // Compose may emit either an array or NDJSON.
+                    if (root.isArray()) {
+                        for (JsonNode n : root) {
+                            addProject(projectNames, n);
+                        }
+                    } else if (root.isObject()) {
+                        addProject(projectNames, root);
+                        // Continue parsing NDJSON tail manually if present.
+                        try (var p = JSON.getFactory().createParser(ls.stdout())) {
+                            while (p.nextToken() != null) {
+                                if (p.currentToken() == com.fasterxml.jackson.core.JsonToken.START_OBJECT) {
+                                    JsonNode node = JSON.readTree(p);
+                                    addProject(projectNames, node);
+                                }
+                            }
+                        } catch (IOException ignored) {
+                            // best-effort
                         }
                     }
-                } catch (IOException ignored) {
-                    // best-effort
+                } catch (IOException ioe) {
+                    LOG.warn("Cannot parse docker compose ls output: {}", ioe.toString());
+                    return List.of();
                 }
+            } else if (isUnsupportedAllFlag(ls.exitCode(), ls.stderr())) {
+                // UC-15: docker compose binary on this runner doesn't know --all.
+                // Latch the sticky flag so subsequent enumerate() calls skip the
+                // probe, then take the fallback once for THIS call.
+                composeListAllSupported = Boolean.FALSE;
+                LOG.info(
+                        "docker compose ls rejected --all (exit={}); falling back to docker ps. stderr={}",
+                        ls.exitCode(),
+                        ls.stderr());
+                if (!enumerateViaDockerPs(projectNames, timeout)) {
+                    return List.of();
+                }
+            } else {
+                // Some other failure (timeout, docker daemon down, transient error).
+                // Leave the flag at its current value (null or TRUE) so the next
+                // enumerate re-probes.
+                LOG.warn("docker compose ls failed (exit={}): {}", ls.exitCode(), ls.stderr());
+                return List.of();
             }
-        } catch (IOException ioe) {
-            LOG.warn("Cannot parse docker compose ls output: {}", ioe.toString());
-            return List.of();
         }
 
         List<SessionRecord> out = new ArrayList<>();
@@ -125,6 +180,97 @@ public class DockerEnumerationService {
         }
         out.sort((a, b) -> Integer.compare(a.n(), b.n()));
         return out;
+    }
+
+    /**
+     * UC-15: detect the literal "docker compose unknown flag: --all" error
+     * shape across the docker-compose binaries we have seen reject it.
+     * docker-compose v2 returns exit=125; older v1 forks return exit=64.
+     * The stderr substring check is case-sensitive — LC_ALL=C on the
+     * invocation keeps it stable across runner locales.
+     */
+    private static boolean isUnsupportedAllFlag(int exitCode, String stderr) {
+        return (exitCode == 125 || exitCode == 64) && stderr != null && stderr.contains("--all");
+    }
+
+    /**
+     * UC-15 fallback enumeration when {@code docker compose ls --all} is
+     * not understood by the runner's docker-compose binary. Lists every
+     * container (running or stopped) that carries the
+     * {@code com.docker.compose.project} label, dedupes by project name,
+     * and filters by {@link #PROJECT_RE} just like the modern path.
+     *
+     * @return {@code true} on success (even if the result set is empty);
+     *     {@code false} if the {@code docker ps} call itself failed (the
+     *     caller turns this into an empty enumeration without flipping
+     *     the sticky flag).
+     */
+    private boolean enumerateViaDockerPs(Map<Integer, String> projectNames, Duration timeout) throws IOException {
+        ProcessExecutor.Result ps = executor.run(
+                List.of(
+                        "docker",
+                        "ps",
+                        "-a",
+                        "--format",
+                        "json",
+                        "--filter",
+                        "label=com.docker.compose.project"),
+                null,
+                Map.of("LC_ALL", "C"),
+                timeout);
+        if (ps.exitCode() != 0) {
+            LOG.warn("docker ps fallback failed (exit={}): {}", ps.exitCode(), ps.stderr());
+            return false;
+        }
+        String stdout = ps.stdout();
+        if (stdout == null || stdout.isBlank()) {
+            return true;
+        }
+        // docker ps --format json emits NDJSON (one object per line). Reuse
+        // the same streaming parser pattern as the compose ls NDJSON tail.
+        try (var p = JSON.getFactory().createParser(stdout)) {
+            while (p.nextToken() != null) {
+                if (p.currentToken() == com.fasterxml.jackson.core.JsonToken.START_OBJECT) {
+                    JsonNode node = JSON.readTree(p);
+                    String project = extractComposeProjectLabel(node.get("Labels"));
+                    if (project == null) {
+                        continue;
+                    }
+                    Matcher m = PROJECT_RE.matcher(project);
+                    if (m.matches()) {
+                        projectNames.putIfAbsent(Integer.parseInt(m.group(1)), project);
+                    }
+                }
+            }
+        } catch (IOException ignored) {
+            // best-effort — partial NDJSON is still useful.
+        }
+        return true;
+    }
+
+    /**
+     * Pull the {@code com.docker.compose.project} value from a
+     * {@code docker ps --format json} {@code Labels} field. Older docker
+     * binaries serialise labels as a comma-joined {@code "k1=v1,k2=v2"}
+     * string; newer ones emit a JSON object. Handle both shapes.
+     */
+    private static String extractComposeProjectLabel(JsonNode labels) {
+        if (labels == null) {
+            return null;
+        }
+        if (labels.isObject()) {
+            JsonNode v = labels.get("com.docker.compose.project");
+            return v == null || !v.isTextual() ? null : v.asText();
+        }
+        if (labels.isTextual()) {
+            for (String kv : labels.asText().split(",")) {
+                int eq = kv.indexOf('=');
+                if (eq > 0 && "com.docker.compose.project".equals(kv.substring(0, eq).trim())) {
+                    return kv.substring(eq + 1).trim();
+                }
+            }
+        }
+        return null;
     }
 
     /**
@@ -172,10 +318,30 @@ public class DockerEnumerationService {
 
     private String containerId(String project, Duration timeout) {
         try {
-            // UC04 § B4 — --all so the container id of a stopped/exited
-            // container is also returned (default ps -q hides them).
-            ProcessExecutor.Result r = executor.run(
-                    List.of("docker", "compose", "-p", project, "ps", "-q", "--all", "claude-sandbox"), null, timeout);
+            List<String> argv;
+            if (Boolean.FALSE.equals(composeListAllSupported)) {
+                // UC-15 fallback: this runner's docker-compose doesn't speak
+                // --all, so ask docker ps directly for the container that
+                // carries the matching compose labels. The compose project
+                // label was authoritative when enumerate() picked this
+                // project up; using the same label here keeps the two
+                // halves of enumeration consistent.
+                argv = List.of(
+                        "docker",
+                        "ps",
+                        "-a",
+                        "-q",
+                        "--filter",
+                        "label=com.docker.compose.project=" + project,
+                        "--filter",
+                        "label=com.docker.compose.service=claude-sandbox");
+            } else {
+                // TRUE or null (unknown) — modern argv. UC04 § B4 — --all so
+                // the container id of a stopped/exited container is also
+                // returned (default ps -q hides them).
+                argv = List.of("docker", "compose", "-p", project, "ps", "-q", "--all", "claude-sandbox");
+            }
+            ProcessExecutor.Result r = executor.run(argv, null, Map.of("LC_ALL", "C"), timeout);
             if (r.exitCode() != 0) {
                 return null;
             }
