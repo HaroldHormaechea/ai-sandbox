@@ -65,6 +65,39 @@ class UnitFileContractTest {
                 .contains("/etc/ai-sandbox-server/clients");
     }
 
+    /**
+     * UC-15 AC3 / AC7 — the systemd unit MUST point {@code DOCKER_CONFIG}
+     * at the state-directory-managed docker config root so docker
+     * invocations don't reach into {@code $HOME/.docker} (which is
+     * unreadable under {@code ProtectHome=true}, and emits a
+     * "WARNING: Error loading config file" line on every invocation).
+     *
+     * <p>The chosen redirect path is {@code
+     * /var/lib/ai-sandbox-server/docker-config} — already covered by the
+     * existing {@code ReadWritePaths=/var/lib/ai-sandbox-server} entry
+     * asserted by {@link #read_write_paths_includes_clients_allowlist_carve_out()},
+     * and pre-created with mode 0700 by the postinst (asserted by
+     * {@link com.aisandbox.server.release.DebPostinstContractTest}).
+     */
+    @Test
+    void environment_includes_docker_config_redirect() throws IOException {
+        assumeTrue(
+                Files.isRegularFile(UNIT_FILE),
+                "unit file not found at " + UNIT_FILE + " — test must run with cwd=server/");
+
+        Set<String> envEntries = parseEnvironmentEntries();
+
+        // UC-15 AC7 — the literal key=value pair MUST appear in some
+        // Environment= line in [Service]. The pair check is exact (not
+        // a substring) so a typo'd path or a wrong owner directory
+        // surfaces as a test failure.
+        assertThat(envEntries)
+                .as("UC-15 AC3 / AC7 — Environment= in [Service] MUST set DOCKER_CONFIG to the "
+                        + "state-directory-managed docker config root so docker invocations don't "
+                        + "reach into ai-sandbox-server's locked-down $HOME under ProtectHome=true")
+                .contains("DOCKER_CONFIG=/var/lib/ai-sandbox-server/docker-config");
+    }
+
     @Test
     void read_only_paths_still_locks_down_etc_tree_parent() throws IOException {
         assumeTrue(
@@ -119,5 +152,52 @@ class UnitFileContractTest {
             }
         }
         return values;
+    }
+
+    /**
+     * Parse every {@code Environment=KEY=VALUE} entry in the
+     * {@code [Service]} section. Systemd accepts multiple {@code KEY=VAL}
+     * pairs on a single {@code Environment=} line separated by spaces
+     * (with optional quoting), but the current unit file uses one entry
+     * per line and the UC-15 invariant ({@code
+     * DOCKER_CONFIG=/var/lib/ai-sandbox-server/docker-config}) is one
+     * such single-pair line. Returns the set of literal {@code KEY=VAL}
+     * tokens across every {@code Environment=} line, so a caller can
+     * assert {@code .contains("DOCKER_CONFIG=/var/lib/...")} without
+     * caring whether someone groups multiple variables onto one line.
+     *
+     * <p>Mirrors the parsing pattern in {@link #parseSpaceSeparatedKey(String)}
+     * (Service-section gating + comment skipping) so the two helpers
+     * have a consistent surface.
+     */
+    private static Set<String> parseEnvironmentEntries() throws IOException {
+        Set<String> entries = new LinkedHashSet<>();
+        boolean inService = false;
+        String prefix = "Environment=";
+        for (String raw : Files.readAllLines(UNIT_FILE)) {
+            String line = raw.strip();
+            if (line.isEmpty() || line.startsWith("#") || line.startsWith(";")) {
+                continue;
+            }
+            if (line.startsWith("[") && line.endsWith("]")) {
+                inService = "[Service]".equalsIgnoreCase(line);
+                continue;
+            }
+            if (!inService) {
+                continue;
+            }
+            if (line.startsWith(prefix)) {
+                String tail = line.substring(prefix.length()).trim();
+                // Single-pair line is the only shape the current unit
+                // file uses. Split on whitespace defensively in case a
+                // future edit groups multiple variables — entries are
+                // KEY=VALUE tokens.
+                Arrays.stream(tail.split("\\s+"))
+                        .map(String::trim)
+                        .filter(s -> !s.isEmpty() && s.contains("="))
+                        .forEach(entries::add);
+            }
+        }
+        return entries;
     }
 }
