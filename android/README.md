@@ -55,6 +55,22 @@ The release tasks require a signing config — see "Signing" below.
   `CertificatePinner` configured from the QR's `pin` field at
   enrollment time. mTLS identity comes from the Android KeyStore via
   a hardware-backed (when available) `X509KeyManager`.
+- **Crypto provider — BouncyCastle (`bcprov-jdk18on:1.79`)** is
+  bundled as a JCE provider so the client can unwrap the modern
+  PBES2 PKCS#12 bundles emitted by `server-v0.0.12+` (the JDK 21
+  default for `KeyStore.getInstance("PKCS12")` since Java 14+, which
+  the stock Android `"BC"` provider does not handle — it has no
+  `SecretKeyFactory` registered under PBKDF2 OID
+  `1.2.840.113549.1.5.12`). The real provider is registered at
+  process start under the distinct name `BC-ai-sandbox-client` (so
+  the stock `"BC"` is left untouched) at lowest priority via
+  `Security.addProvider`, and `KeyStoreIdentityManager` looks it up
+  explicitly via `KeyStore.getInstance("PKCS12", "BC-ai-sandbox-client")`.
+  TLS continues through Conscrypt for hardware-accelerated AES/AEAD;
+  BC is reserved for the PKCS#12 enrollment-cert import unwrap
+  (PBKDF2-HMAC-SHA256 + AES-256 unwrap on the JDK 21 default
+  emission). See [UC13](../use-cases/13-android-bouncycastle-pkcs12-import-fix.md)
+  for the empirical failure mode and the integration rationale.
 - **ZXing** for QR decode in onboarding. Chosen over ML Kit
   specifically to avoid pulling `play-services-mlkit-*` into the dep
   graph — AC29 forbids any `play-services-*` artefact, and the CI

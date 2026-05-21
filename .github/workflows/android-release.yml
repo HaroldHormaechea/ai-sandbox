@@ -99,6 +99,40 @@ jobs:
           echo "apk=$apk" >> "$GITHUB_OUTPUT"
           echo "aab=$aab" >> "$GITHUB_OUTPUT"
 
+      - name: Verify BouncyCastle survives in release APK (UC13 AC13)
+        # AC13 requires the BC provider classes to ship in the final
+        # release APK. Pure unzip+strings+grep — no Android SDK needed.
+        run: |
+          # Intentionally NOT using `pipefail`: `grep -q` exits early
+          # on match → SIGPIPE → unzip exit 141 → pipefail would return
+          # non-zero → `if !` would invert into a false-positive error.
+          set -eu
+          apk="${{ steps.artifacts.outputs.apk }}"
+          if ! unzip -p "$apk" 'classes*.dex' | strings | grep -q 'Lorg/bouncycastle/jce/provider/BouncyCastleProvider;'; then
+            echo "::error::BouncyCastleProvider descriptor not found in $apk DEX — UC13 AC13 violated"
+            exit 1
+          fi
+          echo "AC13 release APK check OK: BouncyCastleProvider descriptor present in $apk"
+
+      - name: Verify BouncyCastle survives in release AAB (UC13 AC13)
+        # Same check against the AAB, plus a Maven-coord cross-check
+        # against the bundle's dependency-info protobuf as forward
+        # defence (catches future shrinker variants that might rewrite
+        # descriptors but leave dependency-info intact).
+        run: |
+          # See AC13 release APK step above for the no-pipefail rationale.
+          set -eu
+          aab="${{ steps.artifacts.outputs.aab }}"
+          if ! unzip -p "$aab" 'base/dex/*.dex' | strings | grep -q 'Lorg/bouncycastle/jce/provider/BouncyCastleProvider;'; then
+            echo "::error::BouncyCastleProvider descriptor not found in $aab base/dex/*.dex — UC13 AC13 violated"
+            exit 1
+          fi
+          if ! unzip -p "$aab" BUNDLE-METADATA/com.android.tools.build.libraries/dependencies.pb | strings | grep -q 'bcprov-jdk18on'; then
+            echo "::error::bcprov-jdk18on coordinate missing from $aab dependencies.pb — UC13 AC13 cross-check failed"
+            exit 1
+          fi
+          echo "AC13 release AAB check OK: BouncyCastleProvider descriptor + bcprov-jdk18on coord present in $aab"
+
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
@@ -107,7 +141,35 @@ jobs:
             ${{ steps.artifacts.outputs.apk }}
             ${{ steps.artifacts.outputs.aab }}
           fail_on_unmatched_files: true
+          # UC13 AC10 — prepend release-notes body with the BC integration
+          # callout; `generate_release_notes: true` appends the auto-generated
+          # commit / PR list after this body. The text below records (a) the
+          # new Android-side BC dependency, (b) the unchanged server crypto,
+          # and (c) the explicit reasoning for the asymmetric fix.
           generate_release_notes: true
+          body: |
+            ## Crypto provider change (UC13)
+
+            This release adds **BouncyCastle (`bcprov-jdk18on:1.79`)** as a
+            new Android-side dependency. It is registered at process start
+            under the distinct provider name `BC-ai-sandbox-client` (so the
+            Android-stock `"BC"` provider remains untouched) and is used
+            exclusively for the PKCS#12 enrollment-cert import unwrap.
+            TLS continues through Conscrypt for hardware-accelerated
+            AES/AEAD — BC is **not** in the TLS path.
+
+            **Server crypto is unchanged.** The server's
+            `KeyStore.getInstance("PKCS12")` emission stays on modern
+            PBES2 (PBKDF2-HMAC-SHA256 + AES-256, the JDK 21 default since
+            Java 14+).
+
+            Why the asymmetric fix: server stays on modern PBKDF2-AES;
+            Android gets the real BC because Conscrypt's stock provider
+            doesn't recognize the bare PBKDF2 OID `1.2.840.113549.1.5.12`
+            during private-key unwrap. The alternative — regressing the
+            server to legacy PKCS#12 v1 (SHA1+3DES) — was rejected on
+            crypto-strength grounds (3DES is FIPS-deprecated and SHA1's
+            collision posture is well-known).
 
       - name: Wipe keystore from tmpfs
         # Defence in depth — runners are ephemeral, but explicit cleanup

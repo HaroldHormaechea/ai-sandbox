@@ -11,8 +11,9 @@ import org.bouncycastle.jce.provider.BouncyCastleProvider
  *
  * ### Why this exists at all
  *
- * The server uses the JDK 21 default for `KeyStore.getInstance("PKCS12")`
- * which, since Java 14+, emits **PKCS#12 v3 / PBES2** — i.e. the
+ * The server uses the JDK 21 default behaviour for the **single-argument**
+ * form of `KeyStore.getInstance(...)` with type `PKCS12`, which since
+ * Java 14+ emits **PKCS#12 v3 / PBES2** — i.e. the
  * private key is wrapped using PBKDF2-HMAC-SHA256 + AES-256. During
  * unwrap, the JCA looks up a `SecretKeyFactory` for the **bare PBKDF2
  * OID `1.2.840.113549.1.5.12`** (not the named string

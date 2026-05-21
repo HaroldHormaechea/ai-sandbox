@@ -80,6 +80,69 @@ jobs:
             exit 1
           fi
 
+      - name: Verify no unqualified PKCS12 KeyStore call (UC13 AC6)
+        # Every PKCS#12 import path in the Android module must name the
+        # BouncyCastle provider explicitly:
+        #     KeyStore.getInstance("PKCS12", "BC-ai-sandbox-client")
+        # Calling `KeyStore.getInstance("PKCS12")` without the provider
+        # argument silently routes through Android's stock PKCS12 stack,
+        # which fails on PBES2 (PBKDF2 OID 1.2.840.113549.1.5.12) — the
+        # exact bug UC13 closes. This grep is a negative test: it must
+        # find ZERO hits, and exits non-zero if any single-arg call
+        # creeps back in.
+        run: |
+          if grep -RnE 'KeyStore\.getInstance\("PKCS12"\s*\)' android/src/main/kotlin/; then
+            echo "::error::Unqualified KeyStore.getInstance(\"PKCS12\") detected — UC13 AC6 requires the explicit \"BC-ai-sandbox-client\" provider argument"
+            exit 1
+          fi
+
+      - name: Verify BouncyCastle survives in debug APK (UC13 AC13)
+        # AC13 requires the BC provider classes to ship in the final
+        # APK / AAB. We unzip the DEX files, run `strings`, and grep
+        # for the BouncyCastleProvider type descriptor. Pure-grep so
+        # there's no Android SDK dependency at this step.
+        run: |
+          # Intentionally NOT using `pipefail`: `grep -q` exits as soon
+          # as it finds a match, which sends SIGPIPE to `unzip -p` and
+          # makes pipefail return the unzip exit code (141), which would
+          # invert through `if !` into a false-positive error. Without
+          # pipefail the pipeline's exit is grep's (the rightmost stage),
+          # which is exactly what we want.
+          set -eu
+          apk="$(ls android/build/outputs/apk/debug/*.apk | head -1)"
+          if [ -z "$apk" ] || [ ! -f "$apk" ]; then
+            echo "::error::Debug APK not found under android/build/outputs/apk/debug/"
+            exit 1
+          fi
+          if ! unzip -p "$apk" 'classes*.dex' | strings | grep -q 'Lorg/bouncycastle/jce/provider/BouncyCastleProvider;'; then
+            echo "::error::BouncyCastleProvider descriptor not found in $apk DEX — UC13 AC13 violated"
+            exit 1
+          fi
+          echo "AC13 APK check OK: BouncyCastleProvider descriptor present in $apk"
+
+      - name: Verify BouncyCastle survives in debug AAB (UC13 AC13)
+        # AAB packaging stores DEX under base/dex/. We also cross-check
+        # the Maven coordinate in the AAB's dependency-info protobuf as
+        # forward defence in case a future shrinker variant rewrites
+        # descriptors but leaves dependency-info intact.
+        run: |
+          # See AC13 APK step above for the no-pipefail rationale.
+          set -eu
+          aab="$(ls android/build/outputs/bundle/debug/*.aab | head -1)"
+          if [ -z "$aab" ] || [ ! -f "$aab" ]; then
+            echo "::error::Debug AAB not found under android/build/outputs/bundle/debug/"
+            exit 1
+          fi
+          if ! unzip -p "$aab" 'base/dex/*.dex' | strings | grep -q 'Lorg/bouncycastle/jce/provider/BouncyCastleProvider;'; then
+            echo "::error::BouncyCastleProvider descriptor not found in $aab base/dex/*.dex — UC13 AC13 violated"
+            exit 1
+          fi
+          if ! unzip -p "$aab" BUNDLE-METADATA/com.android.tools.build.libraries/dependencies.pb | strings | grep -q 'bcprov-jdk18on'; then
+            echo "::error::bcprov-jdk18on coordinate missing from $aab dependencies.pb — UC13 AC13 cross-check failed"
+            exit 1
+          fi
+          echo "AC13 AAB check OK: BouncyCastleProvider descriptor + bcprov-jdk18on coord present in $aab"
+
       - name: Upload lint XML report
         # Always upload even on failure so reviewers can pull the report
         # without re-running the job.
