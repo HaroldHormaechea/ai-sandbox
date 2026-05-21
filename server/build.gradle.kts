@@ -159,6 +159,50 @@ val integrationTest by tasks.registering(Test::class) {
     }
 }
 
+// ── UC-17 real-Docker integration step ──────────────────────────────────────
+//
+// Drives `server/ci/real-docker-integration.sh` against the just-built
+// fat-jars. The script boots a real Reactor-Netty server, issues mTLS
+// curls against /v1/healthz and /v1/sessions*, and asserts the server
+// log is clean of the three forbidden post-commit-UOE patterns
+// ("UnsupportedOperationException", "ServerHttpResponse already
+// committed", "Unmapped exception in REST flow"). This catches the
+// UC-17 regression class that unit tests structurally cannot
+// (MockServerWebExchange never reaches COMMITTED; synthetic mid-stream
+// Flux errors never trigger the Mono.then header-write path).
+//
+// Gated on AI_SANDBOX_REAL_DOCKER_IT=1 so the default `:server:test`
+// and `:server:integrationTest` lanes stay independent of host Docker
+// + passwordless sudo. CI sets the env var explicitly on the
+// real-docker-integration job; local invocations require the operator
+// to opt in the same way.
+//
+// stdout + stderr from the script (and from the embedded server boot)
+// land under `build/real-docker-integration-test/` so the GH Actions
+// `actions/upload-artifact@v4` step can grab them on failure.
+val realDockerIntegrationTest by tasks.registering(Exec::class) {
+    group = "verification"
+    description = "Boots a real server JAR + docker compose project and asserts no post-commit UOE log lines."
+    dependsOn("bootJar", "aisandboxctlJar")
+    workingDir = rootProject.projectDir
+    executable = "bash"
+    args = listOf("server/ci/real-docker-integration.sh")
+    // Pass through every AI_SANDBOX_* env var the script may consult
+    // (the script honours AI_SANDBOX_SERVER_PORT today; future tweaks
+    // can plug in without re-wiring this task). RUNNER_TEMP is honoured
+    // too so GH Actions can pin the scratch tree under $RUNNER_TEMP.
+    environment("AI_SANDBOX_REAL_DOCKER_IT", System.getenv("AI_SANDBOX_REAL_DOCKER_IT") ?: "")
+    if (System.getenv("AI_SANDBOX_SERVER_PORT") != null) {
+        environment("AI_SANDBOX_SERVER_PORT", System.getenv("AI_SANDBOX_SERVER_PORT")!!)
+    }
+    if (System.getenv("RUNNER_TEMP") != null) {
+        environment("RUNNER_TEMP", System.getenv("RUNNER_TEMP")!!)
+    }
+    if (System.getenv("AI_SANDBOX_REAL_DOCKER_IT") != "1") {
+        enabled = false
+    }
+}
+
 // ── OAS generation (docs-only profile) ──────────────────────────────────────
 val generateOpenApiDocs by tasks.registering(JavaExec::class) {
     group = "documentation"
