@@ -21,4 +21,5 @@ Statuses:
 | 09 | [use-cases/09-spki-cert-pin-algorithm.md](use-cases/09-spki-cert-pin-algorithm.md) | SPKI cert-pin algorithm reconciliation | done | 2026-05-19 |
 | 10 | [use-cases/10-android-cert-pin-chain-cleaning-fix.md](use-cases/10-android-cert-pin-chain-cleaning-fix.md) | Android cert-pin chain-cleaning fix | done | 2026-05-20 |
 | 11 | [use-cases/11-enrollment-runtime-fixes.md](use-cases/11-enrollment-runtime-fixes.md) | Enrollment-flow latent bug fixes — systemd ReadWritePaths + WebFlux exception advice + token rollback | done | 2026-05-21 |
+| 12 | [use-cases/12-webflux-exception-advice-routing-fix.md](use-cases/12-webflux-exception-advice-routing-fix.md) | Fix UC-11 regression — WebFlux exception chain bypasses EnrollmentWebExceptionHandler | pending | 2026-05-21 |
 
