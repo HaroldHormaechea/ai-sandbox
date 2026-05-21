@@ -72,8 +72,28 @@ import reactor.core.publisher.Mono;
  * already committed"} log noise; we cover that by invoking the filter
  * directly with an oversize payload and asserting the response body
  * + log silence.
+ *
+ * <h2>UC-12 cross-reference — routing concern moved out</h2>
+ *
+ * <p>UC-12 renamed this file from
+ * {@code EnrollmentWebExceptionHandlerIntegrationTest} to drop the
+ * "IntegrationTest" suffix that was always misleading: the assertions
+ * here are unit-style — they drive the handler directly against a
+ * {@link MockServerWebExchange} and never boot a Spring context, never
+ * cross the {@code WebHttpHandlerBuilder} dispatch ordering, and never
+ * exercise the {@code @RestControllerAdvice} vs. {@link
+ * org.springframework.web.server.WebExceptionHandler} layering that
+ * UC-11's v0.0.12 release got wrong. The routing concern (does the
+ * exception actually reach this handler when both {@link
+ * ProblemDetailsAdvice} and this bean are registered in the same
+ * Spring context?) is now covered by
+ * {@code EnrollmentExceptionRoutingTest} — a real
+ * {@code @SpringBootTest(RANDOM_PORT)} test that boots both advices in
+ * the same context and POSTs over the wire. The two tests are
+ * complementary: this one pins the wire shape per exception; that one
+ * pins that the chain delivers the exception to this handler.
  */
-class EnrollmentWebExceptionHandlerIntegrationTest {
+class EnrollmentWebExceptionHandlerTest {
 
     private static final String FAKE_TOKEN =
             "fake-test-token-not-a-real-key" + "0".repeat(33); // 63+ chars, matches body validator pattern.

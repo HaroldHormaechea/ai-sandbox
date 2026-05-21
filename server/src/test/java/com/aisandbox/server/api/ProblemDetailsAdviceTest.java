@@ -54,12 +54,12 @@ class ProblemDetailsAdviceTest {
         assertThat(pd.getProperties()).containsEntry("code", "bad_request");
     }
 
-    @Test
-    void unmapped_throwable_falls_back_to_500_internal_error() {
-        ProblemDetail pd = advice.handleAny(new RuntimeException("boom"));
-        assertThat(pd.getStatus()).isEqualTo(500);
-        assertThat(pd.getProperties()).containsEntry("code", "internal_error");
-    }
+    // UC-12 — `unmapped_throwable_falls_back_to_500_internal_error` removed.
+    // The catch-all `@ExceptionHandler(Throwable.class)` on
+    // `ProblemDetailsAdvice` was removed (option (a) from the UC-12
+    // proposal); the unmapped-exception fallback is now a separate
+    // `WebExceptionHandler` whose contract is pinned by
+    // `com.aisandbox.server.api.error.GenericProblemFallbackHandlerTest`.
 
     @Test
     void build_factory_emits_type_uri_and_lowercase_code() {
