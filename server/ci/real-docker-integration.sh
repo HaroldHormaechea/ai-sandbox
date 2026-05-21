@@ -127,8 +127,22 @@ bootstrap_pki() {
         sudo_cmd="sudo --preserve-env=JAVA_HOME -n"
     fi
 
+    # NOTE on `${JAVA_HOME:-/usr}/bin/java` under sudo:
+    # On a multi-JDK runner (ubuntu-24.04 GHA has /usr/bin/java pointing
+    # at JDK 17 by default; setup-java@v4 sets JAVA_HOME to JDK 21 but
+    # leaves /usr/bin/java alone), a bare `java` invocation inside a
+    # sudo'd command resolves via sudo's `secure_path` BEFORE the
+    # --preserve-env=JAVA_HOME env var is consulted — so bare `java`
+    # picks JDK 17 and aisandboxctl.jar (compiled for class file v65 /
+    # JDK 21) throws UnsupportedClassVersionError before the picocli
+    # @Command even gets a chance to run. Using the absolute path
+    # ${JAVA_HOME}/bin/java skips secure_path resolution entirely.
+    # The `:-/usr` default keeps the script working on a developer
+    # box where JAVA_HOME is unset (falls back to /usr/bin/java, the
+    # same target as bare `java`). See QA's UC-17 fix-back for the
+    # empirical trace.
     log "bootstrap_pki: running aisandboxctl pki init (user=$aisbx_user)"
-    $sudo_cmd java -jar "$CTL_JAR" pki init \
+    $sudo_cmd "${JAVA_HOME:-/usr}/bin/java" -jar "$CTL_JAR" pki init \
         --pki-dir        "$SCRATCH/pki" \
         --clients-dir    "$SCRATCH/clients" \
         --enrollment-dir "$SCRATCH/enrollment" \
