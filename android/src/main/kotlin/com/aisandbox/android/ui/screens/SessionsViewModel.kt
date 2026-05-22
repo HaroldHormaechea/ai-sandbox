@@ -1,20 +1,14 @@
 package com.aisandbox.android.ui.screens
 
 import android.app.Application
-import android.util.Log
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.aisandbox.android.AiSandboxApplication
-import com.aisandbox.android.net.AiSandboxHttpClient
-import com.aisandbox.android.net.ApiResult
 import com.aisandbox.android.net.ServerProfile
 import com.aisandbox.android.net.SessionSummary
-import com.aisandbox.android.net.SessionsApi
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.launch
 
 /**
  * UC04-2 sessions list ViewModel.
@@ -33,6 +27,13 @@ import kotlinx.coroutines.launch
  * <p>On entry, [refresh] is called once; the screen ALSO subscribes to
  * `Lifecycle.Event.ON_RESUME` and re-fetches when coming back from the
  * Terminal screen so a backgrounded list doesn't show stale state.
+ *
+ * <p>This class is now a thin Android wrapper: all create / list / delete
+ * orchestration lives in [SessionsCoordinator] (a plain, JVM-unit-testable
+ * class). The wrapper owns the [MutableStateFlow], wires the coordinator's
+ * three Android dependencies (profile supplier, API factory, coroutine
+ * scope), and exposes the read-only [state] plus pass-through methods to
+ * Compose.
  */
 class SessionsViewModel(application: Application) : AndroidViewModel(application) {
 
@@ -41,101 +42,24 @@ class SessionsViewModel(application: Application) : AndroidViewModel(application
     private val _state = MutableStateFlow(SessionsUiState())
     val state: StateFlow<SessionsUiState> = _state.asStateFlow()
 
+    private val coordinator = SessionsCoordinator(
+        state = _state,
+        scope = viewModelScope,
+        profileSupplier = { container.profileStore.current() },
+        apiFactory = { profile -> container.sessionsApi(container.httpClient(profile)) },
+    )
+
     init {
         refresh()
     }
 
-    fun refresh() {
-        viewModelScope.launch {
-            _state.value = _state.value.copy(loading = true, lastError = null)
-            val profile = container.profileStore.current()
-            if (profile == null) {
-                _state.value = SessionsUiState(loading = false, lastError = "no_profile")
-                return@launch
-            }
-            val client = container.httpClient(profile)
-            val api = container.sessionsApi(client)
-            when (val r = api.list()) {
-                is ApiResult.Success -> {
-                    _state.value = _state.value.copy(
-                        loading = false,
-                        sessions = r.value,
-                        profile = profile,
-                    )
-                }
-                is ApiResult.HttpFailure -> {
-                    _state.value = _state.value.copy(
-                        loading = false,
-                        lastError = "${r.code} (${r.status})",
-                    )
-                }
-            }
-        }
-    }
+    fun refresh() = coordinator.refresh()
 
-    fun selectFilter(filter: SessionsFilter) {
-        _state.value = _state.value.copy(filter = filter)
-    }
+    fun selectFilter(filter: SessionsFilter) = coordinator.selectFilter(filter)
 
-    fun spawn(label: String?) {
-        if (_state.value.spawning) return
-        viewModelScope.launch {
-            _state.value = _state.value.copy(spawning = true, lastError = null)
-            // Optimistic insertion (AC9) — append a synthetic "starting"
-            // row immediately so the FAB tap feels instant. The next
-            // refresh reconciles N + uptime.
-            val optimisticN = (_state.value.sessions.maxOfOrNull { it.n } ?: 0) + 1
-            val optimistic = SessionSummary(
-                n = optimisticN,
-                label = label.orEmpty(),
-                tmuxTitle = "",
-                state = "starting",
-                uptimeSec = 0L,
-                activeStreams = 0,
-                startedAt = null,
-            )
-            _state.value = _state.value.copy(sessions = _state.value.sessions + optimistic)
+    fun spawn(label: String?) = coordinator.spawn(label)
 
-            val profile = _state.value.profile ?: run {
-                _state.value = _state.value.copy(spawning = false, lastError = "no_profile")
-                return@launch
-            }
-            val api = container.sessionsApi(container.httpClient(profile))
-            when (val r = api.spawn(label)) {
-                is ApiResult.Success -> {
-                    // Replace the optimistic row with the server's
-                    // authoritative summary on the next refresh.
-                    refresh()
-                }
-                is ApiResult.HttpFailure -> {
-                    // Roll back the optimistic insertion + surface the error.
-                    _state.value = _state.value.copy(
-                        sessions = _state.value.sessions.filterNot { it.n == optimisticN && it === optimistic },
-                        lastError = "${r.code} (${r.status})",
-                    )
-                }
-            }
-            _state.value = _state.value.copy(spawning = false)
-        }
-    }
-
-    fun delete(n: Int, force: Boolean) {
-        viewModelScope.launch {
-            val profile = container.profileStore.current() ?: return@launch
-            val api = container.sessionsApi(container.httpClient(profile))
-            when (val r = api.delete(n, force)) {
-                is ApiResult.Success -> refresh()
-                is ApiResult.HttpFailure -> {
-                    Log.w(TAG, "Delete $n failed: ${r.code} (${r.status}) ${r.detail}")
-                    _state.value = _state.value.copy(lastError = "${r.code} (${r.status})")
-                }
-            }
-        }
-    }
-
-    companion object {
-        private const val TAG = "SessionsVM"
-    }
+    fun delete(n: Int, force: Boolean) = coordinator.delete(n, force)
 }
 
 /** Read-only state surfaced to the Compose layer. */
