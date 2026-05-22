@@ -29,3 +29,6 @@ server/build/
 server/bin/
 server/.gradle/
 *.class
+
+# Machine-specific Android SDK location (written by local dev setup; never commit).
+local.properties
