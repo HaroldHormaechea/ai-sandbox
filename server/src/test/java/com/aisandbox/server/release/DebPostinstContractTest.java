@@ -149,8 +149,6 @@ class DebPostinstContractTest {
                 .contains("sudo aisandboxctl onboard");
 
         // Install never fails because of onboarding.
-        assertThat(text)
-                .as("UC-17 — postinst MUST still end with exit 0")
-                .containsPattern("(?m)^exit 0\\s*$");
+        assertThat(text).as("UC-17 — postinst MUST still end with exit 0").containsPattern("(?m)^exit 0\\s*$");
     }
 }

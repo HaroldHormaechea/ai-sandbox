@@ -269,7 +269,8 @@ class OnboardCommandTest {
 
         ByteArrayOutputStream outBuf = new ByteArrayOutputStream();
         ByteArrayOutputStream errBuf = new ByteArrayOutputStream();
-        int exit = executeCapturing(new CommandLine(onboard(runner, io, tmp.resolve("ssh-dir"))), args(layout), outBuf, errBuf);
+        int exit = executeCapturing(
+                new CommandLine(onboard(runner, io, tmp.resolve("ssh-dir"))), args(layout), outBuf, errBuf);
 
         assertThat(exit).isZero();
         String stdout = outBuf.toString();
@@ -289,7 +290,8 @@ class OnboardCommandTest {
         assertThat(Files.readString(layout.gitKeyOut())).isEqualTo("present-git-key");
         assertThat(Files.readString(layout.gitconfigOut())).isEqualTo("present-gitconfig");
         assertThat(Files.readString(layout.ghTokenOut())).isEqualTo("present-gh-token");
-        assertThat(Files.readString(layout.claudeOut().resolve("settings.json"))).isEqualTo("present-claude");
+        assertThat(Files.readString(layout.claudeOut().resolve("settings.json")))
+                .isEqualTo("present-claude");
 
         // No step shelled out (no ssh-keygen probe, no docker).
         assertThat(runner.captureCalls).isEmpty();
@@ -358,8 +360,8 @@ class OnboardCommandTest {
 
         ByteArrayOutputStream outBuf = new ByteArrayOutputStream();
         ByteArrayOutputStream errBuf = new ByteArrayOutputStream();
-        int exit =
-                executeCapturing(new CommandLine(onboard(runner, io, tmp.resolve("ssh-dir"))), args(layout), outBuf, errBuf);
+        int exit = executeCapturing(
+                new CommandLine(onboard(runner, io, tmp.resolve("ssh-dir"))), args(layout), outBuf, errBuf);
 
         // AC1 — defers, does NOT fail the install (exit 0, not 2).
         assertThat(exit).isZero();
@@ -399,7 +401,14 @@ class OnboardCommandTest {
         // git identity supplied, gh + claude opted out, but git-key still missing.
         int exit = executeCapturing(
                 new CommandLine(onboard(runner, io, tmp.resolve("ssh-dir"))),
-                args(layout, "--git-name", "Alice", "--git-email", "alice@example.com", "--no-gh", "--no-claude-preinit"),
+                args(
+                        layout,
+                        "--git-name",
+                        "Alice",
+                        "--git-email",
+                        "alice@example.com",
+                        "--no-gh",
+                        "--no-claude-preinit"),
                 outBuf,
                 errBuf);
 
@@ -432,7 +441,16 @@ class OnboardCommandTest {
         ByteArrayOutputStream errBuf = new ByteArrayOutputStream();
         int exit = executeCapturing(
                 new CommandLine(onboard(runner, io, tmp.resolve("ssh-dir"))),
-                args(layout, "--git-key", srcKey.toString(), "--git-name", "A", "--git-email", "a@b.co", "--no-gh", "--no-claude-preinit"),
+                args(
+                        layout,
+                        "--git-key",
+                        srcKey.toString(),
+                        "--git-name",
+                        "A",
+                        "--git-email",
+                        "a@b.co",
+                        "--no-gh",
+                        "--no-claude-preinit"),
                 outBuf,
                 errBuf);
 
@@ -441,7 +459,9 @@ class OnboardCommandTest {
         // Empty template dir exists for the RO bind-mount to attach to.
         assertThat(layout.claudeOut()).isDirectory();
         try (var s = Files.list(layout.claudeOut())) {
-            assertThat(s.findAny()).as("claude template dir is empty when --no-claude-preinit").isEmpty();
+            assertThat(s.findAny())
+                    .as("claude template dir is empty when --no-claude-preinit")
+                    .isEmpty();
         }
         assertThat(runner.inheritCalls).isEmpty();
     }
@@ -471,7 +491,9 @@ class OnboardCommandTest {
         String stderr = errBuf.toString();
         assertThat(stderr).contains("ai-context:latest").contains("--no-image-build");
         // Fail-fast: no docker image build / inspect, no interactive docker run.
-        assertThat(runner.inheritCalls).as("must not hang on an interactive docker run").isEmpty();
+        assertThat(runner.inheritCalls)
+                .as("must not hang on an interactive docker run")
+                .isEmpty();
         assertThat(dockerInspectCalls(runner)).isZero();
     }
 
@@ -514,7 +536,8 @@ class OnboardCommandTest {
         // All flag-driven steps ran without needing a docker image build.
         assertThat(Files.readAllBytes(layout.gitKeyOut())).isEqualTo(KEY_BYTES);
         assertThat(Files.readString(layout.ghTokenOut())).isEqualTo("<flag-token>\n");
-        assertThat(Files.readString(layout.claudeOut().resolve("settings.json"))).isEqualTo("{\"flag\":true}");
+        assertThat(Files.readString(layout.claudeOut().resolve("settings.json")))
+                .isEqualTo("{\"flag\":true}");
         assertThat(runner.inheritCalls).isEmpty();
         assertThat(dockerInspectCalls(runner)).isZero();
     }
@@ -561,7 +584,11 @@ class OnboardCommandTest {
         assertThat(exit).isZero();
         String stdout = outBuf.toString();
         // Everything (re-)configured, nothing reported unchanged.
-        assertThat(stdout).contains("configured").contains("pki").contains("git-key").contains("gh-token");
+        assertThat(stdout)
+                .contains("configured")
+                .contains("pki")
+                .contains("git-key")
+                .contains("gh-token");
         assertThat(stdout).doesNotContain("unchanged :");
 
         // PKI re-minted by `pki init --force` (real cert generator).
@@ -576,7 +603,8 @@ class OnboardCommandTest {
         assertThat(Files.readString(layout.gitconfigOut()))
                 .isEqualTo("[user]\n\tname = Carol\n\temail = carol@example.com\n");
         assertThat(Files.readString(layout.ghTokenOut())).isEqualTo("<fresh-token>\n");
-        assertThat(Files.readString(layout.claudeOut().resolve("settings.json"))).isEqualTo("{\"fresh\":true}");
+        assertThat(Files.readString(layout.claudeOut().resolve("settings.json")))
+                .isEqualTo("{\"fresh\":true}");
 
         // Flag-driven everywhere ⇒ no interactive docker.
         assertThat(runner.inheritCalls).isEmpty();
@@ -598,7 +626,16 @@ class OnboardCommandTest {
         ByteArrayOutputStream errBuf = new ByteArrayOutputStream();
         int exit = executeCapturing(
                 new CommandLine(onboard(runner, io, tmp.resolve("ssh-dir"))),
-                args(layout, "--git-key", srcKey.toString(), "--git-name", "Dan", "--git-email", "dan@example.com", "--no-gh", "--no-claude-preinit"),
+                args(
+                        layout,
+                        "--git-key",
+                        srcKey.toString(),
+                        "--git-name",
+                        "Dan",
+                        "--git-email",
+                        "dan@example.com",
+                        "--no-gh",
+                        "--no-claude-preinit"),
                 outBuf,
                 errBuf);
 

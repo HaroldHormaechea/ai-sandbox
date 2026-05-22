@@ -342,8 +342,7 @@ class DebPackageTest {
         int off = 8;
         while (off + 60 <= ar.length) {
             String name = new String(ar, off, 16, StandardCharsets.US_ASCII).trim();
-            long size = Long.parseLong(
-                    new String(ar, off + 48, 10, StandardCharsets.US_ASCII).trim());
+            long size = Long.parseLong(new String(ar, off + 48, 10, StandardCharsets.US_ASCII).trim());
             int dataStart = off + 60;
             if (name.startsWith(namePrefix)) {
                 return Arrays.copyOfRange(ar, dataStart, dataStart + (int) size);
