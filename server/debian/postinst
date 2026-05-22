@@ -142,8 +142,10 @@ case "$1" in
 ai-sandbox-server installed and onboarded. Remaining steps:
 
   1. sudo aisandboxctl client mint <name> --pem --out /tmp/<name>
-       The server refuses to start on an empty allowlist — mint at
-       least one client cert before enabling the unit.
+       Authorize at least one client. The server starts fine on an empty
+       allowlist but refuses every request (401) until a client cert is
+       present; mint one here, or enroll a device with
+       `aisandboxctl client invite <name>`. Both hot-reload — no restart.
 
   2. sudo systemctl enable --now ai-sandbox-server
 
@@ -166,8 +168,10 @@ ai-sandbox-server installed. Onboarding was deferred. Next steps:
        commands still work: `aisandboxctl pki init` then `aisandboxctl secrets seed`.
 
   2. sudo aisandboxctl client mint <name> --pem --out /tmp/<name>
-       The server refuses to start on an empty allowlist — mint at
-       least one client cert before enabling the unit.
+       Authorize at least one client. The server starts fine on an empty
+       allowlist but refuses every request (401) until a client cert is
+       present; mint one here, or enroll a device with
+       `aisandboxctl client invite <name>`. Both hot-reload — no restart.
 
   3. sudo systemctl enable --now ai-sandbox-server
 

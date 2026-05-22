@@ -151,4 +151,38 @@ class DebPostinstContractTest {
         // Install never fails because of onboarding.
         assertThat(text).as("UC-17 — postinst MUST still end with exit 0").containsPattern("(?m)^exit 0\\s*$");
     }
+
+    /**
+     * v0.0.19 crashloop fix — the postinst's operator-facing "Next steps"
+     * blocks MUST NOT claim the server refuses to <em>start</em> on an empty
+     * allowlist. That stale wording described the pre-fix behavior; the fix
+     * makes the server boot on an empty allowlist and reject every request
+     * (401) until a client is authorized. This guard pins the corrected
+     * wording and forbids any regression to the "refuses to start" framing.
+     *
+     * <p>The check is deliberately narrow: it forbids the phrase
+     * {@code refuse[s] to start} (the stale claim) while leaving the correct
+     * {@code refuses every request (401)} wording untouched.
+     */
+    @Test
+    void postinst_does_not_claim_the_server_refuses_to_start_on_an_empty_allowlist() throws IOException {
+        assumeTrue(
+                Files.isRegularFile(POSTINST_FILE),
+                "postinst not found at " + POSTINST_FILE + " — test must run with cwd=server/");
+
+        String text = Files.readString(POSTINST_FILE);
+
+        // NEGATIVE — the stale pre-fix framing is gone.
+        assertThat(text)
+                .as("v0.0.19 fix — postinst MUST NOT claim the server `refuses to start` on an empty "
+                        + "allowlist; the fix makes it boot and 401 until a client is authorized")
+                .doesNotContainPattern("(?i)refuses?\\s+to\\s+start");
+
+        // POSITIVE — the corrected wording is present (tolerant of the
+        // heredoc line-wrap between "empty" and "allowlist").
+        assertThat(text)
+                .as("v0.0.19 fix — postinst MUST tell the operator the server `starts fine on an empty "
+                        + "allowlist` but rejects requests until a client is authorized")
+                .containsPattern("(?is)starts fine on an empty\\s+allowlist");
+    }
 }

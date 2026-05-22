@@ -193,7 +193,9 @@ sudo aisandboxctl pki init
 # steps. Re-run with `--force` to refresh credentials when they expire.
 sudo aisandboxctl secrets seed
 
-# Mint a client cert, then start the service.
+# Authorize a client (recommended), then start the service. The server
+# starts on an empty allowlist but refuses every request until a client
+# cert is present; you can also enroll one later via `client invite`.
 sudo aisandboxctl client mint alice --out /tmp/alice/
 sudo install -m 0644 /opt/ai-sandbox-server/systemd/ai-sandbox-server.service \
     /etc/systemd/system/ai-sandbox-server.service
@@ -202,9 +204,10 @@ sudo systemctl enable --now ai-sandbox-server
 ```
 
 The unit refuses to start if any of the following is wrong: server key/cert
-unreadable, allowlist folder empty (refuse-to-start policy), Docker socket
-unreachable, UC02 scripts missing or non-executable, audit-log directory
-missing or not writable.
+unreadable, Docker socket unreachable, UC02 scripts missing or non-executable,
+audit-log directory missing or not writable. An *empty* allowlist is not a
+startup failure — the server starts and logs a warning, then refuses every
+request (401) until you authorize a client (`client mint` or `client invite`).
 
 #### Out-of-box onboarding: the `aisandboxctl onboard` wizard
 

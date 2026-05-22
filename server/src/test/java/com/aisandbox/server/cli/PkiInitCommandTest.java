@@ -379,8 +379,11 @@ class PkiInitCommandTest {
     void init_stdout_summary_carries_client_mint_next_step_line(@TempDir Path tmp) throws Exception {
         // UC07 Bug B (partial) — install-flow nudge: pki init's stdout
         // summary must direct the operator to `aisandboxctl client mint
-        // <name>` before enabling the unit, because the server refuses
-        // to start on an empty allowlist.
+        // <name>` before enabling the unit. NOTE: as of the v0.0.19 crashloop
+        // fix the server no longer refuses to start on an empty allowlist (it
+        // boots and 401s every request until a client is authorized) — the
+        // nudge stands so the operator authorizes a client and gets a usable
+        // server, not because boot would otherwise fail.
         Path etc = tmp.resolve("etc/ai-sandbox-server");
         ByteArrayOutputStream outBuf = new ByteArrayOutputStream();
         PrintStream origOut = System.out;
