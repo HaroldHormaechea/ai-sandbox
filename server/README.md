@@ -122,13 +122,14 @@ sudo aisandboxctl pki init
 #    security model and an unassisted-install flag example.
 sudo aisandboxctl secrets seed
 
-# 4. Mint at least one client cert. The server refuses to start on an
-#    empty allowlist (the refuse-to-start gate is intentional — it
-#    prevents the service from listening on the network without any
-#    valid client credential present, eliminating the misconfiguration
-#    window between `systemctl enable` and the first `client mint`).
-#    Pick a name for the bootstrap operator; subsequent clients are
-#    added the same way.
+# 4. Authorize at least one client. The server starts fine on an empty
+#    allowlist, but with clientAuth=OPTIONAL the mTLS enforcement filter
+#    refuses every request (401) until a valid client cert is present —
+#    so the service is up but unusable until you authorize someone. Mint
+#    a cert here, or enroll a device later with `aisandboxctl client
+#    invite <name>` (both hot-reload via the allowlist watcher, no
+#    restart). Pick a name for the bootstrap operator; subsequent
+#    clients are added the same way.
 sudo aisandboxctl client mint bootstrap --pem --out /tmp/bootstrap
 
 # 5. systemd unit.
@@ -173,12 +174,16 @@ supported; pick whichever fits the deployment's automation posture.
 The unit refuses to start (with a journald-logged reason) when any of:
 
 - server key / cert unreadable
-- allowlist folder empty (refuse-to-start policy — mint a client cert
-  with `aisandboxctl client mint <name>`)
 - Docker socket unreachable
 - bundled host scripts missing or non-executable under
   `/opt/ai-sandbox-server/host/`
 - audit-log directory missing or not writable
+
+An *empty* allowlist is **not** a startup failure — it is the intended
+fresh-install state. The server starts and logs a warning; with
+`clientAuth=OPTIONAL` every request is rejected (401) until you authorize
+a client (`client mint` or `client invite`), which hot-reloads with no
+restart.
 
 ## Upgrade (v0.0.2 → v0.0.3 and onwards)
 
