@@ -26,4 +26,5 @@ Statuses:
 | 14 | [use-cases/14-pkcs12-empty-password-sentinel.md](use-cases/14-pkcs12-empty-password-sentinel.md) | Fix UC-13 regression — sentinel passphrase for enrollment PKCS#12 (BouncyCastle 1.79 rejects empty char[]) | done | 2026-05-21 |
 | 15 | [use-cases/15-server-sessions-enumeration-and-post-response-error-noise.md](use-cases/15-server-sessions-enumeration-and-post-response-error-noise.md) | Server `/v1/sessions` enumeration broken — `docker compose ls --all` rejected, `.docker/config.json` unreadable, downstream `handleAny` log noise | done | 2026-05-21 |
 | 16 | [use-cases/16-android-resume-to-sessions-instead-of-onboarding.md](use-cases/16-android-resume-to-sessions-instead-of-onboarding.md) | Android client — cold-start after enrollment should resume to the sessions list, not re-prompt for QR | done | 2026-05-21 |
+| 17 | [use-cases/17-server-onboarding-uid-alignment.md](use-cases/17-server-onboarding-uid-alignment.md) | Out-of-box server onboarding + uid-aligned session permissions | pending | 2026-05-22 |
 
