@@ -6,8 +6,10 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Set;
 import org.junit.jupiter.api.Test;
 
@@ -98,6 +100,44 @@ class UnitFileContractTest {
                 .contains("DOCKER_CONFIG=/var/lib/ai-sandbox-server/docker-config");
     }
 
+    /**
+     * v0.0.19 crashloop guard — restart rate-limiting MUST live in
+     * {@code [Unit]}, not {@code [Service]}.
+     *
+     * <p>systemd reads {@code StartLimitBurst} / {@code StartLimitIntervalSec}
+     * only from the {@code [Unit]} section. Placed under {@code [Service]} they
+     * are silently ignored, so a crash-on-boot (e.g. the empty-allowlist abort
+     * v0.0.19 shipped) would loop forever under {@code Restart=on-failure}
+     * instead of latching {@code failed} after 5 attempts in 60s. The fix moved
+     * the two directives from {@code [Service]} to {@code [Unit]}; this test
+     * pins them there and asserts they are ABSENT from {@code [Service]} so a
+     * future edit can't silently re-break the latch.
+     */
+    @Test
+    void start_limit_directives_live_in_unit_section_not_service() throws IOException {
+        assumeTrue(
+                Files.isRegularFile(UNIT_FILE),
+                "unit file not found at " + UNIT_FILE + " — test must run with cwd=server/");
+
+        // Present in [Unit] with the documented values.
+        assertThat(valuesForKeyInSection("[Unit]", "StartLimitBurst"))
+                .as("StartLimitBurst MUST live in [Unit] (systemd ignores it under [Service])")
+                .containsExactly("5");
+        assertThat(valuesForKeyInSection("[Unit]", "StartLimitIntervalSec"))
+                .as("StartLimitIntervalSec MUST live in [Unit] (systemd ignores it under [Service])")
+                .containsExactly("60s");
+
+        // Absent from [Service] — where systemd would silently ignore them and
+        // the crash-on-boot latch would never engage.
+        assertThat(valuesForKeyInSection("[Service]", "StartLimitBurst"))
+                .as("StartLimitBurst MUST NOT appear in [Service] — systemd ignores it there, "
+                        + "re-introducing the v0.0.19 infinite-restart crashloop")
+                .isEmpty();
+        assertThat(valuesForKeyInSection("[Service]", "StartLimitIntervalSec"))
+                .as("StartLimitIntervalSec MUST NOT appear in [Service] — systemd ignores it there")
+                .isEmpty();
+    }
+
     @Test
     void read_only_paths_still_locks_down_etc_tree_parent() throws IOException {
         assumeTrue(
@@ -117,6 +157,35 @@ class UnitFileContractTest {
     }
 
     // ── helpers ──────────────────────────────────────────────────────
+
+    /**
+     * Collect the values of {@code key} within the given systemd section
+     * (e.g. {@code "[Unit]"} / {@code "[Service]"}). Each matching
+     * {@code key=value} line contributes one entry (the trimmed right-hand
+     * side), in file order. Returns an empty list when the key never appears
+     * in that section — which is exactly the assertion the StartLimit guard
+     * makes against {@code [Service]}. Comment lines and other-section lines
+     * are ignored; section matching is case-insensitive to mirror systemd.
+     */
+    private static List<String> valuesForKeyInSection(String section, String key) throws IOException {
+        List<String> values = new ArrayList<>();
+        boolean inSection = false;
+        String prefix = key + "=";
+        for (String raw : Files.readAllLines(UNIT_FILE)) {
+            String line = raw.strip();
+            if (line.isEmpty() || line.startsWith("#") || line.startsWith(";")) {
+                continue;
+            }
+            if (line.startsWith("[") && line.endsWith("]")) {
+                inSection = section.equalsIgnoreCase(line);
+                continue;
+            }
+            if (inSection && line.startsWith(prefix)) {
+                values.add(line.substring(prefix.length()).trim());
+            }
+        }
+        return values;
+    }
 
     /**
      * Parse the supplied space-separated systemd unit-file key from the
