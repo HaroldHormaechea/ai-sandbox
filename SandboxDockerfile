@@ -21,7 +21,7 @@ RUN apk add --no-cache nodejs npm git ripgrep bash ca-certificates tmux github-c
     && chmod +x /usr/local/bin/gitleaks \
     && ssh-keyscan github.com >> /etc/ssh/ssh_known_hosts \
     && adduser -D -h /home/claude claude \
-    && mkdir -p /workspace /home/claude/.claude \
+    && mkdir -p /workspace /home/claude/.claude/skills \
     && chown -R claude:claude /workspace /home/claude \
     # UC-17 — OpenShift arbitrary-uid recipe. Make $HOME and /workspace owned by
     # group 0 and group-writable (g=u mirrors the owner bits) so a container run
