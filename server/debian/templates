@@ -1,0 +1,43 @@
+Template: ai-sandbox-server/onboard
+Type: boolean
+Default: true
+Description: Run the ai-sandbox onboarding wizard now?
+ The wizard captures the SSH key, git author identity, and an optional
+ GitHub token so newly spawned sessions can clone and commit out of the box.
+ .
+ You can always (re-)run it later with: sudo aisandboxctl onboard
+ Choose no to defer onboarding entirely.
+
+Template: ai-sandbox-server/git-name
+Type: string
+Description: Git author name for commits made inside sessions:
+ Seeds /etc/ai-sandbox-server/secrets/gitconfig. Both the name and the email
+ are required to onboard during install; leave either blank to defer
+ onboarding and configure it later with `sudo aisandboxctl onboard`.
+
+Template: ai-sandbox-server/git-email
+Type: string
+Description: Git author email for commits made inside sessions:
+ Seeds /etc/ai-sandbox-server/secrets/gitconfig alongside the author name.
+
+Template: ai-sandbox-server/ssh-key-path
+Type: string
+Description: Path to the SSH private key for git over SSH (optional):
+ Copied (passphrase-stripped) to /etc/ai-sandbox-server/secrets/git-key so
+ sessions can clone/push over SSH. Leave blank to add the key later with
+ `sudo aisandboxctl onboard --git-key <path>`.
+
+Template: ai-sandbox-server/gh-token
+Type: password
+Description: GitHub personal access token (optional):
+ Stored at /etc/ai-sandbox-server/secrets/gh-token for `gh` API calls. Leave
+ blank to skip; git clone/push still works over SSH without it. The value is
+ cleared from the debconf database immediately after install.
+
+Template: ai-sandbox-server/claude-preinit-note
+Type: note
+Description: Claude pre-init runs later, interactively
+ The Claude OAuth login needs an interactive terminal and a built container
+ image, so it is skipped during package installation. After install, run
+ `sudo aisandboxctl onboard` from a terminal to capture a Claude pre-init
+ snapshot (or pass --no-claude-preinit to skip it permanently).

@@ -347,8 +347,8 @@ public class OnboardCommand implements Callable<Integer> {
             if ((gitName != null && gitEmail != null) || hasTty) {
                 doGitId = true;
             } else {
-                deferred.add("Git identity — re-run: sudo aisandboxctl onboard"
-                        + " --git-name <name> --git-email <email>.");
+                deferred.add(
+                        "Git identity — re-run: sudo aisandboxctl onboard" + " --git-name <name> --git-email <email>.");
             }
         }
 

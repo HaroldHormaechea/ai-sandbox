@@ -417,8 +417,16 @@ val prepDebControl by tasks.registering(Copy::class) {
         filter(ReplaceTokens::class, mapOf("tokens" to mapOf("aiSandboxServerVersion" to captured)))
     }
     from("$projectDir/debian") {
-        include("postinst", "prerm", "postrm")
+        // UC-17 — the debconf `config` script is a maintainer script and must
+        // be executable, exactly like postinst/prerm/postrm.
+        include("postinst", "prerm", "postrm", "config")
         filePermissions { unix("rwxr-xr-x") }
+    }
+    from("$projectDir/debian") {
+        // UC-17 — the debconf `templates` file is data (questions + types), not
+        // a script; ship it 0644.
+        include("templates")
+        filePermissions { unix("rw-r--r--") }
     }
     into(debControlStagingDir)
 }

@@ -1,0 +1,31 @@
+#!/bin/sh
+# ai-sandbox-server / config — debconf config script (UC-17).
+#
+# Run by the debconf frontend BEFORE postinst, to gather onboarding answers.
+# Under the noninteractive frontend db_input is a no-op (it returns status 30,
+# "question skipped"), so this script is a silent no-op for unattended installs
+# — db_go shows nothing and the questions keep their template defaults. postinst
+# reads whatever this gathered (or the defaults) via db_get and acts on it.
+#
+# `set -e` + the `|| true` guards: several confmodule calls return non-zero on
+# benign conditions (db_input → 30 when a question is skipped/already-seen),
+# which would otherwise abort under set -e.
+set -e
+
+. /usr/share/debconf/confmodule
+
+db_input medium ai-sandbox-server/onboard || true
+db_go || true
+
+# Only ask for the details if the operator wants to onboard now.
+db_get ai-sandbox-server/onboard || true
+if [ "$RET" = "true" ]; then
+    db_input medium ai-sandbox-server/git-name || true
+    db_input medium ai-sandbox-server/git-email || true
+    db_input medium ai-sandbox-server/ssh-key-path || true
+    db_input medium ai-sandbox-server/gh-token || true
+    db_input medium ai-sandbox-server/claude-preinit-note || true
+    db_go || true
+fi
+
+exit 0
