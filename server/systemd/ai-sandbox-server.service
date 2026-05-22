@@ -4,6 +4,12 @@ Documentation=file:///opt/ai-sandbox-server/README.md
 After=network-online.target docker.service
 Wants=network-online.target
 Requires=docker.service
+# Restart rate-limiting lives in [Unit], not [Service] — systemd reads
+# StartLimitBurst / StartLimitIntervalSec only here. Placed in [Service]
+# they are silently ignored, so a crash-on-boot would loop forever instead
+# of latching `failed` after 5 attempts in 60s.
+StartLimitBurst=5
+StartLimitIntervalSec=60s
 
 [Service]
 Type=simple
@@ -24,8 +30,6 @@ ExecStart=/usr/bin/java \
     --spring.config.additional-location=optional:file:/etc/ai-sandbox-server/config.yaml
 Restart=on-failure
 RestartSec=5s
-StartLimitBurst=5
-StartLimitIntervalSec=60s
 KillSignal=SIGTERM
 TimeoutStopSec=70
 SuccessExitStatus=143
