@@ -72,9 +72,9 @@ public class PropertiesValidationStartupCheck implements ApplicationListener<App
             if (entries.findAny().isEmpty()) {
                 LOG.warn(
                         "Allowlist directory is empty ({}): the server is up but NO clients are authorized yet — "
-                            + "every request is rejected with 401 until you authorize one. Authorize a client by "
-                            + "minting a cert (`aisandboxctl client mint <name>`) or enrolling a device "
-                            + "(`aisandboxctl client invite <name>` + QR). Both hot-reload; no restart required.",
+                                + "every request is rejected with 401 until you authorize one. Authorize a client by "
+                                + "minting a cert (`aisandboxctl client mint <name>`) or enrolling a device "
+                                + "(`aisandboxctl client invite <name>` + QR). Both hot-reload; no restart required.",
                         allowlistDir);
             }
         } catch (IOException io) {
