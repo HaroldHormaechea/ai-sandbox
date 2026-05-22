@@ -155,6 +155,38 @@ android {
 // skipped.
 tasks.withType<Test>().configureEach {
     useJUnitPlatform()
+
+    // Durable UC-14 guard — fail the build when a unit-test RUN discovers
+    // ZERO tests. The JUnit-5 platform binding above is load-bearing: if it
+    // regresses (someone drops useJUnitPlatform() or the
+    // junit-platform-launcher runtime dep), every @Test is silently skipped
+    // yet the task still reports SUCCESS — masking a total loss of unit-test
+    // coverage. This converts that silent skip into a hard failure, so the
+    // aggregate :android:test (which runs each variant's *UnitTest task)
+    // can never go green on an empty run.
+    //
+    // It trips ONLY when the task actually executed a test run whose root
+    // suite reported zero tests. A legitimately empty test source set makes
+    // Gradle mark the Test task NO-SOURCE and skip it, so the afterSuite
+    // callback never fires and the guard does not false-positive.
+    val taskPath = path
+    addTestListener(
+        object : TestListener {
+            override fun beforeSuite(suite: TestDescriptor) = Unit
+            override fun beforeTest(testDescriptor: TestDescriptor) = Unit
+            override fun afterTest(testDescriptor: TestDescriptor, result: TestResult) = Unit
+
+            override fun afterSuite(suite: TestDescriptor, result: TestResult) {
+                if (suite.parent == null && result.testCount == 0L) {
+                    throw GradleException(
+                        "$taskPath executed 0 tests. The JUnit-5 platform binding likely regressed " +
+                            "(useJUnitPlatform() / junit-platform-launcher). Refusing to report success on an " +
+                            "empty unit-test run (UC-14 fail-on-zero-tests guard).",
+                    )
+                }
+            }
+        },
+    )
 }
 
 dependencies {

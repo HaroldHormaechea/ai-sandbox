@@ -14,6 +14,7 @@ import com.aisandbox.server.sessions.service.SessionRegistryService;
 import java.io.IOException;
 import java.time.Duration;
 import java.util.List;
+import java.util.NoSuchElementException;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
@@ -113,7 +114,30 @@ public class SessionFacade {
     }
 
     /**
-     * Delete a session. Returns true when {@code clean.sh} succeeded.
+     * Delete a session.
+     *
+     * <p>Existence-gated to fix BUG 2 (a phantom / already-gone {@code N}
+     * used to surface {@code clean.sh}'s exit-1 as a 500; it now 404s):
+     *
+     * <ul>
+     *   <li>{@code force == false} (default): {@link
+     *       SessionRegistryService#exists(int)} is consulted <em>inside</em>
+     *       the per-N lock so a concurrent spawn/clean cannot race the
+     *       check. An absent {@code N} throws {@link NoSuchElementException}
+     *       (mapped to 404 {@code session_not_found} by {@code
+     *       ProblemDetailsAdvice.handleNotFound}) and {@code clean.sh} is
+     *       NOT run. An enumeration outage ({@code exists()} throwing {@link
+     *       IOException}) propagates as a 5xx via the generic fallback —
+     *       NEVER a 404, since a 404 on an outage would be a false
+     *       "doesn't exist".</li>
+     *   <li>{@code force == true}: the existence check is skipped and {@code
+     *       clean.sh} runs unconditionally — the operator escape hatch for
+     *       stuck containers / degraded enumeration, decoupling deletion
+     *       from the registry.</li>
+     * </ul>
+     *
+     * @return true when {@code clean.sh} exited 0; false when it ran but
+     *     exited non-zero (mapped to 500 by the controller)
      */
     public boolean deleteSession(int n, boolean force) throws IOException, InterruptedException {
         ReentrantLock l = perN.get(n);
@@ -121,6 +145,9 @@ public class SessionFacade {
             throw new IOException("Timed out acquiring per-session mutex for N=" + n);
         }
         try {
+            if (!force && !registry.exists(n)) {
+                throw new NoSuchElementException("session " + n + " not found");
+            }
             ProcessExecutor.Result r = executor.clean(n, spawnTimeout);
             audit.logEvent(
                     AuditAction.SESSION_KILL,
