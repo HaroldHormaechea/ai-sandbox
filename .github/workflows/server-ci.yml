@@ -1094,8 +1094,20 @@ jobs:
           test -n "$TOKEN"
 
           body="$(python3 -c "import json,sys;json.dump({'token':sys.argv[1]},sys.stdout)" "$TOKEN")"
+
+          # /etc/ai-sandbox-server/pki/ is mode 0700 owned by ai-sandbox-server
+          # (correct in production), so the unprivileged runner user cannot
+          # read server.crt directly to feed `curl --cacert`. Copy it to a
+          # runner-readable scratch path under sudo so the H1.1 + mTLS curl
+          # below can complete its TLS handshake — without this the curl
+          # fails before any HTTP exchange (Netty logs "Failed to select the
+          # application-level protocol ... StacklessClosedChannelException"
+          # because the client closes the connection without sending the
+          # final handshake frames once it cannot validate the server cert).
+          sudo install -m 0644 /etc/ai-sandbox-server/pki/server.crt /tmp/uc11-systemd-cacert.crt
+
           http_code="$(curl -sS -o /tmp/uc11-systemd-bundle.p12 -w "%{http_code}" \
-              --cacert /etc/ai-sandbox-server/pki/server.crt \
+              --cacert /tmp/uc11-systemd-cacert.crt \
               -H "Content-Type: application/json" \
               --data-binary "$body" \
               https://127.0.0.1:12410/v1/enrollment || echo 000)"
