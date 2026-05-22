@@ -431,6 +431,90 @@ class PostCommitNoiseSilenceTest {
                 .isEqualTo(0L);
     }
 
+    /**
+     * UC-17 bug-pin (additive) — drives a SUCCESSFUL real-controller
+     * REST call ({@code GET /v1/clients}, cheapest no-docker
+     * controller — {@link com.aisandbox.server.clients.facade.ClientAllowlistFacade}
+     * reads an in-memory snapshot of the clients directory seeded
+     * in the static initializer above) and asserts the same two log
+     * categories stay quiet.
+     *
+     * <p>The synthetic post-commit-throw test method above proves the
+     * UC-12 isCommitted() guard works. This method proves the UC-17
+     * SecurityHeadersFilter ordering fix works on a happy path —
+     * pre-UC-17, EVERY successful response on a streaming-body
+     * endpoint fired the WARN+ERROR pair because
+     * {@code chain.filter(...).then(apply)} ran apply() on a sealed
+     * response. Post-UC-17, apply() runs before chain.filter and the
+     * sealed-response UOE is never manufactured.
+     *
+     * <p>Why /v1/clients and not /v1/sessions: the parent test class's
+     * Spring context does NOT mock {@link
+     * com.aisandbox.server.sessions.service.ProcessExecutor} (the
+     * synthetic post-commit-throw endpoint has no docker dependency),
+     * so /v1/sessions would attempt to invoke a real docker
+     * subprocess and fail on the no-docker sandbox.
+     * /v1/clients reads ClientsDir → AllowlistRegistry, an in-memory
+     * map populated from the PEM seeded by
+     * {@link com.aisandbox.server.test.CertFixtures#writeClientPemTo}
+     * in the static initializer, so no subprocess is involved. The
+     * separate {@link SecurityHeadersFilterPostCommitLogTest} drives
+     * /v1/sessions with its own mocked ProcessExecutor.
+     */
+    @Test
+    void real_controller_success_path_does_not_fire_unmapped_warn_or_already_committed_error() throws Exception {
+        WebTestClient client = buildClient(port);
+
+        // Drive a successful GET on a real production controller.
+        // The body is irrelevant; the log-appender shape is what
+        // this test pins.
+        client.get()
+                .uri("/v1/clients")
+                .accept(MediaType.APPLICATION_JSON)
+                .exchange()
+                .expectStatus()
+                .isOk();
+
+        // Same async-flush window as the synthetic test above.
+        Thread.sleep(250);
+
+        // Assertion 1 — successful happy paths MUST NOT log the
+        // unmapped-WARN at all. Pre-UC-17 this fired exactly once
+        // per call because SecurityHeadersFilter's post-commit apply()
+        // surfaced an UnsupportedOperationException, which the
+        // generic fallback handler logged as unmapped.
+        long unmappedWarnCount = problemDetailsAppender.list.stream()
+                .filter(evt -> Level.WARN.equals(evt.getLevel()))
+                .filter(evt -> evt.getFormattedMessage().startsWith("Unmapped exception in REST flow"))
+                .count();
+        assertThat(unmappedWarnCount)
+                .as(
+                        "UC-17 bug-pin (real controller) — a successful GET /v1/clients MUST NOT "
+                                + "trigger an \"Unmapped exception in REST flow\" WARN. Events on "
+                                + "ProblemDetailsAdvice: %s",
+                        problemDetailsAppender.list)
+                .isEqualTo(0L);
+
+        // Assertion 2 — successful happy paths MUST NOT log the
+        // UOE/already-committed ERROR at all. Pre-UC-17 this fired
+        // exactly once per call (SecurityHeadersFilter post-commit
+        // apply mutated sealed headers).
+        long alreadyCommittedErrorCount = webHandlerAppender.list.stream()
+                .filter(evt -> Level.ERROR.equals(evt.getLevel()))
+                .map(ILoggingEvent::getFormattedMessage)
+                .filter(msg -> msg.contains("UnsupportedOperationException"))
+                .filter(msg -> msg.contains("already committed"))
+                .count();
+        assertThat(alreadyCommittedErrorCount)
+                .as(
+                        "UC-17 bug-pin (real controller) — a successful GET /v1/clients MUST NOT "
+                                + "trigger an UnsupportedOperationException / already-committed ERROR "
+                                + "on the HttpWebHandlerAdapter category. Events on "
+                                + "HttpWebHandlerAdapter: %s",
+                        webHandlerAppender.list)
+                .isEqualTo(0L);
+    }
+
     // ── WebTestClient over the random TLS port ─────────────────────────
 
     private static WebTestClient buildClient(int port) throws Exception {

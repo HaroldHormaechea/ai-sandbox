@@ -81,6 +81,75 @@ jobs:
       - name: Testcontainers integration suite
         run: ./gradlew :server:integrationTest --no-daemon
 
+  # UC-17 — real-Docker integration job. Boots the actual fat-jar (NOT a
+  # Spring slice / NOT a MockServerWebExchange) against a real Docker
+  # daemon, issues mTLS curls against /v1/healthz, /v1/sessions, and
+  # /v1/sessions/{n}, and asserts the server log is clean of three
+  # forbidden post-commit-UOE patterns ("UnsupportedOperationException",
+  # "ServerHttpResponse already committed", "Unmapped exception in REST
+  # flow"). UC-17's root cause — SecurityHeadersFilter mutating a sealed
+  # response — could not be caught by the existing test stack because
+  # MockServerWebExchange never transitions to COMMITTED state and
+  # PostCommitNoiseSilenceTest's synthetic mid-stream Flux.error path
+  # never fires `Mono.then`. The driver script under server/ci/ holds
+  # the imperative steps; this job wires it into CI.
+  #
+  # Runs on ubuntu-24.04 explicitly (Docker pre-installed, passwordless
+  # sudo available — see release-install-smoke for prior art using the
+  # same runner-host capabilities). On failure, the server stdout/stderr
+  # logs and pki-init/client-mint diagnostics are uploaded as artefacts
+  # so triage doesn't require a re-run.
+  real-docker-integration:
+    runs-on: ubuntu-24.04
+    needs: build
+    env:
+      AI_SANDBOX_REAL_DOCKER_IT: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@v4
+
+      # Defensive Docker bring-up. ubuntu-24.04 ships docker
+      # pre-installed and the daemon is normally running, but a future
+      # runner-image change could drop one or the other; this step
+      # makes the failure mode obvious in the log instead of a cryptic
+      # "command not found" deep inside the driver script.
+      - name: Verify docker is present and running
+        run: |
+          if ! command -v docker >/dev/null 2>&1; then
+            echo "::group::Install docker (defensive — not expected on ubuntu-24.04)"
+            curl -fsSL https://get.docker.com | sudo sh
+            echo "::endgroup::"
+          fi
+          sudo systemctl is-active docker || sudo systemctl start docker
+          docker version
+          docker compose version
+
+      - name: Build server bootJar + aisandboxctlJar
+        run: ./gradlew :server:bootJar :server:aisandboxctlJar --no-daemon
+
+      - name: Run real-docker integration script
+        run: ./gradlew :server:realDockerIntegrationTest --no-daemon
+
+      # On failure, surface the server logs + pki init / client mint
+      # transcripts so triage can read them without a re-run. The path
+      # under server/build/real-docker-integration-test/ is created by
+      # the driver script and contains:
+      #   server.stdout.log / server.stderr.log
+      #   pki-init.stdout.log / pki-init.stderr.log
+      #   client-mint.stdout.log / client-mint.stderr.log
+      #   healthz.body / sessions.body / session-detail.body
+      #   compose-ls.json / docker.log
+      - name: Upload real-docker-integration artefacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-docker-integration-logs
+          path: server/build/real-docker-integration-test/
+
   # UC05 § AC29,AC30 — smoke-test the self-contained release zip. Runs
   # parallel to `build` and is required-passing per AC30 (the actual
   # branch-protection gate is operator-side, documented in the release
