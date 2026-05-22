@@ -3,6 +3,7 @@ package com.aisandbox.server.sessions.service;
 import com.aisandbox.server.config.ServerProperties;
 import com.aisandbox.server.sessions.dto.SpawnCommand;
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -116,6 +117,32 @@ public class ScriptExecutorService {
                 (secretsDir.getParent() != null) ? secretsDir.getParent() : Path.of("/etc/ai-sandbox-server");
         Path claudeTemplate = templatesParent.resolve("templates").resolve("claude-config");
         env.put("AI_SANDBOX_CLAUDE_TEMPLATE_HOST_PATH", claudeTemplate.toString());
+
+        // UC-17 — run the session container as the numeric owner of the
+        // secrets dir (consumed by docker-compose.yml's `user:` field), so it
+        // can read the 0600 git-key and read/write the server-owned
+        // claude-config / workspace bind mounts. The gid is pinned to 0 (the
+        // OpenShift arbitrary-uid recipe): SandboxDockerfile makes $HOME and
+        // /etc/passwd group-0-writable, so any gid-0 process can self-register
+        // a passwd entry (entrypoint.sh) and write its dotfiles.
+        //
+        // Deriving the uid from the secrets dir's owner — rather than adding a
+        // ServerProperties field — guarantees it matches the 0600 git-key's
+        // owner (both live under the same secrets dir, chowned together by
+        // `pki init` / `secrets seed` / `onboard`). If the attribute can't be
+        // read we WARN loudly and OMIT the var (never silently default to a
+        // hardcoded uid): docker-compose.yml then falls back to the image's
+        // `claude` user, which surfaces as a loud, diagnosable secret-read
+        // failure instead of a silent wrong-uid mount.
+        try {
+            Object uid = Files.getAttribute(secretsDir, "unix:uid");
+            env.put("AI_SANDBOX_RUN_AS_USER", uid + ":0");
+        } catch (IOException | UnsupportedOperationException e) {
+            System.err.println("WARNING: ScriptExecutorService could not resolve the owner uid of " + secretsDir
+                    + " (" + e.getClass().getSimpleName() + "); spawned containers will run as the image-default"
+                    + " `claude` user and may fail to read 0600 secrets. Fix the secrets-dir ownership"
+                    + " (e.g. `sudo aisandboxctl onboard --force`) and respawn.");
+        }
         return env;
     }
 }

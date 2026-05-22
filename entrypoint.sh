@@ -7,6 +7,21 @@ TOKEN_FILE=/etc/secrets/gh-token
 GITCONFIG_FILE=/etc/secrets/gitconfig
 export RTK_TELEMETRY_DISABLED=1
 
+# UC-17 — uid self-registration. MUST be the first thing we do, before any
+# ssh / git / gh / $HOME-resolving call. When the management server runs this
+# container as an arbitrary host uid (compose `user: <uid>:0`) that has no
+# /etc/passwd entry, getpwuid() lookups fail and ssh/git/gh error with "no such
+# user" / cannot determine home. Appending a minimal passwd line fixes that.
+# The build-time `chgrp 0 /etc/passwd && chmod g+w /etc/passwd` (SandboxDockerfile)
+# makes the append possible for any gid-0 process. Idempotent: the default
+# uid-1000 `claude` user already resolves, so this is a no-op in dev mode. The
+# synthesised name is `sandbox` (deliberately != the image's `claude`) so the
+# two entries never collide; gid 0 + home /home/claude match the compose `user:`
+# and the group-0-writable $HOME the Dockerfile prepared.
+if ! getent passwd "$(id -u)" >/dev/null 2>&1; then
+    echo "sandbox:x:$(id -u):0:sandbox:/home/claude:/bin/sh" >> /etc/passwd
+fi
+
 # Claude Code stores some global state (trusted folders, onboarding, default
 # mode, theme) at ~/.claude.json — a file outside the ~/.claude/ directory we
 # mount. Symlink it inside that mounted dir so the state persists across runs.
@@ -35,6 +50,10 @@ fi
 # would be masked by the mount. Running it in entrypoint.sh means the hook
 # lands in the persisted host folder and survives docker compose down/up.
 mkdir -p "$HOME/.claude"
+# UC-17 — RTK also writes non-mounted state under ~/.config/rtk. When running as
+# an arbitrary uid that dir may not exist yet (only ~/.claude is mounted); create
+# it so rtk init never trips on a missing parent. Harmless when it already exists.
+mkdir -p "$HOME/.config"
 
 # 1. Let RTK install its global hook into ~/.claude/settings.json (and possibly
 #    emit ~/.claude/RTK.md). Idempotent per upstream; warn-and-continue on

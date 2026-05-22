@@ -4,6 +4,14 @@ services:
       context: .
       dockerfile: SandboxDockerfile
     image: ai-context:latest
+    # UC-17 — run the session container as the host's runtime user so the
+    # bind-mounted, server-owned tree (secrets, claude-config, workspace) is
+    # readable/writable. In install mode the management server injects
+    # AI_SANDBOX_RUN_AS_USER=<secrets-owner-uid>:0 (gid pinned to 0, the
+    # OpenShift arbitrary-uid recipe) via ScriptExecutorService#composeEnv.
+    # Developer-mode runs leave it unset → defaults to the image's `claude`
+    # user, which is byte-identical to the pre-UC-17 behaviour.
+    user: "${AI_SANDBOX_RUN_AS_USER:-claude}"
     stdin_open: true
     tty: true
     labels:
