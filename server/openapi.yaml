@@ -131,6 +131,12 @@ paths:
     delete:
       tags:
       - session-controller
+      summary: Delete (tear down) a session by N.
+      description: "Runs clean.sh for the target session. With force=false (default),\
+        \ a non-existent N returns 404 session_not_found and clean.sh is NOT run;\
+        \ with force=true the existence check is skipped and clean.sh runs unconditionally\
+        \ (operator escape hatch). 204 on success; 500 internal_error only when clean.sh\
+        \ actually ran and exited non-zero."
       operationId: delete
       parameters:
       - name: "n"
@@ -146,12 +152,20 @@ paths:
           type: boolean
           default: false
       responses:
-        "200":
-          description: OK
+        "204":
+          description: Session deleted (clean.sh exited 0).
           content:
             '*/*':
               schema:
                 type: object
+        "404":
+          description: No session with that N (force=false only).
+          content:
+            application/problem+json: {}
+        "500":
+          description: clean.sh exited non-zero.
+          content:
+            application/problem+json: {}
   /v1/healthz:
     get:
       tags:
