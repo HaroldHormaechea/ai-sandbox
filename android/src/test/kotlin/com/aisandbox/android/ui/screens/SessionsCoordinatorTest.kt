@@ -95,9 +95,9 @@ class SessionsCoordinatorTest {
     /**
      * Start a pinned-HTTPS MockWebServer whose dispatcher answers the
      * three session verbs by shape:
-     *  - GET /v1/sessions     → 200 [listBody]  (BARE array, the real shape)
-     *  - POST /v1/sessions    → 201 [spawnBody]
-     *  - DELETE /v1/sessions/* → 204
+     *  - GET /v1/sessions      → 200 [listBody]  (BARE array, the real shape)
+     *  - POST /v1/sessions     → 201 [spawnBody]
+     *  - DELETE /v1/sessions/{n} → 204
      */
     private fun startFixture(
         listBody: String = """[{"n":1,"label":"existing","tmuxTitle":"","state":"running","uptimeSec":10,"activeStreams":0,"startedAt":null}]""",
