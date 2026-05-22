@@ -238,13 +238,13 @@ class EnrollmentPinAlgorithmTest {
 
             SERVER = CertFixtures.writeServerMaterialTo(PKI_DIR, "uc09-enroll");
 
-            // Seed the allowlist with one disposable client PEM so the
-            // refuse-to-start policy in PropertiesValidationStartupCheck
-            // ("Allowlist directory is empty") doesn't block context
-            // boot. /v1/enrollment is mTLS-EXEMPT (the whole point of
-            // this test), so the allowlist content is never consulted on
-            // the request path under test — but the boot check fires
-            // anyway, so it MUST be non-empty.
+            // Seed one disposable client PEM. NOTE: as of the v0.0.19
+            // crashloop fix PropertiesValidationStartupCheck no longer
+            // refuses to start on an empty allowlist (it logs a warning), so
+            // this seed is no longer REQUIRED for boot — it is kept as
+            // harmless. /v1/enrollment is mTLS-EXEMPT (the whole point of this
+            // test), so the allowlist content is never consulted on the
+            // request path under test either way.
             CertFixtures.writeClientPemTo(CLIENTS_DIR, "uc09-bootstrap-client");
 
             // UC02 host scripts as executable empty shims — only the

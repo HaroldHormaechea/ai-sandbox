@@ -153,10 +153,12 @@ class EnrollmentExceptionRoutingTest {
 
             CertFixtures.writeServerMaterialTo(PKI_DIR, "uc12-enrollment-routing");
 
-            // PropertiesValidationStartupCheck refuses to boot with an
-            // empty allowlist. /v1/enrollment is mTLS-exempt so the
-            // content is never consulted on the request path — but the
-            // boot check fires, so the directory MUST be non-empty.
+            // Seed one disposable client PEM. NOTE: as of the v0.0.19
+            // crashloop fix the boot check no longer refuses to start on an
+            // empty allowlist (it logs a warning), so this seed is no longer
+            // REQUIRED for boot — it is kept as harmless. /v1/enrollment is
+            // mTLS-exempt either way, so the allowlist content is never
+            // consulted on the request path under test.
             CertFixtures.writeClientPemTo(CLIENTS_DIR, "uc12-bootstrap-client");
 
             writeExecutableShim(SCRIPTS_DIR.resolve("spawn.sh"));
