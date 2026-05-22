@@ -4,7 +4,11 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.SerializationException
+import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -30,12 +34,33 @@ class SessionsApi(private val http: AiSandboxHttpClient) {
     suspend fun list(): ApiResult<List<SessionSummary>> = withContext(Dispatchers.IO) {
         val req = Request.Builder().url("$base/v1/sessions").get().build()
         client.newCall(req).execute().use { resp ->
-            mapResponse(resp) {
-                JSON.decodeFromString(SessionsListEnvelope.serializer(), it).sessions
-                    ?: JSON.decodeFromString<List<SessionSummary>>(
-                        kotlinx.serialization.builtins.ListSerializer(SessionSummary.serializer()),
-                        it,
-                    )
+            mapResponse(resp) { body ->
+                // The server returns a BARE JSON array (the controller does
+                // `ResponseEntity.ok(List<…>)` → Jackson → `[…]`). Some
+                // legacy payloads wrapped it in a `{ "sessions": [...] }`
+                // envelope, so we tolerate both. Parse to a JsonElement
+                // first and branch on the ACTUAL shape.
+                //
+                // The previous envelope-FIRST ordering
+                // (`decodeFromString(Envelope.serializer(), it).sessions ?: <bare list>`)
+                // was dead: decoding a bare array with the envelope (object)
+                // serializer throws a SerializationException BEFORE the `?:`
+                // fallback can run — kotlinx's structure decoder requires '{'
+                // and never silently returns null for an array. So `list()`
+                // always failed with decode_error against the real (bare-array)
+                // server body — the BUG 1 root, upstream of the ViewModel fix.
+                // Empirically verified against kotlinx-serialization with the
+                // same isLenient/ignoreUnknownKeys config used here.
+                when (val element = JSON.parseToJsonElement(body)) {
+                    is JsonArray ->
+                        JSON.decodeFromJsonElement(ListSerializer(SessionSummary.serializer()), element)
+                    is JsonObject ->
+                        JSON.decodeFromJsonElement(SessionsListEnvelope.serializer(), element).sessions.orEmpty()
+                    else ->
+                        throw SerializationException(
+                            "GET /v1/sessions body is neither a JSON array nor an object: $element",
+                        )
+                }
             }
         }
     }
