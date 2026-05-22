@@ -2,6 +2,12 @@ FROM alpine:latest
 
 ENV LANG=C.UTF-8
 ENV LC_ALL=C.UTF-8
+# UC-17 — pin HOME so the container resolves a home dir even when it runs as
+# an arbitrary host uid that has no /etc/passwd entry at start. entrypoint.sh
+# self-registers a passwd line on boot; this ENV is the belt-and-braces value
+# the shell/tools read before (and if) that runs. For the default `claude`
+# user (uid 1000) this is exactly the home it already had — no behaviour change.
+ENV HOME=/home/claude
 
 ARG GITLEAKS_VERSION=8.21.0
 # BuildKit auto-populates TARGETARCH (amd64 / arm64 / ...). Used below to pick
@@ -16,7 +22,19 @@ RUN apk add --no-cache nodejs npm git ripgrep bash ca-certificates tmux github-c
     && ssh-keyscan github.com >> /etc/ssh/ssh_known_hosts \
     && adduser -D -h /home/claude claude \
     && mkdir -p /workspace /home/claude/.claude \
-    && chown -R claude:claude /workspace /home/claude
+    && chown -R claude:claude /workspace /home/claude \
+    # UC-17 — OpenShift arbitrary-uid recipe. Make $HOME and /workspace owned by
+    # group 0 and group-writable (g=u mirrors the owner bits) so a container run
+    # as <host-uid>:0 can create ~/.ssh, ~/.claude/*, ~/.config/rtk, etc. For the
+    # default uid-1000 `claude` user nothing changes functionally: it already
+    # owns these paths, and adding group-0 write access is a no-op for it.
+    && chgrp -R 0 /home/claude /workspace \
+    && chmod -R g=u /home/claude /workspace \
+    # Let an unknown runtime uid append its own passwd entry on boot (see
+    # entrypoint.sh). Group-0 owns /etc/passwd and may write it. Standard pattern
+    # for OpenShift-style arbitrary-uid images; harmless for uid 1000.
+    && chgrp 0 /etc/passwd \
+    && chmod g+w /etc/passwd
 
 # RTK (Rust Token Killer) — bundled CLI proxy that compresses Bash output before
 # it reaches the LLM. Rolling latest at build time (matches the

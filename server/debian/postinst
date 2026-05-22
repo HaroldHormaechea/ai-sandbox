@@ -63,32 +63,119 @@ case "$1" in
         install -d -m 0700 -o ai-sandbox-server -g ai-sandbox-server /var/lib/ai-sandbox-server/docker-config
         install -d -m 0750 -o ai-sandbox-server -g ai-sandbox-server /var/log/ai-sandbox-server
 
-        cat <<'EOM'
+        # 4. UC-17 — debconf-driven onboarding. The `config` script gathered
+        #    the answers (or, under the noninteractive frontend, left the
+        #    template defaults). We read them, then immediately db_stop so the
+        #    rest of postinst (onboard's output, the Next-steps block) writes to
+        #    the real terminal rather than the debconf protocol pipe on fd 1.
+        #
+        #    Onboarding runs ONLY when the operator opted in AND supplied both a
+        #    git name and email (the minimum for a useful gitconfig). It runs
+        #    fully non-interactively with --no-claude-preinit --no-image-build:
+        #    Claude OAuth needs a TTY and the image build is slow + Docker-bound,
+        #    so neither belongs in a dpkg run. Any other condition (opt-out,
+        #    missing answers, noninteractive frontend, debconf absent, onboard
+        #    failure) falls through to the deferred Next-steps block — the
+        #    package install never fails or hangs because of onboarding.
+        ONBOARD_DONE=0
+        ONBOARD=""
+        GIT_NAME=""
+        GIT_EMAIL=""
+        SSH_KEY_PATH=""
+        GH_TOKEN=""
+        if [ -r /usr/share/debconf/confmodule ]; then
+            . /usr/share/debconf/confmodule
+            # `if db_get …` keeps set -e happy: db_get returns non-zero when a
+            # question was never registered (e.g. raw `dpkg -i` without the
+            # frontend running `config`), in which case the var stays empty.
+            if db_get ai-sandbox-server/onboard;       then ONBOARD="$RET"; fi
+            if db_get ai-sandbox-server/git-name;      then GIT_NAME="$RET"; fi
+            if db_get ai-sandbox-server/git-email;     then GIT_EMAIL="$RET"; fi
+            if db_get ai-sandbox-server/ssh-key-path;  then SSH_KEY_PATH="$RET"; fi
+            if db_get ai-sandbox-server/gh-token;      then GH_TOKEN="$RET"; fi
+            # Never persist the token in the debconf database.
+            db_set ai-sandbox-server/gh-token "" || true
+            db_stop || true
+        fi
 
-ai-sandbox-server installed. Next steps:
+        if [ "$ONBOARD" = "true" ] && [ -n "$GIT_NAME" ] && [ -n "$GIT_EMAIL" ]; then
+            # Build the onboard argv safely via positional params (no eval, no
+            # word-splitting of operator-supplied values). $1 ("configure") is
+            # not referenced again in this branch, so reusing $@ is safe.
+            set -- --git-name "$GIT_NAME" --git-email "$GIT_EMAIL"
+            if [ -n "$SSH_KEY_PATH" ]; then
+                set -- "$@" --git-key "$SSH_KEY_PATH"
+            fi
+            GH_TOKEN_FILE=""
+            if [ -n "$GH_TOKEN" ]; then
+                # 0600 temp file so the token never appears in the process table.
+                GH_TOKEN_FILE="$(mktemp)"
+                chmod 600 "$GH_TOKEN_FILE"
+                printf '%s' "$GH_TOKEN" > "$GH_TOKEN_FILE"
+                set -- "$@" --gh-token-file "$GH_TOKEN_FILE"
+            else
+                set -- "$@" --no-gh
+            fi
+            set -- "$@" --no-claude-preinit --no-image-build
 
-  1. sudo aisandboxctl pki init
-       Mints the self-signed server cert + key (with SAN), creates the
-       PKI / allowlist / enrollment / secrets / sessions tree, and writes
-       /etc/ai-sandbox-server/config.yaml. Pass --hostname <fqdn> to
-       baked-in the host name; --san DNS:<host>,IP:<addr> for extra
-       entries. Re-run with --force to overwrite.
+            echo "ai-sandbox-server: running onboarding wizard (non-interactive)..."
+            if /usr/bin/aisandboxctl onboard "$@" </dev/null; then
+                ONBOARD_DONE=1
+            else
+                echo "ai-sandbox-server: onboarding step failed; complete it later with: sudo aisandboxctl onboard" >&2
+            fi
 
-  2. sudo aisandboxctl secrets seed
-       Walks the container's pre-flight state (SSH key, git identity,
-       optional gh PAT, optional Claude pre-init). Use --no-gh /
-       --no-claude-preinit to opt out.
+            if [ -n "$GH_TOKEN_FILE" ] && [ -f "$GH_TOKEN_FILE" ]; then
+                if command -v shred >/dev/null 2>&1; then
+                    shred -u "$GH_TOKEN_FILE" 2>/dev/null || rm -f "$GH_TOKEN_FILE"
+                else
+                    rm -f "$GH_TOKEN_FILE"
+                fi
+            fi
+        fi
 
-  3. sudo aisandboxctl client mint <name> --pem --out /tmp/<name>
+        # 5. Next steps — short form when onboarding ran, full deferred block
+        #    otherwise.
+        if [ "$ONBOARD_DONE" = "1" ]; then
+            cat <<'EOM'
+
+ai-sandbox-server installed and onboarded. Remaining steps:
+
+  1. sudo aisandboxctl client mint <name> --pem --out /tmp/<name>
        The server refuses to start on an empty allowlist — mint at
        least one client cert before enabling the unit.
 
-  4. sudo systemctl enable --now ai-sandbox-server
+  2. sudo systemctl enable --now ai-sandbox-server
+
+Re-run `sudo aisandboxctl onboard` any time to refresh credentials, add a
+Claude pre-init snapshot (interactive, from a terminal), or change the
+captured config. The CLI wrapper is at /usr/bin/aisandboxctl.
+
+EOM
+        else
+            cat <<'EOM'
+
+ai-sandbox-server installed. Onboarding was deferred. Next steps:
+
+  1. sudo aisandboxctl onboard
+       One-shot wizard: provisions the server cert + directory tree (PKI),
+       captures the SSH key, git identity, an optional gh token, and — from a
+       terminal — a Claude pre-init snapshot. Gathers only what is missing;
+       re-run with --force to refresh. Pass --hostname <fqdn> / --san for a
+       custom cert SAN, --no-gh / --no-claude-preinit to opt out. The granular
+       commands still work: `aisandboxctl pki init` then `aisandboxctl secrets seed`.
+
+  2. sudo aisandboxctl client mint <name> --pem --out /tmp/<name>
+       The server refuses to start on an empty allowlist — mint at
+       least one client cert before enabling the unit.
+
+  3. sudo systemctl enable --now ai-sandbox-server
 
 The CLI wrapper is at /usr/bin/aisandboxctl (a thin POSIX shell shim
 around the bundled aisandboxctl jar — `aisandboxctl --help` for usage).
 
 EOM
+        fi
         ;;
 
     abort-upgrade|abort-remove|abort-deconfigure)

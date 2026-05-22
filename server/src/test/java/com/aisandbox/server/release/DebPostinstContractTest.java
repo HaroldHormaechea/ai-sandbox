@@ -83,4 +83,72 @@ class DebPostinstContractTest {
                         text)
                 .isTrue();
     }
+
+    /**
+     * UC-17 AC1/AC2/AC9 — packaging contract for the debconf-driven
+     * onboarding the postinst now performs. The wizard is invoked
+     * non-interactively from {@code configure}; this guard pins the
+     * shape of that integration so a future edit can't silently drop a
+     * piece (and reintroduce a hang or a leaked token):
+     *
+     * <ul>
+     *   <li>sources the debconf confmodule and reads the captured
+     *       answers via {@code db_get};</li>
+     *   <li>invokes {@code /usr/bin/aisandboxctl onboard} with stdin
+     *       redirected from {@code /dev/null} and the headless flags
+     *       {@code --no-claude-preinit --no-image-build} (so a dpkg run
+     *       can never block on a TTY or a slow Docker build — AC1);</li>
+     *   <li>clears the captured gh token from the debconf database
+     *       (never persisted);</li>
+     *   <li>retains the deferred "Next steps" fallback block pointing at
+     *       {@code aisandboxctl onboard} (the no-onboard path — AC1/AC2);</li>
+     *   <li>still ends with {@code exit 0} (the install never fails
+     *       because of onboarding).</li>
+     * </ul>
+     */
+    @Test
+    void postinst_drives_debconf_onboarding_non_interactively_and_defers_cleanly() throws IOException {
+        assumeTrue(
+                Files.isRegularFile(POSTINST_FILE),
+                "postinst not found at " + POSTINST_FILE + " — test must run with cwd=server/");
+
+        String text = Files.readString(POSTINST_FILE);
+
+        // Sources the confmodule + reads the captured answers.
+        assertThat(text)
+                .as("UC-17 — postinst MUST source the debconf confmodule")
+                .contains(". /usr/share/debconf/confmodule");
+        assertThat(text)
+                .as("UC-17 — postinst MUST db_get the onboarding answers")
+                .contains("db_get ai-sandbox-server/onboard")
+                .contains("db_get ai-sandbox-server/git-name")
+                .contains("db_get ai-sandbox-server/git-email");
+
+        // Invokes the wizard non-interactively, stdin from /dev/null, with the
+        // headless flags — AC1: a dpkg run can never hang on a TTY / image build.
+        assertThat(text)
+                .as("UC-17 — postinst MUST invoke `aisandboxctl onboard`")
+                .contains("/usr/bin/aisandboxctl onboard");
+        assertThat(text)
+                .as("UC-17 AC1 — the onboard invocation MUST redirect stdin from /dev/null (no hang)")
+                .containsPattern("/usr/bin/aisandboxctl onboard[^\\n]*</dev/null");
+        assertThat(text)
+                .as("UC-17 AC1 — onboarding during install MUST run with --no-claude-preinit --no-image-build")
+                .contains("--no-claude-preinit")
+                .contains("--no-image-build");
+
+        // The captured gh token is wiped from the debconf db (never persisted).
+        assertThat(text)
+                .as("UC-17 — postinst MUST clear the gh token from the debconf database")
+                .containsPattern("db_set\\s+ai-sandbox-server/gh-token\\s+\"\"");
+
+        // The deferred Next-steps fallback survives (no-onboard / defer path).
+        assertThat(text)
+                .as("UC-17 AC1/AC2 — the deferred Next-steps block pointing at `aisandboxctl onboard` MUST remain")
+                .contains("Onboarding was deferred")
+                .contains("sudo aisandboxctl onboard");
+
+        // Install never fails because of onboarding.
+        assertThat(text).as("UC-17 — postinst MUST still end with exit 0").containsPattern("(?m)^exit 0\\s*$");
+    }
 }

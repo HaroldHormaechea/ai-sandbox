@@ -133,18 +133,26 @@ release_counter_lock
 
 PROJECT="ai-sandbox-${N}"
 
-# ── Pre-create per-session host dirs if isolation chosen ─────────────────────
+# ── Pre-create per-session host dirs ─────────────────────────────────────────
 WORKSPACE_HOST_PATH="./workspace"
 CLAUDE_CONFIG_HOST_PATH="./claude-config"
 
 if [ "$WORKSPACE_MODE" = "isolated" ]; then
     WORKSPACE_HOST_PATH="./workspace-${N}"
-    mkdir -p "$WORKSPACE_HOST_PATH"
 fi
 if [ "$CLAUDE_CONFIG_MODE" = "isolated" ]; then
     CLAUDE_CONFIG_HOST_PATH="./claude-config-${N}"
-    mkdir -p "$CLAUDE_CONFIG_HOST_PATH"
 fi
+
+# UC-17 — pre-create the resolved bind-mount source dirs (BOTH shared and
+# isolated) before `compose up`. If a bind source does not exist, Docker
+# auto-creates it as root:root, which a non-root session container (running as
+# the server uid via compose `user:`) then cannot write — the original
+# "Permission denied creating ~/.claude/CLAUDE.md" failure. Creating them here,
+# as the user who runs spawn.sh (the ai-sandbox-server service user in install
+# mode), gives them the right owner up front. `mkdir -p` is idempotent and
+# harmless in developer mode where the shared dirs usually already exist.
+mkdir -p "$WORKSPACE_HOST_PATH" "$CLAUDE_CONFIG_HOST_PATH"
 
 # ── Launch ───────────────────────────────────────────────────────────────────
 export AI_SANDBOX_WORKSPACE_HOST_PATH="$WORKSPACE_HOST_PATH"

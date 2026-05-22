@@ -206,6 +206,65 @@ unreadable, allowlist folder empty (refuse-to-start policy), Docker socket
 unreachable, UC02 scripts missing or non-executable, audit-log directory
 missing or not writable.
 
+#### Out-of-box onboarding: the `aisandboxctl onboard` wizard
+
+`aisandboxctl onboard` is a single, re-runnable wizard that gets a fresh
+install to "spawned sessions just work". It composes `pki init` and
+`secrets seed` behind one **per-component check**: it provisions the PKI +
+directory tree, the SSH key, git identity, an optional gh token, and (from a
+terminal) a Claude pre-init snapshot — but **only for the pieces that are
+still missing**. Already-present artifacts are left untouched unless you pass
+`--force`, so re-running is safe and idempotent.
+
+```bash
+# Interactive — prompts only for what's missing; builds the session image
+# lazily the first time a Docker-using step (gh web login / Claude OAuth) runs.
+sudo aisandboxctl onboard
+
+# Unattended (Ansible / cloud-init) — every value supplied, nothing prompts.
+sudo aisandboxctl onboard \
+    --git-key /home/operator/.ssh/id_ed25519 \
+    --git-name "Alice Operator" --git-email alice@example.com \
+    --gh-token-file /tmp/gh-token \
+    --no-claude-preinit            # Claude OAuth needs a TTY; add it later
+```
+
+On a **`.deb` install** the wizard runs automatically via **debconf**:
+`apt`/`dpkg` asks whether to onboard now and, if yes, collects the git
+name/email, an SSH key path, and an optional gh token. Under a noninteractive
+or unattended frontend it does **not** hang or fail the install — it defers
+cleanly and prints the exact command to finish later. The package install
+never builds the container image and never runs the interactive Claude OAuth
+step (the postinst forces `--no-claude-preinit --no-image-build`); the image
+builds **lazily** on the first interactive `onboard` or the first `spawn`.
+The captured gh token is wiped from the debconf database immediately after
+install. Re-run `sudo aisandboxctl onboard` any time to refresh credentials,
+add a Claude pre-init snapshot, or change the captured config.
+
+#### Session uid alignment
+
+Session containers run as the **management server's runtime uid**, not the
+image's baked-in `claude` user (uid 1000). The server injects
+`AI_SANDBOX_RUN_AS_USER=<uid>:0` into `docker-compose.yml`'s `user:` field,
+where `<uid>` is the numeric owner of the secrets dir — the same uid that
+owns the 0600 `git-key`. This is the OpenShift "arbitrary-uid" recipe:
+
+- The image's `$HOME` (`/home/claude`) and `/workspace` are owned by **group
+  0** and made group-writable at build time, so a container running as
+  `<uid>:0` can create `~/.ssh`, `~/.claude/*`, `~/.config/rtk`, etc.
+- `/etc/passwd` is group-0-writable and `entrypoint.sh` appends a passwd line
+  for its own uid on boot (idempotent), so `ssh` / `git` / `gh` resolve the
+  user even when it has no pre-existing entry.
+- `spawn.sh` pre-creates the per-session bind-mount source dirs
+  (`workspace*/`, `claude-config*/`) as the server user **before** `compose
+  up`, so Docker never auto-creates them `root`-owned.
+
+The net effect: a session can write its mounted `~/.claude`, read the 0600
+`git-key`, clone/commit over SSH, and inherit the Claude pre-init template —
+with no post-install `chown` or secret-copying. Developer-mode runs leave
+`AI_SANDBOX_RUN_AS_USER` unset, so `user:` falls back to the image's `claude`
+user — byte-identical to the pre-UC-17 behaviour.
+
 #### What `secrets seed` captures, where, and the at-rest security model
 
 | Step | Output | Mode | At-rest content |
@@ -230,6 +289,36 @@ sudo aisandboxctl secrets seed \
 ##### Alternative for non-wizard deployments
 
 The pre-UC06 manual-drop flow still works: after `pki init`, drop `git-key`, `gitconfig`, and optionally `gh-token` into `/etc/ai-sandbox-server/secrets/` by hand (mode 0600, owned `ai-sandbox-server`). Leave `/etc/ai-sandbox-server/templates/claude-config/` empty (or absent) and sessions will skip the Claude pre-init copy. Operators on this path lose the unattended-install story `secrets seed` provides but retain full control over how secrets land on disk.
+
+##### Cleaning up an already-broken install (pre-UC-17)
+
+UC-17 ships **fresh-install + new-session** behaviour only — it performs **no
+migration** of installs that predate it (e.g. a server whose tree is owned by
+the old uid, or that has root-owned per-session dirs Docker auto-created when
+a bind-mount source was missing). This is experimental; no
+backwards-compatibility is promised. Repair a broken install by hand:
+
+```bash
+# 1. Re-run onboarding to repair/refresh the server-owned tree + secrets.
+sudo aisandboxctl onboard --force
+
+# 2. Re-assert ownership of the operator-managed tree to the runtime user.
+sudo chown -R ai-sandbox-server:ai-sandbox-server \
+    /etc/ai-sandbox-server /var/lib/ai-sandbox-server
+
+# 3. Remove root-owned per-session dirs Docker auto-created before the fix.
+sudo rm -rf /var/lib/ai-sandbox-server/sessions/{workspace-*,claude-config-*}
+
+# 4. Rebuild / re-pull ai-context:latest so it carries the UC-17 Dockerfile
+#    changes ($HOME group-0-writable, /etc/passwd self-registration). The
+#    first interactive `aisandboxctl onboard` (or a `docker compose build`)
+#    rebuilds it.
+
+# 5. Recreate any already-spawned sessions so they pick up the new `user:`
+#    (DELETE then POST /v1/sessions via the API, or clean.sh + spawn.sh on
+#    the host). Sessions launched before the upgrade keep running as the old
+#    uid until they are recreated.
+```
 
 ### Client lifecycle
 

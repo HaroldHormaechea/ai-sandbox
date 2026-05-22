@@ -150,6 +150,52 @@ jobs:
           name: real-docker-integration-logs
           path: server/build/real-docker-integration-test/
 
+  # UC-17 — real-Docker onboarding / uid-alignment job. Spawns a session via the
+  # real spawn.sh as an arbitrary non-1000 uid (4242) — the management server's
+  # install-mode path with AI_SANDBOX_RUN_AS_USER=4242:0 — and asserts the
+  # container stays Up and bootstraps cleanly (passwd self-register, ~/.claude
+  # written, Claude template seeded, readable 0600 git-key, ssh config). This
+  # catches the UC-17 permission/uid bug class, which the unit + Spring-slice
+  # tests structurally cannot reach (they never run a real container as a uid
+  # other than the image's 1000). Sibling of real-docker-integration: same
+  # ubuntu-24.04 runner (Docker pre-installed + passwordless sudo) and the same
+  # AI_SANDBOX_REAL_DOCKER_IT=1 gate.
+  real-docker-onboarding:
+    runs-on: ubuntu-24.04
+    needs: build
+    env:
+      AI_SANDBOX_REAL_DOCKER_IT: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Verify docker is present and running
+        run: |
+          if ! command -v docker >/dev/null 2>&1; then
+            echo "::group::Install docker (defensive — not expected on ubuntu-24.04)"
+            curl -fsSL https://get.docker.com | sudo sh
+            echo "::endgroup::"
+          fi
+          sudo systemctl is-active docker || sudo systemctl start docker
+          docker version
+          docker compose version
+
+      - name: Run real-docker onboarding / uid-alignment script
+        run: ./gradlew :server:realDockerOnboardingTest --no-daemon
+
+      # On failure, surface the spawn / docker / probe transcripts so triage can
+      # read them without a re-run.
+      - name: Upload real-docker-onboarding artefacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-docker-onboarding-logs
+          path: server/build/real-docker-onboarding-test/
+
   # UC05 § AC29,AC30 — smoke-test the self-contained release zip. Runs
   # parallel to `build` and is required-passing per AC30 (the actual
   # branch-protection gate is operator-side, documented in the release
@@ -663,14 +709,29 @@ jobs:
                   apt-get install -y --no-install-recommends \
                       openjdk-21-jdk-headless unzip openssh-client curl ca-certificates python3
 
+                  # UC-17 — the debconf control files must ship inside the .deb
+                  # control archive. dpkg-deb -e extracts the control member;
+                  # assert `config` (executable) + `templates` are present, the
+                  # onboarding question is registered, and debconf is a Depends.
+                  dpkg-deb -e /tmp/release/release.deb /tmp/debcontrol
+                  test -x /tmp/debcontrol/config
+                  test -f /tmp/debcontrol/templates
+                  grep -q "ai-sandbox-server/onboard" /tmp/debcontrol/templates
+                  grep -qE "^Depends:.*debconf" /tmp/debcontrol/control
+
                   # `docker.io` is one of the .deb Depends but the smoke env
                   # cannot run a Docker daemon; pre-create the `docker` group
                   # the postinst expects, install the .deb, then satisfy
                   # remaining deps with `apt-get -f install -y`.
                   groupadd -f docker
-                  dpkg -i /tmp/release/release.deb || true
+                  # UC-17 — the postinst now runs the debconf-driven onboarding
+                  # hook. Under the noninteractive frontend it must NOT block on
+                  # stdin (no answers preseeded → onboarding defers cleanly). Wrap
+                  # the install + configure in `timeout` so a regression that
+                  # hangs waiting for input fails loudly here instead of stalling.
+                  timeout 180 dpkg -i /tmp/release/release.deb </dev/null || true
                   apt-get install -y --no-install-recommends -f
-                  dpkg --configure -a
+                  timeout 180 dpkg --configure -a </dev/null
 
                   # AC layout — jars under /opt/ai-sandbox-server/lib/.
                   test -f /opt/ai-sandbox-server/lib/aisandbox-server.jar
@@ -1222,3 +1283,65 @@ jobs:
               true
 
           [ ! -e "$claude_config_empty/.seeded" ]
+
+      # UC-17 — uid-aligned session bootstrap probe. The original bug: a session
+      # container running as a uid OTHER than the image's `claude` (1000) hit
+      # "Permission denied" creating ~/.claude/CLAUDE.md (container Exited 1) and
+      # could not read the 0600 git-key ("Permission denied (publickey)"). This
+      # step runs the REAL entrypoint as uid 4242:0 (an arbitrary host uid with
+      # no /etc/passwd entry) against a 4242-owned ~/.claude mount + a 4242-owned
+      # 0600 git-key, and asserts the four crux conditions the Part-A recipe
+      # fixes:
+      #   (a) the entrypoint wrote into the mounted ~/.claude (the EACCES half);
+      #   (b) getent passwd 4242 resolves (entrypoint self-registered it);
+      #   (c) ssh config resolves (~/.ssh wired from the readable key);
+      #   (d) the 0600 git-key is readable by uid 4242 (the publickey half).
+      # ai-context:latest was built by the "Build bundled compose context" step
+      # above. The existing UC06 step is left untouched (Dockerfile changes are
+      # no-ops for uid 1000 — its three cases stay green).
+      - name: Verify UC-17 uid-aligned session bootstrap (run as uid 4242:0)
+        run: |
+          set -euxo pipefail
+
+          cc="$RUNNER_TEMP/uc17-cc"
+          secrets="$RUNNER_TEMP/uc17-secrets"
+          rm -rf "$cc" "$secrets"
+          install -d "$cc" "$secrets"
+
+          # 0777 ~/.claude so uid 4242 can populate the bind mount in this probe.
+          # (The real install path instead pre-creates it 4242-owned via
+          # spawn.sh — same end state: writable by the runtime uid.)
+          chmod 0777 "$cc"
+
+          # A throwaway 0600 key owned by 4242 — proves the runtime uid can READ
+          # the secret the entrypoint copies into ~/.ssh.
+          ssh-keygen -t ed25519 -N "" -f "$secrets/git-key" -C uc17-ci >/dev/null
+          sudo chown 4242:0 "$secrets" "$secrets/git-key"
+          sudo chmod 600 "$secrets/git-key"
+
+          # Pass a probe command as argv → the entrypoint runs its full bootstrap
+          # then `exec "$@"`. A clean exit 0 means every probe passed.
+          docker run --rm \
+              --user 4242:0 \
+              -v "$cc:/home/claude/.claude" \
+              -v "$secrets:/etc/secrets:ro" \
+              ai-context:latest \
+              sh -c '
+                  set -e
+                  echo "[uc17] uid=$(id -u) gid=$(id -g) HOME=$HOME"
+                  # (b) the synthesised passwd entry resolves.
+                  getent passwd 4242
+                  # (a) entrypoint wrote into the mounted ~/.claude as uid 4242
+                  # (the write that used to fail with EACCES). rtk init -g writes
+                  # its hook at settings.json; the bash-nudge doc lands in
+                  # CLAUDE.md unless rtk already documented it in RTK.md, so the
+                  # nudge is asserted as "CLAUDE.md OR RTK.md" (either proves the
+                  # write succeeded).
+                  test -f "$HOME/.claude/settings.json"
+                  test -f "$HOME/.claude/CLAUDE.md" || test -f "$HOME/.claude/RTK.md"
+                  # (c) ssh config resolves (IdentityFile / StrictHostKeyChecking).
+                  ssh -G github.com >/dev/null
+                  # (d) the 0600 git-key is readable by uid 4242.
+                  cat /etc/secrets/git-key >/dev/null
+                  echo "[uc17] all uid-4242 bootstrap probes passed"
+              '

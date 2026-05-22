@@ -203,6 +203,34 @@ val realDockerIntegrationTest by tasks.registering(Exec::class) {
     }
 }
 
+// ── UC-17 real-Docker onboarding / uid-alignment step ────────────────────────
+//
+// Drives `server/ci/real-docker-onboarding.sh`, which builds ai-context:latest,
+// lays down a uid-4242-owned scratch server tree, spawns a session via the real
+// `spawn.sh` in install mode (AI_SANDBOX_RUN_AS_USER=4242:0), and asserts the
+// container stays Up + the uid-4242 bootstrap probes pass (passwd self-register,
+// ~/.claude written, template seeded, ssh config, readable 0600 git-key). This
+// catches the UC-17 uid-misalignment regression class — which the unit/Spring
+// tests cannot reach because they never run a real container as a non-1000 uid.
+//
+// No jar dependency: the path under test is the host scripts + the container
+// entrypoint, not the server fat-jar. Gated on AI_SANDBOX_REAL_DOCKER_IT=1 like
+// realDockerIntegrationTest; the script itself does not re-check the env var.
+val realDockerOnboardingTest by tasks.registering(Exec::class) {
+    group = "verification"
+    description = "Spawns a session as a non-1000 uid via spawn.sh and asserts uid-aligned bootstrap (UC-17)."
+    workingDir = rootProject.projectDir
+    executable = "bash"
+    args = listOf("server/ci/real-docker-onboarding.sh")
+    environment("AI_SANDBOX_REAL_DOCKER_IT", System.getenv("AI_SANDBOX_REAL_DOCKER_IT") ?: "")
+    if (System.getenv("RUNNER_TEMP") != null) {
+        environment("RUNNER_TEMP", System.getenv("RUNNER_TEMP")!!)
+    }
+    if (System.getenv("AI_SANDBOX_REAL_DOCKER_IT") != "1") {
+        enabled = false
+    }
+}
+
 // ── OAS generation (docs-only profile) ──────────────────────────────────────
 val generateOpenApiDocs by tasks.registering(JavaExec::class) {
     group = "documentation"
@@ -417,8 +445,16 @@ val prepDebControl by tasks.registering(Copy::class) {
         filter(ReplaceTokens::class, mapOf("tokens" to mapOf("aiSandboxServerVersion" to captured)))
     }
     from("$projectDir/debian") {
-        include("postinst", "prerm", "postrm")
+        // UC-17 — the debconf `config` script is a maintainer script and must
+        // be executable, exactly like postinst/prerm/postrm.
+        include("postinst", "prerm", "postrm", "config")
         filePermissions { unix("rwxr-xr-x") }
+    }
+    from("$projectDir/debian") {
+        // UC-17 — the debconf `templates` file is data (questions + types), not
+        // a script; ship it 0644.
+        include("templates")
+        filePermissions { unix("rw-r--r--") }
     }
     into(debControlStagingDir)
 }
