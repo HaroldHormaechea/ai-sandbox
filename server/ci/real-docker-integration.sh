@@ -77,6 +77,14 @@ preflight() {
     command -v curl >/dev/null     || fail "curl not on PATH"
     command -v openssl >/dev/null  || fail "openssl not on PATH"
     command -v jq >/dev/null       || fail "jq not on PATH"
+    # `aisandboxctl pki init` shells out to useradd to provision the
+    # ai-sandbox-server system user; on a minimal Linux runner without
+    # useradd this would otherwise fail late inside bootstrap_pki with a
+    # confusing "useradd: command not found" buried in pki-init.stderr.
+    # Fail fast in preflight instead — ubuntu-24.04 GH runners ship
+    # useradd by default so this only fires on deliberately stripped
+    # images and surfaces the missing dependency immediately.
+    command -v useradd >/dev/null  || fail "useradd not on PATH (required by aisandboxctl pki init)"
 
     docker version  >/dev/null 2>&1 || fail "docker daemon not reachable (\`docker version\` failed)"
     docker info     >/dev/null 2>&1 || fail "docker daemon not reachable (\`docker info\` failed)"
@@ -312,8 +320,13 @@ EOF
             fail "docker compose up -d failed for project $COMPOSE_PROJECT"
         }
     # Sanity-check: the project should now appear in `docker compose ls`.
+    # Use jq instead of grep so the assertion is whitespace-stable
+    # (compose's --format json output is documented to be compact today,
+    # but a future compose version that pretty-prints would silently
+    # break a grep on the literal `"Name":"…"` byte sequence).
     docker compose ls --all --format json >"$ARTIFACT_DIR/compose-ls.json" 2>>"$ARTIFACT_DIR/docker.log"
-    if ! grep -q "\"Name\":\"$COMPOSE_PROJECT\"" "$ARTIFACT_DIR/compose-ls.json"; then
+    if ! jq -e --arg n "$COMPOSE_PROJECT" 'any(.[]; .Name == $n)' \
+            < "$ARTIFACT_DIR/compose-ls.json" >/dev/null; then
         log "── compose-ls.json ──"
         cat "$ARTIFACT_DIR/compose-ls.json" >&2 || true
         fail "$COMPOSE_PROJECT did not appear in docker compose ls --all output"
