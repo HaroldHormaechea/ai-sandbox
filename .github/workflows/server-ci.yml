@@ -988,6 +988,30 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
               openjdk-21-jdk-headless curl ca-certificates python3 openssl
 
+          # Force /usr/bin/java to resolve to JDK 21 on this host runner.
+          #
+          # Why this is needed: ubuntu-latest GHA runners pre-bake openjdk-17,
+          # and `apt-get install openjdk-21-jdk-headless` does NOT bump the
+          # update-alternatives priority — `/usr/bin/java` keeps pointing at
+          # JDK 17. The bundled aisandboxctl wrapper (server/wrapper/aisandboxctl)
+          # and the packaged systemd unit (server/systemd/ai-sandbox-server.service)
+          # both hardcode `/usr/bin/java`, which is correct for a production
+          # .deb install (`Depends: openjdk-21-jre-headless` guarantees JDK 21
+          # at /usr/bin/java there) but wrong on this multi-JDK CI runner.
+          # The mismatch surfaces as `UnsupportedClassVersionError: class file
+          # version 65.0` (JDK 21 build) vs runtime version 61.0 (JDK 17)
+          # as soon as the wrapper or systemd unit invokes the JDK-21-compiled
+          # jars (UC-17 fix-back #1 — same bug class, different invocation site).
+          #
+          # The setup-java step earlier in this job installed JDK 21 at $JAVA_HOME;
+          # symlink /usr/bin/java directly at that binary so both the wrapper and
+          # systemd resolve to the same JDK the build targeted.
+          if [ -n "${JAVA_HOME:-}" ] && [ -x "$JAVA_HOME/bin/java" ]; then
+              sudo ln -sf "$JAVA_HOME/bin/java" /usr/bin/java
+              echo "Forced /usr/bin/java -> $JAVA_HOME/bin/java"
+          fi
+          java -version
+
           # UC-15 — documentary echo of the runner's docker-compose
           # capabilities. The server probes `docker compose ls --all` at
           # runtime and falls back to `docker ps -a --filter
@@ -1070,8 +1094,20 @@ jobs:
           test -n "$TOKEN"
 
           body="$(python3 -c "import json,sys;json.dump({'token':sys.argv[1]},sys.stdout)" "$TOKEN")"
+
+          # /etc/ai-sandbox-server/pki/ is mode 0700 owned by ai-sandbox-server
+          # (correct in production), so the unprivileged runner user cannot
+          # read server.crt directly to feed `curl --cacert`. Copy it to a
+          # runner-readable scratch path under sudo so the H1.1 + mTLS curl
+          # below can complete its TLS handshake — without this the curl
+          # fails before any HTTP exchange (Netty logs "Failed to select the
+          # application-level protocol ... StacklessClosedChannelException"
+          # because the client closes the connection without sending the
+          # final handshake frames once it cannot validate the server cert).
+          sudo install -m 0644 /etc/ai-sandbox-server/pki/server.crt /tmp/uc11-systemd-cacert.crt
+
           http_code="$(curl -sS -o /tmp/uc11-systemd-bundle.p12 -w "%{http_code}" \
-              --cacert /etc/ai-sandbox-server/pki/server.crt \
+              --cacert /tmp/uc11-systemd-cacert.crt \
               -H "Content-Type: application/json" \
               --data-binary "$body" \
               https://127.0.0.1:12410/v1/enrollment || echo 000)"
