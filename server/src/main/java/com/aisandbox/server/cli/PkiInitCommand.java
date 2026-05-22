@@ -272,10 +272,11 @@ public class PkiInitCommand implements Runnable {
             System.out.println("  config  : " + configFile);
             System.out.println();
             System.out.println("Next: populate " + secretsDir + " with your SSH key (git-key) and optional gh-token,");
-            System.out.println(
-                    "      then: mint at least one client cert (aisandboxctl client mint <name>) — the server");
-            System.out.println("      refuses to start on an empty allowlist,");
-            System.out.println("      then `systemctl enable --now ai-sandbox-server`.");
+            System.out.println("      then `systemctl enable --now ai-sandbox-server`. The server starts fine on an");
+            System.out.println("      empty allowlist (every request is refused with 401 until a client is authorized).");
+            System.out.println("      Recommended next step: authorize at least one client — mint a cert with");
+            System.out.println("      `aisandboxctl client mint <name>`, or enroll a device with");
+            System.out.println("      `aisandboxctl client invite <name>` (scan the QR). Both hot-reload, no restart.");
             return 0;
         }
 
