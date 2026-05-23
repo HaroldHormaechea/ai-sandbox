@@ -111,6 +111,21 @@ public final class ClaudePreInitStep {
         Files.setPosixFilePermissions(templateDir, PosixFilePermissions.fromString("rwxr-x---"));
 
         if (sourceDirFlag != null) {
+            // UC-19 AC5 — --claude-config-source is the UNATTENDED capture path
+            // (Ansible / CI), so a silently-bad seed is the worst case: no human
+            // is watching to catch the resulting first-run prompt. Value-check
+            // the supplied tree with the SAME requirements as the interactive
+            // capture and fail loud BEFORE seeding, so a malformed source never
+            // produces a prompting session.
+            if (!templateLooksOnboarded(sourceDirFlag)) {
+                throw new IOException("--claude-config-source " + sourceDirFlag
+                        + " is not a usable, onboarded Claude config (see the check(s) above):"
+                        + " spawned sessions would still hit Claude's first-run wizard. Supply a"
+                        + " ~/.claude/-shaped tree captured from a completed `claude` login"
+                        + " (.claude.json with hasCompletedOnboarding=true + oauthAccount, plus a"
+                        + " non-empty .credentials.json), or pass --no-claude-preinit to"
+                        + " intentionally seed no Claude state.");
+            }
             copyTreePreservingModes(sourceDirFlag, templateDir);
         } else {
             interactivePreInit(templateDir);
@@ -257,16 +272,29 @@ public final class ClaudePreInitStep {
     }
 
     /**
-     * UC-19 AC6 value check — confirm the scratch holds the state Claude
-     * reads to skip its first-run wizard, not merely "some non-empty
-     * file". Returns {@code true} only when all of the following hold;
-     * each failure is reported on the operator-visible stream so the
-     * caller's {@code IOException} is actionable (AC6 "fail loud"):
+     * UC-19 AC6 success check for the INTERACTIVE capture: the original
+     * UC06 floor (≥1 non-empty regular file other than {@code .gitkeep},
+     * a guard against a wholly empty scratch) AND
+     * {@link #templateLooksOnboarded(Path)}. Each failure is reported on
+     * the operator-visible stream so the caller's {@code IOException} is
+     * actionable (AC6 "fail loud").
+     */
+    private boolean scratchIsUsable(Path scratch) throws IOException {
+        if (!hasNonEmptyRegularFile(scratch)) {
+            io.println("  Claude pre-init check failed: captured config holds no non-empty files.");
+            return false;
+        }
+        return templateLooksOnboarded(scratch);
+    }
+
+    /**
+     * UC-19 — the shared value check used by BOTH the interactive capture
+     * (against the scratch) AND the {@code --claude-config-source} path
+     * (against the operator-supplied tree, AC5). Returns {@code true} only
+     * when {@code dir} holds the state Claude reads to skip its first-run
+     * wizard, not merely "some non-empty file":
      *
-     * <ol>
-     *   <li>secondary floor — ≥1 regular file other than {@code .gitkeep}
-     *       contributing &gt;0 bytes (the original UC06 heuristic, kept as
-     *       a guard against a wholly empty scratch);</li>
+     * <ul>
      *   <li>{@code .claude.json} is present, non-empty, valid JSON with
      *       {@code hasCompletedOnboarding == true} (boolean) AND a present,
      *       non-empty {@code oauthAccount} object;</li>
@@ -274,19 +302,18 @@ public final class ClaudePreInitStep {
      *       login token. {@code oauthAccount} is only display metadata, so
      *       a template with the account but no credentials would still
      *       re-prompt for login.</li>
-     * </ol>
+     * </ul>
+     *
+     * <p>Each failure is reported on the operator-visible stream so the
+     * caller can throw an actionable {@code IOException} (AC6/AC5 "fail
+     * loud"). For the interactive path the UC-19 symlink redirects Claude's
+     * sibling-file writes into the mounted scratch, so {@code .claude.json}
+     * lands at {@code scratch/.claude.json}; for the source path the
+     * operator's tree is {@code ~/.claude/}-shaped, so the same relative
+     * paths apply.
      */
-    private boolean scratchIsUsable(Path scratch) throws IOException {
-        // (1) secondary floor — guard against a wholly empty scratch.
-        if (!hasNonEmptyRegularFile(scratch)) {
-            io.println("  Claude pre-init check failed: captured config holds no non-empty files.");
-            return false;
-        }
-
-        // (2) ~/.claude.json onboarding + account state. The UC-19 symlink
-        // redirects Claude's sibling-file writes into the mounted scratch,
-        // so it lands at scratch/.claude.json.
-        Path claudeJson = scratch.resolve(".claude.json");
+    private boolean templateLooksOnboarded(Path dir) throws IOException {
+        Path claudeJson = dir.resolve(".claude.json");
         if (!Files.isRegularFile(claudeJson) || Files.size(claudeJson) == 0) {
             io.println("  Claude pre-init check failed: ~/.claude.json missing or empty"
                     + " (completed-onboarding / signed-in account state not captured).");
@@ -311,9 +338,7 @@ public final class ClaudePreInitStep {
                     + " (no signed-in account captured).");
             return false;
         }
-
-        // (3) the real login token at ~/.claude/.credentials.json.
-        Path credentials = scratch.resolve(".credentials.json");
+        Path credentials = dir.resolve(".credentials.json");
         if (!Files.isRegularFile(credentials) || Files.size(credentials) == 0) {
             io.println("  Claude pre-init check failed: ~/.claude/.credentials.json missing or empty"
                     + " (login token not captured; spawned Claude would still prompt to sign in).");

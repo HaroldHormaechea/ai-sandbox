@@ -278,6 +278,20 @@ still hit Claude's first-run wizard. Refresh it from a terminal:
 unattended seed). The CLI wrapper is at /usr/bin/aisandboxctl.
 
 EOM
+        elif [ "$CLAUDE_SNAPSHOT_PRESENT" = "1" ]; then
+            cat <<'EOM'
+
+ai-sandbox-server installed; already onboarded (a Claude pre-init snapshot is
+present) — nothing to do. Re-run `sudo aisandboxctl onboard --force` to refresh
+credentials or re-capture the snapshot. If you haven't already:
+
+  1. sudo aisandboxctl client mint <name> --pem --out /tmp/<name>
+       Authorize at least one client; the server returns 401 to every request
+       until one is present. Hot-reloads — no restart.
+
+  2. sudo systemctl enable --now ai-sandbox-server
+
+EOM
         else
             cat <<'EOM'
 
