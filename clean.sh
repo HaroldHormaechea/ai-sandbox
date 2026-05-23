@@ -96,7 +96,13 @@ fi
 clean_one() {
     local n="$1" name="ai-sandbox-${n}"
     info "Cleaning $name" >&2
-    ai_sandbox_compose -p "$name" down -v --remove-orphans 2>/dev/null || true
+    # AC9 — capture the real teardown exit code. The old `|| true` (combined
+    # with the 2>/dev/null) swallowed a failed `down`, so a container that
+    # never actually tore down still yielded exit 0 → server 204 → the row
+    # reappeared on the next refresh. errexit stays satisfied because the `||`
+    # branch makes the line always succeed.
+    local down_rc=0
+    ai_sandbox_compose -p "$name" down -v --remove-orphans 2>/dev/null || down_rc=$?
 
     if [ "$KEEP_WORKSPACE" -eq 0 ] && [ -d "./workspace-${n}" ]; then
         info "  rm -rf ./workspace-${n}" >&2
@@ -106,7 +112,21 @@ clean_one() {
         info "  rm -rf ./claude-config-${n}" >&2
         rm -rf "./claude-config-${n}"
     fi
+
+    # If `down` reported failure, re-check whether containers actually remain
+    # before treating it as fatal: a non-zero exit with nothing left running
+    # (already-gone / never-existed) is tolerated; lingering containers are a
+    # genuine teardown failure that MUST propagate a non-zero return (AC9).
+    if [ "$down_rc" -ne 0 ]; then
+        local remaining
+        remaining="$(ai_sandbox_compose -p "$name" ps -q 2>/dev/null || true)"
+        if [ -n "$remaining" ]; then
+            warn "$name: teardown failed (compose down exit $down_rc; containers still present)" >&2
+            return 1
+        fi
+    fi
     ok "$name cleaned"
+    return 0
 }
 
 # ── Branch 1: --all ──────────────────────────────────────────────────────────
@@ -121,16 +141,20 @@ if [ "$DO_ALL" -eq 1 ]; then
         info "No ai-sandbox-* sessions to clean." >&2
         exit 0
     fi
+    rc=0
     for n in "${ALL_SESSIONS[@]}"; do
-        clean_one "$n"
+        clean_one "$n" || rc=$?
     done
-    exit 0
+    exit "$rc"
 fi
 
 # ── Branch 2: explicit <N> ───────────────────────────────────────────────────
 if [ -n "$TARGET_N" ]; then
-    clean_one "$TARGET_N"
-    exit 0
+    # The management server's clean path. A teardown failure here MUST yield a
+    # non-zero exit so the server returns 500 and the client surfaces it (AC9).
+    rc=0
+    clean_one "$TARGET_N" || rc=$?
+    exit "$rc"
 fi
 
 # ── Branch 3: no-arg — list running and prompt ──────────────────────────────
@@ -168,18 +192,20 @@ while true; do
     case "$choice" in
         cancel|c|C|q|Q) exit 0 ;;
         all|A|a)
+            rc=0
             for n in "${INDEX_TO_N[@]}"; do
-                clean_one "$n"
+                clean_one "$n" || rc=$?
             done
-            exit 0
+            exit "$rc"
             ;;
         ''|*[!0-9]*)
             warn "Enter a number, 'all', or 'cancel'." >&2
             ;;
         *)
             if [ "$choice" -ge 1 ] && [ "$choice" -le "${#SESSIONS[@]}" ]; then
-                clean_one "${INDEX_TO_N[$(( choice - 1 ))]}"
-                exit 0
+                rc=0
+                clean_one "${INDEX_TO_N[$(( choice - 1 ))]}" || rc=$?
+                exit "$rc"
             fi
             warn "Out of range." >&2
             ;;
