@@ -225,24 +225,62 @@ still missing**. Already-present artifacts are left untouched unless you pass
 sudo aisandboxctl onboard
 
 # Unattended (Ansible / cloud-init) — every value supplied, nothing prompts.
+# Either opt out of the Claude step (--no-claude-preinit) and capture it from a
+# terminal later, or seed it zero-touch from a previously-captured claude-config
+# template (see "Two Claude capture paths" below — NOT a raw ~/.claude/ dir):
 sudo aisandboxctl onboard \
     --git-key /home/operator/.ssh/id_ed25519 \
     --git-name "Alice Operator" --git-email alice@example.com \
     --gh-token-file /tmp/gh-token \
-    --no-claude-preinit            # Claude OAuth needs a TTY; add it later
+    --claude-config-source /path/to/prebuilt-claude-config
 ```
 
-On a **`.deb` install** the wizard runs automatically via **debconf**:
-`apt`/`dpkg` asks whether to onboard now and, if yes, collects the git
-name/email, an SSH key path, and an optional gh token. Under a noninteractive
-or unattended frontend it does **not** hang or fail the install — it defers
-cleanly and prints the exact command to finish later. The package install
-never builds the container image and never runs the interactive Claude OAuth
-step (the postinst forces `--no-claude-preinit --no-image-build`); the image
-builds **lazily** on the first interactive `onboard` or the first `spawn`.
+**Two Claude capture paths.** The Claude pre-init snapshot — the state that
+lets a spawned session start past Claude's first-run setup (theme,
+completed-onboarding flag, signed-in account) — can be captured two ways:
+
+- **Interactive device-flow login** (default): a one-time `claude` login in a
+  throwaway container. Needs a terminal and a browser.
+- **Zero-touch `--claude-config-source <dir>`**: copies a previously-captured
+  **claude-config template** — the directory an interactive `aisandboxctl
+  onboard` / `secrets seed` produces, with `.claude.json` **and**
+  `.credentials.json` at its root — for headless / automated provisioning.
+  This is **not** a raw `~/.claude/` directory: `~/.claude.json` (which holds
+  the completed-onboarding flag + signed-in account) lives *outside*
+  `~/.claude/`, so a bare copy omits it. To hand-assemble a source dir, copy
+  your `~/.claude/` contents **and** your `~/.claude.json` (as `.claude.json`)
+  into it. A source missing this state now **fails loud** (rather than silently
+  seeding a session that still prompts); pass `--no-claude-preinit` if you
+  deliberately want no Claude state.
+
+Both produce a template that fully suppresses the in-container first-run
+wizard, and both also enable Claude Code's **agent-teams + tmux teammate
+backend** in each spawned session's `~/.claude/settings.json`
+(`env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` plus `teammateMode: "tmux"`).
+
+On a **`.deb` install** onboarding adapts to whether a terminal is present:
+
+- **From a terminal** — works under both `sudo dpkg -i *.deb` and `sudo apt
+  install ./*.deb` — the post-install step offers a `[Y/n]` invite and, on
+  yes, runs the **full interactive wizard**: the Claude device-flow login and
+  the container-image build included, so sessions spawned afterward start at
+  Claude's normal prompt. Any answers already collected by debconf (git
+  name/email, SSH key path, gh token) prefill the wizard. Decline, and the
+  install finishes with a single command to onboard later.
+- **Headless / unattended** — noninteractive frontend, piped fds, or
+  `ssh host 'sudo dpkg -i …'` — the install **never hangs or fails**: if
+  onboarding was preseeded via debconf it runs non-interactively (skipping the
+  TTY-only Claude login and the slow image build); otherwise it defers cleanly
+  and prints exactly one next step. For a zero-touch Claude snapshot on a
+  headless host, run `sudo aisandboxctl onboard --claude-config-source <dir>`
+  afterward.
+
 The captured gh token is wiped from the debconf database immediately after
-install. Re-run `sudo aisandboxctl onboard` any time to refresh credentials,
-add a Claude pre-init snapshot, or change the captured config.
+install and never appears on the process table. Onboarding is idempotent: a
+re-install with a Claude snapshot already captured does **not** re-prompt, and
+an upgrade whose snapshot predates this release prints a one-line
+`onboard --force` hint. Re-run `sudo aisandboxctl onboard --force` any time to
+refresh credentials or re-capture the Claude snapshot.
 
 #### Session uid alignment
 
@@ -286,7 +324,7 @@ sudo aisandboxctl secrets seed \
     --git-key /home/operator/.ssh/id_ed25519 \
     --git-name "Alice Operator" --git-email alice@example.com \
     --gh-token-file /tmp/gh-token \
-    --no-claude-preinit   # or --claude-config-source <workstation-tarball>
+    --no-claude-preinit   # or --claude-config-source <captured-claude-config-dir>
 ```
 
 ##### Alternative for non-wizard deployments

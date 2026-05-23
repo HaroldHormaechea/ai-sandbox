@@ -28,6 +28,15 @@ set -e
 
 case "$1" in
     configure)
+        # Capture the upgrade indicator NOW, before the onboarding block reuses
+        # the positional params ($@) to build the onboard argv. On `configure`,
+        # $2 is the most-recently-configured version (empty on a fresh install,
+        # the old version on an upgrade). The UC-19 Next-steps logic needs it.
+        IS_UPGRADE=0
+        if [ -n "$2" ]; then
+            IS_UPGRADE=1
+        fi
+
         # 1. systemd daemon reload.
         if command -v systemctl >/dev/null 2>&1; then
             systemctl daemon-reload || true
@@ -63,21 +72,25 @@ case "$1" in
         install -d -m 0700 -o ai-sandbox-server -g ai-sandbox-server /var/lib/ai-sandbox-server/docker-config
         install -d -m 0750 -o ai-sandbox-server -g ai-sandbox-server /var/log/ai-sandbox-server
 
-        # 4. UC-17 — debconf-driven onboarding. The `config` script gathered
-        #    the answers (or, under the noninteractive frontend, left the
-        #    template defaults). We read them, then immediately db_stop so the
-        #    rest of postinst (onboard's output, the Next-steps block) writes to
-        #    the real terminal rather than the debconf protocol pipe on fd 1.
+        # 4. UC-17 / UC-19 — onboarding. The `config` script gathered the
+        #    answers (or, under the noninteractive frontend, left the template
+        #    defaults). We read them, then immediately db_stop so the rest of
+        #    postinst writes to the real terminal rather than the debconf
+        #    protocol pipe on fd 1. UC-19 then picks one of three paths:
         #
-        #    Onboarding runs ONLY when the operator opted in AND supplied both a
-        #    git name and email (the minimum for a useful gitconfig). It runs
-        #    fully non-interactively with --no-claude-preinit --no-image-build:
-        #    Claude OAuth needs a TTY and the image build is slow + Docker-bound,
-        #    so neither belongs in a dpkg run. Any other condition (opt-out,
-        #    missing answers, noninteractive frontend, debconf absent, onboard
-        #    failure) falls through to the deferred Next-steps block — the
-        #    package install never fails or hangs because of onboarding.
+        #      1. Controlling terminal present (works under `dpkg -i` AND
+        #         `apt install`) — offer a [Y/n] invite and, on yes, run the
+        #         FULL interactive wizard (Claude device-flow login + image
+        #         build) on /dev/tty, prefilled with any debconf answers.
+        #      2. No terminal but debconf preseeded — the UC-17 non-interactive
+        #         onboard (--no-claude-preinit --no-image-build); Claude OAuth
+        #         needs a TTY and the image build is slow + Docker-bound.
+        #      3. No terminal, no preseed — defer with one clear next-step.
+        #
+        #    The package install never fails or hangs because of onboarding:
+        #    the tty probe is set -e-safe and every onboard call is guarded.
         ONBOARD_DONE=0
+        ONBOARD_INTERACTIVE=0
         ONBOARD=""
         GIT_NAME=""
         GIT_EMAIL=""
@@ -98,20 +111,94 @@ case "$1" in
             db_stop || true
         fi
 
-        if [ "$ONBOARD" = "true" ] && [ -n "$GIT_NAME" ] && [ -n "$GIT_EMAIL" ]; then
-            # Build the onboard argv safely via positional params (no eval, no
-            # word-splitting of operator-supplied values). $1 ("configure") is
-            # not referenced again in this branch, so reusing $@ is safe.
+        # Idempotency gate (UC-19 B3 / AC7). A non-empty captured .claude.json
+        # proves a previous onboarding ran the (post-UC-19) Claude pre-init
+        # capture — pre-UC-19 builds never captured it, so any non-empty one
+        # here is necessarily post-fix. When present we skip the interactive
+        # invite to avoid a spurious re-prompt; fresh installs and stale/old
+        # templates (missing or empty .claude.json) are still offered.
+        CLAUDE_TEMPLATE_JSON=/etc/ai-sandbox-server/templates/claude-config/.claude.json
+        CLAUDE_SNAPSHOT_PRESENT=0
+        if [ -s "$CLAUDE_TEMPLATE_JSON" ]; then
+            CLAUDE_SNAPSHOT_PRESENT=1
+        fi
+
+        # Controlling-terminal probe (UC-19 C1). We must detect /dev/tty WITHOUT
+        # aborting the script when it is absent. NOTE: the obvious form
+        # `if { exec 3<>/dev/tty; } 2>/dev/null` is NOT safe — on dash a
+        # redirection failure on `exec` exits the (non-interactive) shell even
+        # inside the `if`/group/redirect guard, which would fail the install on
+        # no-tty systems. A subshell + a regular builtin contains the failure to
+        # the subshell, so the parent only sees a non-zero status. /dev/tty
+        # resolves to the operator's terminal under both `dpkg -i` (fds usually
+        # preserved) and `apt install` (maintainer-script stdio is piped into
+        # apt's progress UI, but the controlling terminal is still /dev/tty).
+        HAVE_TTY=0
+        if ( true <>/dev/tty ) 2>/dev/null; then
+            HAVE_TTY=1
+        fi
+
+        # gh token → 0600 temp file (used by whichever branch onboards) so the
+        # token never appears in the process table. Shredded after onboard runs.
+        GH_TOKEN_FILE=""
+        if [ -n "$GH_TOKEN" ]; then
+            GH_TOKEN_FILE="$(mktemp)"
+            chmod 600 "$GH_TOKEN_FILE"
+            printf '%s' "$GH_TOKEN" > "$GH_TOKEN_FILE"
+        fi
+
+        if [ "$CLAUDE_SNAPSHOT_PRESENT" = "0" ] && [ "$HAVE_TTY" = "1" ] && [ "$ONBOARD" != "false" ]; then
+            # ── Branch 1 — interactive invite on the controlling terminal ──
+            # NOT gated on ONBOARD=true: a raw `dpkg -i` never runs the config
+            # script, so there are no answers to gate on — the terminal itself
+            # is the signal. We DO respect an explicit debconf opt-out
+            # (ONBOARD=false) so the operator is never re-prompted after saying
+            # no. The probe above proved /dev/tty is openable, so this `exec`
+            # cannot fail (and thus cannot abort the script); we open fd 3 RW.
+            exec 3<>/dev/tty
+            printf '\n' >&3
+            printf 'ai-sandbox-server: run the onboarding wizard now (Claude login + image build)? [Y/n] ' >&3
+            REPLY=""
+            read REPLY <&3 || REPLY=""
+            case "$REPLY" in
+                [Nn]*)
+                    : # declined — fall through to the deferred Next-steps block.
+                    ;;
+                *)
+                    # Prefill the onboard argv from any debconf answers (each
+                    # optional) via positional params — no eval, no word-split
+                    # of operator-supplied values. `set --` first drops $1
+                    # ("configure"); IS_UPGRADE was already captured above.
+                    set --
+                    if [ -n "$GIT_NAME" ]; then set -- "$@" --git-name "$GIT_NAME"; fi
+                    if [ -n "$GIT_EMAIL" ]; then set -- "$@" --git-email "$GIT_EMAIL"; fi
+                    if [ -n "$SSH_KEY_PATH" ]; then set -- "$@" --git-key "$SSH_KEY_PATH"; fi
+                    if [ -n "$GH_TOKEN_FILE" ]; then set -- "$@" --gh-token-file "$GH_TOKEN_FILE"; fi
+                    echo "ai-sandbox-server: launching interactive onboarding (Ctrl-C to abort)..." >&3
+                    # Wire stdin+stdout+stderr to the terminal: onboard's TTY
+                    # gate is System.console(), non-null only when BOTH stdin and
+                    # stdout are terminals. WITHOUT --no-claude-preinit /
+                    # --no-image-build so the full device-flow + image build run.
+                    if /usr/bin/aisandboxctl onboard "$@" <&3 >&3 2>&3; then
+                        ONBOARD_DONE=1
+                        ONBOARD_INTERACTIVE=1
+                    else
+                        echo "ai-sandbox-server: onboarding did not complete; re-run later with: sudo aisandboxctl onboard" >&3
+                    fi
+                    ;;
+            esac
+            exec 3>&- || true
+        elif [ "$ONBOARD" = "true" ] && [ -n "$GIT_NAME" ] && [ -n "$GIT_EMAIL" ]; then
+            # ── Branch 2 — no terminal but debconf preseeded (UC-17) ──
+            # Fully non-interactive: Claude OAuth needs a TTY and the image
+            # build is slow + Docker-bound, so both are skipped here. Build the
+            # argv via positional params; $1 ("configure") is not referenced
+            # again and IS_UPGRADE was captured above.
             set -- --git-name "$GIT_NAME" --git-email "$GIT_EMAIL"
             if [ -n "$SSH_KEY_PATH" ]; then
                 set -- "$@" --git-key "$SSH_KEY_PATH"
             fi
-            GH_TOKEN_FILE=""
-            if [ -n "$GH_TOKEN" ]; then
-                # 0600 temp file so the token never appears in the process table.
-                GH_TOKEN_FILE="$(mktemp)"
-                chmod 600 "$GH_TOKEN_FILE"
-                printf '%s' "$GH_TOKEN" > "$GH_TOKEN_FILE"
+            if [ -n "$GH_TOKEN_FILE" ]; then
                 set -- "$@" --gh-token-file "$GH_TOKEN_FILE"
             else
                 set -- "$@" --no-gh
@@ -124,19 +211,42 @@ case "$1" in
             else
                 echo "ai-sandbox-server: onboarding step failed; complete it later with: sudo aisandboxctl onboard" >&2
             fi
+        fi
+        # Branch 3 (no terminal, no preseed) needs no action here — it falls
+        # through to the deferred Next-steps block below.
 
-            if [ -n "$GH_TOKEN_FILE" ] && [ -f "$GH_TOKEN_FILE" ]; then
-                if command -v shred >/dev/null 2>&1; then
-                    shred -u "$GH_TOKEN_FILE" 2>/dev/null || rm -f "$GH_TOKEN_FILE"
-                else
-                    rm -f "$GH_TOKEN_FILE"
-                fi
+        # Shred the gh-token temp file regardless of which branch ran.
+        if [ -n "$GH_TOKEN_FILE" ] && [ -f "$GH_TOKEN_FILE" ]; then
+            if command -v shred >/dev/null 2>&1; then
+                shred -u "$GH_TOKEN_FILE" 2>/dev/null || rm -f "$GH_TOKEN_FILE"
+            else
+                rm -f "$GH_TOKEN_FILE"
             fi
         fi
 
-        # 5. Next steps — short form when onboarding ran, full deferred block
-        #    otherwise.
-        if [ "$ONBOARD_DONE" = "1" ]; then
+        # 5. Next steps. Four shapes: onboarded-interactively, onboarded-
+        #    non-interactively, upgrade-with-a-stale-Claude-template (B3), and
+        #    the full deferred block (fresh install, no tty / declined / no
+        #    preseed). Exactly one is printed (AC4 — one unambiguous next step).
+        if [ "$ONBOARD_DONE" = "1" ] && [ "$ONBOARD_INTERACTIVE" = "1" ]; then
+            cat <<'EOM'
+
+ai-sandbox-server installed and onboarded interactively (Claude pre-init
+captured; session image built). Remaining steps:
+
+  1. sudo aisandboxctl client mint <name> --pem --out /tmp/<name>
+       Authorize at least one client. The server starts fine on an empty
+       allowlist but refuses every request (401) until a client cert is
+       present; mint one here, or enroll a device with
+       `aisandboxctl client invite <name>`. Both hot-reload — no restart.
+
+  2. sudo systemctl enable --now ai-sandbox-server
+
+Re-run `sudo aisandboxctl onboard --force` any time to refresh credentials or
+re-capture the Claude pre-init snapshot. The CLI wrapper is at /usr/bin/aisandboxctl.
+
+EOM
+        elif [ "$ONBOARD_DONE" = "1" ]; then
             cat <<'EOM'
 
 ai-sandbox-server installed and onboarded. Remaining steps:
@@ -149,9 +259,37 @@ ai-sandbox-server installed and onboarded. Remaining steps:
 
   2. sudo systemctl enable --now ai-sandbox-server
 
-Re-run `sudo aisandboxctl onboard` any time to refresh credentials, add a
-Claude pre-init snapshot (interactive, from a terminal), or change the
-captured config. The CLI wrapper is at /usr/bin/aisandboxctl.
+Claude pre-init was NOT captured (it needs a terminal). From a terminal, run
+`sudo aisandboxctl onboard` to capture it so spawned sessions skip Claude's
+first-run wizard — or `sudo aisandboxctl onboard --claude-config-source <dir>`
+for an unattended seed. Re-run any time to refresh credentials.
+
+EOM
+        elif [ "$IS_UPGRADE" = "1" ] && [ "$CLAUDE_SNAPSHOT_PRESENT" = "0" ]; then
+            cat <<'EOM'
+
+ai-sandbox-server upgraded. The Claude pre-init capture changed in this
+release and your installed template predates it, so spawned sessions may
+still hit Claude's first-run wizard. Refresh it from a terminal:
+
+  sudo aisandboxctl onboard --force
+
+(or `sudo aisandboxctl onboard --force --claude-config-source <dir>` for an
+unattended seed). The CLI wrapper is at /usr/bin/aisandboxctl.
+
+EOM
+        elif [ "$CLAUDE_SNAPSHOT_PRESENT" = "1" ]; then
+            cat <<'EOM'
+
+ai-sandbox-server installed; already onboarded (a Claude pre-init snapshot is
+present) — nothing to do. Re-run `sudo aisandboxctl onboard --force` to refresh
+credentials or re-capture the snapshot. If you haven't already:
+
+  1. sudo aisandboxctl client mint <name> --pem --out /tmp/<name>
+       Authorize at least one client; the server returns 401 to every request
+       until one is present. Hot-reloads — no restart.
+
+  2. sudo systemctl enable --now ai-sandbox-server
 
 EOM
         else
@@ -162,7 +300,9 @@ ai-sandbox-server installed. Onboarding was deferred. Next steps:
   1. sudo aisandboxctl onboard
        One-shot wizard: provisions the server cert + directory tree (PKI),
        captures the SSH key, git identity, an optional gh token, and — from a
-       terminal — a Claude pre-init snapshot. Gathers only what is missing;
+       terminal — an interactive Claude pre-init snapshot (device-flow login).
+       For unattended/headless installs, pass --claude-config-source <dir>
+       with a pre-built ~/.claude/ tree instead. Gathers only what is missing;
        re-run with --force to refresh. Pass --hostname <fqdn> / --san for a
        custom cert SAN, --no-gh / --no-claude-preinit to opt out. The granular
        commands still work: `aisandboxctl pki init` then `aisandboxctl secrets seed`.

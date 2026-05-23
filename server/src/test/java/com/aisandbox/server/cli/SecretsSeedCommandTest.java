@@ -5,6 +5,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.aisandbox.server.cli.secrets.FakeConsoleIO;
 import com.aisandbox.server.cli.secrets.FakeProcessRunner;
 import com.aisandbox.server.cli.secrets.ProcessRunner;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.PrintStream;
@@ -111,6 +113,34 @@ class SecretsSeedCommandTest {
         Path p = tmp.resolve(name);
         Files.write(p, KEY_BYTES);
         return p;
+    }
+
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    /** Onboarded {@code .claude.json} + {@code .credentials.json}, as the UC-19 value check requires. */
+    private static final String ONBOARDED_CLAUDE_JSON =
+            "{\"hasCompletedOnboarding\":true,\"oauthAccount\":{\"emailAddress\":\"dev@example.com\"}}";
+
+    private static final String CREDENTIALS_JSON = "{\"claudeAiOauth\":{\"accessToken\":\"tok\"}}";
+
+    /** UC-19: a {@code --claude-config-source} tree must be onboarded (value-checked). */
+    private static Path onboardedClaudeSource(Path dir, String settingsJson) throws IOException {
+        Files.createDirectories(dir);
+        Files.writeString(dir.resolve("settings.json"), settingsJson);
+        Files.writeString(dir.resolve(".claude.json"), ONBOARDED_CLAUDE_JSON);
+        Files.writeString(dir.resolve(".credentials.json"), CREDENTIALS_JSON);
+        return dir;
+    }
+
+    /** Part E rewrites settings.json: assert the preserved boolean key + the agent-teams keys. */
+    private static void assertAgentTeamsMerged(Path settingsFile, String preservedKey) throws IOException {
+        JsonNode n = MAPPER.readTree(settingsFile.toFile());
+        assertThat(n.path(preservedKey).asBoolean())
+                .as("part-E preserves %s", preservedKey)
+                .isTrue();
+        assertThat(n.path("teammateMode").asText()).isEqualTo("tmux");
+        assertThat(n.path("env").path("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS").asText())
+                .isEqualTo("1");
     }
 
     /** Default unencrypted-key probe + image-present probe for all-flag runs. */
@@ -390,9 +420,7 @@ class SecretsSeedCommandTest {
         Path srcKey = writeKey(tmp, "src-key");
         Path ghToken = tmp.resolve("gh-pat");
         Files.writeString(ghToken, "<fresh-token>\n");
-        Path claudeSrc = tmp.resolve("src-claude");
-        Files.createDirectories(claudeSrc);
-        Files.writeString(claudeSrc.resolve("settings.json"), "{\"new\":true}");
+        Path claudeSrc = onboardedClaudeSource(tmp.resolve("src-claude"), "{\"new\":true}");
 
         // Seed stale content at all four targets — simulating a prior
         // run that should be overwritten on --force.
@@ -434,8 +462,9 @@ class SecretsSeedCommandTest {
         assertThat(Files.readString(layout.gitconfigOut()))
                 .isEqualTo("[user]\n\tname = Bob\n\temail = bob@example.com\n");
         assertThat(Files.readString(layout.ghTokenOut())).isEqualTo("<fresh-token>\n");
-        assertThat(Files.readString(layout.claudeOut().resolve("settings.json")))
-                .isEqualTo("{\"new\":true}");
+        // UC-19: re-seeded from the onboarded source; part E merged the agent-teams keys.
+        assertThat(layout.claudeOut().resolve(".claude.json")).exists();
+        assertAgentTeamsMerged(layout.claudeOut().resolve("settings.json"), "new");
 
         // stderr enumerated the overwritten paths.
         String stderr = errBuf.toString();
@@ -561,10 +590,13 @@ class SecretsSeedCommandTest {
                     if (!Files.exists(layout.ghTokenOut())) {
                         orderViolations.add("claude-step started before gh-token existed");
                     }
-                    // Simulate Claude CLI populating the scratch.
+                    // Simulate Claude CLI populating the scratch with the onboarded
+                    // state the UC-19 value check requires (the sibling ~/.claude.json
+                    // redirected into the mount + the login token).
                     int vIdx = argv.indexOf("-v");
                     Path scratch = Path.of(argv.get(vIdx + 1).split(":")[0]);
-                    Files.writeString(scratch.resolve("settings.json"), "{\"oauth\":\"ok\"}");
+                    Files.writeString(scratch.resolve(".claude.json"), ONBOARDED_CLAUDE_JSON);
+                    Files.writeString(scratch.resolve(".credentials.json"), CREDENTIALS_JSON);
                     return 0;
                 }
             } catch (IOException ioe) {
@@ -627,9 +659,7 @@ class SecretsSeedCommandTest {
         Path srcKey = writeKey(tmp, "src-key");
         Path ghToken = tmp.resolve("gh-pat");
         Files.writeString(ghToken, "<fixture-token>\n");
-        Path claudeSrc = tmp.resolve("src-claude");
-        Files.createDirectories(claudeSrc);
-        Files.writeString(claudeSrc.resolve("settings.json"), "{}");
+        Path claudeSrc = onboardedClaudeSource(tmp.resolve("src-claude"), "{}");
 
         FakeProcessRunner runner = permissiveRunner();
         FakeConsoleIO io = new FakeConsoleIO();

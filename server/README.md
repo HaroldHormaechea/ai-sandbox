@@ -118,8 +118,15 @@ sudo aisandboxctl pki init
 #    CLI flag so the same command can run unassisted under Ansible /
 #    cloud-init — add `--no-gh` and/or `--no-claude-preinit` to opt
 #    out of optional steps. Re-run with `--force` to refresh creds
-#    when they expire. See the top-level README for the full at-rest
-#    security model and an unassisted-install flag example.
+#    when they expire. The Claude step captures two ways: an interactive
+#    device-flow login (default, needs a terminal) or a zero-touch
+#    `--claude-config-source <dir>` seed from a previously-captured
+#    claude-config template (.claude.json + .credentials.json at its root,
+#    as produced by an interactive onboard — NOT a raw ~/.claude/ dir; see
+#    the top-level README) for headless hosts; both also enable the
+#    agent-teams + tmux backend.
+#    See the top-level README for the full at-rest security model, the
+#    .deb auto-onboarding behavior, and an unassisted-install flag example.
 sudo aisandboxctl secrets seed
 
 # 4. Authorize at least one client. The server starts fine on an empty
