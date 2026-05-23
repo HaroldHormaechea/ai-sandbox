@@ -2,20 +2,30 @@ package com.aisandbox.android.ui.screens
 
 import com.aisandbox.android.identity.KeyStoreIdentityManager
 import com.aisandbox.android.net.AiSandboxHttpClient
+import com.aisandbox.android.net.NetworkEvent
+import com.aisandbox.android.net.NetworkEvents
 import com.aisandbox.android.net.ServerProfile
 import com.aisandbox.android.net.SessionSummary
 import com.aisandbox.android.net.SessionsApi
 import java.net.InetAddress
 import java.security.KeyStore
 import java.security.MessageDigest
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 import javax.net.ssl.KeyManagerFactory
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.onSubscription
+import kotlinx.coroutines.job
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import okhttp3.mockwebserver.Dispatcher
@@ -146,7 +156,7 @@ class SessionsCoordinatorTest {
      * put a real {@code POST /v1/sessions} on the wire.
      */
     @Test
-    fun spawn_dispatches_outbound_post_to_server() = runBlocking {
+    fun spawn_dispatches_outbound_post_to_server(): Unit = runBlocking {
         val fx = startFixture()
         val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
         try {
@@ -200,7 +210,7 @@ class SessionsCoordinatorTest {
      * and dispatch NOTHING (the api factory must never be invoked).
      */
     @Test
-    fun spawn_with_no_profile_rolls_back_optimistic_row_and_flags_no_profile() = runBlocking {
+    fun spawn_with_no_profile_rolls_back_optimistic_row_and_flags_no_profile(): Unit = runBlocking {
         val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
         try {
             val seed = SessionSummary(
@@ -246,7 +256,7 @@ class SessionsCoordinatorTest {
      * Asserts both outbound mutations actually left the client.
      */
     @Test
-    fun create_then_delete_round_trip_dispatches_post_and_delete() = runBlocking {
+    fun create_then_delete_round_trip_dispatches_post_and_delete(): Unit = runBlocking {
         val fx = startFixture()
         val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
         try {
@@ -280,6 +290,262 @@ class SessionsCoordinatorTest {
         } finally {
             scope.cancel()
             fx.shutdown()
+        }
+    }
+
+    // ── UC20 delete-path coverage (AC4 / AC5) ──────────────────────────────
+    //
+    // The existing startFixture() hardcodes DELETE → 204. UC20's delete
+    // contract has three distinct outcomes the success-only fixture cannot
+    // exercise, so each test below stands up a purpose-built pinned server
+    // via [pinnedServer]:
+    //   1. AC4 — 204 tears the row down: the post-delete refresh re-lists
+    //      WITHOUT the deleted N, so the row disappears and does not reappear.
+    //   2. AC5 — a non-204 (500 clean_failed / 404 not_found) is surfaced as
+    //      "<code> (<status>)" in lastError, NEVER a silent no-op, and the row
+    //      stays at its resting position (no optimistic removal on failure).
+    //   3. AC5 — a transport failure (connection refused) is single-surfaced
+    //      via the full-screen NetworkEvent path (HandshakeError) and the
+    //      throwable is swallowed (no viewModelScope crash).
+
+    private val seedListBody =
+        """[{"n":1,"label":"existing","tmuxTitle":"","state":"running","uptimeSec":10,"activeStreams":0,"startedAt":null}]"""
+
+    /** Build a pinned-HTTPS MockWebServer + matching profile around [dispatcher]. */
+    private fun pinnedServer(dispatcher: Dispatcher): Fixture {
+        val cert = HeldCertificate.Builder()
+            .commonName("ai-sandbox-coordinator-test")
+            .addSubjectAlternativeName("127.0.0.1")
+            .rsa2048()
+            .build()
+        val handshake = HandshakeCertificates.Builder().heldCertificate(cert).build()
+        val server = MockWebServer().apply {
+            useHttps(handshake.sslSocketFactory(), false)
+            this.dispatcher = dispatcher
+            start(InetAddress.getByName("127.0.0.1"), 0)
+        }
+        val profile = ServerProfile(
+            serverUrl = "https://127.0.0.1:${server.port}",
+            pinSha256Hex = spkiHex(cert.certificate.publicKey.encoded),
+            clientCertCn = "alice-phone",
+            clientCertExpiresAtMs = 0L,
+        )
+        return Fixture(server, profile)
+    }
+
+    /**
+     * AC4 — a 204 DELETE actually tears the container down: the server stops
+     * enumerating the row, so the coordinator's post-delete refresh() drops it
+     * from the list and it does NOT reappear. The list body flips to "[]" only
+     * AFTER a DELETE arrives, so observing an empty list proves the outbound
+     * DELETE was dispatched and processed (not merely a handled local state).
+     */
+    @Test
+    fun delete_success_tears_row_down_and_it_does_not_reappear(): Unit = runBlocking {
+        val listRef = AtomicReference(seedListBody)
+        val fx = pinnedServer(object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                val path = request.path ?: ""
+                return when {
+                    request.method == "GET" && path == "/v1/sessions" ->
+                        MockResponse().setResponseCode(200).setBody(listRef.get())
+                    request.method == "DELETE" && path == "/v1/sessions/1" -> {
+                        // Container torn down server-side → row no longer enumerated.
+                        listRef.set("[]")
+                        MockResponse().setResponseCode(204)
+                    }
+                    else -> MockResponse().setResponseCode(404).setBody("""{"code":"not_found"}""")
+                }
+            }
+        })
+        val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+        try {
+            val state = MutableStateFlow(SessionsUiState())
+            val coordinator = SessionsCoordinator(
+                state = state,
+                scope = scope,
+                profileSupplier = { fx.profile },
+                apiFactory = apiFactory(),
+            )
+
+            coordinator.refresh()
+            withTimeout(10_000) {
+                state.first { !it.loading && it.sessions.any { s -> s.n == 1 } }
+            }
+
+            coordinator.delete(1, force = false)
+            // After the 204 the coordinator refreshes; the re-list omits n=1.
+            withTimeout(10_000) {
+                state.first { !it.loading && it.sessions.isEmpty() }
+            }
+
+            assertThat(state.value.sessions)
+                .`as`("a 204 DELETE must remove the row via the post-delete refresh (AC4)")
+                .noneMatch { it.n == 1 }
+            assertThat(state.value.lastError)
+                .`as`("a successful delete must not surface any error")
+                .isNull()
+        } finally {
+            scope.cancel()
+            fx.shutdown()
+        }
+    }
+
+    /**
+     * AC5 — a 500 problem+json (the server's clean-non-zero → 500 mapping)
+     * is surfaced as "clean_failed (500)" and the row stays put (no refresh
+     * fires on failure, so nothing is removed).
+     */
+    @Test
+    fun delete_http_500_surfaces_code_and_status_and_keeps_row(): Unit = runBlocking {
+        val fx = pinnedServer(object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                val path = request.path ?: ""
+                return when {
+                    request.method == "GET" && path == "/v1/sessions" ->
+                        MockResponse().setResponseCode(200).setBody(seedListBody)
+                    request.method == "DELETE" && path.startsWith("/v1/sessions/") ->
+                        MockResponse().setResponseCode(500).setBody(
+                            """{"code":"clean_failed","detail":"compose down exit 1; containers still present"}""",
+                        )
+                    else -> MockResponse().setResponseCode(404).setBody("""{"code":"not_found"}""")
+                }
+            }
+        })
+        val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+        try {
+            val state = MutableStateFlow(SessionsUiState())
+            val coordinator = SessionsCoordinator(
+                state = state,
+                scope = scope,
+                profileSupplier = { fx.profile },
+                apiFactory = apiFactory(),
+            )
+
+            coordinator.refresh()
+            withTimeout(10_000) {
+                state.first { !it.loading && it.sessions.any { s -> s.n == 1 } }
+            }
+
+            coordinator.delete(1, force = false)
+            withTimeout(10_000) { state.first { it.lastError != null } }
+
+            assertThat(state.value.lastError)
+                .`as`("non-204 DELETE must surface '<code> (<status>)', never a silent no-op (AC5)")
+                .isEqualTo("clean_failed (500)")
+            assertThat(state.value.sessions)
+                .`as`("a failed delete must leave the row at its resting position (AC5)")
+                .anyMatch { it.n == 1 }
+        } finally {
+            scope.cancel()
+            fx.shutdown()
+        }
+    }
+
+    /**
+     * AC5 — a 404 not_found is surfaced as "not_found (404)". Drives delete()
+     * straight off a seeded state (no prior refresh needed), proving the
+     * surfacing does not depend on a successful list first.
+     */
+    @Test
+    fun delete_http_404_surfaces_code_and_status(): Unit = runBlocking {
+        val fx = pinnedServer(object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse =
+                when (request.method) {
+                    "DELETE" -> MockResponse().setResponseCode(404).setBody("""{"code":"not_found"}""")
+                    else -> MockResponse().setResponseCode(404).setBody("""{"code":"not_found"}""")
+                }
+        })
+        val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+        try {
+            val seed = SessionSummary(n = 1, label = "existing", state = "running")
+            val state = MutableStateFlow(SessionsUiState(sessions = listOf(seed), profile = fx.profile))
+            val coordinator = SessionsCoordinator(
+                state = state,
+                scope = scope,
+                profileSupplier = { fx.profile },
+                apiFactory = apiFactory(),
+            )
+
+            coordinator.delete(1, force = false)
+            withTimeout(10_000) { state.first { it.lastError != null } }
+
+            assertThat(state.value.lastError).isEqualTo("not_found (404)")
+            assertThat(state.value.sessions).containsExactly(seed)
+        } finally {
+            scope.cancel()
+            fx.shutdown()
+        }
+    }
+
+    /**
+     * AC5 (network/transport branch) — when the connection is refused the
+     * OkHttp interceptor translates the IOException to a
+     * [NetworkEvent.HandshakeError] (the full-screen ServerIdentityChanged
+     * surfacing) and re-throws. delete()'s try/catch MUST swallow the throwable
+     * (no viewModelScope crash). Because the failure is already surfaced
+     * full-screen, the coordinator deliberately does NOT also set lastError —
+     * the single-surface decision (translate(...) != null ⇒ skip the snackbar).
+     */
+    @Test
+    fun delete_transport_failure_is_single_surfaced_and_does_not_escape(): Unit = runBlocking {
+        // A real pinned fixture yields a valid profile (real 64-hex pin); then
+        // we close the port so the next connect is refused (ConnectException,
+        // an IOException) — exercising the catch's transport branch.
+        val fx = startFixture()
+        fx.shutdown()
+
+        val uncaught = AtomicReference<Throwable?>(null)
+        val handler = CoroutineExceptionHandler { _, t -> uncaught.set(t) }
+        val workScope = CoroutineScope(Dispatchers.IO + SupervisorJob() + handler)
+        val collectorScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+        try {
+            val events = CopyOnWriteArrayList<NetworkEvent>()
+            val subscribed = CompletableDeferred<Unit>()
+            collectorScope.launch {
+                NetworkEvents.flow
+                    .onSubscription { subscribed.complete(Unit) }
+                    .collect { events.add(it) }
+            }
+            subscribed.await()
+
+            val state = MutableStateFlow(
+                SessionsUiState(sessions = listOf(SessionSummary(n = 1, state = "running"))),
+            )
+            val coordinator = SessionsCoordinator(
+                state = state,
+                scope = workScope,
+                profileSupplier = { fx.profile },
+                apiFactory = apiFactory(),
+            )
+
+            coordinator.delete(1, force = false)
+
+            // The interceptor emits HandshakeError before re-throwing.
+            withTimeout(15_000) {
+                while (events.none { it is NetworkEvent.HandshakeError }) delay(50)
+            }
+            // Join the single work-scope child so delete()'s catch has finished.
+            withTimeout(15_000) {
+                workScope.coroutineContext.job.children.forEach { it.join() }
+            }
+
+            assertThat(uncaught.get())
+                .`as`("delete() MUST swallow the transport throwable — nothing escapes viewModelScope")
+                .isNull()
+            assertThat(events)
+                .`as`("a transport failure must be surfaced (AC5) — here via the full-screen NetworkEvent")
+                .anyMatch { it is NetworkEvent.HandshakeError }
+            assertThat(state.value.lastError)
+                .`as`(
+                    "transport/TLS failures are SINGLE-surfaced via the full-screen NetworkEvent path, " +
+                        "not ALSO via the snackbar lastError (developer's single-surface decision: " +
+                        "translate(...) != null ⇒ skip lastError)",
+                )
+                .isNull()
+        } finally {
+            workScope.cancel()
+            collectorScope.cancel()
         }
     }
 

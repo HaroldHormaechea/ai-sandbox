@@ -1,48 +1,62 @@
 package com.aisandbox.android.ui.screens
 
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
-import androidx.compose.ui.test.longClick
+import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.swipeLeft
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
+import com.aisandbox.android.R
 import com.aisandbox.android.net.SessionSummary
 import com.aisandbox.android.ui.theme.AiSandboxTheme
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 
 /**
- * UC18 — instrumented coverage for the sessions screen's card-tap
- * handling. Regression guard for the v0.3.3 defect where a
- * `clickable` + `detectTapGestures` race left the session cards
- * unresponsive to taps.
+ * UC20 — instrumented coverage for the sessions screen's swipe-to-delete
+ * affordance (replaces the UC18-era long-press → delete path). Drives the
+ * now-`internal` [SessionsBody] render seam directly (the screen body minus
+ * the [SessionsScreen] Scaffold chrome), seeded with a deterministic
+ * [SessionsUiState], and asserts the swipe → confirm-dialog → delete flow
+ * runs server-free on the headless emulator.
  *
- * <p>Renders the now-`internal` [SessionsBody] render seam directly
- * (the screen body minus the [SessionsScreen] Scaffold chrome), seeded
- * with a deterministic [SessionsUiState], and asserts the wired
- * callbacks fire from real Compose gestures on the headless emulator.
- *
- * <p>Criterion → test map (use-cases/18-android-sessions-cards-untappable.md):
+ * <p>Criterion → test map (use-cases/20-android-swipe-to-delete-session.md):
  *
  * <ul>
- *   <li>AC1 / AC5 — {@link #tapping_a_session_card_fires_onOpen_with_that_n()}:
- *       a card tap fires the connect/navigation action ([SessionsBody.onOpen])
- *       with the tapped session's N.</li>
- *   <li>AC2 — {@link #session_cards_are_displayed_and_have_a_click_action()}:
- *       the full card area is a displayed, clickable target (the
- *       `combinedClickable(role = Button)` semantics).</li>
- *   <li>UC04-2b delete guard — {@link #long_pressing_a_session_card_routes_to_onLongPress()}:
- *       a long-press routes to the delete-confirm callback, not the tap.</li>
- *   <li>AC3 — {@link #filter_chip_fires_independently_of_cards()}: a
- *       non-card control (the Running filter chip) still fires its own
- *       action, proving the cards' click wiring did not steal sibling
- *       pointer events.</li>
+ *   <li>AC1 — {@link #swipe_background_exposes_black_outlined_trash_affordance()}:
+ *       a destructive trash affordance (contentDescription "Delete session")
+ *       is wired behind every row.</li>
+ *   <li>AC1 / AC2 — {@link #swipe_left_past_threshold_opens_confirm_dialog_without_removing_row()}:
+ *       a threshold swipe-left opens the confirm dialog and the row is NOT
+ *       auto-dismissed (confirmValueChange vetoes the settle).</li>
+ *   <li>AC3 — {@link #cancelling_the_confirm_dialog_restores_the_row()}:
+ *       cancelling closes the dialog, fires no delete, and leaves the row.</li>
+ *   <li>AC4 — {@link #confirming_fires_onConfirmDelete_and_the_row_disappears()}:
+ *       confirm fires [SessionsBody.onConfirmDelete] with the row's N (force
+ *       false for an unattached session) and the row disappears once the state
+ *       drops it.</li>
+ *   <li>AC6 — {@link #force_toggle_is_shown_for_a_session_with_active_streams()}:
+ *       the confirm step still presents the force toggle for an attached
+ *       session.</li>
+ *   <li>AC7 / AC8 — {@link #tapping_a_session_card_fires_onOpen_with_that_n()}
+ *       and {@link #session_cards_are_displayed_and_have_a_click_action()}:
+ *       tap still opens the terminal; the long-press delete path is gone.</li>
+ *   <li>No-regression — {@link #filter_chip_fires_independently_of_cards()}:
+ *       a sibling control still fires its own action.</li>
  * </ul>
  */
 @RunWith(AndroidJUnit4::class)
@@ -51,11 +65,21 @@ class SessionsScreenInstrumentationTest {
     @get:Rule
     val composeTestRule = createComposeRule()
 
-    /** Two running sessions → both cards visible under the default ALL filter. */
+    private val ctx get() = InstrumentationRegistry.getInstrumentation().targetContext
+
+    /** Two running, unattached sessions → both cards visible under ALL. */
     private val seededState = SessionsUiState(
         sessions = listOf(
             SessionSummary(n = 1, label = "alpha", state = "running"),
             SessionSummary(n = 2, label = "beta", state = "running"),
+        ),
+        filter = SessionsFilter.ALL,
+    )
+
+    /** One running session with two attached streams → force toggle eligible. */
+    private val attachedState = SessionsUiState(
+        sessions = listOf(
+            SessionSummary(n = 3, label = "gamma", state = "running", activeStreams = 2),
         ),
         filter = SessionsFilter.ALL,
     )
@@ -70,7 +94,7 @@ class SessionsScreenInstrumentationTest {
                     state = seededState,
                     onSelectFilter = {},
                     onOpen = { openedN = it },
-                    onLongPress = {},
+                    onConfirmDelete = { _, _ -> },
                 )
             }
         }
@@ -89,7 +113,7 @@ class SessionsScreenInstrumentationTest {
                     state = seededState,
                     onSelectFilter = {},
                     onOpen = {},
-                    onLongPress = {},
+                    onConfirmDelete = { _, _ -> },
                 )
             }
         }
@@ -102,26 +126,141 @@ class SessionsScreenInstrumentationTest {
             .assertHasClickAction()
     }
 
+    /** AC1 — the black-outlined trash affordance is wired behind every row. */
     @Test
-    fun long_pressing_a_session_card_routes_to_onLongPress() {
-        var longPressedN: Int? = null
-        var openedN: Int? = null
+    fun swipe_background_exposes_black_outlined_trash_affordance() {
         composeTestRule.setContent {
             AiSandboxTheme {
                 SessionsBody(
                     padding = PaddingValues(),
                     state = seededState,
                     onSelectFilter = {},
-                    onOpen = { openedN = it },
-                    onLongPress = { longPressedN = it.n },
+                    onOpen = {},
+                    onConfirmDelete = { _, _ -> },
                 )
             }
         }
 
-        composeTestRule.onNodeWithTag("session-card-2").performTouchInput { longClick() }
+        // SwipeToDismissBox always composes its backgroundContent, so one trash
+        // icon (the destructive affordance) sits behind each visible row.
+        composeTestRule.onAllNodesWithContentDescription(
+            ctx.getString(R.string.delete_icon_description),
+            useUnmergedTree = true,
+        ).assertCountEquals(seededState.visible.size)
+    }
 
-        assertEquals("long-press must route to the delete-confirm callback", 2, longPressedN)
-        assertEquals("long-press must NOT also fire the tap/connect action", null, openedN)
+    /**
+     * AC1 / AC2 — a threshold swipe-left opens the confirm dialog WITHOUT
+     * auto-dismissing the row (the SwipeToDismissBox vetoes the settle).
+     */
+    @Test
+    fun swipe_left_past_threshold_opens_confirm_dialog_without_removing_row() {
+        var deletedN: Int? = null
+        composeTestRule.setContent {
+            AiSandboxTheme {
+                SessionsBody(
+                    padding = PaddingValues(),
+                    state = seededState,
+                    onSelectFilter = {},
+                    onOpen = {},
+                    onConfirmDelete = { n, _ -> deletedN = n },
+                )
+            }
+        }
+
+        composeTestRule.onNodeWithTag("session-card-1").performTouchInput { swipeLeft() }
+
+        composeTestRule.onNodeWithText(ctx.getString(R.string.delete_title, 1)).assertIsDisplayed()
+        // Row not auto-removed by the swipe (deletion happens only on confirm).
+        composeTestRule.onNodeWithTag("session-card-1").assertIsDisplayed()
+        assertNull("swipe alone must NOT delete — only an explicit confirm does", deletedN)
+    }
+
+    /** AC3 — cancelling the confirm dialog fires no delete and keeps the row. */
+    @Test
+    fun cancelling_the_confirm_dialog_restores_the_row() {
+        var deletedN: Int? = null
+        composeTestRule.setContent {
+            AiSandboxTheme {
+                SessionsBody(
+                    padding = PaddingValues(),
+                    state = seededState,
+                    onSelectFilter = {},
+                    onOpen = {},
+                    onConfirmDelete = { n, _ -> deletedN = n },
+                )
+            }
+        }
+
+        composeTestRule.onNodeWithTag("session-card-1").performTouchInput { swipeLeft() }
+        composeTestRule.onNodeWithText(ctx.getString(R.string.delete_title, 1)).assertIsDisplayed()
+
+        composeTestRule.onNodeWithText(ctx.getString(R.string.delete_cancel)).performClick()
+
+        composeTestRule.onNodeWithText(ctx.getString(R.string.delete_title, 1)).assertDoesNotExist()
+        composeTestRule.onNodeWithTag("session-card-1").assertIsDisplayed()
+        assertNull("cancel must NOT fire a delete", deletedN)
+    }
+
+    /**
+     * AC4 — confirming fires [SessionsBody.onConfirmDelete] with the row's N
+     * (force false for an unattached row), and once the state drops that row
+     * it disappears from the list.
+     */
+    @Test
+    fun confirming_fires_onConfirmDelete_and_the_row_disappears() {
+        var deletedN: Int? = null
+        var deletedForce: Boolean? = null
+        composeTestRule.setContent {
+            var state by remember { mutableStateOf(seededState) }
+            AiSandboxTheme {
+                SessionsBody(
+                    padding = PaddingValues(),
+                    state = state,
+                    onSelectFilter = {},
+                    onOpen = {},
+                    onConfirmDelete = { n, force ->
+                        deletedN = n
+                        deletedForce = force
+                        // Mirror the production refresh: the deleted row leaves
+                        // the list (server no longer enumerates it).
+                        state = state.copy(sessions = state.sessions.filterNot { it.n == n })
+                    },
+                )
+            }
+        }
+
+        composeTestRule.onNodeWithTag("session-card-1").performTouchInput { swipeLeft() }
+        composeTestRule.onNodeWithText(ctx.getString(R.string.delete_title, 1)).assertIsDisplayed()
+
+        composeTestRule.onNodeWithText(ctx.getString(R.string.delete_confirm)).performClick()
+
+        assertEquals("confirm must delete the swiped session", 1, deletedN)
+        assertEquals("an unattached session confirms with force = false", false, deletedForce)
+        composeTestRule.onNodeWithTag("session-card-1").assertDoesNotExist()
+        // The sibling row is untouched.
+        composeTestRule.onNodeWithTag("session-card-2").assertIsDisplayed()
+    }
+
+    /** AC6 — the force toggle is still presented for a session with streams. */
+    @Test
+    fun force_toggle_is_shown_for_a_session_with_active_streams() {
+        composeTestRule.setContent {
+            AiSandboxTheme {
+                SessionsBody(
+                    padding = PaddingValues(),
+                    state = attachedState,
+                    onSelectFilter = {},
+                    onOpen = {},
+                    onConfirmDelete = { _, _ -> },
+                )
+            }
+        }
+
+        composeTestRule.onNodeWithTag("session-card-3").performTouchInput { swipeLeft() }
+        composeTestRule.onNodeWithText(ctx.getString(R.string.delete_title, 3)).assertIsDisplayed()
+
+        composeTestRule.onNodeWithText(ctx.getString(R.string.delete_force)).assertIsDisplayed()
     }
 
     @Test
@@ -134,7 +273,7 @@ class SessionsScreenInstrumentationTest {
                     state = seededState,
                     onSelectFilter = { selectedFilter = it },
                     onOpen = {},
-                    onLongPress = {},
+                    onConfirmDelete = { _, _ -> },
                 )
             }
         }
@@ -145,7 +284,7 @@ class SessionsScreenInstrumentationTest {
         composeTestRule.onNodeWithText("Running", substring = true).performClick()
 
         assertEquals(
-            "a non-card control must still fire its own action (AC3)",
+            "a non-card control must still fire its own action",
             SessionsFilter.RUNNING,
             selectedFilter,
         )
