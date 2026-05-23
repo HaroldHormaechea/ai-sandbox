@@ -9,6 +9,7 @@ import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.longClick
 import androidx.compose.ui.test.onAllNodesWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -52,9 +53,13 @@ import org.junit.runner.RunWith
  *   <li>AC6 — {@link #force_toggle_is_shown_for_a_session_with_active_streams()}:
  *       the confirm step still presents the force toggle for an attached
  *       session.</li>
- *   <li>AC7 / AC8 — {@link #tapping_a_session_card_fires_onOpen_with_that_n()}
+ *   <li>AC7 — {@link #long_pressing_a_session_card_does_not_open_the_delete_dialog()}:
+ *       a long-press does NOT open the confirm dialog or fire a delete (the
+ *       UC18-era long-press → delete path is removed; swipe is the sole
+ *       affordance).</li>
+ *   <li>AC8 — {@link #tapping_a_session_card_fires_onOpen_with_that_n()}
  *       and {@link #session_cards_are_displayed_and_have_a_click_action()}:
- *       tap still opens the terminal; the long-press delete path is gone.</li>
+ *       tap still opens the terminal.</li>
  *   <li>No-regression — {@link #filter_chip_fires_independently_of_cards()}:
  *       a sibling control still fires its own action.</li>
  * </ul>
@@ -261,6 +266,33 @@ class SessionsScreenInstrumentationTest {
         composeTestRule.onNodeWithText(ctx.getString(R.string.delete_title, 3)).assertIsDisplayed()
 
         composeTestRule.onNodeWithText(ctx.getString(R.string.delete_force)).assertIsDisplayed()
+    }
+
+    /**
+     * AC7 — long-press no longer triggers delete. SessionRow uses a plain
+     * `clickable` (the UC18-era long-press → delete-dialog path is gone), so a
+     * long-press must NOT open the confirm dialog or fire a delete; swipe-left
+     * is the sole delete affordance.
+     */
+    @Test
+    fun long_pressing_a_session_card_does_not_open_the_delete_dialog() {
+        var deletedN: Int? = null
+        composeTestRule.setContent {
+            AiSandboxTheme {
+                SessionsBody(
+                    padding = PaddingValues(),
+                    state = seededState,
+                    onSelectFilter = {},
+                    onOpen = {},
+                    onConfirmDelete = { n, _ -> deletedN = n },
+                )
+            }
+        }
+
+        composeTestRule.onNodeWithTag("session-card-1").performTouchInput { longClick() }
+
+        composeTestRule.onNodeWithText(ctx.getString(R.string.delete_title, 1)).assertDoesNotExist()
+        assertNull("long-press must NOT trigger the delete path (swipe is the sole affordance)", deletedN)
     }
 
     @Test
