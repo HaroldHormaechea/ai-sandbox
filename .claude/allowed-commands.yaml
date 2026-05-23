@@ -43,3 +43,9 @@ commands:
   - xxd
   - unzip
   - zip
+  # UC04/UC18 — Android client: SDK + emulator tooling for building and
+  # running instrumented Compose tests (./gradlew :android:connectedDebugAndroidTest).
+  - adb
+  - emulator
+  - sdkmanager
+  - avdmanager
