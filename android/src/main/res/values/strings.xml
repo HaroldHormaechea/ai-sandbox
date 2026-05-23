@@ -23,6 +23,9 @@
     <string name="sessions_empty_running">No running sessions yet — tap "New session" to spawn one.</string>
     <string name="sessions_empty_stopped">No stopped sessions.</string>
     <string name="sessions_empty_all">No sessions on this server.</string>
+    <!-- UC20 — error surfacing (AC5). %1$s carries the error code + HTTP status, e.g. "404 (Not Found)". -->
+    <string name="sessions_error_snackbar">Request failed: %1$s</string>
+    <string name="sessions_error_dismiss">Dismiss</string>
 
     <!-- New session sheet (UC04-2a) -->
     <string name="new_session_label_hint">e.g. release-build, scratch</string>
@@ -37,6 +40,8 @@
     <string name="delete_force">Force delete (kill attached streams)</string>
     <string name="delete_cancel">Cancel</string>
     <string name="delete_confirm">Delete</string>
+    <!-- UC20 — TalkBack description for the black-outlined trash revealed on swipe-left (AC1). -->
+    <string name="delete_icon_description">Delete session</string>
 
     <!-- Terminal (UC04-3) -->
     <string name="terminal_back">Back</string>

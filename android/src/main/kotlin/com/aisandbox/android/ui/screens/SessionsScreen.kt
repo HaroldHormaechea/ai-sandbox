@@ -1,8 +1,7 @@
 package com.aisandbox.android.ui.screens
 
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
-import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -21,6 +20,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -35,14 +35,22 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarDuration
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.SwipeToDismissBox
+import androidx.compose.material3.SwipeToDismissBoxValue
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.material3.rememberModalBottomSheetState
+import androidx.compose.material3.rememberSwipeToDismissBoxState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -51,6 +59,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
@@ -74,8 +85,11 @@ import kotlinx.coroutines.launch
  * UC04-2 — large M3 top bar, three filter chips with counts, list of
  * session cards, extended "New session" FAB.
  *
- * <p>Tap a row → [onOpen] (terminal). Long-press a row → confirm dialog
- * (UC04-2b). FAB tap → bottom sheet (UC04-2a).
+ * <p>Tap a row → [onOpen] (terminal). Swipe a row LEFT → reveals a
+ * red/destructive background with a black-outlined trash icon; releasing
+ * past the threshold opens the delete-confirmation dialog (UC04-2b / UC20).
+ * FAB tap → bottom sheet (UC04-2a). Errors from any operation (refresh /
+ * spawn / delete) surface via the [Scaffold]'s snackbar host (AC5).
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -87,13 +101,31 @@ fun SessionsScreen(
     val state by viewModel.state.collectAsState()
     val scrollBehavior = TopAppBarDefaults.exitUntilCollapsedScrollBehavior()
     val coroutineScope = rememberCoroutineScope()
+    val context = LocalContext.current
 
     var showNewSheet by rememberSaveable { mutableStateOf(false) }
-    var deleteTarget by remember { mutableStateOf<SessionSummary?>(null) }
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val snackbarHostState = remember { SnackbarHostState() }
+
+    // AC5 — surface any operation error (refresh / spawn / delete) as a
+    // snackbar carrying the error code + status. clearError() afterwards is
+    // mandatory: lastError is a StateFlow VALUE, so a repeat same-code
+    // failure would not re-key this effect unless we reset it to null first.
+    LaunchedEffect(state.lastError) {
+        val err = state.lastError
+        if (err != null) {
+            snackbarHostState.showSnackbar(
+                message = context.getString(R.string.sessions_error_snackbar, err),
+                actionLabel = context.getString(R.string.sessions_error_dismiss),
+                duration = SnackbarDuration.Short,
+            )
+            viewModel.clearError()
+        }
+    }
 
     Scaffold(
         modifier = Modifier.fillMaxSize(),
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             androidx.compose.material3.LargeTopAppBar(
                 title = {
@@ -140,7 +172,7 @@ fun SessionsScreen(
             state = state,
             onSelectFilter = viewModel::selectFilter,
             onOpen = onOpen,
-            onLongPress = { deleteTarget = it },
+            onConfirmDelete = viewModel::delete,
         )
     }
 
@@ -161,27 +193,22 @@ fun SessionsScreen(
             )
         }
     }
-
-    deleteTarget?.let { target ->
-        DeleteSessionDialog(
-            target = target,
-            onCancel = { deleteTarget = null },
-            onConfirm = { force ->
-                viewModel.delete(target.n, force)
-                deleteTarget = null
-            },
-        )
-    }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 internal fun SessionsBody(
     padding: PaddingValues,
     state: SessionsUiState,
     onSelectFilter: (SessionsFilter) -> Unit,
     onOpen: (Int) -> Unit,
-    onLongPress: (SessionSummary) -> Unit,
+    onConfirmDelete: (n: Int, force: Boolean) -> Unit,
 ) {
+    // UC20 — the swipe → confirm → delete flow lives in this internal seam
+    // (the same seam UC18 used for tap-to-open) so an instrumented Compose
+    // test can drive swipe → dialog → confirm without a live server.
+    var deleteTarget by remember { mutableStateOf<SessionSummary?>(null) }
+
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
@@ -194,9 +221,85 @@ internal fun SessionsBody(
             item { EmptyState(filter = state.filter) }
         } else {
             items(items = state.visible, key = { it.n }) { row ->
-                SessionRow(row = row, onTap = { onOpen(row.n) }, onLongPress = { onLongPress(row) })
+                // Pitfall 5 — scope the dismiss state per-N inside key(row.n)
+                // so an in-flight list refresh can't carry a stale anchor onto
+                // a different row or resurrect a just-deleted one.
+                key(row.n) {
+                    val dismissState = rememberSwipeToDismissBoxState(
+                        confirmValueChange = { value ->
+                            if (value == SwipeToDismissBoxValue.EndToStart) {
+                                // Pitfall 1 / AC2 — open the dialog and VETO the
+                                // settle (return false) so the row never
+                                // auto-dismisses; deletion happens only on an
+                                // explicit confirm.
+                                deleteTarget = row
+                            }
+                            false
+                        },
+                    )
+                    // AC3 — once this row is no longer the pending target
+                    // (cancelled or confirmed), snap it back to rest if the
+                    // veto left it displaced.
+                    LaunchedEffect(deleteTarget?.n) {
+                        if (deleteTarget?.n != row.n &&
+                            dismissState.currentValue != SwipeToDismissBoxValue.Settled
+                        ) {
+                            dismissState.reset()
+                        }
+                    }
+                    SwipeToDismissBox(
+                        state = dismissState,
+                        enableDismissFromStartToEnd = false,
+                        enableDismissFromEndToStart = true,
+                        backgroundContent = {
+                            SwipeDeleteBackground(progress = dismissState.progress)
+                        },
+                    ) {
+                        SessionRow(row = row, onTap = { onOpen(row.n) })
+                    }
+                }
             }
         }
+    }
+
+    deleteTarget?.let { target ->
+        DeleteSessionDialog(
+            target = target,
+            onCancel = { deleteTarget = null },
+            onConfirm = { force ->
+                onConfirmDelete(target.n, force)
+                deleteTarget = null
+            },
+        )
+    }
+}
+
+/**
+ * UC20 / AC1 — the destructive swipe affordance revealed behind a row as it
+ * is dragged LEFT. Brief-mandated black-outlined trash on M3 `error` red
+ * (NOT errorContainer — its darker tone would fail black-icon contrast). The
+ * icon scales with the drag [progress]; right-aligned because the gesture is
+ * end → start.
+ */
+@Composable
+private fun SwipeDeleteBackground(progress: Float) {
+    val scale = 0.5f + 0.5f * progress.coerceIn(0f, 1f)
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .clip(RoundedCornerShape(14.dp))
+            .background(MaterialTheme.colorScheme.error)
+            .padding(horizontal = 24.dp),
+        contentAlignment = Alignment.CenterEnd,
+    ) {
+        Icon(
+            imageVector = Icons.Outlined.Delete,
+            contentDescription = stringResource(R.string.delete_icon_description),
+            tint = Color.Black,
+            modifier = Modifier
+                .size(28.dp)
+                .scale(scale),
+        )
     }
 }
 
@@ -240,12 +343,10 @@ private fun EmptyState(filter: SessionsFilter) {
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun SessionRow(
     row: SessionSummary,
     onTap: () -> Unit,
-    onLongPress: () -> Unit,
 ) {
     Box(
         modifier = Modifier
@@ -253,11 +354,10 @@ private fun SessionRow(
             .clip(RoundedCornerShape(14.dp))
             .background(SurfaceLow)
             .testTag("session-card-${row.n}")
-            .combinedClickable(
-                onClick = onTap,
-                onLongClick = onLongPress,
-                role = Role.Button,
-            )
+            // AC7 / AC8 — plain tap-to-open only; the long-press → delete
+            // path is gone (swipe-left is now the sole delete affordance).
+            // Horizontal drags are consumed by the enclosing SwipeToDismissBox.
+            .clickable(onClick = onTap, role = Role.Button)
             .padding(12.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -341,7 +441,7 @@ private fun NewSessionSheet(
 // ── UC04-2b Delete dialog ───────────────────────────────────────────────────
 
 @Composable
-private fun DeleteSessionDialog(
+internal fun DeleteSessionDialog(
     target: SessionSummary,
     onCancel: () -> Unit,
     onConfirm: (force: Boolean) -> Unit,

@@ -60,6 +60,8 @@ class SessionsViewModel(application: Application) : AndroidViewModel(application
     fun spawn(label: String?) = coordinator.spawn(label)
 
     fun delete(n: Int, force: Boolean) = coordinator.delete(n, force)
+
+    fun clearError() = coordinator.clearError()
 }
 
 /** Read-only state surfaced to the Compose layer. */

@@ -103,7 +103,20 @@ function Clean-One {
     param([Parameter(Mandatory)][int]$N)
     $name = "ai-sandbox-$N"
     Write-Info "Cleaning $name"
-    Invoke-AiSandboxCompose -p $name down -v --remove-orphans 2>$null | Out-Null
+    # AC9 — capture the real teardown exit code. `$ErrorActionPreference =
+    # 'Stop'` is set at the top of this script, and on PowerShell 7.4+ a
+    # non-zero NATIVE exit can surface as a terminating error, so wrap the
+    # call to capture the code either way. `| Out-Null` keeps compose stdout
+    # off Clean-One's return pipeline (a function emits ALL uncaptured output,
+    # so only the trailing `return <int>` may reach the caller).
+    $downRc = 0
+    try {
+        Invoke-AiSandboxCompose -p $name down -v --remove-orphans 2>$null | Out-Null
+        $downRc = $LASTEXITCODE
+        if ($null -eq $downRc) { $downRc = 0 }
+    } catch {
+        $downRc = 1
+    }
 
     if (-not $KeepWorkspace -and (Test-Path ".\workspace-$N")) {
         Write-Info "  rm -rf .\workspace-$N"
@@ -113,7 +126,26 @@ function Clean-One {
         Write-Info "  rm -rf .\claude-config-$N"
         Remove-Item -Recurse -Force ".\claude-config-$N"
     }
+
+    # If `down` reported failure, re-check whether containers actually remain
+    # before treating it as fatal: a non-zero exit with nothing left running
+    # (already-gone / never-existed) is tolerated; lingering containers are a
+    # genuine teardown failure that MUST propagate (AC9). $remaining is
+    # captured into a variable (not emitted) so only `return` reaches caller.
+    if ($downRc -ne 0) {
+        $remaining = $null
+        try {
+            $remaining = Invoke-AiSandboxCompose -p $name ps -q 2>$null
+        } catch {
+            $remaining = $null
+        }
+        if ($remaining) {
+            Write-Warn "$name: teardown failed (compose down exit $downRc; containers still present)"
+            return 1
+        }
+    }
     Write-Ok "$name cleaned"
+    return 0
 }
 
 # --- Branch 1: --all --------------------------------------------------------
@@ -127,14 +159,20 @@ if ($DoAll) {
         Write-Info "No ai-sandbox-* sessions to clean."
         exit 0
     }
-    foreach ($n in $all) { Clean-One -N $n }
-    exit 0
+    $rc = 0
+    foreach ($n in $all) {
+        $r = Clean-One -N $n
+        if ($r -ne 0) { $rc = $r }
+    }
+    exit $rc
 }
 
 # --- Branch 2: explicit <N> -------------------------------------------------
 if ($TargetN) {
-    Clean-One -N ([int]$TargetN)
-    exit 0
+    # The management server's clean path — a teardown failure MUST yield a
+    # non-zero exit so the server returns 500 and the client surfaces it (AC9).
+    $rc = Clean-One -N ([int]$TargetN)
+    exit $rc
 }
 
 # --- Branch 3: no-arg — list running and prompt -----------------------------
@@ -164,8 +202,12 @@ while ($true) {
     $choice = Read-Host "  Pick [1-$($sessions.Count)], 'all', or 'cancel'"
     if ($choice -match '^(cancel|c|q)$') { exit 0 }
     if ($choice -match '^(all|a)$') {
-        foreach ($s in $sessions) { Clean-One -N $s.N }
-        exit 0
+        $rc = 0
+        foreach ($s in $sessions) {
+            $r = Clean-One -N $s.N
+            if ($r -ne 0) { $rc = $r }
+        }
+        exit $rc
     }
     if ($choice -notmatch '^\d+$') {
         Write-Warn "Enter a number, 'all', or 'cancel'."
@@ -176,6 +218,6 @@ while ($true) {
         Write-Warn "Out of range."
         continue
     }
-    Clean-One -N $sessions[$n - 1].N
-    exit 0
+    $rc = Clean-One -N $sessions[$n - 1].N
+    exit $rc
 }

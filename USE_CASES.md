@@ -29,6 +29,6 @@ Statuses:
 | 17 | [use-cases/17-server-onboarding-uid-alignment.md](use-cases/17-server-onboarding-uid-alignment.md) | Out-of-box server onboarding + uid-aligned session permissions | done | 2026-05-22 |
 | 18 | [use-cases/18-android-sessions-cards-untappable.md](use-cases/18-android-sessions-cards-untappable.md) | Android sessions-screen cards do not respond to taps | done | 2026-05-23 |
 | 19 | [use-cases/19-server-deb-onboarding-claude-preinit.md](use-cases/19-server-deb-onboarding-claude-preinit.md) | Server `.deb` onboarding — auto-run wizard on TTY + capture Claude pre-init state | pending | 2026-05-23 |
-| 20 | [use-cases/20-android-swipe-to-delete-session.md](use-cases/20-android-swipe-to-delete-session.md) | Android client — swipe-to-delete a session (reveal red + trash, confirm, actually delete) | pending | 2026-05-23 |
+| 20 | [use-cases/20-android-swipe-to-delete-session.md](use-cases/20-android-swipe-to-delete-session.md) | Android client — swipe-to-delete a session (reveal red + trash, confirm, actually delete) | done | 2026-05-23 |
 | 21 | [use-cases/21-android-terminal-emulator-and-agent-switcher.md](use-cases/21-android-terminal-emulator-and-agent-switcher.md) | Android client — usable terminal (real emulator + keyboard) + hamburger delete/disconnect + agent-team switcher | pending | 2026-05-23 |
 
