@@ -36,8 +36,11 @@ Description: GitHub personal access token (optional):
 
 Template: ai-sandbox-server/claude-preinit-note
 Type: note
-Description: Claude pre-init runs later, interactively
+Description: Claude pre-init: interactive login now, or a headless seed later
  The Claude OAuth login needs an interactive terminal and a built container
- image, so it is skipped during package installation. After install, run
- `sudo aisandboxctl onboard` from a terminal to capture a Claude pre-init
- snapshot (or pass --no-claude-preinit to skip it permanently).
+ image. When you install from a terminal, the post-install step offers to run
+ the full wizard now — including this login and the image build — so spawned
+ sessions start past Claude's first-run setup. When no terminal is available
+ it is skipped and the install completes with one next step: capture it later
+ with `sudo aisandboxctl onboard` from a terminal, or seed it unattended with
+ `sudo aisandboxctl onboard --claude-config-source <dir>`.
