@@ -135,8 +135,10 @@ public class SecretsSeedCommand implements Runnable {
 
         @Option(
                 names = "--claude-config-source",
-                description = "Path to a ~/.claude/-shaped dir to seed the template from."
-                        + " Mutually exclusive with --no-claude-preinit.")
+                description = "Path to a captured claude-config template dir (.claude.json +"
+                        + " .credentials.json at its root, as produced by an interactive onboard) to"
+                        + " seed from — NOT a raw ~/.claude/ tree (~/.claude.json lives outside it; see"
+                        + " README). Mutually exclusive with --no-claude-preinit.")
         Path claudeConfigSource;
 
         @Option(names = "--no-claude-preinit", description = "Skip the Claude pre-init step entirely.")

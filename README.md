@@ -226,7 +226,8 @@ sudo aisandboxctl onboard
 
 # Unattended (Ansible / cloud-init) — every value supplied, nothing prompts.
 # Either opt out of the Claude step (--no-claude-preinit) and capture it from a
-# terminal later, or seed it zero-touch from a pre-built ~/.claude/ tree:
+# terminal later, or seed it zero-touch from a previously-captured claude-config
+# template (see "Two Claude capture paths" below — NOT a raw ~/.claude/ dir):
 sudo aisandboxctl onboard \
     --git-key /home/operator/.ssh/id_ed25519 \
     --git-name "Alice Operator" --git-email alice@example.com \
@@ -240,8 +241,17 @@ completed-onboarding flag, signed-in account) — can be captured two ways:
 
 - **Interactive device-flow login** (default): a one-time `claude` login in a
   throwaway container. Needs a terminal and a browser.
-- **Zero-touch `--claude-config-source <dir>`**: copies a pre-built
-  `~/.claude/` tree, for headless / automated provisioning.
+- **Zero-touch `--claude-config-source <dir>`**: copies a previously-captured
+  **claude-config template** — the directory an interactive `aisandboxctl
+  onboard` / `secrets seed` produces, with `.claude.json` **and**
+  `.credentials.json` at its root — for headless / automated provisioning.
+  This is **not** a raw `~/.claude/` directory: `~/.claude.json` (which holds
+  the completed-onboarding flag + signed-in account) lives *outside*
+  `~/.claude/`, so a bare copy omits it. To hand-assemble a source dir, copy
+  your `~/.claude/` contents **and** your `~/.claude.json` (as `.claude.json`)
+  into it. A source missing this state now **fails loud** (rather than silently
+  seeding a session that still prompts); pass `--no-claude-preinit` if you
+  deliberately want no Claude state.
 
 Both produce a template that fully suppresses the in-container first-run
 wizard, and both also enable Claude Code's **agent-teams + tmux teammate
@@ -314,7 +324,7 @@ sudo aisandboxctl secrets seed \
     --git-key /home/operator/.ssh/id_ed25519 \
     --git-name "Alice Operator" --git-email alice@example.com \
     --gh-token-file /tmp/gh-token \
-    --no-claude-preinit   # or --claude-config-source <workstation-tarball>
+    --no-claude-preinit   # or --claude-config-source <captured-claude-config-dir>
 ```
 
 ##### Alternative for non-wizard deployments

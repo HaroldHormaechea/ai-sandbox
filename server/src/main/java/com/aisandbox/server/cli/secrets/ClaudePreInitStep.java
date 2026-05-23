@@ -28,9 +28,13 @@ import java.util.List;
  *   <li>{@code --no-claude-preinit} — orchestrator skips this step;
  *       the bind-mount becomes a no-op (target dir empty), and
  *       sessions behave as they did before UC06.</li>
- *   <li>{@code --claude-config-source PATH} — recursive copy of an
- *       operator-supplied {@code ~/.claude/}-shaped directory
- *       preserving file modes. The documented zero-touch / headless
+ *   <li>{@code --claude-config-source PATH} — recursive copy of a
+ *       previously-captured claude-config template directory (a dir with
+ *       {@code .claude.json} + {@code .credentials.json} at its root, as
+ *       produced by an interactive capture — NOT a raw {@code ~/.claude/}
+ *       tree, since {@code ~/.claude.json} lives outside it), preserving
+ *       file modes and value-checked the same as the interactive path
+ *       (fails loud on a non-onboarded source). The documented zero-touch / headless
  *       path (UC-19 AC5b): a workstation-built template ships to a
  *       server that can't do interactive OAuth without operator fuss.</li>
  *   <li>interactive — spawns an ephemeral {@code ai-context:latest}
@@ -121,10 +125,11 @@ public final class ClaudePreInitStep {
                 throw new IOException("--claude-config-source " + sourceDirFlag
                         + " is not a usable, onboarded Claude config (see the check(s) above):"
                         + " spawned sessions would still hit Claude's first-run wizard. Supply a"
-                        + " ~/.claude/-shaped tree captured from a completed `claude` login"
-                        + " (.claude.json with hasCompletedOnboarding=true + oauthAccount, plus a"
-                        + " non-empty .credentials.json), or pass --no-claude-preinit to"
-                        + " intentionally seed no Claude state.");
+                        + " captured claude-config template dir with .claude.json at its root"
+                        + " (hasCompletedOnboarding=true + oauthAccount) plus a non-empty"
+                        + " .credentials.json — i.e. the dir an interactive onboard produces, NOT a"
+                        + " raw ~/.claude/ tree (~/.claude.json lives outside it). Or pass"
+                        + " --no-claude-preinit to intentionally seed no Claude state.");
             }
             copyTreePreservingModes(sourceDirFlag, templateDir);
         } else {
