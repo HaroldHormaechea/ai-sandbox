@@ -94,7 +94,16 @@ if [ -n "$TARGET_N" ]; then
 fi
 
 clean_one() {
-    local n="$1" name="ai-sandbox-${n}"
+    # `n` and `name` MUST be on SEPARATE `local` lines. A single
+    # `local n="$1" name="ai-sandbox-${n}"` expands ${n} against the OUTER
+    # scope (before the `n="$1"` assignment takes effect), so under `set -u`
+    # it crashes with "n: unbound variable" on the explicit-N path (Branch 2 —
+    # the server's DELETE route) where no global `n` exists; the --all /
+    # interactive branches only survived by leaking a global `n` from their
+    # `for` loop (and would even read a stale value). Splitting makes ${n}
+    # read the just-set local. (bash 5.x.)
+    local n="$1"
+    local name="ai-sandbox-${n}"
     info "Cleaning $name" >&2
     # AC9 — capture the real teardown exit code. The old `|| true` (combined
     # with the 2>/dev/null) swallowed a failed `down`, so a container that
