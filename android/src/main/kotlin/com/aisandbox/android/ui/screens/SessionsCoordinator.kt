@@ -5,6 +5,7 @@ import com.aisandbox.android.net.ApiResult
 import com.aisandbox.android.net.ServerProfile
 import com.aisandbox.android.net.SessionSummary
 import com.aisandbox.android.net.SessionsApi
+import com.aisandbox.android.net.TlsFailureTranslation
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
@@ -131,15 +132,51 @@ class SessionsCoordinator(
 
     fun delete(n: Int, force: Boolean) {
         scope.launch {
-            val profile = profileSupplier() ?: return@launch
-            when (val r = apiFactory(profile).delete(n, force)) {
-                is ApiResult.Success -> refresh()
-                is ApiResult.HttpFailure -> {
-                    Log.w(TAG, "Delete $n failed: ${r.code} (${r.status}) ${r.detail}")
-                    state.value = state.value.copy(lastError = "${r.code} (${r.status})")
+            val profile = profileSupplier() ?: run {
+                // Match refresh()/spawn() — surface the missing-profile case
+                // rather than silently no-op'ing (AC5).
+                state.value = state.value.copy(lastError = "no_profile")
+                return@launch
+            }
+            try {
+                when (val r = apiFactory(profile).delete(n, force)) {
+                    is ApiResult.Success -> refresh()
+                    is ApiResult.HttpFailure -> {
+                        // The headline AC5 path: a non-204 (404 / 500 / …) is
+                        // no longer a silent no-op — surface code + status.
+                        Log.w(TAG, "Delete $n failed: ${r.code} (${r.status}) ${r.detail}")
+                        state.value = state.value.copy(lastError = "${r.code} (${r.status})")
+                    }
+                }
+            } catch (t: Throwable) {
+                // MANDATORY — delete() previously had no try/catch, so a
+                // transport throw (connection drop, TLS) escaped uncaught on
+                // viewModelScope (crash risk). The AiSandboxHttpClient
+                // interceptor already TRANSLATED + EMITTED a NetworkEvent
+                // (full-screen ServerIdentityChangedScreen) for any SSL/IO
+                // failure before re-throwing, so we only raise a snackbar for
+                // throwables it did NOT surface — avoids double-surfacing the
+                // same error (AC5).
+                Log.w(TAG, "Delete $n threw: ${t.message}", t)
+                val host = profile.serverUrl
+                    .substringAfter("://")
+                    .substringBefore('/')
+                    .substringBefore(':')
+                if (TlsFailureTranslation.translate(t, profile.pinSha256Hex, host) == null) {
+                    state.value = state.value.copy(lastError = t.message ?: "delete_failed")
                 }
             }
         }
+    }
+
+    /**
+     * Clear the surfaced error after the screen has shown it. Required
+     * because [lastError] is a plain StateFlow value — without resetting it
+     * to null, a repeat same-code failure would not re-trigger the screen's
+     * snackbar effect (its key would be unchanged).
+     */
+    fun clearError() {
+        state.value = state.value.copy(lastError = null)
     }
 
     companion object {
