@@ -97,7 +97,8 @@ class ClaudePreInitStepTest {
         // AC2 — the suppressing state is captured, with its CONTENT intact
         // (not merely "some non-empty file").
         assertThat(templateDir.resolve(".claude.json")).exists();
-        JsonNode claudeJson = MAPPER.readTree(templateDir.resolve(".claude.json").toFile());
+        JsonNode claudeJson =
+                MAPPER.readTree(templateDir.resolve(".claude.json").toFile());
         assertThat(claudeJson.get("hasCompletedOnboarding").booleanValue()).isTrue();
         assertThat(claudeJson.get("oauthAccount").get("emailAddress").asText()).isEqualTo("dev@example.com");
         assertThat(templateDir.resolve(".credentials.json")).exists();
@@ -120,7 +121,9 @@ class ClaudePreInitStepTest {
         // part E — agent-teams keys present on the flag path, theme preserved.
         JsonNode settings = MAPPER.readTree(templateDir.resolve("settings.json").toFile());
         assertThat(settings.get("teammateMode").asText()).isEqualTo("tmux");
-        assertThat(settings.path("env").path("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS").asText())
+        assertThat(settings.path("env")
+                        .path("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS")
+                        .asText())
                 .isEqualTo("1");
         assertThat(settings.get("theme").asText()).isEqualTo("dark");
 
@@ -235,7 +238,8 @@ class ClaudePreInitStepTest {
         new ClaudePreInitStep(runner, io).run(/* flag */ null, templateDir, null);
 
         // AC2 — onboarding state mirrored into the template, content intact.
-        JsonNode claudeJson = MAPPER.readTree(templateDir.resolve(".claude.json").toFile());
+        JsonNode claudeJson =
+                MAPPER.readTree(templateDir.resolve(".claude.json").toFile());
         assertThat(claudeJson.get("hasCompletedOnboarding").booleanValue()).isTrue();
         assertThat(claudeJson.get("oauthAccount").get("emailAddress").asText()).isEqualTo("dev@example.com");
         assertThat(templateDir.resolve(".credentials.json")).exists();
@@ -270,7 +274,9 @@ class ClaudePreInitStepTest {
         // part E — agent-teams keys present on the interactive path, theme preserved.
         JsonNode settings = MAPPER.readTree(templateDir.resolve("settings.json").toFile());
         assertThat(settings.get("teammateMode").asText()).isEqualTo("tmux");
-        assertThat(settings.path("env").path("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS").asText())
+        assertThat(settings.path("env")
+                        .path("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS")
+                        .asText())
                 .isEqualTo("1");
         assertThat(settings.get("theme").asText()).isEqualTo("dark");
 
@@ -389,7 +395,9 @@ class ClaudePreInitStepTest {
                 .isEqualTo("Bash");
         // Agent-teams keys added.
         assertThat(settings.get("teammateMode").asText()).isEqualTo("tmux");
-        assertThat(settings.path("env").path("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS").asText())
+        assertThat(settings.path("env")
+                        .path("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS")
+                        .asText())
                 .isEqualTo("1");
     }
 

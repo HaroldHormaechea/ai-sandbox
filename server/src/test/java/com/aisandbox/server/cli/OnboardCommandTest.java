@@ -5,6 +5,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.aisandbox.server.cli.secrets.FakeConsoleIO;
 import com.aisandbox.server.cli.secrets.FakeProcessRunner;
 import com.aisandbox.server.cli.secrets.ProcessRunner;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.PrintStream;
@@ -202,6 +204,40 @@ class OnboardCommandTest {
         Path p = tmp.resolve(name);
         Files.write(p, KEY_BYTES);
         return p;
+    }
+
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    /**
+     * UC-19: {@code --claude-config-source} is value-checked, so a source tree
+     * must carry an onboarded {@code .claude.json} + a non-empty
+     * {@code .credentials.json} at its root (in addition to whatever
+     * {@code settings.json} the test wants merged by part E).
+     */
+    private static Path onboardedClaudeSource(Path dir, String settingsJson) throws IOException {
+        Files.createDirectories(dir);
+        Files.writeString(dir.resolve("settings.json"), settingsJson);
+        Files.writeString(
+                dir.resolve(".claude.json"),
+                "{\"hasCompletedOnboarding\":true,\"oauthAccount\":{\"emailAddress\":\"dev@example.com\"}}");
+        Files.writeString(dir.resolve(".credentials.json"), "{\"claudeAiOauth\":{\"accessToken\":\"tok\"}}");
+        return dir;
+    }
+
+    /**
+     * Assert the seeded {@code claude-config/settings.json} preserves
+     * {@code preservedKey} (a boolean true) AND carries the part-E agent-teams
+     * keys. The part-E read-modify-write means the file is no longer
+     * byte-identical to the source, so we parse rather than string-compare.
+     */
+    private static void assertAgentTeamsMerged(Path settingsFile, String preservedKey) throws IOException {
+        JsonNode n = MAPPER.readTree(settingsFile.toFile());
+        assertThat(n.path(preservedKey).asBoolean())
+                .as("part-E merge preserves the pre-existing key %s", preservedKey)
+                .isTrue();
+        assertThat(n.path("teammateMode").asText()).isEqualTo("tmux");
+        assertThat(n.path("env").path("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS").asText())
+                .isEqualTo("1");
     }
 
     /** Default permissive runner: image present + ssh key unencrypted. */
@@ -504,9 +540,7 @@ class OnboardCommandTest {
         Path srcKey = writeKey(tmp, "src-key");
         Path ghToken = tmp.resolve("gh-pat");
         Files.writeString(ghToken, "<flag-token>\n");
-        Path claudeSrc = tmp.resolve("src-claude");
-        Files.createDirectories(claudeSrc);
-        Files.writeString(claudeSrc.resolve("settings.json"), "{\"flag\":true}");
+        Path claudeSrc = onboardedClaudeSource(tmp.resolve("src-claude"), "{\"flag\":true}");
 
         FakeProcessRunner runner = permissiveRunner();
         FakeConsoleIO io = new FakeConsoleIO();
@@ -536,8 +570,9 @@ class OnboardCommandTest {
         // All flag-driven steps ran without needing a docker image build.
         assertThat(Files.readAllBytes(layout.gitKeyOut())).isEqualTo(KEY_BYTES);
         assertThat(Files.readString(layout.ghTokenOut())).isEqualTo("<flag-token>\n");
-        assertThat(Files.readString(layout.claudeOut().resolve("settings.json")))
-                .isEqualTo("{\"flag\":true}");
+        // UC-19: the onboarded source was seeded + part E merged the agent-teams keys.
+        assertThat(layout.claudeOut().resolve(".claude.json")).exists();
+        assertAgentTeamsMerged(layout.claudeOut().resolve("settings.json"), "flag");
         assertThat(runner.inheritCalls).isEmpty();
         assertThat(dockerInspectCalls(runner)).isZero();
     }
@@ -553,9 +588,7 @@ class OnboardCommandTest {
         Path srcKey = writeKey(tmp, "src-key");
         Path ghToken = tmp.resolve("gh-pat");
         Files.writeString(ghToken, "<fresh-token>\n");
-        Path claudeSrc = tmp.resolve("src-claude");
-        Files.createDirectories(claudeSrc);
-        Files.writeString(claudeSrc.resolve("settings.json"), "{\"fresh\":true}");
+        Path claudeSrc = onboardedClaudeSource(tmp.resolve("src-claude"), "{\"fresh\":true}");
 
         FakeProcessRunner runner = permissiveRunner();
         FakeConsoleIO io = new FakeConsoleIO();
@@ -603,8 +636,9 @@ class OnboardCommandTest {
         assertThat(Files.readString(layout.gitconfigOut()))
                 .isEqualTo("[user]\n\tname = Carol\n\temail = carol@example.com\n");
         assertThat(Files.readString(layout.ghTokenOut())).isEqualTo("<fresh-token>\n");
-        assertThat(Files.readString(layout.claudeOut().resolve("settings.json")))
-                .isEqualTo("{\"fresh\":true}");
+        // UC-19: re-seeded from the onboarded source; part E merged the agent-teams keys.
+        assertThat(layout.claudeOut().resolve(".claude.json")).exists();
+        assertAgentTeamsMerged(layout.claudeOut().resolve("settings.json"), "fresh");
 
         // Flag-driven everywhere ⇒ no interactive docker.
         assertThat(runner.inheritCalls).isEmpty();

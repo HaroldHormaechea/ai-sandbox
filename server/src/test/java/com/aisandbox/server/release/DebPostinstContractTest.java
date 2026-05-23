@@ -185,4 +185,225 @@ class DebPostinstContractTest {
                         + "allowlist` but rejects requests until a client is authorized")
                 .containsPattern("(?is)starts fine on an empty\\s+allowlist");
     }
+
+    // ── UC-19 — new packaging contract ────────────────────────────────
+
+    /** Convenience — read the postinst, skipping when it isn't on disk (cwd≠server/). */
+    private static String postinst() throws IOException {
+        assumeTrue(
+                Files.isRegularFile(POSTINST_FILE),
+                "postinst not found at " + POSTINST_FILE + " — test must run with cwd=server/");
+        return Files.readString(POSTINST_FILE);
+    }
+
+    private static int count(String haystack, String needle) {
+        int n = 0;
+        for (int i = haystack.indexOf(needle); i >= 0; i = haystack.indexOf(needle, i + needle.length())) {
+            n++;
+        }
+        return n;
+    }
+
+    /**
+     * Drop whole-line shell comments so a negative assertion targets actual
+     * CODE, not the postinst's (deliberate) explanatory comments — several of
+     * which name the dash-unsafe probe form and the headless flags precisely to
+     * document why they are NOT used on a given path.
+     */
+    private static String stripCommentLines(String text) {
+        StringBuilder sb = new StringBuilder();
+        for (String line : text.split("\n", -1)) {
+            if (!line.strip().startsWith("#")) {
+                sb.append(line).append('\n');
+            }
+        }
+        return sb.toString();
+    }
+
+    /**
+     * UC-19 C1 — the controlling-terminal probe MUST be the dash-safe
+     * subshell form {@code ( true <>/dev/tty ) 2>/dev/null}, NOT a
+     * {@code { exec 3<>/dev/tty; } 2>/dev/null} brace-group guard. On dash a
+     * redirection failure on the {@code exec} special builtin aborts the
+     * (non-interactive) shell even inside an {@code if}/group/redirect guard,
+     * which would fail the install (violating AC4 "exit 0 always") on no-tty
+     * hosts. A subshell + a regular builtin contains the failure to the
+     * subshell, so the parent only sees a non-zero status.
+     */
+    @Test
+    void postinst_probes_tty_with_dash_safe_subshell_not_exec_guard() throws IOException {
+        String text = postinst();
+
+        // POSITIVE — the subshell probe that sets HAVE_TTY.
+        assertThat(text)
+                .as("UC-19 C1 — postinst MUST probe /dev/tty via the dash-safe `( true <>/dev/tty )` subshell")
+                .contains("( true <>/dev/tty )")
+                .containsPattern("(?s)\\(\\s*true\\s*<>/dev/tty\\s*\\)\\s*2>/dev/null;\\s*then\\s*HAVE_TTY=1");
+
+        // NEGATIVE — the unsafe brace-group `exec` probe form must NOT be used in
+        // CODE. (A comment deliberately names it to document why; strip comments.)
+        assertThat(stripCommentLines(text))
+                .as("UC-19 C1 — postinst MUST NOT probe with the dash-unsafe `{ exec 3<>/dev/tty; }` form")
+                .doesNotContainPattern("\\{\\s*exec\\s+3<>/dev/tty");
+    }
+
+    /**
+     * UC-19 AC3 — when a controlling terminal is present (true under BOTH
+     * {@code dpkg -i} and {@code apt install}), the postinst offers a [Y/n]
+     * invite and, on accept, runs the FULL interactive wizard on /dev/tty
+     * (fd 3) WITHOUT the headless {@code --no-claude-preinit} /
+     * {@code --no-image-build} flags — so the Claude device-flow login + the
+     * image build actually run. The headless flags belong only to the
+     * no-terminal preseeded branch (asserted elsewhere).
+     */
+    @Test
+    void postinst_interactive_branch_invites_and_runs_onboard_on_tty_without_headless_flags() throws IOException {
+        String text = postinst();
+
+        assertThat(text)
+                .as("UC-19 AC3 — interactive branch MUST present a [Y/n] onboarding invite")
+                .contains("[Y/n]");
+        assertThat(text)
+                .as("UC-19 AC3 — interactive onboard MUST be wired to the terminal (fd 3), not /dev/null")
+                .contains("/usr/bin/aisandboxctl onboard \"$@\" <&3 >&3 2>&3");
+
+        // Isolate the interactive branch CODE (guard line → fd-3 close, comments
+        // stripped) and prove it carries NO headless flags — those would suppress
+        // exactly the Claude pre-init capture this branch exists to perform.
+        String code = stripCommentLines(text);
+        int start = code.indexOf(
+                "[ \"$CLAUDE_SNAPSHOT_PRESENT\" = \"0\" ] && [ \"$HAVE_TTY\" = \"1\" ] && [ \"$ONBOARD\" != \"false\" ]");
+        int end = code.indexOf("exec 3>&-", start);
+        assertThat(start).isGreaterThanOrEqualTo(0);
+        assertThat(end).isGreaterThan(start);
+        String interactiveBranch = code.substring(start, end);
+        assertThat(interactiveBranch)
+                .as("UC-19 AC3 — the interactive onboard MUST NOT pass the headless flags")
+                .doesNotContain("--no-claude-preinit")
+                .doesNotContain("--no-image-build");
+    }
+
+    /**
+     * UC-19 AC3 — the interactive invite fires on the presence of a terminal
+     * (so a raw {@code dpkg -i}, which never runs the debconf {@code config}
+     * script, still triggers it) and is NOT gated on {@code onboard=true};
+     * it is suppressed only when a snapshot already exists OR the operator
+     * explicitly opted out via debconf ({@code onboard=false}).
+     */
+    @Test
+    void postinst_interactive_invite_is_tty_gated_not_answer_gated_and_respects_optout() throws IOException {
+        String text = postinst();
+        assertThat(text)
+                .as("UC-19 AC3 — interactive invite gated on (no snapshot) AND (have tty) AND (not opted out)")
+                .contains(
+                        "[ \"$CLAUDE_SNAPSHOT_PRESENT\" = \"0\" ] && [ \"$HAVE_TTY\" = \"1\" ] && [ \"$ONBOARD\" != \"false\" ]");
+    }
+
+    /**
+     * UC-19 AC9 — the captured gh token never reaches the process table: it is
+     * staged into a mode-0600 temp file and handed to {@code onboard} via
+     * {@code --gh-token-file}, never as a {@code --gh-token <value>} argv (which
+     * would be world-visible in {@code ps}). The temp file is shredded/removed
+     * after use, and (asserted by the existing UC-17 test) cleared from the
+     * debconf database.
+     */
+    @Test
+    void postinst_gh_token_staged_in_0600_tempfile_never_on_command_line() throws IOException {
+        String text = postinst();
+
+        assertThat(text)
+                .as("UC-19 AC9 — gh token staged into a temp file at mode 0600")
+                .contains("GH_TOKEN_FILE=\"$(mktemp)\"")
+                .contains("chmod 600 \"$GH_TOKEN_FILE\"")
+                .contains("printf '%s' \"$GH_TOKEN\" > \"$GH_TOKEN_FILE\"");
+        assertThat(text)
+                .as("UC-19 AC9 — onboard receives the token by file reference, not by value")
+                .contains("--gh-token-file \"$GH_TOKEN_FILE\"");
+
+        // NEGATIVE — the raw token value is never passed as a `--gh-token <value>`
+        // argv (matches `--gh-token` followed by whitespace; `--gh-token-file` is
+        // followed by `-`, so it is correctly excluded).
+        assertThat(text)
+                .as("UC-19 AC9 — the raw gh token MUST NOT appear on a command line (process table leak)")
+                .doesNotContainPattern("--gh-token\\s");
+
+        assertThat(text)
+                .as("UC-19 AC9 — the gh-token temp file is wiped after onboarding")
+                .containsPattern("(shred\\s+-u|rm\\s+-f)\\s+\"\\$GH_TOKEN_FILE\"");
+    }
+
+    /**
+     * UC-19 — re-install / re-run idempotency (AC7): when a non-empty Claude
+     * pre-init snapshot is already present in the installed template, the
+     * postinst neither re-prompts nor defers — it prints the "already
+     * onboarded" next-step block. The snapshot gate keys on a non-empty
+     * {@code .claude.json} (the post-UC-19 capture marker).
+     */
+    @Test
+    void postinst_already_onboarded_snapshot_present_emits_nothing_to_do_next_step() throws IOException {
+        String text = postinst();
+
+        // The snapshot gate.
+        assertThat(text)
+                .contains("CLAUDE_TEMPLATE_JSON=/etc/ai-sandbox-server/templates/claude-config/.claude.json")
+                .contains("if [ -s \"$CLAUDE_TEMPLATE_JSON\" ]; then")
+                .contains("CLAUDE_SNAPSHOT_PRESENT=1");
+
+        // The dedicated next-step branch + its distinctive marker.
+        assertThat(text).contains("elif [ \"$CLAUDE_SNAPSHOT_PRESENT\" = \"1\" ]; then");
+        assertThat(text)
+                .as("UC-19 AC7 — a present snapshot yields the `already onboarded` next-step (no re-prompt)")
+                .containsPattern("already onboarded \\(a Claude pre-init snapshot is\\s+present\\)");
+    }
+
+    /**
+     * UC-19 — the upgrade-with-stale-template next step: on an upgrade
+     * ({@code $2} non-empty) where no snapshot is present, the operator is told
+     * the capture changed and to refresh with {@code aisandboxctl onboard --force}.
+     */
+    @Test
+    void postinst_upgrade_with_stale_template_points_at_onboard_force() throws IOException {
+        String text = postinst();
+
+        // Upgrade indicator captured from $2 before $@ is reused.
+        assertThat(text).contains("IS_UPGRADE=0").containsPattern("if \\[ -n \"\\$2\" \\]; then\\s*IS_UPGRADE=1");
+
+        // The upgrade-stale branch + its actionable next step.
+        assertThat(text).contains("elif [ \"$IS_UPGRADE\" = \"1\" ] && [ \"$CLAUDE_SNAPSHOT_PRESENT\" = \"0\" ]; then");
+        assertThat(text)
+                .as("UC-19 — the upgrade-stale next step MUST point at `onboard --force`")
+                .containsPattern("sudo aisandboxctl onboard --force");
+    }
+
+    /**
+     * UC-19 AC4 — the "Next steps" output is a SINGLE {@code if/elif…/else}
+     * chain, so exactly one block prints for any install state (one
+     * unambiguous next step). Pins both the chained structure (each guard is
+     * an {@code elif}/{@code else}, never a fresh {@code if}) and that each of
+     * the five distinct block markers occurs exactly once.
+     */
+    @Test
+    void postinst_next_step_blocks_form_one_mutually_exclusive_chain() throws IOException {
+        String text = postinst();
+
+        // Chained guards — proves runtime mutual exclusivity (only one branch runs).
+        assertThat(text).contains("if [ \"$ONBOARD_DONE\" = \"1\" ] && [ \"$ONBOARD_INTERACTIVE\" = \"1\" ]; then");
+        assertThat(text).contains("elif [ \"$ONBOARD_DONE\" = \"1\" ]; then");
+        assertThat(text).contains("elif [ \"$IS_UPGRADE\" = \"1\" ] && [ \"$CLAUDE_SNAPSHOT_PRESENT\" = \"0\" ]; then");
+        assertThat(text).contains("elif [ \"$CLAUDE_SNAPSHOT_PRESENT\" = \"1\" ]; then");
+
+        // Each distinct next-step shape's marker appears exactly once.
+        assertThat(count(text, "onboarded interactively"))
+                .as("interactive-onboarded block marker occurs exactly once")
+                .isEqualTo(1);
+        assertThat(count(text, "Claude pre-init was NOT captured"))
+                .as("non-interactive-onboarded block marker occurs exactly once")
+                .isEqualTo(1);
+        assertThat(count(text, "already onboarded"))
+                .as("already-onboarded block marker occurs exactly once")
+                .isEqualTo(1);
+        assertThat(count(text, "Onboarding was deferred"))
+                .as("deferred block marker occurs exactly once")
+                .isEqualTo(1);
+    }
 }
