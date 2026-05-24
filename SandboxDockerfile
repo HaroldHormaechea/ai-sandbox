@@ -54,8 +54,19 @@ RUN set -eu; \
         apt-get install -y --no-install-recommends nodejs npm; \
       fi; \
       rm -rf /var/lib/apt/lists/*; \
-      # Debian `useradd` equivalent of Alpine's `adduser -D -h`.
-      useradd -m -d /home/claude -s /bin/bash claude; \
+      # UC22 — pin claude to uid/gid 1000 on the glibc base, matching the
+      # Alpine image (where `adduser -D` lands on 1000) and the historical
+      # contract. The node:*-bookworm base ships a `node` user already holding
+      # uid/gid 1000, which would otherwise push claude to 1001 — and then a
+      # dev-mode session cannot write its bind mounts (./workspace and
+      # ./claude-config are created by spawn.sh as the operator's uid, almost
+      # always 1000), so the entrypoint dies with "Permission denied" creating
+      # ~/.claude. Free 1000 (the `node` user/group is unused by ai-sandbox —
+      # only the node binary matters) and pin claude to it. The UC-17 group-0
+      # ownership recipe below still covers the server-spawned <uid>:0 case.
+      if getent passwd node >/dev/null 2>&1; then userdel node; fi; \
+      if getent group node >/dev/null 2>&1; then groupdel node 2>/dev/null || true; fi; \
+      useradd -u 1000 -m -d /home/claude -s /bin/bash claude; \
     fi; \
     npm install -g @anthropic-ai/claude-code; \
     curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_$(uname -m | sed 's/x86_64/x64/;s/aarch64/arm64/').tar.gz" \

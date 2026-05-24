@@ -89,8 +89,10 @@ build (and cache afterward); only the Android SDK side is guaranteed offline.
 Instrumented tests (`:android:connectedAndroidTest`) need a running emulator,
 which needs hardware **KVM**. The heavy x86_64 system image + AVD are **not**
 baked into the image — they're provisioned lazily on first use into
-`/workspace/environment-utilities/` (persisted, so it downloads once). From
-inside a session, drive it with the bundled helper:
+`/workspace/environment-utilities/` (persisted via the workspace bind mount, so
+the **shared** workspace downloads them once and reuses them across container
+restarts, rebuilds, and re-spawns). From inside a session, drive it with the
+bundled helper:
 
 ```bash
 aisandbox-emulator doctor    # check toolchain + KVM; verify aapt2/adb actually load
@@ -124,6 +126,14 @@ and refuses to launch (pass `--no-accel` to force very slow software emulation).
 follow-up — x86_64 system images won't boot on arm64). Docker Desktop on
 **Windows/macOS** does not expose `/dev/kvm`, so the emulator path is
 Linux-host-only there; the build + JVM-test lane works on any host.
+
+**Per-session cache caveat.** The system image + AVD cache lives under the
+session's `/workspace`. Sessions given an **isolated** workspace
+(`spawn.sh --isolated-workspace`, or a management-server-assigned per-session
+workspace path) therefore have their own `environment-utilities/` and
+re-download the ~1.5 GB system image on their first emulator use. Sessions on
+the shared `/workspace` (the default) all reuse the one cache. This is the
+accepted trade-off of caching under the workspace bind mount.
 
 ### Workspace location
 
