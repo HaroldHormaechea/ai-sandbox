@@ -1,0 +1,167 @@
+#!/usr/bin/env bash
+# aisandbox-emulator — manage a headless Android emulator inside an ai-sandbox
+# session (UC22 AC10/AC12).
+#
+# The session container IS a Claude Code session, so this is the command the
+# in-container agent invokes to bring up an AVD for
+# `./gradlew :android:connectedAndroidTest`.
+#
+# The build-time Android SDK (ANDROID_HOME=/opt/android-sdk) ships cmdline-tools
+# + platform-tools + platforms;android-36 + build-tools;36.0.0, so the
+# lint/test/assemble/bundle lane works OFFLINE. The heavy bits — the x86_64
+# system image, the emulator package, and the AVD — are provisioned LAZILY here
+# on first `start`, into a persisted cache under the workspace mount
+# (/workspace/environment-utilities) so they download once and survive container
+# restart/rebuild (AC9). First `start` therefore needs network; the build lane
+# does not.
+#
+#   ⚠ EMPIRICALLY UNVERIFIED at authoring time — there was no Docker/KVM in the
+#     authoring environment, so this script has only been static-checked
+#     (bash -n / shellcheck). Validate on a Docker+KVM+amd64 host per
+#     use-cases/22-onboarding-toolchain-android-testing.md → "Testing
+#     Limitations".
+set -euo pipefail
+
+ANDROID_HOME="${ANDROID_HOME:-/opt/android-sdk}"
+CACHE_ROOT="${AISB_ANDROID_CACHE:-/workspace/environment-utilities/android}"
+EMU_SDK_ROOT="$CACHE_ROOT/sdk"             # lazily-installed emulator + system image
+AVD_HOME="$CACHE_ROOT/avd"                 # persisted AVDs
+export ANDROID_AVD_HOME="$AVD_HOME"
+AVD_NAME="${AISB_AVD_NAME:-aisandbox}"
+SYS_IMAGE="${AISB_SYS_IMAGE:-system-images;android-36;default;x86_64}"
+DEVICE_PROFILE="${AISB_AVD_DEVICE:-pixel_6}"
+ADB="$ANDROID_HOME/platform-tools/adb"
+SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+AVDMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager"
+PIDFILE="$CACHE_ROOT/emulator.pid"
+LOGFILE="$CACHE_ROOT/emulator.log"
+
+log() { printf '  [aisandbox-emulator] %s\n' "$*" >&2; }
+die() { printf '  [aisandbox-emulator] ERROR: %s\n' "$*" >&2; exit 1; }
+
+require_toolchain() {
+    [ -x "$SDKMANAGER" ] || die "Android SDK not found at $ANDROID_HOME. This image was built WITHOUT the Android testing toolchain — re-run ./setup.sh, select 'Android testing', and rebuild the image."
+}
+
+kvm_ok() { [ -e /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; }
+
+ensure_emulator_installed() {
+    if [ ! -x "$EMU_SDK_ROOT/emulator/emulator" ] || [ ! -d "$EMU_SDK_ROOT/system-images" ]; then
+        log "First run: provisioning emulator + '$SYS_IMAGE' into $EMU_SDK_ROOT (one-time download, needs network)..."
+        mkdir -p "$EMU_SDK_ROOT"
+        yes | "$SDKMANAGER" --sdk_root="$EMU_SDK_ROOT" --licenses >/dev/null 2>&1 || true
+        "$SDKMANAGER" --sdk_root="$EMU_SDK_ROOT" "emulator" "$SYS_IMAGE"
+    fi
+}
+
+ensure_avd() {
+    mkdir -p "$AVD_HOME"
+    if ! ANDROID_SDK_ROOT="$EMU_SDK_ROOT" "$AVDMANAGER" list avd 2>/dev/null | grep -q "Name: $AVD_NAME"; then
+        log "Creating AVD '$AVD_NAME' from '$SYS_IMAGE'..."
+        echo "no" | ANDROID_SDK_ROOT="$EMU_SDK_ROOT" "$AVDMANAGER" create avd \
+            -n "$AVD_NAME" -k "$SYS_IMAGE" --device "$DEVICE_PROFILE" --force
+    fi
+}
+
+cmd_status() {
+    if [ "$("$ADB" get-state 2>/dev/null || true)" = "device" ]; then
+        log "Emulator running (adb state: device)."
+        return 0
+    fi
+    log "No running emulator."
+    return 1
+}
+
+cmd_start() {
+    require_toolchain
+    local accel_args=()
+    if kvm_ok; then
+        log "/dev/kvm present and accessible — hardware acceleration enabled."
+    else
+        log "WARNING: /dev/kvm not accessible. Without KVM the emulator falls back to software (TCG) emulation: extremely slow, often will not finish booting."
+        log "  • Re-spawn on a host with KVM — spawn.sh auto-passes --device /dev/kvm for Android images when /dev/kvm exists."
+        log "  • The build + JVM-test lane (:android:lint/:test/:assembleDebug/:bundleDebug) does NOT need KVM and is unaffected."
+        if [ "${1:-}" != "--no-accel" ]; then
+            die "Refusing to start without KVM. Re-run with --no-accel to attempt (very slow) software emulation anyway."
+        fi
+        log "Proceeding with -no-accel (software emulation) as requested."
+        accel_args+=(-no-accel)
+    fi
+
+    ensure_emulator_installed
+    ensure_avd
+
+    if cmd_status >/dev/null 2>&1; then
+        log "Emulator already running — nothing to do."
+        return 0
+    fi
+
+    log "Booting headless AVD '$AVD_NAME'..."
+    ANDROID_SDK_ROOT="$EMU_SDK_ROOT" ANDROID_AVD_HOME="$AVD_HOME" \
+        nohup "$EMU_SDK_ROOT/emulator/emulator" -avd "$AVD_NAME" \
+        -no-window -gpu swiftshader_indirect -no-audio -no-boot-anim -no-snapshot \
+        ${accel_args[@]+"${accel_args[@]}"} >"$LOGFILE" 2>&1 &
+    echo "$!" > "$PIDFILE"
+
+    log "Waiting for device + sys.boot_completed (can take several minutes on first boot)..."
+    "$ADB" wait-for-device
+    local tries=0
+    until [ "$("$ADB" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = "1" ]; do
+        tries=$((tries + 1))
+        if [ "$tries" -gt 600 ]; then
+            die "Emulator did not finish booting within ~20 min. See $LOGFILE"
+        fi
+        sleep 2
+    done
+    "$ADB" shell input keyevent 82 >/dev/null 2>&1 || true   # dismiss lock screen
+    log "Emulator '$AVD_NAME' is booted and ready."
+    log "Next: ./gradlew :android:connectedAndroidTest"
+}
+
+cmd_stop() {
+    "$ADB" -e emu kill >/dev/null 2>&1 || true
+    if [ -f "$PIDFILE" ]; then
+        kill "$(cat "$PIDFILE")" 2>/dev/null || true
+        rm -f "$PIDFILE"
+    fi
+    log "Emulator stopped."
+}
+
+cmd_doctor() {
+    require_toolchain
+    log "ANDROID_HOME       : $ANDROID_HOME"
+    log "java               : $(java -version 2>&1 | head -1 || echo 'MISSING')"
+    log "adb                : $("$ADB" version 2>&1 | head -1 || echo 'MISSING / loader error (gcompat?)')"
+    log "aapt2              : $("$ANDROID_HOME"/build-tools/36.0.0/aapt2 version 2>&1 | head -1 || echo 'MISSING / loader error (gcompat?)')"
+    log "/dev/kvm           : $(kvm_ok && echo 'present + accessible' || echo 'ABSENT/inaccessible — emulator will be slow/unavailable')"
+    log "cache root         : $CACHE_ROOT"
+    log "emulator installed : $([ -x "$EMU_SDK_ROOT/emulator/emulator" ] && echo yes || echo 'no (lazy — installed on first start)')"
+    log "AVD '$AVD_NAME'      : $(ANDROID_SDK_ROOT="$EMU_SDK_ROOT" "$AVDMANAGER" list avd 2>/dev/null | grep -q "Name: $AVD_NAME" && echo present || echo 'not created yet')"
+}
+
+usage() {
+    cat >&2 <<'EOF'
+Usage: aisandbox-emulator <command> [--no-accel]
+
+Commands:
+  start    Lazily install the x86_64 system image + emulator (first run only,
+           into /workspace/environment-utilities), create the AVD, and boot it
+           headless; waits for sys.boot_completed. Requires /dev/kvm unless
+           --no-accel is given.
+  stop     Kill the running emulator.
+  status   Report whether an emulator is attached (adb get-state).
+  doctor   Print toolchain + KVM diagnostics (verifies aapt2 / adb actually load).
+
+Then run the instrumented tests with:
+  ./gradlew :android:connectedAndroidTest
+EOF
+}
+
+case "${1:-}" in
+    start)  shift; cmd_start "${1:-}" ;;
+    stop)   cmd_stop ;;
+    status) cmd_status ;;
+    doctor) cmd_doctor ;;
+    -h|--help|"") usage; exit 2 ;;
+    *) log "Unknown command: $1"; usage; exit 2 ;;
+esac

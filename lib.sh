@@ -271,11 +271,59 @@ _aisb_normalize_title() {
 # kept for consistency so every invocation is shaped identically.
 ai_sandbox_compose() {
     local flags=()
-    if [ -n "${AI_SANDBOX_COMPOSE_FILE:-}" ]; then
-        flags+=(-f "$AI_SANDBOX_COMPOSE_FILE")
+    local base="${AI_SANDBOX_COMPOSE_FILE:-}"
+    # UC22 — when override files are requested in developer mode (no explicit
+    # base compose file), make the base explicit. Otherwise a bare `-f
+    # <override>` makes docker compose IGNORE the default docker-compose.yml.
+    if [ -n "${AI_SANDBOX_EXTRA_COMPOSE_FILES:-}" ] && [ -z "$base" ]; then
+        base="docker-compose.yml"
     fi
+    [ -n "$base" ] && flags+=(-f "$base")
+    # UC22 — optional override compose files (e.g. docker-compose.kvm.yml for
+    # /dev/kvm passthrough on Android-testing images). Space-separated, applied
+    # AFTER the base so they layer on top. Unset → behaviour identical to
+    # pre-UC22.
+    local extra
+    for extra in ${AI_SANDBOX_EXTRA_COMPOSE_FILES:-}; do
+        flags+=(-f "$extra")
+    done
     if [ -n "${AI_SANDBOX_HOST_STATE_ROOT:-}" ]; then
         flags+=(--project-directory "$AI_SANDBOX_HOST_STATE_ROOT")
     fi
     docker compose "${flags[@]}" "$@"
+}
+
+# ── UC22 — toolchain selection state ─────────────────────────────────────────
+#
+# The operator's optional-toolchain choices (e.g. "android") persist in a
+# gitignored newline-delimited file at the repo root (cwd of setup.sh). They
+# drive `docker compose build` build args and survive rebuild + re-spawn.
+AISB_TOOLCHAINS_FILE="${AISB_TOOLCHAINS_FILE:-.ai-sandbox-toolchains}"
+
+# toolchain_is_enabled ID → 0 if ID is listed in the toolchains file.
+toolchain_is_enabled() {
+    [ -f "$AISB_TOOLCHAINS_FILE" ] || return 1
+    grep -qxF "$1" "$AISB_TOOLCHAINS_FILE"
+}
+
+# write_enabled_toolchains [ID...] → truncate + rewrite the toolchains file.
+# Zero args writes an empty file (base image only).
+write_enabled_toolchains() {
+    : > "$AISB_TOOLCHAINS_FILE"
+    local id
+    for id in "$@"; do
+        printf '%s\n' "$id" >> "$AISB_TOOLCHAINS_FILE"
+    done
+}
+
+# image_supports_android [IMAGE] → 0 if the built image carries the Android
+# toolchain label (stamped by SandboxDockerfile when ANDROID_TESTING=1). This
+# is the runtime source of truth for KVM passthrough — independent of the
+# build-time state file, so it works identically for developer-mode and
+# management-server-spawned sessions.
+image_supports_android() {
+    local img="${1:-ai-context:latest}" val=""
+    val="$(docker image inspect "$img" \
+        --format '{{ index .Config.Labels "com.ai-sandbox.toolchain.android" }}' 2>/dev/null || true)"
+    [ "$val" = "1" ]
 }

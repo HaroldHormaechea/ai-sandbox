@@ -3,6 +3,12 @@ services:
     build:
       context: .
       dockerfile: SandboxDockerfile
+      args:
+        # UC22 — optional toolchains baked into the image. setup.sh exports
+        # AI_SANDBOX_TOOLCHAIN_ANDROID (0/1) from the operator's selection in
+        # ./.ai-sandbox-toolchains before `docker compose build`. Default 0
+        # keeps non-Android builds byte-identical to the pre-UC22 image.
+        ANDROID_TESTING: "${AI_SANDBOX_TOOLCHAIN_ANDROID:-0}"
     image: ai-context:latest
     # UC-17 — run the session container as the host's runtime user so the
     # bind-mounted, server-owned tree (secrets, claude-config, workspace) is

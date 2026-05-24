@@ -175,7 +175,11 @@ install."
   `cmdline-tools` + `platform-tools` + `platforms;android-36` +
   `build-tools;36.0.0` (or whatever the brief currently pins). Set
   `ANDROID_HOME` or drop a `local.properties` next to `settings.gradle.kts`
-  with `sdk.dir=…`.
+  with `sdk.dir=…`. **Or** build inside an ai-sandbox session with the
+  Android toolchain selected at `setup.sh` Step 3 — it bakes exactly that
+  SDK and ships `aisandbox-emulator` for instrumented tests on a headless
+  AVD. See the repo README → "Testing Android apps inside the sandbox
+  (UC22)" and `use-cases/22-onboarding-toolchain-android-testing.md`.
 - **The terminal-rendering surface is a v0.1 placeholder.** It renders
   raw UTF-8 of the PTY stdout in monospace and auto-scrolls; ANSI
   escape sequences pass through unparsed (so colours render as

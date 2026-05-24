@@ -216,11 +216,48 @@ function Normalize-TmuxTitle {
 # identically to a bare `docker compose` call.
 function Invoke-AiSandboxCompose {
     $flags = @()
-    if ($env:AI_SANDBOX_COMPOSE_FILE) {
-        $flags += @('-f', $env:AI_SANDBOX_COMPOSE_FILE)
+    $base = $env:AI_SANDBOX_COMPOSE_FILE
+    # UC22 — make the base explicit when override files are requested in
+    # developer mode, else a bare `-f <override>` makes compose ignore the
+    # default docker-compose.yml.
+    if ($env:AI_SANDBOX_EXTRA_COMPOSE_FILES -and -not $base) {
+        $base = 'docker-compose.yml'
+    }
+    if ($base) { $flags += @('-f', $base) }
+    # UC22 — optional override compose files (e.g. docker-compose.kvm.yml).
+    if ($env:AI_SANDBOX_EXTRA_COMPOSE_FILES) {
+        foreach ($extra in ($env:AI_SANDBOX_EXTRA_COMPOSE_FILES -split '\s+')) {
+            if ($extra) { $flags += @('-f', $extra) }
+        }
     }
     if ($env:AI_SANDBOX_HOST_STATE_ROOT) {
         $flags += @('--project-directory', $env:AI_SANDBOX_HOST_STATE_ROOT)
     }
     & docker compose @flags @args
+}
+
+# --- UC22 — toolchain selection state ----------------------------------------
+#
+# Mirror of lib.sh's toolchain helpers. The operator's optional-toolchain
+# choices persist in a gitignored newline-delimited file at the repo root and
+# drive `docker compose build` build args.
+$script:AiSandboxToolchainsFile = if ($env:AISB_TOOLCHAINS_FILE) { $env:AISB_TOOLCHAINS_FILE } else { '.ai-sandbox-toolchains' }
+
+function Test-ToolchainEnabled {
+    param([Parameter(Mandatory)][string]$Id)
+    if (-not (Test-Path $script:AiSandboxToolchainsFile)) { return $false }
+    return ((Get-Content $script:AiSandboxToolchainsFile) -contains $Id)
+}
+
+function Write-EnabledToolchains {
+    param([string[]]$Ids = @())
+    Set-Content -Path $script:AiSandboxToolchainsFile -Value $Ids
+}
+
+# Test-ImageSupportsAndroid [IMAGE] — $true if the built image carries the
+# Android toolchain label (runtime source of truth for KVM passthrough).
+function Test-ImageSupportsAndroid {
+    param([string]$Image = 'ai-context:latest')
+    $val = (& docker image inspect $Image --format '{{ index .Config.Labels "com.ai-sandbox.toolchain.android" }}' 2>$null)
+    return ($val -eq '1')
 }

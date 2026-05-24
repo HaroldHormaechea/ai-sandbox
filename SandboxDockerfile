@@ -61,6 +61,62 @@ COPY git-hooks/ /etc/git-hooks/
 RUN chmod +x /etc/git-hooks/* \
     && git config --system core.hooksPath /etc/git-hooks
 
+# ── UC22 — optional Android build/test/emulator toolchain ────────────────────
+# Baked only when the operator selects "Android testing" in setup.sh, which
+# passes ANDROID_TESTING=1 as a build arg (docker-compose.yml build.args).
+# amd64-only — x86_64 system images won't run on arm64 (arm64 is a documented
+# UC22 follow-up, AC15). The glibc-linked SDK binaries (aapt2/adb/emulator) need
+# a glibc shim on Alpine/musl: gcompat + libc6-compat — the same approach the
+# RTK block above already uses on arm64.
+#
+#   ⚠ EMPIRICALLY UNVERIFIED at authoring time (no Docker/KVM in the authoring
+#     environment). gcompat sufficiency for aapt2 / the QEMU emulator is the key
+#     open risk. If a required binary still won't load under gcompat on a real
+#     host, switch this image to a glibc base (Debian/Ubuntu) per
+#     use-cases/22-onboarding-toolchain-android-testing.md → "gcompat→glibc
+#     fallback" / "Testing Limitations".
+#
+# Baked (so the lint/test/assemble/bundle lane works offline, AC7/AC8): JDK 21 +
+# cmdline-tools + platform-tools + platforms;android-36 + build-tools;36.0.0
+# (matches android-ci.yml + gradle/libs.versions.toml — AC14). NOT baked
+# (provisioned lazily on first emulator use by `aisandbox-emulator`, into the
+# persisted /workspace/environment-utilities — AC9): the ~1.5 GB x86_64 system
+# image, the emulator package, and the AVD.
+ARG ANDROID_TESTING=0
+ARG ANDROID_CMDLINE_TOOLS_VERSION=11076708
+ENV ANDROID_HOME=/opt/android-sdk
+ENV ANDROID_SDK_ROOT=/opt/android-sdk
+ENV PATH="/opt/android-sdk/cmdline-tools/latest/bin:/opt/android-sdk/platform-tools:${PATH}"
+RUN set -eu; \
+    if [ "${ANDROID_TESTING}" = "1" ]; then \
+      if [ "${TARGETARCH}" != "amd64" ]; then \
+        echo "ERROR: Android testing toolchain is amd64-only (TARGETARCH=${TARGETARCH}); arm64 is a documented follow-up (UC22 AC15)." >&2; \
+        exit 1; \
+      fi; \
+      apk add --no-cache gcompat libc6-compat openjdk21-jdk unzip; \
+      mkdir -p "${ANDROID_HOME}/cmdline-tools"; \
+      curl -fsSL "https://dl.google.com/android/repository/commandlinetools-linux-${ANDROID_CMDLINE_TOOLS_VERSION}_latest.zip" -o /tmp/cmdline-tools.zip; \
+      unzip -q /tmp/cmdline-tools.zip -d "${ANDROID_HOME}/cmdline-tools"; \
+      mv "${ANDROID_HOME}/cmdline-tools/cmdline-tools" "${ANDROID_HOME}/cmdline-tools/latest"; \
+      rm -f /tmp/cmdline-tools.zip; \
+      yes | "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null; \
+      "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" \
+        "platform-tools" "platforms;android-36" "build-tools;36.0.0" >/dev/null; \
+      chgrp -R 0 "${ANDROID_HOME}" && chmod -R g=u "${ANDROID_HOME}"; \
+      echo "Android toolchain baked OK ($(java -version 2>&1 | head -1))"; \
+    fi
+# Stamp the toolchain state onto the image so spawn.sh can decide /dev/kvm
+# passthrough at run time (and so server-spawned sessions inherit it). "1" when
+# baked, "0" otherwise.
+LABEL com.ai-sandbox.toolchain.android="${ANDROID_TESTING}"
+
+# In-container emulator helper (UC22 AC10) — invoked by the in-sandbox Claude
+# Code session to lazily provision + boot a headless AVD for
+# :android:connectedAndroidTest. Always shipped; it self-checks and prints clear
+# guidance if the Android toolchain was not baked into this image.
+COPY container-bin/aisandbox-emulator /usr/local/bin/aisandbox-emulator
+RUN chmod +x /usr/local/bin/aisandbox-emulator
+
 COPY --chown=claude:claude entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 

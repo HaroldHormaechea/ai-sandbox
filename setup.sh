@@ -384,6 +384,60 @@ press_enter
 # ── Step 3: Container image ──────────────────────────────────────────────────
 clear_screen
 screen_header 3 6 "Container image"
+
+# ── UC22 — optional toolchain selection ──────────────────────────────────────
+# Data-driven menu of optional toolchains baked into ai-context:latest. The
+# selection persists in ./.ai-sandbox-toolchains (gitignored, via lib.sh) and is
+# passed to `docker compose build` as build args. Today the only optional
+# toolchain is "android"; add a row here + a build arg to offer more without
+# reworking the plumbing (AC16).
+info "Optional toolchains to bake into the image:"
+hr
+
+HOST_ARCH="$(uname -m)"
+case "$HOST_ARCH" in
+    x86_64|amd64) HOST_IS_AMD64=1 ;;
+    *)            HOST_IS_AMD64=0 ;;
+esac
+
+selected_android=0
+toolchain_is_enabled android && selected_android=1
+
+# Android testing — amd64 only (x86_64 system image; arm64 is a documented
+# follow-up, AC15). On non-amd64 hosts we surface the limitation instead of
+# offering a broken option or failing the wizard.
+if [ "$HOST_IS_AMD64" -eq 1 ]; then
+    if [ "$selected_android" -eq 1 ]; then
+        read -r -p "  Include Android testing (JDK 21 + Android SDK + headless emulator)? [Y/n]: " a_resp
+        if [[ "${a_resp:-}" =~ ^[Nn]$ ]]; then selected_android=0; else selected_android=1; fi
+    else
+        read -r -p "  Include Android testing (JDK 21 + Android SDK + headless emulator)? [y/N]: " a_resp
+        if [[ "${a_resp:-}" =~ ^[Yy]$ ]]; then selected_android=1; else selected_android=0; fi
+    fi
+else
+    warn "Android testing is amd64-only — not available on this $HOST_ARCH host (arm64 is a documented follow-up). Skipping."
+    selected_android=0
+fi
+
+# Persist the selection and export build args for `docker compose build`.
+toolchain_selection=()
+[ "$selected_android" -eq 1 ] && toolchain_selection+=("android")
+write_enabled_toolchains ${toolchain_selection[@]+"${toolchain_selection[@]}"}
+export AI_SANDBOX_TOOLCHAIN_ANDROID="$selected_android"
+
+if [ "$selected_android" -eq 1 ]; then
+    ok "Android testing enabled — image will include JDK 21 + Android SDK (build-tools 36.0.0, android-36)."
+    warn "The Android image is larger (~+1.5 GB) and its first build is slower than the base image."
+    # If an Android selection is active but the existing image lacks the
+    # toolchain, a rebuild is required for it to take effect.
+    if docker image inspect ai-context:latest >/dev/null 2>&1 && ! image_supports_android; then
+        warn "The existing ai-context:latest image has NO Android toolchain — rebuild below to bake it in."
+    fi
+else
+    ok "Base image only (no optional toolchains)."
+fi
+hr
+
 if docker image inspect ai-context:latest >/dev/null 2>&1; then
     ok "Image ai-context:latest already built"
     hr

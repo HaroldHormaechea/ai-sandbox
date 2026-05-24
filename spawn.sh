@@ -166,6 +166,30 @@ if [ "$LABEL_SET" -eq 1 ] && [ -n "$LABEL" ]; then
     info "  label         : $LABEL" >&2
 fi
 
+# UC22 — Android-testing images can boot a headless emulator, which needs
+# hardware KVM. When the built image carries the Android toolchain AND the host
+# exposes /dev/kvm, layer the KVM passthrough override so `aisandbox-emulator`
+# inside the session can run an accelerated AVD (AC11). Both gates must hold;
+# either missing → no override → behaviour identical to a normal session. This
+# also covers management-server-spawned sessions (AC13), since the server
+# invokes this very script with AI_SANDBOX_COMPOSE_FILE set.
+if image_supports_android; then
+    if [ -e /dev/kvm ]; then
+        kvm_override="docker-compose.kvm.yml"
+        if [ -n "${AI_SANDBOX_COMPOSE_FILE:-}" ]; then
+            kvm_override="$(dirname "$AI_SANDBOX_COMPOSE_FILE")/docker-compose.kvm.yml"
+        fi
+        if [ -f "$kvm_override" ]; then
+            export AI_SANDBOX_EXTRA_COMPOSE_FILES="${AI_SANDBOX_EXTRA_COMPOSE_FILES:+$AI_SANDBOX_EXTRA_COMPOSE_FILES }$kvm_override"
+            info "  kvm           : /dev/kvm detected → passthrough enabled ($kvm_override)" >&2
+        else
+            warn "Android image + /dev/kvm present but $kvm_override missing — emulator will be unaccelerated." >&2
+        fi
+    else
+        info "  kvm           : no /dev/kvm on host → emulator slow/unavailable (build+JVM-test lane unaffected)" >&2
+    fi
+fi
+
 if ! ai_sandbox_compose -p "$PROJECT" up -d; then
     warn "docker compose up failed for $PROJECT." >&2
     warn "Counter NOT rolled back (monotonic by design); next spawn will use N=$(( N + 1 ))." >&2

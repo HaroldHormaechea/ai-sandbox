@@ -18,6 +18,10 @@ templates/claude-config/*
 .ai-sandbox-counter
 .ai-sandbox-counter.lock/
 
+# UC22 — operator's optional-toolchain selection (drives `docker compose build`
+# build args). Machine-local; never committed.
+.ai-sandbox-toolchains
+
 # Per-session isolated host directories created by ./spawn.sh.
 workspace-*/
 claude-config-*/

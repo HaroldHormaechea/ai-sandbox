@@ -163,6 +163,31 @@ if ($LabelSet -and $Label) {
     Write-Info "  label         : $Label"
 }
 
+# UC22 — layer KVM passthrough for Android-testing images when /dev/kvm exists
+# (Linux hosts). On Windows there is no /dev/kvm, so this is a no-op and the
+# emulator-in-container path is unavailable there (build + JVM-test lane still
+# works). Mirrors spawn.sh; also covers server-spawned sessions (AC13).
+if (Test-ImageSupportsAndroid) {
+    if (Test-Path '/dev/kvm') {
+        $kvmOverride = 'docker-compose.kvm.yml'
+        if ($env:AI_SANDBOX_COMPOSE_FILE) {
+            $kvmOverride = Join-Path (Split-Path -Parent $env:AI_SANDBOX_COMPOSE_FILE) 'docker-compose.kvm.yml'
+        }
+        if (Test-Path $kvmOverride) {
+            if ($env:AI_SANDBOX_EXTRA_COMPOSE_FILES) {
+                $env:AI_SANDBOX_EXTRA_COMPOSE_FILES = "$($env:AI_SANDBOX_EXTRA_COMPOSE_FILES) $kvmOverride"
+            } else {
+                $env:AI_SANDBOX_EXTRA_COMPOSE_FILES = $kvmOverride
+            }
+            Write-Info "  kvm           : /dev/kvm detected -> passthrough enabled ($kvmOverride)"
+        } else {
+            Write-Warn "Android image + /dev/kvm present but $kvmOverride missing - emulator will be unaccelerated."
+        }
+    } else {
+        Write-Info "  kvm           : no /dev/kvm on host -> emulator slow/unavailable (build+JVM-test lane unaffected)"
+    }
+}
+
 Invoke-AiSandboxCompose -p $Project up -d
 if ($LASTEXITCODE -ne 0) {
     Write-Warn "docker compose up failed for $Project."

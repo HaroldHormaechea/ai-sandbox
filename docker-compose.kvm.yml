@@ -1,0 +1,22 @@
+# UC22 — KVM passthrough override for Android-testing sandboxes.
+#
+# Layered ON TOP of docker-compose.yml by spawn.sh (via ai_sandbox_compose's
+# AI_SANDBOX_EXTRA_COMPOSE_FILES) ONLY when BOTH hold:
+#   1. the image carries the Android toolchain
+#      (label com.ai-sandbox.toolchain.android=1), and
+#   2. the host exposes /dev/kvm.
+#
+# Never applied otherwise, so non-Android / no-KVM runs are completely
+# unaffected. /dev/kvm is what lets `aisandbox-emulator` boot an accelerated
+# headless AVD inside the session; without it the build + JVM-test lane still
+# works and the emulator degrades to (very slow) software emulation.
+#
+# NOTE: the container's runtime user must be able to open /dev/kvm. On the host
+# that usually means the device is group `kvm` and the runtime uid is a member,
+# or a device-cgroup rule grants access. For management-server-spawned sessions
+# (which run as <secrets-owner-uid>:0 under systemd) this is the open ops item
+# tracked in use-cases/22-…md → "Server-spawned sessions / /dev/kvm access".
+services:
+  claude-sandbox:
+    devices:
+      - "/dev/kvm:/dev/kvm"

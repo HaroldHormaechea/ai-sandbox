@@ -57,3 +57,70 @@ The setup wizard (`setup.sh` / `setup.ps1`) gains a Step-3 prompt to choose whic
   A: Reuse `/workspace`, creating a new subfolder `/workspace/environment-utilities` (persisted via the existing workspace bind mount) (AC9, AC13).
 - Q: Should the management-server-spawned sessions (UC03/UC05) also get the Android toolchain + `/dev/kvm` + AVD volume?
   A: Include server-spawned sessions — extend `ScriptExecutorService#composeEnv` so they honor the Android image, inject `/dev/kvm`, and resolve the AVD cache (AC13).
+
+## Testing Limitations / Validation Status (head-start draft — 2026-05-24)
+
+This use case was **implemented as a head-start draft** on a host that **cannot
+validate the behavioural acceptance criteria**: it has **no Docker, no
+`/dev/kvm`, and no root** (Alpine/musl, uid 1000). The ledger row is intentionally
+kept at **`in-progress`** — do not mark it `done` until the items below are
+verified on a capable host. The implementation lives on branch
+`feat/uc-22-android-toolchain-impl` (pushed, **not merged**).
+
+### What WAS validated here (static only)
+- `bash -n` syntax — **pass** on `setup.sh`, `spawn.sh`, `lib.sh`, `container-bin/aisandbox-emulator`.
+- `shellcheck` 0.11.0 (`--severity=warning`) — **clean** on all four scripts (the only hits are pre-existing SC2034s on `lib.sh`'s legacy colour aliases, untouched by this work).
+- Version-pin cross-check — the image installs `platforms;android-36` + `build-tools;36.0.0` + `openjdk21-jdk`, matching `.github/workflows/android-ci.yml` and `gradle/libs.versions.toml` (java=21, androidCompileSdk=36) — **AC14 ✓**.
+- YAML hygiene — `docker-compose.yml` / `docker-compose.kvm.yml` are tab-free and structurally correct (no `docker compose config` available for a full lint).
+- PowerShell (`setup.ps1` / `spawn.ps1` / `lib.ps1`) — **NOT** validated (no `pwsh` available); mirrors the bash logic and must be parsed/run on Windows.
+
+### What could NOT be validated here (needs Docker + KVM + amd64)
+| AC | Why it needs a real host |
+|----|--------------------------|
+| 4 | Confirm the non-Android image is byte-equivalent to today's — needs `docker compose build`. |
+| 5 | `java -version` → 21 inside the built image. |
+| 6 | **The key open risk:** that `aapt2` / `adb` / the QEMU emulator actually LOAD under `gcompat` on Alpine/musl. If they don't, apply the glibc-base fallback. |
+| 7 | SDK components baked + licenses accepted — needs the image build to succeed. |
+| 8 | `:android:lint/:test/:assembleDebug/:bundleDebug` running inside the image. |
+| 9, 10, 12 | Lazy system-image pull, headless AVD boot, `connectedAndroidTest`, and no-KVM degradation — all need `/dev/kvm`. |
+| 11, 13 | `spawn.sh` `--device /dev/kvm` injection + server-spawned parity — need Docker + a real session launch. |
+
+### How to finish validation (on a Docker + KVM + amd64 host)
+```bash
+# 1. Build the Android-enabled image, and prove the base image is unchanged.
+AI_SANDBOX_TOOLCHAIN_ANDROID=1 docker compose build      # Android image
+AI_SANDBOX_TOOLCHAIN_ANDROID=0 docker compose build      # base image (AC4)
+
+# 2. The decisive gcompat check — do the SDK binaries load? (AC5/AC6/AC7)
+docker run --rm ai-context:latest sh -lc '
+  java -version &&
+  aapt2 version &&           # <-- gcompat-sufficiency check (AC6); the make-or-break line
+  adb version &&
+  ls "$ANDROID_HOME"/build-tools/36.0.0/aapt2'
+
+# 3. Build lane, offline, from a session at the repo root (AC8):
+./gradlew :android:lint :android:test :android:assembleDebug :android:bundleDebug
+
+# 4. Emulator lane (AC9/AC10/AC12) — spawn.sh auto-passes --device /dev/kvm for
+#    Android images when /dev/kvm exists; from inside the session:
+aisandbox-emulator doctor
+aisandbox-emulator start
+./gradlew :android:connectedAndroidTest
+```
+If step 2's `aapt2 version` fails with an `ld-linux`/loader error under `gcompat`,
+apply the **gcompat→glibc fallback** (AC6): rebase the Android image on a glibc
+base (Debian/Ubuntu, matching CI's `ubuntu-latest`); the SDK install steps are
+otherwise identical.
+
+### Deliberately NOT done in this draft
+- **No Java edits.** AC13 (server-spawned sessions) is delivered entirely on the
+  shell side: the server already invokes `spawn.sh` (`ScriptExecutorService#composeEnv`
+  sets `AI_SANDBOX_COMPOSE_FILE`), and `spawn.sh` now inspects the image label +
+  `/dev/kvm` and layers `docker-compose.kvm.yml`. `ScriptExecutorService.java` was
+  **left untouched on purpose** — it is `spotlessCheck`/CI-gated and could not be
+  compiled or formatted here. Remaining server-side items to confirm on a real
+  host: (a) the release / `.deb` bundle ships `docker-compose.kvm.yml` next to
+  `docker-compose.yml`, and (b) the server's runtime user (`<secrets-owner-uid>:0`)
+  can open `/dev/kvm` (kvm group membership / a device-cgroup rule).
+- **arm64 Android** — AC15 surfaces the amd64-only limitation; full arm64 support
+  (arm64 system images) is a separate follow-up.

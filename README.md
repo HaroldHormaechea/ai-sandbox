@@ -21,7 +21,7 @@ It steps you through:
 
 1. **SSH key** — copies your private key to `secrets/git-key` (or confirms it's already there). Used for git clone/push.
 2. **Git identity** — sets the `user.name` / `user.email` recorded on every commit Claude makes. Detects defaults from your host `git config --global` (and the SSH key's `.pub` comment as a secondary hint), prompts to confirm or override, writes `secrets/gitconfig`. The container applies it at boot via `git config --global include.path`, so it survives `clean.sh` and image rebuilds (the file lives on the host).
-3. **Container image** — builds `ai-context:latest` if needed.
+3. **Container image** — first asks which optional **toolchains** to bake into the image (see [Testing Android apps inside the sandbox](#testing-android-apps-inside-the-sandbox-uc22)), then builds `ai-context:latest` if needed.
 4. **`gh` login (optional)** — launches a disposable container that runs `gh auth login` and writes the resulting token to `secrets/gh-token`. Skip if you don't need `gh issue` / `gh pr` etc.
 5. **Claude first-run** — launches Claude in a disposable container so you can do `/login`, accept the "trust this folder" prompt, and acknowledge the bypass-permissions warning. The state lives in `claude-config/` and persists, so the long-running daemon never asks again.
 6. **First session** — initializes the gitignored `./.ai-sandbox-counter` (it holds the *last issued* N, so it starts at `0` and the first spawn produces `ai-sandbox-1`), takes down any leftover legacy unnumbered `ai-sandbox` container, and brings up `ai-sandbox-1` via `./spawn.sh --non-interactive`. Idempotent — re-running setup when an `ai-sandbox-*` project already exists logs "skipping spawn" and continues.
@@ -39,6 +39,67 @@ After setup completes, attach to Claude:
 ```
 
 You'll drop straight into your already-authenticated session. None of `secrets/`, `claude-config/`, `claude-config-*/`, `workspace/`, `workspace-*/`, or `.ai-sandbox-counter` is tracked by git.
+
+### Testing Android apps inside the sandbox (UC22)
+
+`setup.sh` / `setup.ps1` Step 3 asks which optional **toolchains** to bake into
+`ai-context:latest`. Today the one optional toolchain is **Android testing**
+(amd64 only). Your selection persists in the gitignored `./.ai-sandbox-toolchains`
+and is passed to `docker compose build`, so rebuilds and re-spawns honour it.
+Deselecting and rebuilding produces a plain image again; operators who never
+select it get the lean base image unchanged.
+
+When **Android testing** is enabled, the image gains:
+
+- a **glibc shim** (`gcompat` + `libc6-compat`) so the SDK's glibc-linked native
+  binaries (`aapt2`, `adb`, `emulator`) run on the Alpine base;
+- **JDK 21** + the **Android SDK** build components (`cmdline-tools`,
+  `platform-tools`, `platforms;android-36`, `build-tools;36.0.0`) — matching
+  `.github/workflows/android-ci.yml` + `gradle/libs.versions.toml`.
+
+That makes the full CI build lane work inside the session, offline:
+
+```bash
+./gradlew :android:lint :android:test :android:assembleDebug :android:bundleDebug
+```
+
+#### Running instrumented tests (the emulator)
+
+Instrumented tests (`:android:connectedAndroidTest`) need a running emulator,
+which needs hardware **KVM**. The heavy x86_64 system image + AVD are **not**
+baked into the image — they're provisioned lazily on first use into
+`/workspace/environment-utilities/` (persisted, so it downloads once). From
+inside a session, drive it with the bundled helper:
+
+```bash
+aisandbox-emulator doctor    # check toolchain + KVM; verify aapt2/adb actually load
+aisandbox-emulator start     # lazily install system image, create AVD, boot headless
+./gradlew :android:connectedAndroidTest
+aisandbox-emulator stop
+```
+
+**Host KVM prerequisite.** `spawn.sh` automatically passes `--device /dev/kvm`
+into the session when the image carries the Android toolchain **and** the host
+exposes `/dev/kvm`. Verify on the host first:
+
+```bash
+ls -l /dev/kvm                                   # must exist
+{ [ -r /dev/kvm ] && [ -w /dev/kvm ]; } && echo "readable+writable"
+```
+
+If `/dev/kvm` is missing, load the modules (`modprobe kvm kvm_intel` or
+`kvm_amd`) and — if the host is itself a VM — enable **nested virtualization**.
+Without KVM the build + JVM-test lane above still works; only the emulator is
+affected — `aisandbox-emulator start` reports that acceleration is unavailable
+and refuses to launch (pass `--no-accel` to force very slow software emulation).
+
+**Limitations.** Android testing is **amd64-only** today (arm64 is a documented
+follow-up — x86_64 system images won't boot on arm64). Docker Desktop on
+**Windows/macOS** does not expose `/dev/kvm`, so the emulator path is
+Linux-host-only there; the build + JVM-test lane works on any host. This feature
+was authored without a Docker/KVM environment to validate end-to-end — see
+`use-cases/22-onboarding-toolchain-android-testing.md` → "Testing Limitations"
+for exactly what remains to be verified on a capable host.
 
 ### Spawning additional sessions
 
