@@ -31,4 +31,5 @@ Statuses:
 | 19 | [use-cases/19-server-deb-onboarding-claude-preinit.md](use-cases/19-server-deb-onboarding-claude-preinit.md) | Server `.deb` onboarding — auto-run wizard on TTY + capture Claude pre-init state | done | 2026-05-23 |
 | 20 | [use-cases/20-android-swipe-to-delete-session.md](use-cases/20-android-swipe-to-delete-session.md) | Android client — swipe-to-delete a session (reveal red + trash, confirm, actually delete) | done | 2026-05-23 |
 | 21 | [use-cases/21-android-terminal-emulator-and-agent-switcher.md](use-cases/21-android-terminal-emulator-and-agent-switcher.md) | Android client — usable terminal (real emulator + keyboard) + hamburger delete/disconnect + agent-team switcher | pending | 2026-05-23 |
+| 22 | [use-cases/22-onboarding-toolchain-android-testing.md](use-cases/22-onboarding-toolchain-android-testing.md) | Onboarding toolchain selection with full Android build/test/emulator image support | in-progress | 2026-05-24 |
 
