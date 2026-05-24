@@ -50,7 +50,12 @@ if [ "${#SESSIONS[@]}" -eq 0 ]; then
 fi
 
 attach_to_n() {
-    local n="$1" name="ai-sandbox-${n}"
+    # `n` and `name` MUST stay on SEPARATE `local` lines: a single
+    # `local n="$1" name="ai-sandbox-${n}"` expands ${n} against the OUTER
+    # scope before the n="$1" assignment lands, crashing under `set -u` with
+    # "n: unbound variable". Same gotcha documented in clean.sh's clean_one().
+    local n="$1"
+    local name="ai-sandbox-${n}"
     # AC25: pass -f and --project-directory on every docker compose call
     # for consistency; `compose exec` identifies the project by container
     # labels so the flags are functionally a no-op here. Kept for parity
