@@ -327,3 +327,45 @@ image_supports_android() {
         --format '{{ index .Config.Labels "com.ai-sandbox.toolchain.android" }}' 2>/dev/null || true)"
     [ "$val" = "1" ]
 }
+
+# UC22 (AC6 fallback) — glibc base for the Android variant. The emulator's QEMU
+# binary can't load under gcompat on musl (missing posix_fallocate64), so the
+# Android image is built on a glibc (Debian) base. node:20-bookworm-slim is a
+# Debian-bookworm glibc base that already ships a modern Node + npm (Claude Code
+# needs Node 18+; bookworm's apt nodejs is only 18, so we use the node image to
+# keep a current runtime without a NodeSource step). An operator can override
+# via AI_SANDBOX_ANDROID_BASE (e.g. ubuntu:24.04 to match CI's ubuntu-latest).
+AISB_ANDROID_BASE_DEFAULT="${AISB_ANDROID_BASE_DEFAULT:-node:20-bookworm-slim}"
+
+# host_kvm_gid — echo the host's kvm group GID, or "0" if there is no kvm group.
+# Used by spawn.sh to pass /dev/kvm's group as a supplementary group into the
+# session (docker-compose.kvm.yml group_add) so the runtime user can actually
+# open the device (UC22 BUG-1). Prefer the group that OWNS /dev/kvm (most
+# correct — the device's gid is what matters), falling back to the named `kvm`
+# group, then 0. `stat` is coreutils on Linux hosts (where /dev/kvm exists at
+# all); getent covers the named-group path.
+host_kvm_gid() {
+    local gid=""
+    if [ -e /dev/kvm ]; then
+        gid="$(stat -c '%g' /dev/kvm 2>/dev/null || true)"
+    fi
+    if [ -z "$gid" ]; then
+        gid="$(getent group kvm 2>/dev/null | cut -d: -f3 || true)"
+    fi
+    printf '%s' "${gid:-0}"
+}
+
+# export_android_build_env ENABLED — set the build args `docker compose build`
+# reads for the Android variant. ENABLED is 0/1 (or non-empty/empty). When
+# enabled, exports AI_SANDBOX_ANDROID_BASE (honouring an operator override) so
+# compose flips FROM onto the glibc base; when disabled, leaves it unset so
+# compose's `${AI_SANDBOX_ANDROID_BASE:-alpine:latest}` keeps the lean Alpine
+# image byte-identical to pre-UC22 (AC4). Idempotent; safe to call before any
+# build.
+export_android_build_env() {
+    local enabled="${1:-0}"
+    if [ "$enabled" = "1" ]; then
+        export AI_SANDBOX_TOOLCHAIN_ANDROID=1
+        export AI_SANDBOX_ANDROID_BASE="${AI_SANDBOX_ANDROID_BASE:-$AISB_ANDROID_BASE_DEFAULT}"
+    fi
+}

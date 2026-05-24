@@ -261,3 +261,41 @@ function Test-ImageSupportsAndroid {
     $val = (& docker image inspect $Image --format '{{ index .Config.Labels "com.ai-sandbox.toolchain.android" }}' 2>$null)
     return ($val -eq '1')
 }
+
+# UC22 (AC6 fallback) — glibc base for the Android variant. Mirrors lib.sh's
+# AISB_ANDROID_BASE_DEFAULT. The emulator's QEMU binary can't load under gcompat
+# on musl (missing posix_fallocate64), so the Android image builds on a glibc
+# (Debian) base. node:20-bookworm-slim ships a modern Node + npm.
+$script:AiSandboxAndroidBaseDefault = if ($env:AISB_ANDROID_BASE_DEFAULT) { $env:AISB_ANDROID_BASE_DEFAULT } else { 'node:20-bookworm-slim' }
+
+# Export-AndroidBuildEnv ENABLED — set the build args `docker compose build`
+# reads for the Android variant. When enabled, exports AI_SANDBOX_ANDROID_BASE
+# (honouring an operator override) so compose flips FROM onto the glibc base;
+# when disabled, leaves it unset so compose's
+# `${AI_SANDBOX_ANDROID_BASE:-alpine:latest}` keeps the lean Alpine image (AC4).
+function Export-AndroidBuildEnv {
+    param([string]$Enabled = '0')
+    if ($Enabled -eq '1') {
+        $env:AI_SANDBOX_TOOLCHAIN_ANDROID = '1'
+        if (-not $env:AI_SANDBOX_ANDROID_BASE) {
+            $env:AI_SANDBOX_ANDROID_BASE = $script:AiSandboxAndroidBaseDefault
+        }
+    }
+}
+
+# Get-HostKvmGid — echo the host's kvm group GID, or '0' if none. Used by
+# spawn.ps1 to pass /dev/kvm's group as a supplementary group (UC22 BUG-1) so
+# the runtime user can open the device. Linux-only path (Windows has no
+# /dev/kvm); mirrors lib.sh host_kvm_gid.
+function Get-HostKvmGid {
+    $gid = ''
+    if (Test-Path '/dev/kvm') {
+        $gid = (& stat -c '%g' /dev/kvm 2>$null)
+    }
+    if (-not $gid) {
+        $line = (& getent group kvm 2>$null)
+        if ($line) { $gid = ($line -split ':')[2] }
+    }
+    if (-not $gid) { $gid = '0' }
+    return "$gid".Trim()
+}

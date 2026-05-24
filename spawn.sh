@@ -180,8 +180,20 @@ if image_supports_android; then
             kvm_override="$(dirname "$AI_SANDBOX_COMPOSE_FILE")/docker-compose.kvm.yml"
         fi
         if [ -f "$kvm_override" ]; then
+            # UC22 BUG-1 fix — passing the device alone is not enough: inside the
+            # container /dev/kvm is `crw-rw---- root <kvm-gid>` and the runtime
+            # user (uid1000/gid1000 in dev mode, <uid>:0 for server-spawned) is
+            # NOT in that group, so opening it fails with EACCES and the emulator
+            # refuses to start. Detect the host kvm GID and pass it as a
+            # supplementary group via docker-compose.kvm.yml's group_add. One
+            # change covers BOTH developer-mode and management-server-spawned
+            # sessions (AC13). If the host has no kvm group, fall back to 0 so the
+            # override still parses (the device passthrough is harmless and the
+            # emulator helper will report inaccessibility cleanly, AC12).
+            kvm_gid="$(host_kvm_gid)"
+            export AI_SANDBOX_KVM_GID="$kvm_gid"
             export AI_SANDBOX_EXTRA_COMPOSE_FILES="${AI_SANDBOX_EXTRA_COMPOSE_FILES:+$AI_SANDBOX_EXTRA_COMPOSE_FILES }$kvm_override"
-            info "  kvm           : /dev/kvm detected → passthrough enabled ($kvm_override)" >&2
+            info "  kvm           : /dev/kvm detected → passthrough enabled (gid $kvm_gid, $kvm_override)" >&2
         else
             warn "Android image + /dev/kvm present but $kvm_override missing — emulator will be unaccelerated." >&2
         fi

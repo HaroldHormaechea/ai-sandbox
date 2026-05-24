@@ -51,18 +51,24 @@ select it get the lean base image unchanged.
 
 When **Android testing** is enabled, the image gains:
 
-- a **glibc shim** (`gcompat` + `libc6-compat`) so the SDK's glibc-linked native
-  binaries (`aapt2`, `adb`, `emulator`) run on the Alpine base;
+- a **glibc base** (Debian, `node:20-bookworm-slim`) for the SDK's glibc-linked
+  native binaries (`aapt2`, `adb`, and especially the **emulator**);
 - **JDK 21** + the **Android SDK** build components (`cmdline-tools`,
   `platform-tools`, `platforms;android-36`, `build-tools;36.0.0`) — matching
   `.github/workflows/android-ci.yml` + `gradle/libs.versions.toml`.
 
-The Android image stays on the **Alpine base** — `gcompat` is sufficient for the
-SDK's glibc-linked binaries. Verified on a Docker + KVM + amd64 host: `aapt2
-version` and `adb version` both load and run cleanly under `gcompat` (no
-`ld-linux`/loader error), so the documented glibc-base (Debian/Ubuntu) fallback
-was **not** needed. If a future SDK component ever fails to load under `gcompat`,
-that fallback is the escape hatch (see the use-case file).
+**Base-image decision (the gcompat→glibc fallback was triggered).** The
+non-Android image stays on the lean **Alpine** base, byte/functionally unchanged.
+The **Android** image runs on a **glibc (Debian) base** instead. This was
+decided empirically on a Docker + KVM + amd64 host: `aapt2`, `adb`, and `java`
+*do* load under Alpine's `gcompat` shim (the build/lint/test/assemble/bundle lane
+works there), but the emulator's QEMU binary does **not** — it dies with
+`posix_fallocate64: symbol not found`, a glibc large-file-support symbol that
+`gcompat` does not export. Since the emulator lane needs it, the Android variant
+takes the glibc-base fallback the use case prescribes; on glibc no shim is needed
+and the emulator's X11/GL/pulse runtime libraries are installed via `apt`.
+Override the base with `AI_SANDBOX_ANDROID_BASE` (e.g. `ubuntu:24.04`) if you
+prefer to match CI's `ubuntu-latest` exactly.
 
 That makes the full CI build lane work inside the session:
 
@@ -93,11 +99,17 @@ aisandbox-emulator stop
 
 **Host KVM prerequisite.** `spawn.sh` automatically passes `--device /dev/kvm`
 into the session when the image carries the Android toolchain **and** the host
-exposes `/dev/kvm`. Verify on the host first:
+exposes `/dev/kvm`. It also detects the host's `kvm` group GID and adds it as a
+supplementary group on the container (`group_add`), so the in-container user can
+actually *open* `/dev/kvm` — passing the device alone is not enough, because the
+device node is group-owned and the runtime user would otherwise hit `EACCES`.
+This works for both developer-mode and management-server-spawned sessions.
+Verify on the host first:
 
 ```bash
-ls -l /dev/kvm                                   # must exist
+ls -l /dev/kvm                                   # must exist; note its group
 { [ -r /dev/kvm ] && [ -w /dev/kvm ]; } && echo "readable+writable"
+getent group kvm                                 # the GID spawn.sh passes through
 ```
 
 If `/dev/kvm` is missing, load the modules (`modprobe kvm kvm_intel` or

@@ -178,18 +178,22 @@ install."
   with `sdk.dir=…`. **Or** build inside an ai-sandbox session with the
   Android toolchain selected at `setup.sh` Step 3 — it bakes exactly that
   SDK and ships `aisandbox-emulator` for instrumented tests on a headless
-  AVD. The sandbox image stays on Alpine: `gcompat` is enough to run the
-  SDK's glibc-linked binaries (`aapt2`/`adb` verified to load under it on
-  amd64), so no glibc-base image is needed for the build/lint/test/assemble
-  lane. See the repo README → "Testing Android apps inside the sandbox
-  (UC22)" and `use-cases/22-onboarding-toolchain-android-testing.md`.
+  AVD. The Android sandbox image runs on a **glibc (Debian) base**, not the
+  lean Alpine base the non-Android image uses: `aapt2`/`adb`/`java` load fine
+  under Alpine's `gcompat`, but the emulator's QEMU binary does not (it needs
+  glibc's `posix_fallocate64`, which `gcompat` does not export), so the
+  Android variant takes the gcompat→glibc fallback. See the repo README →
+  "Testing Android apps inside the sandbox (UC22)" and
+  `use-cases/22-onboarding-toolchain-android-testing.md`.
 - **Instrumented tests need a KVM-capable amd64 Linux host.**
   `:android:connectedAndroidTest` runs against the headless emulator that
-  `aisandbox-emulator start` boots; that needs `/dev/kvm` (auto-passed by
-  `spawn.sh` for Android images when present). Without KVM the build +
-  JVM-test lane still works — only the emulator degrades. Android testing
-  is amd64-only today (arm64 is a documented follow-up); Docker Desktop on
-  Windows/macOS does not expose `/dev/kvm`.
+  `aisandbox-emulator start` boots; that needs `/dev/kvm` — `spawn.sh`
+  auto-passes the device AND adds the host `kvm` group GID as a supplementary
+  group so the in-container user can open it (passing the device alone fails
+  with `EACCES`). Without KVM the build + JVM-test lane still works — only the
+  emulator degrades. Android testing is amd64-only today (arm64 is a
+  documented follow-up); Docker Desktop on Windows/macOS does not expose
+  `/dev/kvm`.
 - **The terminal-rendering surface is a v0.1 placeholder.** It renders
   raw UTF-8 of the PTY stdout in monospace and auto-scrolls; ANSI
   escape sequences pass through unparsed (so colours render as

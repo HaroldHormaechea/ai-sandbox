@@ -11,12 +11,20 @@
 # headless AVD inside the session; without it the build + JVM-test lane still
 # works and the emulator degrades to (very slow) software emulation.
 #
-# NOTE: the container's runtime user must be able to open /dev/kvm. On the host
-# that usually means the device is group `kvm` and the runtime uid is a member,
-# or a device-cgroup rule grants access. For management-server-spawned sessions
-# (which run as <secrets-owner-uid>:0 under systemd) this is the open ops item
-# tracked in use-cases/22-…md → "Server-spawned sessions / /dev/kvm access".
+# UC22 BUG-1 fix — passing the device is not enough. Inside the container
+# /dev/kvm is `crw-rw---- root <kvm-gid>`; the runtime user (uid1000/gid1000 in
+# dev mode, <secrets-owner-uid>:0 for management-server-spawned sessions) is NOT
+# in that group, so open() returns EACCES and the emulator refuses to start.
+# spawn.sh detects the host kvm GID (the gid that owns /dev/kvm; 991 on this
+# host) and exports AI_SANDBOX_KVM_GID, which is added below as a supplementary
+# group. This single override covers BOTH developer-mode and server-spawned
+# sessions (AC13) — the management server invokes spawn.sh, which sets the env
+# and layers this file via AI_SANDBOX_EXTRA_COMPOSE_FILES. Default 0 keeps the
+# file parseable on a host with no kvm group (device passthrough is then a no-op
+# and aisandbox-emulator reports inaccessibility cleanly, AC12).
 services:
   claude-sandbox:
     devices:
       - "/dev/kvm:/dev/kvm"
+    group_add:
+      - "${AI_SANDBOX_KVM_GID:-0}"

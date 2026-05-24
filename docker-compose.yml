@@ -9,6 +9,16 @@ services:
         # ./.ai-sandbox-toolchains before `docker compose build`. Default 0
         # keeps non-Android builds byte-identical to the pre-UC22 image.
         ANDROID_TESTING: "${AI_SANDBOX_TOOLCHAIN_ANDROID:-0}"
+        # UC22 (AC6 fallback) — base image. The Android emulator's QEMU binary
+        # can't load under gcompat on musl (missing posix_fallocate64), so the
+        # Android variant runs on a glibc base. setup.sh exports
+        # AI_SANDBOX_ANDROID_BASE=node:20-bookworm-slim when Android testing is
+        # selected; non-Android builds leave it unset → `alpine:latest` →
+        # byte-identical to the pre-UC22 image (AC4). A bare
+        # `AI_SANDBOX_TOOLCHAIN_ANDROID=1 docker compose build` must therefore
+        # also set AI_SANDBOX_ANDROID_BASE (or the build fails loud on Alpine
+        # with a clear message — see SandboxDockerfile).
+        ANDROID_BASE: "${AI_SANDBOX_ANDROID_BASE:-alpine:latest}"
     image: ai-context:latest
     # UC-17 — run the session container as the host's runtime user so the
     # bind-mounted, server-owned tree (secrets, claude-config, workspace) is

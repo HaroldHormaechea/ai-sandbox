@@ -174,12 +174,17 @@ if (Test-ImageSupportsAndroid) {
             $kvmOverride = Join-Path (Split-Path -Parent $env:AI_SANDBOX_COMPOSE_FILE) 'docker-compose.kvm.yml'
         }
         if (Test-Path $kvmOverride) {
+            # UC22 BUG-1 fix — the runtime user must be IN /dev/kvm's group or
+            # open() fails EACCES. Detect the host kvm GID and pass it as a
+            # supplementary group (docker-compose.kvm.yml group_add). Mirrors
+            # spawn.sh; on Windows this branch is unreachable (no /dev/kvm).
+            $env:AI_SANDBOX_KVM_GID = Get-HostKvmGid
             if ($env:AI_SANDBOX_EXTRA_COMPOSE_FILES) {
                 $env:AI_SANDBOX_EXTRA_COMPOSE_FILES = "$($env:AI_SANDBOX_EXTRA_COMPOSE_FILES) $kvmOverride"
             } else {
                 $env:AI_SANDBOX_EXTRA_COMPOSE_FILES = $kvmOverride
             }
-            Write-Info "  kvm           : /dev/kvm detected -> passthrough enabled ($kvmOverride)"
+            Write-Info "  kvm           : /dev/kvm detected -> passthrough enabled (gid $($env:AI_SANDBOX_KVM_GID), $kvmOverride)"
         } else {
             Write-Warn "Android image + /dev/kvm present but $kvmOverride missing - emulator will be unaccelerated."
         }

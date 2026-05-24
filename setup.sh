@@ -424,6 +424,11 @@ toolchain_selection=()
 [ "$selected_android" -eq 1 ] && toolchain_selection+=("android")
 write_enabled_toolchains ${toolchain_selection[@]+"${toolchain_selection[@]}"}
 export AI_SANDBOX_TOOLCHAIN_ANDROID="$selected_android"
+# UC22 (AC6 fallback) — when Android is selected, also export
+# AI_SANDBOX_ANDROID_BASE so `docker compose build` flips FROM onto the glibc
+# base (the emulator can't load under gcompat). No-op when not selected →
+# Alpine base stays byte-identical to pre-UC22.
+export_android_build_env "$selected_android"
 
 if [ "$selected_android" -eq 1 ]; then
     ok "Android testing enabled — image will include JDK 21 + Android SDK (build-tools 36.0.0, android-36)."

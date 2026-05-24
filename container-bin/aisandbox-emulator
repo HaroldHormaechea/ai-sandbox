@@ -22,17 +22,39 @@
 #     Limitations".
 set -euo pipefail
 
-ANDROID_HOME="${ANDROID_HOME:-/opt/android-sdk}"
+BAKED_SDK="${AISB_BAKED_SDK:-${ANDROID_HOME:-/opt/android-sdk}}"   # image-baked SDK
 CACHE_ROOT="${AISB_ANDROID_CACHE:-/workspace/environment-utilities/android}"
-EMU_SDK_ROOT="$CACHE_ROOT/sdk"             # lazily-installed emulator + system image
-AVD_HOME="$CACHE_ROOT/avd"                 # persisted AVDs
+# UC22 BUG-2 fix — ONE self-consistent, persisted SDK root.
+#
+# The baked SDK (cmdline-tools + platform-tools + platforms;android-36 +
+# build-tools;36.0.0) lives at $BAKED_SDK (image layer, not persisted). The lazy
+# bits (emulator + the ~1.5 GB x86_64 system image + the AVD) must persist across
+# container restart/rebuild, so they go under the workspace bind mount.
+# avdmanager AND the emulator both require that the system image, platform(s),
+# platform-tools, and the tools that resolve them all live under ONE sdk_root —
+# otherwise avdmanager derives its toolsdir from $BAKED_SDK (which has no system
+# image) and fails "Valid system image paths are: null", and the emulator rejects
+# a root that has system-images/ without a co-located platform-tools/.
+#
+# So we materialise a single unified root at $SDK_ROOT under the cache: symlink
+# the baked components into it (cheap, no copy) and install the emulator + system
+# image into the SAME root. Every sdkmanager/avdmanager/emulator call then uses
+# $SDK_ROOT, and we run the cmdline-tools binaries FROM that root so their
+# toolsdir resolves to it.
+SDK_ROOT="$CACHE_ROOT/sdk"                  # the one unified, persisted SDK root
+AVD_HOME="$CACHE_ROOT/avd"                  # persisted AVDs
 export ANDROID_AVD_HOME="$AVD_HOME"
+export ANDROID_SDK_ROOT="$SDK_ROOT"
+export ANDROID_HOME="$SDK_ROOT"
 AVD_NAME="${AISB_AVD_NAME:-aisandbox}"
 SYS_IMAGE="${AISB_SYS_IMAGE:-system-images;android-36;default;x86_64}"
 DEVICE_PROFILE="${AISB_AVD_DEVICE:-pixel_6}"
-ADB="$ANDROID_HOME/platform-tools/adb"
-SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-AVDMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager"
+# Run cmdline-tools from the baked location (always present) but target $SDK_ROOT
+# via --sdk_root / ANDROID_SDK_ROOT; once the unified root is built, the symlinked
+# cmdline-tools under it resolve identically.
+SDKMANAGER="$BAKED_SDK/cmdline-tools/latest/bin/sdkmanager"
+AVDMANAGER="$BAKED_SDK/cmdline-tools/latest/bin/avdmanager"
+ADB="$BAKED_SDK/platform-tools/adb"
 PIDFILE="$CACHE_ROOT/emulator.pid"
 LOGFILE="$CACHE_ROOT/emulator.log"
 
@@ -40,25 +62,43 @@ log() { printf '  [aisandbox-emulator] %s\n' "$*" >&2; }
 die() { printf '  [aisandbox-emulator] ERROR: %s\n' "$*" >&2; exit 1; }
 
 require_toolchain() {
-    [ -x "$SDKMANAGER" ] || die "Android SDK not found at $ANDROID_HOME. This image was built WITHOUT the Android testing toolchain — re-run ./setup.sh, select 'Android testing', and rebuild the image."
+    [ -x "$SDKMANAGER" ] || die "Android SDK not found at $BAKED_SDK. This image was built WITHOUT the Android testing toolchain — re-run ./setup.sh, select 'Android testing', and rebuild the image."
 }
 
 kvm_ok() { [ -e /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; }
 
+# Build the unified SDK root: symlink the baked components into $SDK_ROOT so
+# avdmanager/emulator see cmdline-tools + platform-tools + platforms +
+# build-tools and (after ensure_emulator_installed) emulator + system-images all
+# co-located under one root. Symlinks (not copies) keep the persisted cache
+# small; targets live in the image layer. Idempotent.
+ensure_unified_root() {
+    mkdir -p "$SDK_ROOT"
+    local d
+    for d in cmdline-tools platform-tools platforms build-tools licenses; do
+        if [ -e "$BAKED_SDK/$d" ] && [ ! -e "$SDK_ROOT/$d" ]; then
+            ln -s "$BAKED_SDK/$d" "$SDK_ROOT/$d"
+        fi
+    done
+}
+
 ensure_emulator_installed() {
-    if [ ! -x "$EMU_SDK_ROOT/emulator/emulator" ] || [ ! -d "$EMU_SDK_ROOT/system-images" ]; then
-        log "First run: provisioning emulator + '$SYS_IMAGE' into $EMU_SDK_ROOT (one-time download, needs network)..."
-        mkdir -p "$EMU_SDK_ROOT"
-        yes | "$SDKMANAGER" --sdk_root="$EMU_SDK_ROOT" --licenses >/dev/null 2>&1 || true
-        "$SDKMANAGER" --sdk_root="$EMU_SDK_ROOT" "emulator" "$SYS_IMAGE"
+    ensure_unified_root
+    if [ ! -x "$SDK_ROOT/emulator/emulator" ] || [ ! -d "$SDK_ROOT/system-images" ]; then
+        log "First run: provisioning emulator + '$SYS_IMAGE' into $SDK_ROOT (one-time download, needs network)..."
+        yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses >/dev/null 2>&1 || true
+        "$SDKMANAGER" --sdk_root="$SDK_ROOT" "emulator" "$SYS_IMAGE"
     fi
 }
 
 ensure_avd() {
     mkdir -p "$AVD_HOME"
-    if ! ANDROID_SDK_ROOT="$EMU_SDK_ROOT" "$AVDMANAGER" list avd 2>/dev/null | grep -q "Name: $AVD_NAME"; then
+    # avdmanager resolves system images relative to its sdk root; with the
+    # unified root holding the system image, creation succeeds (no more
+    # "Valid system image paths are: null").
+    if ! ANDROID_SDK_ROOT="$SDK_ROOT" "$AVDMANAGER" list avd 2>/dev/null | grep -q "Name: $AVD_NAME"; then
         log "Creating AVD '$AVD_NAME' from '$SYS_IMAGE'..."
-        echo "no" | ANDROID_SDK_ROOT="$EMU_SDK_ROOT" "$AVDMANAGER" create avd \
+        echo "no" | ANDROID_SDK_ROOT="$SDK_ROOT" "$AVDMANAGER" create avd \
             -n "$AVD_NAME" -k "$SYS_IMAGE" --device "$DEVICE_PROFILE" --force
     fi
 }
@@ -97,8 +137,8 @@ cmd_start() {
     fi
 
     log "Booting headless AVD '$AVD_NAME'..."
-    ANDROID_SDK_ROOT="$EMU_SDK_ROOT" ANDROID_AVD_HOME="$AVD_HOME" \
-        nohup "$EMU_SDK_ROOT/emulator/emulator" -avd "$AVD_NAME" \
+    ANDROID_SDK_ROOT="$SDK_ROOT" ANDROID_AVD_HOME="$AVD_HOME" \
+        nohup "$SDK_ROOT/emulator/emulator" -avd "$AVD_NAME" \
         -no-window -gpu swiftshader_indirect -no-audio -no-boot-anim -no-snapshot \
         ${accel_args[@]+"${accel_args[@]}"} >"$LOGFILE" 2>&1 &
     echo "$!" > "$PIDFILE"
@@ -129,14 +169,15 @@ cmd_stop() {
 
 cmd_doctor() {
     require_toolchain
-    log "ANDROID_HOME       : $ANDROID_HOME"
+    log "baked SDK          : $BAKED_SDK"
+    log "unified SDK root   : $SDK_ROOT"
     log "java               : $(java -version 2>&1 | head -1 || echo 'MISSING')"
-    log "adb                : $("$ADB" version 2>&1 | head -1 || echo 'MISSING / loader error (gcompat?)')"
-    log "aapt2              : $("$ANDROID_HOME"/build-tools/36.0.0/aapt2 version 2>&1 | head -1 || echo 'MISSING / loader error (gcompat?)')"
+    log "adb                : $("$ADB" version 2>&1 | head -1 || echo 'MISSING / loader error')"
+    log "aapt2              : $("$BAKED_SDK"/build-tools/36.0.0/aapt2 version 2>&1 | head -1 || echo 'MISSING / loader error')"
     log "/dev/kvm           : $(kvm_ok && echo 'present + accessible' || echo 'ABSENT/inaccessible — emulator will be slow/unavailable')"
     log "cache root         : $CACHE_ROOT"
-    log "emulator installed : $([ -x "$EMU_SDK_ROOT/emulator/emulator" ] && echo yes || echo 'no (lazy — installed on first start)')"
-    log "AVD '$AVD_NAME'      : $(ANDROID_SDK_ROOT="$EMU_SDK_ROOT" "$AVDMANAGER" list avd 2>/dev/null | grep -q "Name: $AVD_NAME" && echo present || echo 'not created yet')"
+    log "emulator installed : $([ -x "$SDK_ROOT/emulator/emulator" ] && echo yes || echo 'no (lazy — installed on first start)')"
+    log "AVD '$AVD_NAME'      : $(ANDROID_SDK_ROOT="$SDK_ROOT" "$AVDMANAGER" list avd 2>/dev/null | grep -q "Name: $AVD_NAME" && echo present || echo 'not created yet')"
 }
 
 usage() {
