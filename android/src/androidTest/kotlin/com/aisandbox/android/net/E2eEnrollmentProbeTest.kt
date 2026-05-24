@@ -4,6 +4,7 @@ import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertTrue
+import org.junit.Assume
 import org.junit.Test
 import org.junit.runner.RunWith
 
@@ -30,8 +31,11 @@ class E2eEnrollmentProbeTest {
     @Test
     fun emulator_enrolls_against_local_server() {
         val raw = InstrumentationRegistry.getArguments().getString("qrPayload")
-            ?: error("missing instrumentation arg: -e qrPayload '<invite json>'")
-        val payload = QrPayload.parse(raw).getOrThrow()
+        Assume.assumeTrue(
+            "E2E enrollment probe skipped: pass -e qrPayload '<invite json>' to run the server-connected enrollment probe",
+            raw != null,
+        )
+        val payload = QrPayload.parse(raw!!).getOrThrow()
 
         val outcome = runBlocking { EnrollmentClient(payload).redeem() }
 
