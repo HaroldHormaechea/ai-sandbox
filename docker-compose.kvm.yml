@@ -1,0 +1,30 @@
+# UC22 — KVM passthrough override for Android-testing sandboxes.
+#
+# Layered ON TOP of docker-compose.yml by spawn.sh (via ai_sandbox_compose's
+# AI_SANDBOX_EXTRA_COMPOSE_FILES) ONLY when BOTH hold:
+#   1. the image carries the Android toolchain
+#      (label com.ai-sandbox.toolchain.android=1), and
+#   2. the host exposes /dev/kvm.
+#
+# Never applied otherwise, so non-Android / no-KVM runs are completely
+# unaffected. /dev/kvm is what lets `aisandbox-emulator` boot an accelerated
+# headless AVD inside the session; without it the build + JVM-test lane still
+# works and the emulator degrades to (very slow) software emulation.
+#
+# UC22 BUG-1 fix — passing the device is not enough. Inside the container
+# /dev/kvm is `crw-rw---- root <kvm-gid>`; the runtime user (uid1000/gid1000 in
+# dev mode, <secrets-owner-uid>:0 for management-server-spawned sessions) is NOT
+# in that group, so open() returns EACCES and the emulator refuses to start.
+# spawn.sh detects the host kvm GID (the gid that owns /dev/kvm; 991 on this
+# host) and exports AI_SANDBOX_KVM_GID, which is added below as a supplementary
+# group. This single override covers BOTH developer-mode and server-spawned
+# sessions (AC13) — the management server invokes spawn.sh, which sets the env
+# and layers this file via AI_SANDBOX_EXTRA_COMPOSE_FILES. Default 0 keeps the
+# file parseable on a host with no kvm group (device passthrough is then a no-op
+# and aisandbox-emulator reports inaccessibility cleanly, AC12).
+services:
+  claude-sandbox:
+    devices:
+      - "/dev/kvm:/dev/kvm"
+    group_add:
+      - "${AI_SANDBOX_KVM_GID:-0}"

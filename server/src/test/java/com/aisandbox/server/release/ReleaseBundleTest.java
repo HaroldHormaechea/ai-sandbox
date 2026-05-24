@@ -96,6 +96,80 @@ class ReleaseBundleTest {
 
         // AC5 — container build context co-located with the scripts.
         assertThat(entries).contains("host/docker-compose.yml", "host/SandboxDockerfile", "host/entrypoint.sh");
+
+        // UC22 § AC13 — the KVM-passthrough compose override ships beside
+        // docker-compose.yml so spawn.sh can layer it for zip/.deb/server-
+        // spawned Android sessions; the in-container emulator helper ships
+        // inside the container build context (host/container-bin/).
+        assertThat(entries).contains("host/docker-compose.kvm.yml", "host/container-bin/aisandbox-emulator");
+    }
+
+    @Test
+    void uc22_kvm_override_and_emulator_helper_ship_with_correct_modes() throws Exception {
+        Path zip = findZip();
+        assumeTrue(zip != null, "release bundle not built: ./gradlew :server:releaseBundle");
+
+        Set<String> entries = readEntryNames(zip);
+        Map<String, Integer> modes = readPosixModes(zip);
+
+        // UC22 § AC13 — docker-compose.kvm.yml ships beside docker-compose.yml
+        // (data file, mode 0644 like the .ps1 mirrors and SandboxDockerfile).
+        // spawn.sh resolves it as `$(dirname AI_SANDBOX_COMPOSE_FILE)/
+        // docker-compose.kvm.yml`; if it is absent the /dev/kvm override
+        // silently can't be layered (AC11/AC13 fail) for a zip/.deb/server-
+        // spawned session.
+        assertThat(entries).contains("host/docker-compose.kvm.yml");
+        Integer kvmMode = modes.get("host/docker-compose.kvm.yml");
+        assertThat(kvmMode).as("mode of host/docker-compose.kvm.yml").isNotNull();
+        assertThat(kvmMode & 0777).as("mode of host/docker-compose.kvm.yml").isEqualTo(0644);
+
+        // UC22 § AC8,AC10 — the in-container emulator helper ships under
+        // host/container-bin/ (part of the container build context that a
+        // bundled `docker compose build` consumes; SandboxDockerfile COPYs
+        // container-bin/aisandbox-emulator into the image). It MUST carry
+        // the exec bit (0755) so the COPYd file is invocable by the
+        // in-sandbox agent that drives `:android:connectedAndroidTest`.
+        assertThat(entries).contains("host/container-bin/aisandbox-emulator");
+        Integer emuMode = modes.get("host/container-bin/aisandbox-emulator");
+        assertThat(emuMode).as("mode of host/container-bin/aisandbox-emulator").isNotNull();
+        assertThat(emuMode & 0777)
+                .as("mode of host/container-bin/aisandbox-emulator")
+                .isEqualTo(0755);
+    }
+
+    @Test
+    void uc22_bundled_kvm_override_and_emulator_helper_are_byte_identical_to_repo_originals() throws Exception {
+        Path zip = findZip();
+        assumeTrue(zip != null, "release bundle not built: ./gradlew :server:releaseBundle");
+
+        // UC22 — the bundling step copies both new host files verbatim from
+        // the repo root (docker-compose.kvm.yml) and from container-bin/
+        // (aisandbox-emulator). No templating happens at build time, exactly
+        // as for the other host/ files asserted above.
+        Map<String, Path> bundled = new HashMap<>();
+        bundled.put("host/docker-compose.kvm.yml", REPO_ROOT.resolve("docker-compose.kvm.yml"));
+        bundled.put(
+                "host/container-bin/aisandbox-emulator",
+                REPO_ROOT.resolve("container-bin").resolve("aisandbox-emulator"));
+
+        try (ZipFile zf = new ZipFile(zip.toFile())) {
+            for (Map.Entry<String, Path> e : bundled.entrySet()) {
+                ZipEntry ze = zf.getEntry(e.getKey());
+                assertThat(ze).as("entry %s", e.getKey()).isNotNull();
+                byte[] inZip;
+                try (InputStream in = zf.getInputStream(ze)) {
+                    inZip = in.readAllBytes();
+                }
+                Path original = e.getValue();
+                assertThat(Files.exists(original))
+                        .as("repo original at %s", original)
+                        .isTrue();
+                byte[] onDisk = Files.readAllBytes(original);
+                assertThat(inZip)
+                        .as("byte-identity of %s vs %s", e.getKey(), original)
+                        .isEqualTo(onDisk);
+            }
+        }
     }
 
     @Test

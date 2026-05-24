@@ -384,6 +384,65 @@ press_enter
 # ── Step 3: Container image ──────────────────────────────────────────────────
 clear_screen
 screen_header 3 6 "Container image"
+
+# ── UC22 — optional toolchain selection ──────────────────────────────────────
+# Data-driven menu of optional toolchains baked into ai-context:latest. The
+# selection persists in ./.ai-sandbox-toolchains (gitignored, via lib.sh) and is
+# passed to `docker compose build` as build args. Today the only optional
+# toolchain is "android"; add a row here + a build arg to offer more without
+# reworking the plumbing (AC16).
+info "Optional toolchains to bake into the image:"
+hr
+
+HOST_ARCH="$(uname -m)"
+case "$HOST_ARCH" in
+    x86_64|amd64) HOST_IS_AMD64=1 ;;
+    *)            HOST_IS_AMD64=0 ;;
+esac
+
+selected_android=0
+toolchain_is_enabled android && selected_android=1
+
+# Android testing — amd64 only (x86_64 system image; arm64 is a documented
+# follow-up, AC15). On non-amd64 hosts we surface the limitation instead of
+# offering a broken option or failing the wizard.
+if [ "$HOST_IS_AMD64" -eq 1 ]; then
+    if [ "$selected_android" -eq 1 ]; then
+        read -r -p "  Include Android testing (JDK 21 + Android SDK + headless emulator)? [Y/n]: " a_resp
+        if [[ "${a_resp:-}" =~ ^[Nn]$ ]]; then selected_android=0; else selected_android=1; fi
+    else
+        read -r -p "  Include Android testing (JDK 21 + Android SDK + headless emulator)? [y/N]: " a_resp
+        if [[ "${a_resp:-}" =~ ^[Yy]$ ]]; then selected_android=1; else selected_android=0; fi
+    fi
+else
+    warn "Android testing is amd64-only — not available on this $HOST_ARCH host (arm64 is a documented follow-up). Skipping."
+    selected_android=0
+fi
+
+# Persist the selection and export build args for `docker compose build`.
+toolchain_selection=()
+[ "$selected_android" -eq 1 ] && toolchain_selection+=("android")
+write_enabled_toolchains ${toolchain_selection[@]+"${toolchain_selection[@]}"}
+export AI_SANDBOX_TOOLCHAIN_ANDROID="$selected_android"
+# UC22 (AC6 fallback) — when Android is selected, also export
+# AI_SANDBOX_ANDROID_BASE so `docker compose build` flips FROM onto the glibc
+# base (the emulator can't load under gcompat). No-op when not selected →
+# Alpine base stays byte-identical to pre-UC22.
+export_android_build_env "$selected_android"
+
+if [ "$selected_android" -eq 1 ]; then
+    ok "Android testing enabled — image will include JDK 21 + Android SDK (build-tools 36.0.0, android-36)."
+    warn "The Android image is larger (~+1.5 GB) and its first build is slower than the base image."
+    # If an Android selection is active but the existing image lacks the
+    # toolchain, a rebuild is required for it to take effect.
+    if docker image inspect ai-context:latest >/dev/null 2>&1 && ! image_supports_android; then
+        warn "The existing ai-context:latest image has NO Android toolchain — rebuild below to bake it in."
+    fi
+else
+    ok "Base image only (no optional toolchains)."
+fi
+hr
+
 if docker image inspect ai-context:latest >/dev/null 2>&1; then
     ok "Image ai-context:latest already built"
     hr
@@ -445,6 +504,25 @@ if [ "$do_auth" = true ]; then
     ok "Token saved to secrets/gh-token"
 fi
 
+# ── Resolve (and, if needed, migrate to) the dev workspace root ──────────────
+#
+# The dev-mode workspace now lives OUTSIDE the repo by default so a stray
+# `cp -a . workspace` can never recurse and fill the disk. setup is the ONLY
+# interactive path that writes the state file: it resolves the root, runs the
+# shared migrate-or-keep prompt when a legacy in-repo workspace is found, and
+# persists the choice to `.ai-sandbox-workspace-root`. After this, ./spawn.sh
+# (Step 6) hits the persisted value (Rule 2) and never refuses; clean.sh reads
+# the same frozen value so the two always agree. Rule 0: skip entirely when a
+# server pin is active (setup is a developer-mode tool, but be defensive).
+if [ -z "${AI_SANDBOX_HOST_STATE_ROOT:-}" ] && [ -z "${AI_SANDBOX_WORKSPACE_HOST_PATH:-}" ]; then
+    DEV_WS_ROOT="$(aisb_dev_workspace_setup)"
+    mkdir -p "$DEV_WS_ROOT/workspace" "$DEV_WS_ROOT/claude-config"
+else
+    # Under a server pin, keep the historical in-repo paths for the first-run
+    # docker run mount (setup is not normally run in that mode).
+    DEV_WS_ROOT="$(pwd)"
+fi
+
 # ── Step 5: Claude Code first-run ────────────────────────────────────────────
 clear_screen
 screen_header 5 6 "Claude Code first-run"
@@ -475,8 +553,8 @@ if [ "$do_claude_setup" = true ]; then
     info "Launching Claude — answer the prompts, then type /exit to return."
     hr
     docker run --rm -it \
-        -v "$(pwd)/workspace:/workspace" \
-        -v "$(pwd)/claude-config:/home/claude/.claude" \
+        -v "$DEV_WS_ROOT/workspace:/workspace" \
+        -v "$DEV_WS_ROOT/claude-config:/home/claude/.claude" \
         -v "$(pwd)/secrets:/etc/secrets:ro" \
         ai-context:latest \
         claude --dangerously-skip-permissions

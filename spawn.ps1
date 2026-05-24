@@ -139,16 +139,66 @@ try {
 $Project = "ai-sandbox-$N"
 
 # --- Pre-create per-session host dirs if isolation chosen --------------------
-$WorkspaceHostPath    = './workspace'
-$ClaudeConfigHostPath = './claude-config'
+#
+# Rule 0 — server pin wins. Under AI_SANDBOX_HOST_STATE_ROOT we already cd'd
+# into it (above) and keep the historical relative .\workspace / .\workspace-<N>
+# (resolved against the state-root cwd) — byte-identical to pre-relocation.
+# Developer-mode runs resolve the workspace base OUTSIDE the repo via
+# Get-AisbDevWorkspaceRoot so a stray `cp -a . workspace` can never recurse.
+if ($env:AI_SANDBOX_HOST_STATE_ROOT) {
+    $WorkspaceHostPath    = './workspace'
+    $ClaudeConfigHostPath = './claude-config'
+    if ($WorkspaceMode -eq 'isolated') {
+        $WorkspaceHostPath = "./workspace-$N"
+        New-Item -ItemType Directory -Force -Path $WorkspaceHostPath | Out-Null
+    }
+    if ($ClaudeConfigMode -eq 'isolated') {
+        $ClaudeConfigHostPath = "./claude-config-$N"
+        New-Item -ItemType Directory -Force -Path $ClaudeConfigHostPath | Out-Null
+    }
+} else {
+    $RepoRoot = (Get-Location).Path
+    $WsRoot   = Get-AisbDevWorkspaceRoot
+    if (-not $WsRoot) {
+        # Unconfigured first run. On a non-interactive run we must NOT silently
+        # pick a default (the operator may have a populated in-repo workspace to
+        # migrate first); on a TTY, run the shared resolve-migrate-persist
+        # routine so the choice is frozen for clean.ps1 too.
+        $interactive = $true
+        try { if ([Console]::IsInputRedirected) { $interactive = $false } } catch { }
+        if (-not $interactive) {
+            Write-Warn "Dev workspace root is not configured for this repo."
+            Write-Warn "Run .\setup.ps1 interactively once to pick (and migrate to) a location,"
+            Write-Warn "or set AI_SANDBOX_DEV_WORKSPACE_ROOT explicitly (use '.' to keep it in-repo)."
+            exit 1
+        }
+        $WsRoot = Invoke-AisbDevWorkspaceSetup
+    }
 
-if ($WorkspaceMode -eq 'isolated') {
-    $WorkspaceHostPath = "./workspace-$N"
-    New-Item -ItemType Directory -Force -Path $WorkspaceHostPath | Out-Null
-}
-if ($ClaudeConfigMode -eq 'isolated') {
-    $ClaudeConfigHostPath = "./claude-config-$N"
-    New-Item -ItemType Directory -Force -Path $ClaudeConfigHostPath | Out-Null
+    # Recursion guard — the structural defence against the self-copy disk-filler.
+    $sharedWs = Join-Path $WsRoot 'workspace'
+    $guard = Test-AisbWorkspaceRecursion -RepoRoot $RepoRoot -WsPath $sharedWs
+    if ($guard -eq 2) {
+        Write-Warn "Refusing to spawn: the resolved workspace ($sharedWs) is, contains, or is an"
+        Write-Warn "ancestor of the repo ($RepoRoot). A 'cp -a . workspace' here would recurse and"
+        Write-Warn "fill the disk. Point AI_SANDBOX_DEV_WORKSPACE_ROOT at a directory outside the repo."
+        exit 1
+    } elseif ($guard -eq 1) {
+        Write-Warn "Workspace ($sharedWs) is inside the repo tree — the recorded in-repo opt-in."
+        Write-Warn "A 'cp -a . workspace' from the repo root would recurse; never copy this repo's"
+        Write-Warn "working tree into the workspace (use git clone / archive / a bind mount instead)."
+    }
+
+    $WorkspaceHostPath    = Join-Path $WsRoot 'workspace'
+    $ClaudeConfigHostPath = Join-Path $WsRoot 'claude-config'
+    if ($WorkspaceMode -eq 'isolated') {
+        $WorkspaceHostPath = Join-Path $WsRoot "workspace-$N"
+        New-Item -ItemType Directory -Force -Path $WorkspaceHostPath | Out-Null
+    }
+    if ($ClaudeConfigMode -eq 'isolated') {
+        $ClaudeConfigHostPath = Join-Path $WsRoot "claude-config-$N"
+        New-Item -ItemType Directory -Force -Path $ClaudeConfigHostPath | Out-Null
+    }
 }
 
 # --- Launch ------------------------------------------------------------------
@@ -161,6 +211,36 @@ Write-Info "  workspace     : $WorkspaceHostPath"
 Write-Info "  claude-config : $ClaudeConfigHostPath"
 if ($LabelSet -and $Label) {
     Write-Info "  label         : $Label"
+}
+
+# UC22 — layer KVM passthrough for Android-testing images when /dev/kvm exists
+# (Linux hosts). On Windows there is no /dev/kvm, so this is a no-op and the
+# emulator-in-container path is unavailable there (build + JVM-test lane still
+# works). Mirrors spawn.sh; also covers server-spawned sessions (AC13).
+if (Test-ImageSupportsAndroid) {
+    if (Test-Path '/dev/kvm') {
+        $kvmOverride = 'docker-compose.kvm.yml'
+        if ($env:AI_SANDBOX_COMPOSE_FILE) {
+            $kvmOverride = Join-Path (Split-Path -Parent $env:AI_SANDBOX_COMPOSE_FILE) 'docker-compose.kvm.yml'
+        }
+        if (Test-Path $kvmOverride) {
+            # UC22 BUG-1 fix — the runtime user must be IN /dev/kvm's group or
+            # open() fails EACCES. Detect the host kvm GID and pass it as a
+            # supplementary group (docker-compose.kvm.yml group_add). Mirrors
+            # spawn.sh; on Windows this branch is unreachable (no /dev/kvm).
+            $env:AI_SANDBOX_KVM_GID = Get-HostKvmGid
+            if ($env:AI_SANDBOX_EXTRA_COMPOSE_FILES) {
+                $env:AI_SANDBOX_EXTRA_COMPOSE_FILES = "$($env:AI_SANDBOX_EXTRA_COMPOSE_FILES) $kvmOverride"
+            } else {
+                $env:AI_SANDBOX_EXTRA_COMPOSE_FILES = $kvmOverride
+            }
+            Write-Info "  kvm           : /dev/kvm detected -> passthrough enabled (gid $($env:AI_SANDBOX_KVM_GID), $kvmOverride)"
+        } else {
+            Write-Warn "Android image + /dev/kvm present but $kvmOverride missing - emulator will be unaccelerated."
+        }
+    } else {
+        Write-Info "  kvm           : no /dev/kvm on host -> emulator slow/unavailable (build+JVM-test lane unaffected)"
+    }
 }
 
 Invoke-AiSandboxCompose -p $Project up -d

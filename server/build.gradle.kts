@@ -383,6 +383,13 @@ val releaseBundle by tasks.registering(Zip::class) {
     // both relationships.
     from(rootProject.file("docker-compose.yml")) { into("host") }
     from(rootProject.file("SandboxDockerfile")) { into("host") }
+    // UC22 § AC13 — the KVM override compose file must ship beside
+    // docker-compose.yml. spawn.sh resolves it as
+    // `$(dirname AI_SANDBOX_COMPOSE_FILE)/docker-compose.kvm.yml`; for a
+    // server-spawned / .deb / zip session AI_SANDBOX_COMPOSE_FILE points at
+    // host/docker-compose.yml, so without this file the override silently
+    // can't be layered and /dev/kvm passthrough never happens (AC13 fails).
+    from(rootProject.file("docker-compose.kvm.yml")) { into("host") }
     // UC05 § AC5,AC6 — SandboxDockerfile:42 does `COPY git-hooks/ /etc/git-hooks/`,
     // so git-hooks/ is part of the container build context and must ship in host/.
     // Exec bit preserves the convention (matches entrypoint.sh above); the
@@ -391,6 +398,15 @@ val releaseBundle by tasks.registering(Zip::class) {
     // is ever removed.
     from(rootProject.file("git-hooks")) {
         into("host/git-hooks")
+        filePermissions { unix("rwxr-xr-x") }
+    }
+    // UC22 § AC8,AC13 — SandboxDockerfile does `COPY container-bin/aisandbox-emulator …`,
+    // so container-bin/ is part of the container build context (build context =
+    // host/ for a bundled `docker compose build`) and must ship in host/.
+    // Mirrors the git-hooks/ packaging above; aisandbox-emulator is an
+    // executable in-container helper, so the +x bit is preserved.
+    from(rootProject.file("container-bin")) {
+        into("host/container-bin")
         filePermissions { unix("rwxr-xr-x") }
     }
     // UC08 § AC2 — the zip ships the same POSIX shell wrapper as the
@@ -501,7 +517,11 @@ val prepDebStaging by tasks.registering(Copy::class) {
     }
     val hostData = listOf(
         "spawn.ps1", "clean.ps1", "attach.ps1", "lib.ps1", "setup.ps1",
-        "docker-compose.yml", "SandboxDockerfile",
+        // UC22 § AC13 — docker-compose.kvm.yml must ship beside
+        // docker-compose.yml so spawn.sh can layer the /dev/kvm override for
+        // .deb-installed / server-spawned sessions; mode 0644 like the other
+        // compose context files.
+        "docker-compose.yml", "docker-compose.kvm.yml", "SandboxDockerfile",
     )
     hostData.forEach { name ->
         from(rootProject.file(name)) {
@@ -512,6 +532,14 @@ val prepDebStaging by tasks.registering(Copy::class) {
     // git-hooks/ — preserve exec bit (matches releaseBundle).
     from(rootProject.file("git-hooks")) {
         into("opt/ai-sandbox-server/host/git-hooks")
+        filePermissions { unix("rwxr-xr-x") }
+    }
+    // UC22 § AC8,AC13 — container-bin/ is in the container build context
+    // (SandboxDockerfile COPYs container-bin/aisandbox-emulator); ship it in
+    // host/ so a bundled `docker compose build` resolves the COPY. Preserve
+    // the +x bit on aisandbox-emulator (matches git-hooks/ above).
+    from(rootProject.file("container-bin")) {
+        into("opt/ai-sandbox-server/host/container-bin")
         filePermissions { unix("rwxr-xr-x") }
     }
 
@@ -618,6 +646,12 @@ val debPackage by tasks.registering {
                     "include"("name" to "**/*.sh")
                     "include"("name" to "**/git-hooks/pre-commit")
                     "include"("name" to "usr/bin/aisandboxctl")
+                    // UC22 — the in-container emulator helper has no .sh suffix
+                    // (it is COPYd into the image at /usr/local/bin/ and exec'd
+                    // by the in-sandbox agent); a named-file include keeps its
+                    // +x bit without broadening the *.sh pattern. Same
+                    // include/exclude pattern as usr/bin/aisandboxctl above.
+                    "include"("name" to "**/container-bin/aisandbox-emulator")
                     "mapper"(
                         "type" to "perm",
                         "user" to "root",
@@ -633,6 +667,7 @@ val debPackage by tasks.registering {
                     "exclude"("name" to "**/*.sh")
                     "exclude"("name" to "**/git-hooks/pre-commit")
                     "exclude"("name" to "usr/bin/aisandboxctl")
+                    "exclude"("name" to "**/container-bin/aisandbox-emulator")
                     "mapper"(
                         "type" to "perm",
                         "user" to "root",

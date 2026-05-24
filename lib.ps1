@@ -216,11 +216,291 @@ function Normalize-TmuxTitle {
 # identically to a bare `docker compose` call.
 function Invoke-AiSandboxCompose {
     $flags = @()
-    if ($env:AI_SANDBOX_COMPOSE_FILE) {
-        $flags += @('-f', $env:AI_SANDBOX_COMPOSE_FILE)
+    $base = $env:AI_SANDBOX_COMPOSE_FILE
+    # UC22 — make the base explicit when override files are requested in
+    # developer mode, else a bare `-f <override>` makes compose ignore the
+    # default docker-compose.yml.
+    if ($env:AI_SANDBOX_EXTRA_COMPOSE_FILES -and -not $base) {
+        $base = 'docker-compose.yml'
+    }
+    if ($base) { $flags += @('-f', $base) }
+    # UC22 — optional override compose files (e.g. docker-compose.kvm.yml).
+    if ($env:AI_SANDBOX_EXTRA_COMPOSE_FILES) {
+        foreach ($extra in ($env:AI_SANDBOX_EXTRA_COMPOSE_FILES -split '\s+')) {
+            if ($extra) { $flags += @('-f', $extra) }
+        }
     }
     if ($env:AI_SANDBOX_HOST_STATE_ROOT) {
         $flags += @('--project-directory', $env:AI_SANDBOX_HOST_STATE_ROOT)
     }
     & docker compose @flags @args
+}
+
+# --- UC22 — toolchain selection state ----------------------------------------
+#
+# Mirror of lib.sh's toolchain helpers. The operator's optional-toolchain
+# choices persist in a gitignored newline-delimited file at the repo root and
+# drive `docker compose build` build args.
+$script:AiSandboxToolchainsFile = if ($env:AISB_TOOLCHAINS_FILE) { $env:AISB_TOOLCHAINS_FILE } else { '.ai-sandbox-toolchains' }
+
+function Test-ToolchainEnabled {
+    param([Parameter(Mandatory)][string]$Id)
+    if (-not (Test-Path $script:AiSandboxToolchainsFile)) { return $false }
+    return ((Get-Content $script:AiSandboxToolchainsFile) -contains $Id)
+}
+
+function Write-EnabledToolchains {
+    param([string[]]$Ids = @())
+    Set-Content -Path $script:AiSandboxToolchainsFile -Value $Ids
+}
+
+# Test-ImageSupportsAndroid [IMAGE] — $true if the built image carries the
+# Android toolchain label (runtime source of truth for KVM passthrough).
+function Test-ImageSupportsAndroid {
+    param([string]$Image = 'ai-context:latest')
+    $val = (& docker image inspect $Image --format '{{ index .Config.Labels "com.ai-sandbox.toolchain.android" }}' 2>$null)
+    return ($val -eq '1')
+}
+
+# UC22 (AC6 fallback) — glibc base for the Android variant. Mirrors lib.sh's
+# AISB_ANDROID_BASE_DEFAULT. The emulator's QEMU binary can't load under gcompat
+# on musl (missing posix_fallocate64), so the Android image builds on a glibc
+# (Debian) base. node:20-bookworm-slim ships a modern Node + npm.
+$script:AiSandboxAndroidBaseDefault = if ($env:AISB_ANDROID_BASE_DEFAULT) { $env:AISB_ANDROID_BASE_DEFAULT } else { 'node:20-bookworm-slim' }
+
+# Export-AndroidBuildEnv ENABLED — set the build args `docker compose build`
+# reads for the Android variant. When enabled, exports AI_SANDBOX_ANDROID_BASE
+# (honouring an operator override) so compose flips FROM onto the glibc base;
+# when disabled, leaves it unset so compose's
+# `${AI_SANDBOX_ANDROID_BASE:-alpine:latest}` keeps the lean Alpine image (AC4).
+function Export-AndroidBuildEnv {
+    param([string]$Enabled = '0')
+    if ($Enabled -eq '1') {
+        $env:AI_SANDBOX_TOOLCHAIN_ANDROID = '1'
+        if (-not $env:AI_SANDBOX_ANDROID_BASE) {
+            $env:AI_SANDBOX_ANDROID_BASE = $script:AiSandboxAndroidBaseDefault
+        }
+    }
+}
+
+# Get-HostKvmGid — echo the host's kvm group GID, or '0' if none. Used by
+# spawn.ps1 to pass /dev/kvm's group as a supplementary group (UC22 BUG-1) so
+# the runtime user can open the device. Linux-only path (Windows has no
+# /dev/kvm); mirrors lib.sh host_kvm_gid.
+function Get-HostKvmGid {
+    $gid = ''
+    if (Test-Path '/dev/kvm') {
+        $gid = (& stat -c '%g' /dev/kvm 2>$null)
+    }
+    if (-not $gid) {
+        $line = (& getent group kvm 2>$null)
+        if ($line) { $gid = ($line -split ':')[2] }
+    }
+    if (-not $gid) { $gid = '0' }
+    return "$gid".Trim()
+}
+
+# --- Dev-mode workspace root (relocate-out-of-tree) -------------------------
+#
+# Mirror of lib.sh's aisb_dev_workspace_root family. The dev workspace lives
+# OUTSIDE the repo working tree by default so a stray `cp -a . workspace` can
+# never recurse into the freshly-created `.\workspace` and fill the disk.
+#
+# `Get-AisbDevWorkspaceRoot` returns an ABSOLUTE base dir; spawn and clean both
+# call it so they always agree. Shared workspace = `<root>\workspace`; isolated
+# = `<root>\workspace-<N>` with claude-config sibling `<root>\claude-config-<N>`.
+#
+# Precedence (highest first):
+#   Rule 0 — server pin wins (AI_SANDBOX_WORKSPACE_HOST_PATH /
+#            AI_SANDBOX_HOST_STATE_ROOT). Enforced by the CALLER; the guard here
+#            is defensive.
+#   Rule 1 — explicit override AI_SANDBOX_DEV_WORKSPACE_ROOT, used verbatim.
+#   Rule 2 — persisted absolute path in the gitignored state file
+#            `<repo>\.ai-sandbox-workspace-root` (the determinism anchor).
+#   Rule 3 — first-run default `$env:LOCALAPPDATA\ai-sandbox` (persisted only by
+#            the interactive setup path, not by this read-only resolver).
+$script:AisbDevWorkspaceStateFile = if ($env:AISB_DEV_WORKSPACE_STATE_FILE) { $env:AISB_DEV_WORKSPACE_STATE_FILE } else { '.ai-sandbox-workspace-root' }
+
+# Convert-AisbToAbsolute PATH → an absolute path even if PATH doesn't exist yet.
+function Convert-AisbToAbsolute {
+    param([Parameter(Mandatory)][string]$Path)
+    if ([System.IO.Path]::IsPathRooted($Path)) { return $Path }
+    return (Join-Path (Get-Location).Path $Path)
+}
+
+# Get-AisbDevWorkspaceDefaultRoot → the Rule-3 default base dir for this host.
+function Get-AisbDevWorkspaceDefaultRoot {
+    $base = $env:LOCALAPPDATA
+    if (-not $base) { $base = Join-Path $HOME '.local/state' }   # non-Windows pwsh
+    return (Join-Path $base 'ai-sandbox')
+}
+
+# Get-AisbDevWorkspaceRoot → resolve the dev workspace base (Rules 1-3).
+# Read-only; never writes the state file, never prompts. Returns $null when the
+# state file is absent AND no override is set (an unconfigured first run); the
+# caller decides whether that is fatal.
+function Get-AisbDevWorkspaceRoot {
+    # Rule 0 (defensive).
+    if ($env:AI_SANDBOX_WORKSPACE_HOST_PATH -or $env:AI_SANDBOX_HOST_STATE_ROOT) {
+        Write-Warn "Get-AisbDevWorkspaceRoot called under a server pin — ignoring (Rule 0)."
+        return $null
+    }
+    # Rule 1 — explicit override.
+    if ($env:AI_SANDBOX_DEV_WORKSPACE_ROOT) {
+        return (Convert-AisbToAbsolute $env:AI_SANDBOX_DEV_WORKSPACE_ROOT)
+    }
+    # Rule 2 — persisted choice.
+    if (Test-Path $script:AisbDevWorkspaceStateFile) {
+        $persisted = (Get-Content -Path $script:AisbDevWorkspaceStateFile -Raw -ErrorAction SilentlyContinue)
+        if ($persisted) {
+            $persisted = $persisted.Trim()
+            if ($persisted) { return (Convert-AisbToAbsolute $persisted) }
+        }
+    }
+    # Rule 3 — first-run default, not persisted here. Signal "unconfigured".
+    return $null
+}
+
+# Write-AisbDevWorkspaceRoot ABS_PATH → persist ABS_PATH to the state file.
+function Write-AisbDevWorkspaceRoot {
+    param([Parameter(Mandatory)][string]$AbsPath)
+    Set-Content -Path $script:AisbDevWorkspaceStateFile -Value $AbsPath
+}
+
+# Test-AisbDirHasRealContent DIR → $true if DIR holds anything but a tracked
+# `.gitkeep`. `.gitkeep`-awareness matters: a fresh clone's `.\workspace` is
+# non-empty (it holds `.gitkeep`), and must NOT be classified as legacy.
+function Test-AisbDirHasRealContent {
+    param([Parameter(Mandatory)][string]$Dir)
+    if (-not (Test-Path $Dir)) { return $false }
+    foreach ($item in (Get-ChildItem -Force -Path $Dir -ErrorAction SilentlyContinue)) {
+        if ($item.Name -ne '.gitkeep') { return $true }
+    }
+    return $false
+}
+
+# Test-AisbHasLegacyInRepoWorkspace → $true if the repo (cwd) has a populated
+# `.\workspace` (ignoring `.gitkeep`) OR any `.\workspace-*` isolated dir.
+function Test-AisbHasLegacyInRepoWorkspace {
+    if (Test-AisbDirHasRealContent '.\workspace') { return $true }
+    if (Get-ChildItem -Directory -Force -Path '.' -Filter 'workspace-*' -ErrorAction SilentlyContinue) {
+        return $true
+    }
+    return $false
+}
+
+# Invoke-AisbDevWorkspaceSetup → interactive resolve-migrate-persist, mirror of
+# lib.sh's aisb_dev_workspace_setup. Returns the chosen ABSOLUTE root. Refuses
+# (throws) on a non-interactive run that finds a legacy in-repo workspace.
+function Invoke-AisbDevWorkspaceSetup {
+    # Already recorded → freeze.
+    if (Test-Path $script:AisbDevWorkspaceStateFile) {
+        $existing = (Get-Content -Path $script:AisbDevWorkspaceStateFile -Raw -ErrorAction SilentlyContinue)
+        if ($existing) {
+            $existing = $existing.Trim()
+            if ($existing) { return (Convert-AisbToAbsolute $existing) }
+        }
+    }
+    # Explicit override is authoritative; persist so clean agrees too.
+    if ($env:AI_SANDBOX_DEV_WORKSPACE_ROOT) {
+        $override = Convert-AisbToAbsolute $env:AI_SANDBOX_DEV_WORKSPACE_ROOT
+        Write-AisbDevWorkspaceRoot $override
+        return $override
+    }
+
+    $repoRoot    = (Get-Location).Path
+    $defaultRoot = Get-AisbDevWorkspaceDefaultRoot
+
+    if (Test-AisbHasLegacyInRepoWorkspace) {
+        $interactive = $true
+        try { if ([Console]::IsInputRedirected) { $interactive = $false } } catch { }
+        if (-not $interactive) {
+            Write-Warn "A populated in-repo workspace was found, but this is a non-interactive run."
+            Write-Warn "Refusing to migrate or keep it silently (it may be a large / live-git tree)."
+            Write-Warn "Re-run .\setup.ps1 interactively, or set AI_SANDBOX_DEV_WORKSPACE_ROOT (use '.'"
+            Write-Warn "to deliberately keep it in the repo)."
+            throw "Dev workspace root is unconfigured and a legacy in-repo workspace exists."
+        }
+        Write-Host ""
+        Write-Host "  Workspace relocation" -ForegroundColor White
+        Write-Info "The dev workspace now lives OUTSIDE the repo by default, so a stray"
+        Write-Info "'cp -a . workspace' can never recurse and fill your disk."
+        Write-Info "An existing in-repo workspace was detected at:"
+        Write-Info "    $repoRoot\workspace (and/or workspace-*)"
+        Write-Info "New default location:"
+        Write-Info "    $defaultRoot"
+        $resp = Read-Host "  [m]igrate to the new location, or [k]eep it in the repo? [M/k]"
+        if ($resp -match '^[Kk]') {
+            Write-AisbDevWorkspaceRoot $repoRoot
+            Write-Ok "Keeping the workspace in the repo (recorded in $script:AisbDevWorkspaceStateFile)."
+            return $repoRoot
+        }
+        New-Item -ItemType Directory -Force -Path $defaultRoot | Out-Null
+        $candidates = @()
+        if (Test-AisbDirHasRealContent '.\workspace') { $candidates += (Get-Item '.\workspace') }
+        $candidates += @(Get-ChildItem -Directory -Force -Path '.' -Filter 'workspace-*' -ErrorAction SilentlyContinue)
+        foreach ($d in $candidates) {
+            $dest = Join-Path $defaultRoot $d.Name
+            if (Test-Path $dest) {
+                Write-Warn "$dest already exists — leaving $($d.Name) in place to avoid clobbering."
+                continue
+            }
+            # Cross-volume Move-Item becomes copy+delete and can be slow on a
+            # large tree; say so up front so it doesn't look hung.
+            Write-Info "Moving $($d.Name) -> $defaultRoot\ (may take a while if large or on another disk)..."
+            Move-Item -Path $d.FullName -Destination $dest
+            # The shared .\workspace dir carries the TRACKED workspace\.gitkeep
+            # bind-mount placeholder; moving the whole dir would delete it from
+            # the working tree. Re-seed it so the repo stays clean and a fresh
+            # clone still finds the placeholder.
+            if ($d.Name -eq 'workspace') {
+                New-Item -ItemType Directory -Force -Path '.\workspace' | Out-Null
+                New-Item -ItemType File -Force -Path '.\workspace\.gitkeep' | Out-Null
+            }
+        }
+        Write-AisbDevWorkspaceRoot $defaultRoot
+        Write-Ok "Workspace relocated to $defaultRoot (recorded in $script:AisbDevWorkspaceStateFile)."
+        return $defaultRoot
+    }
+
+    # No legacy tree — persist the safe default so spawn and clean agree.
+    Write-AisbDevWorkspaceRoot $defaultRoot
+    return $defaultRoot
+}
+
+# Test-AisbWorkspaceRecursion REPO_ROOT WS_PATH → recursion guard (mirror of
+# lib.sh's aisb_check_workspace_recursion). Returns:
+#   2 (HARD FAIL) — WS is, contains, or is an ancestor of the repo root.
+#   1 (WARN)      — WS is a strict descendant inside the repo (recorded opt-in).
+#   0             — WS safely outside the repo tree.
+function Test-AisbWorkspaceRecursion {
+    param(
+        [Parameter(Mandatory)][string]$RepoRoot,
+        [Parameter(Mandatory)][string]$WsPath
+    )
+    $sep = [System.IO.Path]::DirectorySeparatorChar
+    # Canonicalize the repo root (it exists).
+    $repoC = $RepoRoot
+    try { $repoC = (Resolve-Path -LiteralPath $RepoRoot -ErrorAction Stop).Path } catch { }
+    # Canonicalize the deepest existing ancestor of WS, re-appending the tail so
+    # a not-yet-created workspace still canonicalizes.
+    $probe = $WsPath
+    $tail  = ''
+    while ($probe -and -not (Test-Path -LiteralPath $probe)) {
+        $tail   = "$sep$(Split-Path -Leaf $probe)$tail"
+        $parent = Split-Path -Parent $probe
+        if (-not $parent -or $parent -eq $probe) { break }
+        $probe = $parent
+    }
+    $wsC = $WsPath
+    if ($probe -and (Test-Path -LiteralPath $probe)) {
+        try { $wsC = (Resolve-Path -LiteralPath $probe -ErrorAction Stop).Path + $tail } catch { }
+    }
+
+    $repoNorm = $repoC.TrimEnd($sep)
+    $wsNorm   = $wsC.TrimEnd($sep)
+    if ($wsNorm -eq $repoNorm) { return 2 }
+    if ($repoNorm.StartsWith($wsNorm + $sep)) { return 2 }   # ws is an ancestor of repo
+    if ($wsNorm.StartsWith($repoNorm + $sep)) { return 1 }   # ws strictly inside repo → warn
+    return 0
 }

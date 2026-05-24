@@ -325,6 +325,54 @@ Press-Enter
 # --- Step 3: Container image -------------------------------------------------
 Clear-Host
 Write-Step 3 6 "Container image"
+
+# UC22 — optional toolchain selection (mirror of setup.sh). Persists to
+# ./.ai-sandbox-toolchains (gitignored) and passes build args to
+# `docker compose build`. Data-driven so future toolchains slot in (AC16).
+Write-Info "Optional toolchains to bake into the image:"
+Write-Blank
+
+$arch = $env:PROCESSOR_ARCHITECTURE
+$isAmd64 = ($arch -eq 'AMD64')
+$selectedAndroid = Test-ToolchainEnabled -Id 'android'
+
+# Android testing — amd64 only (x86_64 system image; arm64 is a documented
+# follow-up, AC15). On non-amd64 hosts surface the limitation instead of
+# offering a broken option or failing the wizard.
+if ($isAmd64) {
+    if ($selectedAndroid) {
+        $aResp = Read-Host "  Include Android testing (JDK 21 + Android SDK + headless emulator)? [Y/n]"
+        $selectedAndroid = ($aResp -notmatch '^[Nn]')
+    } else {
+        $aResp = Read-Host "  Include Android testing (JDK 21 + Android SDK + headless emulator)? [y/N]"
+        $selectedAndroid = ($aResp -match '^[Yy]')
+    }
+} else {
+    Write-Warn "Android testing is amd64-only - not available on this $arch host (arm64 is a documented follow-up). Skipping."
+    $selectedAndroid = $false
+}
+
+$toolchainSelection = @()
+if ($selectedAndroid) { $toolchainSelection += 'android' }
+Write-EnabledToolchains -Ids $toolchainSelection
+$env:AI_SANDBOX_TOOLCHAIN_ANDROID = if ($selectedAndroid) { '1' } else { '0' }
+# UC22 (AC6 fallback) — when Android is selected, also export
+# AI_SANDBOX_ANDROID_BASE so `docker compose build` flips FROM onto the glibc
+# base (the emulator can't load under gcompat). No-op otherwise.
+Export-AndroidBuildEnv -Enabled $env:AI_SANDBOX_TOOLCHAIN_ANDROID
+
+if ($selectedAndroid) {
+    Write-Ok "Android testing enabled - image will include JDK 21 + Android SDK (build-tools 36.0.0, android-36)."
+    Write-Warn "The Android image is larger (~+1.5 GB) and its first build is slower than the base image."
+    Write-Warn "Note: the in-container emulator needs /dev/kvm, which Docker Desktop on Windows does not expose; the build + JVM-test lane works regardless."
+    if ((docker images -q ai-context:latest) -and -not (Test-ImageSupportsAndroid)) {
+        Write-Warn "The existing ai-context:latest image has NO Android toolchain - rebuild below to bake it in."
+    }
+} else {
+    Write-Ok "Base image only (no optional toolchains)."
+}
+Write-Blank
+
 if (docker images -q ai-context:latest) {
     Write-Ok "Image ai-context:latest already built"
     Write-Blank
@@ -386,6 +434,23 @@ if ($doAuth) {
     Write-Ok "Token saved to secrets/gh-token"
 }
 
+# --- Resolve (and, if needed, migrate to) the dev workspace root -------------
+#
+# Mirror of setup.sh: the dev workspace now lives OUTSIDE the repo by default so
+# a stray `cp -a . workspace` can never recurse and fill the disk. setup is the
+# ONLY interactive path that writes the state file — it resolves the root, runs
+# the shared migrate-or-keep prompt when a legacy in-repo workspace is found,
+# and persists the choice to `.ai-sandbox-workspace-root`. spawn.ps1 (Step 6)
+# then hits the persisted value (Rule 2) and never refuses; clean.ps1 reads the
+# same frozen value. Rule 0: skip under a server pin (be defensive).
+if (-not $env:AI_SANDBOX_HOST_STATE_ROOT -and -not $env:AI_SANDBOX_WORKSPACE_HOST_PATH) {
+    $DevWsRoot = Invoke-AisbDevWorkspaceSetup
+    New-Item -ItemType Directory -Force -Path (Join-Path $DevWsRoot 'workspace') | Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $DevWsRoot 'claude-config') | Out-Null
+} else {
+    $DevWsRoot = (Get-Location).Path
+}
+
 # --- Step 5: Claude Code first-run -------------------------------------------
 Clear-Host
 Write-Step 5 6 "Claude Code first-run"
@@ -414,8 +479,8 @@ if ($doClaudeSetup) {
     Write-Info "Launching Claude - answer the prompts, then type /exit to return."
     Write-Blank
     docker run --rm -it `
-        -v "${PWD}/workspace:/workspace" `
-        -v "${PWD}/claude-config:/home/claude/.claude" `
+        -v "$(Join-Path $DevWsRoot 'workspace'):/workspace" `
+        -v "$(Join-Path $DevWsRoot 'claude-config'):/home/claude/.claude" `
         -v "${PWD}/secrets:/etc/secrets:ro" `
         ai-context:latest `
         claude --dangerously-skip-permissions

@@ -271,11 +271,367 @@ _aisb_normalize_title() {
 # kept for consistency so every invocation is shaped identically.
 ai_sandbox_compose() {
     local flags=()
-    if [ -n "${AI_SANDBOX_COMPOSE_FILE:-}" ]; then
-        flags+=(-f "$AI_SANDBOX_COMPOSE_FILE")
+    local base="${AI_SANDBOX_COMPOSE_FILE:-}"
+    # UC22 — when override files are requested in developer mode (no explicit
+    # base compose file), make the base explicit. Otherwise a bare `-f
+    # <override>` makes docker compose IGNORE the default docker-compose.yml.
+    if [ -n "${AI_SANDBOX_EXTRA_COMPOSE_FILES:-}" ] && [ -z "$base" ]; then
+        base="docker-compose.yml"
     fi
+    [ -n "$base" ] && flags+=(-f "$base")
+    # UC22 — optional override compose files (e.g. docker-compose.kvm.yml for
+    # /dev/kvm passthrough on Android-testing images). Space-separated, applied
+    # AFTER the base so they layer on top. Unset → behaviour identical to
+    # pre-UC22.
+    local extra
+    for extra in ${AI_SANDBOX_EXTRA_COMPOSE_FILES:-}; do
+        flags+=(-f "$extra")
+    done
     if [ -n "${AI_SANDBOX_HOST_STATE_ROOT:-}" ]; then
         flags+=(--project-directory "$AI_SANDBOX_HOST_STATE_ROOT")
     fi
     docker compose "${flags[@]}" "$@"
+}
+
+# ── UC22 — toolchain selection state ─────────────────────────────────────────
+#
+# The operator's optional-toolchain choices (e.g. "android") persist in a
+# gitignored newline-delimited file at the repo root (cwd of setup.sh). They
+# drive `docker compose build` build args and survive rebuild + re-spawn.
+AISB_TOOLCHAINS_FILE="${AISB_TOOLCHAINS_FILE:-.ai-sandbox-toolchains}"
+
+# toolchain_is_enabled ID → 0 if ID is listed in the toolchains file.
+toolchain_is_enabled() {
+    [ -f "$AISB_TOOLCHAINS_FILE" ] || return 1
+    grep -qxF "$1" "$AISB_TOOLCHAINS_FILE"
+}
+
+# write_enabled_toolchains [ID...] → truncate + rewrite the toolchains file.
+# Zero args writes an empty file (base image only).
+write_enabled_toolchains() {
+    : > "$AISB_TOOLCHAINS_FILE"
+    local id
+    for id in "$@"; do
+        printf '%s\n' "$id" >> "$AISB_TOOLCHAINS_FILE"
+    done
+}
+
+# image_supports_android [IMAGE] → 0 if the built image carries the Android
+# toolchain label (stamped by SandboxDockerfile when ANDROID_TESTING=1). This
+# is the runtime source of truth for KVM passthrough — independent of the
+# build-time state file, so it works identically for developer-mode and
+# management-server-spawned sessions.
+image_supports_android() {
+    local img="${1:-ai-context:latest}" val=""
+    val="$(docker image inspect "$img" \
+        --format '{{ index .Config.Labels "com.ai-sandbox.toolchain.android" }}' 2>/dev/null || true)"
+    [ "$val" = "1" ]
+}
+
+# UC22 (AC6 fallback) — glibc base for the Android variant. The emulator's QEMU
+# binary can't load under gcompat on musl (missing posix_fallocate64), so the
+# Android image is built on a glibc (Debian) base. node:20-bookworm-slim is a
+# Debian-bookworm glibc base that already ships a modern Node + npm (Claude Code
+# needs Node 18+; bookworm's apt nodejs is only 18, so we use the node image to
+# keep a current runtime without a NodeSource step). An operator can override
+# via AI_SANDBOX_ANDROID_BASE (e.g. ubuntu:24.04 to match CI's ubuntu-latest).
+AISB_ANDROID_BASE_DEFAULT="${AISB_ANDROID_BASE_DEFAULT:-node:20-bookworm-slim}"
+
+# host_kvm_gid — echo the host's kvm group GID, or "0" if there is no kvm group.
+# Used by spawn.sh to pass /dev/kvm's group as a supplementary group into the
+# session (docker-compose.kvm.yml group_add) so the runtime user can actually
+# open the device (UC22 BUG-1). Prefer the group that OWNS /dev/kvm (most
+# correct — the device's gid is what matters), falling back to the named `kvm`
+# group, then 0. `stat` is coreutils on Linux hosts (where /dev/kvm exists at
+# all); getent covers the named-group path.
+host_kvm_gid() {
+    local gid=""
+    if [ -e /dev/kvm ]; then
+        gid="$(stat -c '%g' /dev/kvm 2>/dev/null || true)"
+    fi
+    if [ -z "$gid" ]; then
+        gid="$(getent group kvm 2>/dev/null | cut -d: -f3 || true)"
+    fi
+    printf '%s' "${gid:-0}"
+}
+
+# export_android_build_env ENABLED — set the build args `docker compose build`
+# reads for the Android variant. ENABLED is 0/1 (or non-empty/empty). When
+# enabled, exports AI_SANDBOX_ANDROID_BASE (honouring an operator override) so
+# compose flips FROM onto the glibc base; when disabled, leaves it unset so
+# compose's `${AI_SANDBOX_ANDROID_BASE:-alpine:latest}` keeps the lean Alpine
+# image byte-identical to pre-UC22 (AC4). Idempotent; safe to call before any
+# build.
+export_android_build_env() {
+    local enabled="${1:-0}"
+    if [ "$enabled" = "1" ]; then
+        export AI_SANDBOX_TOOLCHAIN_ANDROID=1
+        export AI_SANDBOX_ANDROID_BASE="${AI_SANDBOX_ANDROID_BASE:-$AISB_ANDROID_BASE_DEFAULT}"
+    fi
+}
+
+# ── Dev-mode workspace root (relocate-out-of-tree) ───────────────────────────
+#
+# Historically, developer-mode runs put the shared workspace at the in-repo
+# `./workspace` and isolated workspaces at `./workspace-<N>`. If an operator
+# ever pointed Claude at the repo itself and ran `cp -a . ./workspace`, the
+# copy recursed into the freshly-created `./workspace` (and then `./workspace/
+# workspace`, …) until the disk filled. Moving the dev workspace OUTSIDE the
+# repo working tree makes that self-copy structurally impossible.
+#
+# `aisb_dev_workspace_root` returns an ABSOLUTE base dir. Both spawn and clean
+# call it so they always agree on the location. The shared workspace lives at
+# `<root>/workspace`; isolated workspaces at `<root>/workspace-<N>` and their
+# claude-config siblings at `<root>/claude-config-<N>`.
+#
+# Precedence (highest first):
+#   Rule 0 — server pin wins, helper NOT consulted. When the management server
+#            sets AI_SANDBOX_WORKSPACE_HOST_PATH (per-spawn) or
+#            AI_SANDBOX_HOST_STATE_ROOT (install-mode cwd reroot), the existing
+#            server/isolated flow owns the path. Rule 0 is enforced by the
+#            CALLER (spawn.sh / clean.sh) which only invokes this helper in the
+#            developer-mode branch; the guard below is defensive.
+#   Rule 1 — explicit operator override: AI_SANDBOX_DEV_WORKSPACE_ROOT, used
+#            verbatim (e.g. `=.` is the recorded in-repo opt-in).
+#   Rule 2 — persisted choice: an absolute path in the gitignored state file
+#            `<repo>/.ai-sandbox-workspace-root` (the determinism anchor —
+#            spawn and clean always read the same frozen value).
+#   Rule 3 — first-run default: ${XDG_STATE_HOME:-$HOME/.local/state}/ai-sandbox.
+#            Persisting that default is the job of the INTERACTIVE setup path
+#            (setup.sh / the migrate-or-keep routine), NOT this read-only
+#            helper — see aisb_dev_workspace_setup. On a non-interactive spawn
+#            with no persisted file, the caller refuses rather than writing.
+#
+# This function NEVER writes the state file and NEVER prompts. Resolution only.
+AISB_DEV_WORKSPACE_STATE_FILE="${AISB_DEV_WORKSPACE_STATE_FILE:-.ai-sandbox-workspace-root}"
+
+# aisb_abspath PATH → echo an absolute, normalized path (no symlink resolution
+# required for a path that may not exist yet). Used so the state file and the
+# exported bind-source are always absolute regardless of the caller's cwd.
+aisb_abspath() {
+    local p="$1"
+    case "$p" in
+        /*) ;;                       # already absolute
+        *)  p="$(pwd)/$p" ;;
+    esac
+    printf '%s' "$p"
+}
+
+# aisb_dev_workspace_root → echo the resolved absolute dev workspace base dir.
+# Read-only: applies Rules 1-3 (Rule 0 is the caller's gate). Returns non-zero
+# only on a Rule-3 first run when the state file is absent AND no override is
+# set — the caller decides whether that is a fatal (non-interactive) condition.
+aisb_dev_workspace_root() {
+    # Rule 0 (defensive): never run under a server pin.
+    if [ -n "${AI_SANDBOX_WORKSPACE_HOST_PATH:-}" ] || [ -n "${AI_SANDBOX_HOST_STATE_ROOT:-}" ]; then
+        warn "aisb_dev_workspace_root called under a server pin — ignoring (Rule 0)." >&2
+        return 2
+    fi
+    # Rule 1 — explicit operator override.
+    if [ -n "${AI_SANDBOX_DEV_WORKSPACE_ROOT:-}" ]; then
+        aisb_abspath "$AI_SANDBOX_DEV_WORKSPACE_ROOT"
+        return 0
+    fi
+    # Rule 2 — persisted choice.
+    if [ -f "$AISB_DEV_WORKSPACE_STATE_FILE" ]; then
+        local persisted
+        persisted="$(tr -d '\r\n' < "$AISB_DEV_WORKSPACE_STATE_FILE" || true)"
+        if [ -n "$persisted" ]; then
+            aisb_abspath "$persisted"
+            return 0
+        fi
+    fi
+    # Rule 3 — first-run default (NOT persisted here; setup does that).
+    printf '%s' "${XDG_STATE_HOME:-$HOME/.local/state}/ai-sandbox"
+    # Signal "this came from the default, nothing persisted yet" so callers can
+    # distinguish a fresh run from a recorded one.
+    return 1
+}
+
+# aisb_write_dev_workspace_root ABS_PATH → persist ABS_PATH to the state file
+# (mirrors write_enabled_toolchains' truncate-and-write style). Caller is
+# responsible for passing an absolute path; we store it verbatim.
+aisb_write_dev_workspace_root() {
+    printf '%s\n' "$1" > "$AISB_DEV_WORKSPACE_STATE_FILE"
+}
+
+# aisb_dir_has_real_content DIR → 0 if DIR exists and contains anything other
+# than a tracked `.gitkeep`. The `.gitkeep`-awareness is critical: `.gitignore`
+# tracks `workspace/.gitkeep`, so a FRESH clone has a non-empty `./workspace`
+# (it holds `.gitkeep`) — without this exclusion, first-run detection would
+# wrongly classify a clean checkout as a "populated legacy workspace".
+aisb_dir_has_real_content() {
+    local d="$1"
+    [ -d "$d" ] || return 1
+    local entry
+    for entry in "$d"/* "$d"/.[!.]* "$d"/..?*; do
+        [ -e "$entry" ] || continue
+        case "$(basename "$entry")" in
+            .gitkeep) ;;
+            *) return 0 ;;
+        esac
+    done
+    return 1
+}
+
+# aisb_has_legacy_inrepo_workspace → 0 if the repo (cwd) carries a legacy
+# in-repo workspace that predates relocation: a populated `./workspace`
+# (ignoring `.gitkeep`) OR any `./workspace-*/` isolated dir.
+aisb_has_legacy_inrepo_workspace() {
+    if aisb_dir_has_real_content "./workspace"; then
+        return 0
+    fi
+    local d
+    for d in ./workspace-*/; do
+        [ -d "$d" ] || continue
+        return 0
+    done
+    return 1
+}
+
+# aisb_dev_workspace_setup → the single interactive resolve-migrate-persist
+# routine shared by setup.sh and (defensively) any interactive spawn. It:
+#   1. Resolves the target root (Rule 1/2/3 via aisb_dev_workspace_root).
+#   2. If the state file is already populated, does nothing (asked once).
+#   3. Else, if a legacy in-repo workspace exists:
+#        - TTY  → prompt migrate / keep-in-place; migrate `mv`s the dirs to the
+#                 new root and persists the XDG root; keep persists the absolute
+#                 repo root (recorded opt-in).
+#        - no TTY → refuse (return non-zero) without writing — the caller turns
+#                   that into a hard, instructive failure.
+#   4. Else (no legacy) persists the resolved default so spawn/clean agree.
+# Echoes the chosen absolute root on stdout on success.
+#
+# Rule 0: never call this under a server pin (the caller gates on that).
+aisb_dev_workspace_setup() {
+    # Already recorded → freeze; just echo it.
+    if [ -f "$AISB_DEV_WORKSPACE_STATE_FILE" ]; then
+        local existing
+        existing="$(tr -d '\r\n' < "$AISB_DEV_WORKSPACE_STATE_FILE" || true)"
+        if [ -n "$existing" ]; then
+            aisb_abspath "$existing"
+            return 0
+        fi
+    fi
+
+    # An explicit env override is authoritative; persist it so clean agrees too.
+    if [ -n "${AI_SANDBOX_DEV_WORKSPACE_ROOT:-}" ]; then
+        local override
+        override="$(aisb_abspath "$AI_SANDBOX_DEV_WORKSPACE_ROOT")"
+        aisb_write_dev_workspace_root "$override"
+        printf '%s' "$override"
+        return 0
+    fi
+
+    local repo_root default_root
+    repo_root="$(pwd -P)"
+    default_root="${XDG_STATE_HOME:-$HOME/.local/state}/ai-sandbox"
+
+    if aisb_has_legacy_inrepo_workspace; then
+        if [ ! -t 0 ]; then
+            warn "A populated in-repo workspace was found, but this is a non-interactive run." >&2
+            warn "Refusing to migrate or keep it silently (it may be a multi-GB / live-git tree)." >&2
+            warn "Re-run ./setup.sh interactively, or set AI_SANDBOX_DEV_WORKSPACE_ROOT to choose a" >&2
+            warn "location explicitly (use '.' to deliberately keep it in the repo)." >&2
+            return 1
+        fi
+        printf "\n  %sWorkspace relocation%s\n" "$AISB_BOLD" "$AISB_RESET" >&2
+        info "The dev workspace now lives OUTSIDE the repo by default, so a stray" >&2
+        info "'cp -a . workspace' can never recurse and fill your disk." >&2
+        info "An existing in-repo workspace was detected at:" >&2
+        info "    $repo_root/workspace (and/or workspace-*/)" >&2
+        info "New default location:" >&2
+        info "    $default_root" >&2
+        printf "\n  [m]igrate to the new location, or [k]eep it in the repo? [M/k]: " >&2
+        local resp
+        read -r resp || resp=""
+        case "$resp" in
+            k|K)
+                aisb_write_dev_workspace_root "$repo_root"
+                ok "Keeping the workspace in the repo (recorded in $AISB_DEV_WORKSPACE_STATE_FILE)." >&2
+                printf '%s' "$repo_root"
+                return 0
+                ;;
+            *)
+                mkdir -p "$default_root"
+                local d base
+                for d in ./workspace ./workspace-*/; do
+                    [ -e "$d" ] || continue
+                    base="$(basename "$d")"
+                    # Skip a workspace that holds only .gitkeep (nothing to move);
+                    # the .gitkeep itself stays tracked in the repo.
+                    if [ "$base" = "workspace" ] && ! aisb_dir_has_real_content "$d"; then
+                        continue
+                    fi
+                    if [ -e "$default_root/$base" ]; then
+                        warn "$default_root/$base already exists — leaving $d in place to avoid clobbering." >&2
+                        continue
+                    fi
+                    # Cross-filesystem mv becomes copy+delete and can be slow on a
+                    # large tree; say so up front so it doesn't look hung.
+                    info "Moving $base → $default_root/ (may take a while if it's large or on another disk)…" >&2
+                    mv "$d" "$default_root/$base"
+                    # The shared ./workspace dir carries the TRACKED workspace/
+                    # .gitkeep bind-mount placeholder; moving the whole dir would
+                    # delete it from the working tree. Re-seed it so the repo
+                    # stays clean and a fresh clone still finds the placeholder.
+                    if [ "$base" = "workspace" ]; then
+                        mkdir -p ./workspace
+                        : > ./workspace/.gitkeep
+                    fi
+                done
+                aisb_write_dev_workspace_root "$default_root"
+                ok "Workspace relocated to $default_root (recorded in $AISB_DEV_WORKSPACE_STATE_FILE)." >&2
+                printf '%s' "$default_root"
+                return 0
+                ;;
+        esac
+    fi
+
+    # No legacy tree — persist the safe default so spawn and clean agree.
+    aisb_write_dev_workspace_root "$default_root"
+    printf '%s' "$default_root"
+    return 0
+}
+
+# aisb_check_workspace_recursion REPO_ROOT WS_PATH → recursion guard used by
+# spawn (dev mode). Canonicalizes both paths, then:
+#   - returns 2 (HARD FAIL) if WS is, contains, or is an ancestor of the repo
+#     root — the genuine `cp -a . <ws>` self-copy case.
+#   - returns 1 (WARN) if WS is a strict descendant inside the repo (the
+#     recorded `=.` opt-in) — caller warns but proceeds.
+#   - returns 0 otherwise (WS safely outside the repo tree).
+# Canonicalization resolves symlinks/.. via `pwd -P` on whichever ancestor of
+# WS already exists (WS itself may not exist yet on a first spawn).
+aisb_check_workspace_recursion() {
+    local repo="$1" ws="$2"
+    local repo_c ws_c
+    repo_c="$(cd "$repo" 2>/dev/null && pwd -P)" || repo_c="$repo"
+    # Resolve the deepest existing ancestor of ws, then re-append the missing
+    # tail so a not-yet-created workspace still canonicalizes correctly.
+    local probe="$ws" tail=""
+    while [ -n "$probe" ] && [ ! -d "$probe" ]; do
+        tail="/$(basename "$probe")$tail"
+        local parent
+        parent="$(dirname "$probe")"
+        [ "$parent" = "$probe" ] && break
+        probe="$parent"
+    done
+    if [ -d "$probe" ]; then
+        ws_c="$(cd "$probe" 2>/dev/null && pwd -P)$tail" || ws_c="$ws"
+    else
+        ws_c="$ws"
+    fi
+
+    # Equal, or ws is an ancestor of repo, or ws contains repo → hard fail.
+    if [ "$ws_c" = "$repo_c" ]; then
+        return 2
+    fi
+    case "$repo_c/" in
+        "$ws_c"/*) return 2 ;;     # ws is an ancestor of repo
+    esac
+    case "$ws_c/" in
+        "$repo_c"/*) return 1 ;;   # ws is a strict descendant inside repo → warn
+    esac
+    return 0
 }
