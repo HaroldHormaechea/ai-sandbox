@@ -36,11 +36,13 @@ CACHE_ROOT="${AISB_ANDROID_CACHE:-/workspace/environment-utilities/android}"
 # image) and fails "Valid system image paths are: null", and the emulator rejects
 # a root that has system-images/ without a co-located platform-tools/.
 #
-# So we materialise a single unified root at $SDK_ROOT under the cache: symlink
-# the baked components into it (cheap, no copy) and install the emulator + system
-# image into the SAME root. Every sdkmanager/avdmanager/emulator call then uses
-# $SDK_ROOT, and we run the cmdline-tools binaries FROM that root so their
-# toolsdir resolves to it.
+# So we materialise a single unified root at $SDK_ROOT under the cache: copy
+# cmdline-tools in (a REAL copy — avdmanager canonicalises its own launcher path
+# to find the sdk root, so a symlink back to the baked SDK defeats it), symlink
+# the path-resolved components (platform-tools/platforms/build-tools/licenses),
+# and install the emulator + system image into the SAME root. The sdkmanager
+# install and all avdmanager work then run from $SDK_ROOT/cmdline-tools so the
+# resolved toolsdir — and thus the sdk root — is $SDK_ROOT.
 SDK_ROOT="$CACHE_ROOT/sdk"                  # the one unified, persisted SDK root
 AVD_HOME="$CACHE_ROOT/avd"                  # persisted AVDs
 export ANDROID_AVD_HOME="$AVD_HOME"
@@ -49,11 +51,20 @@ export ANDROID_HOME="$SDK_ROOT"
 AVD_NAME="${AISB_AVD_NAME:-aisandbox}"
 SYS_IMAGE="${AISB_SYS_IMAGE:-system-images;android-36;default;x86_64}"
 DEVICE_PROFILE="${AISB_AVD_DEVICE:-pixel_6}"
-# Run cmdline-tools from the baked location (always present) but target $SDK_ROOT
-# via --sdk_root / ANDROID_SDK_ROOT; once the unified root is built, the symlinked
-# cmdline-tools under it resolve identically.
+# BAKED cmdline-tools (always present in the image) — used for the toolchain-
+# presence check (require_toolchain) and the doctor diagnostics / AVD listing.
 SDKMANAGER="$BAKED_SDK/cmdline-tools/latest/bin/sdkmanager"
 AVDMANAGER="$BAKED_SDK/cmdline-tools/latest/bin/avdmanager"
+# UNIFIED-ROOT cmdline-tools (a REAL copy made by ensure_unified_root) — used
+# for the sdkmanager install and ALL avdmanager work. avdmanager derives its
+# SDK root from the *canonical* path of its own launcher, so it MUST run from a
+# cmdline-tools that physically lives under $SDK_ROOT (where the lazily-installed
+# system image is). A symlink back to the baked SDK canonicalises to
+# /opt/android-sdk (which has no system-images) and yields
+# "Valid system image paths are: null". These paths resolve only after
+# ensure_unified_root has populated the cache (it is called before any use).
+UNIFIED_SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+UNIFIED_AVDMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/avdmanager"
 ADB="$BAKED_SDK/platform-tools/adb"
 PIDFILE="$CACHE_ROOT/emulator.pid"
 LOGFILE="$CACHE_ROOT/emulator.log"
@@ -74,8 +85,24 @@ kvm_ok() { [ -e /dev/kvm ] && [ -r /dev/kvm ] && [ -w /dev/kvm ]; }
 # small; targets live in the image layer. Idempotent.
 ensure_unified_root() {
     mkdir -p "$SDK_ROOT"
+    # cmdline-tools MUST be a real copy, not a symlink. avdmanager derives its
+    # SDK root from the canonical location of its own launcher; a symlink back
+    # to the baked SDK (which has no system-images) makes `avdmanager create
+    # avd` fail with "Valid system image paths are: null". Copying cmdline-tools
+    # into the unified root (one-time ~130 MB, persisted in the workspace cache)
+    # roots avdmanager at $SDK_ROOT, where the system image is installed.
+    # Migrate an older symlinked cache in place.
+    if [ -L "$SDK_ROOT/cmdline-tools" ]; then
+        rm -f "$SDK_ROOT/cmdline-tools"
+    fi
+    if [ ! -e "$SDK_ROOT/cmdline-tools" ] && [ -e "$BAKED_SDK/cmdline-tools" ]; then
+        cp -a "$BAKED_SDK/cmdline-tools" "$SDK_ROOT/cmdline-tools"
+    fi
+    # platform-tools / platforms / build-tools / licenses are looked up by path
+    # under the root (not by launcher location), so cheap symlinks into the
+    # image layer are fine for them.
     local d
-    for d in cmdline-tools platform-tools platforms build-tools licenses; do
+    for d in platform-tools platforms build-tools licenses; do
         if [ -e "$BAKED_SDK/$d" ] && [ ! -e "$SDK_ROOT/$d" ]; then
             ln -s "$BAKED_SDK/$d" "$SDK_ROOT/$d"
         fi
@@ -86,19 +113,19 @@ ensure_emulator_installed() {
     ensure_unified_root
     if [ ! -x "$SDK_ROOT/emulator/emulator" ] || [ ! -d "$SDK_ROOT/system-images" ]; then
         log "First run: provisioning emulator + '$SYS_IMAGE' into $SDK_ROOT (one-time download, needs network)..."
-        yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses >/dev/null 2>&1 || true
-        "$SDKMANAGER" --sdk_root="$SDK_ROOT" "emulator" "$SYS_IMAGE"
+        yes | "$UNIFIED_SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses >/dev/null 2>&1 || true
+        "$UNIFIED_SDKMANAGER" --sdk_root="$SDK_ROOT" "emulator" "$SYS_IMAGE"
     fi
 }
 
 ensure_avd() {
     mkdir -p "$AVD_HOME"
-    # avdmanager resolves system images relative to its sdk root; with the
-    # unified root holding the system image, creation succeeds (no more
-    # "Valid system image paths are: null").
-    if ! ANDROID_SDK_ROOT="$SDK_ROOT" "$AVDMANAGER" list avd 2>/dev/null | grep -q "Name: $AVD_NAME"; then
+    # Use the unified-root avdmanager (a real copy under $SDK_ROOT) so it roots
+    # at $SDK_ROOT and finds the installed system image — running the baked
+    # avdmanager here fails with "Valid system image paths are: null".
+    if ! ANDROID_SDK_ROOT="$SDK_ROOT" "$UNIFIED_AVDMANAGER" list avd 2>/dev/null | grep -q "Name: $AVD_NAME"; then
         log "Creating AVD '$AVD_NAME' from '$SYS_IMAGE'..."
-        echo "no" | ANDROID_SDK_ROOT="$SDK_ROOT" "$AVDMANAGER" create avd \
+        echo "no" | ANDROID_SDK_ROOT="$SDK_ROOT" "$UNIFIED_AVDMANAGER" create avd \
             -n "$AVD_NAME" -k "$SYS_IMAGE" --device "$DEVICE_PROFILE" --force
     fi
 }
