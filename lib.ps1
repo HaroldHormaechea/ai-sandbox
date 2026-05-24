@@ -449,6 +449,14 @@ function Invoke-AisbDevWorkspaceSetup {
             # large tree; say so up front so it doesn't look hung.
             Write-Info "Moving $($d.Name) -> $defaultRoot\ (may take a while if large or on another disk)..."
             Move-Item -Path $d.FullName -Destination $dest
+            # The shared .\workspace dir carries the TRACKED workspace\.gitkeep
+            # bind-mount placeholder; moving the whole dir would delete it from
+            # the working tree. Re-seed it so the repo stays clean and a fresh
+            # clone still finds the placeholder.
+            if ($d.Name -eq 'workspace') {
+                New-Item -ItemType Directory -Force -Path '.\workspace' | Out-Null
+                New-Item -ItemType File -Force -Path '.\workspace\.gitkeep' | Out-Null
+            }
         }
         Write-AisbDevWorkspaceRoot $defaultRoot
         Write-Ok "Workspace relocated to $defaultRoot (recorded in $script:AisbDevWorkspaceStateFile)."

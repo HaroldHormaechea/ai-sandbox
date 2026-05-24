@@ -6,6 +6,8 @@ A self-contained Docker environment for running [Claude Code](https://docs.claud
 
 You can run more than one of these at a time. Each session is its own Docker Compose project named `ai-sandbox-<N>`, with a tmux window named `main` inside the container. Sessions can share the host workspace and Claude config (default — fast and zero-friction) or run on their own isolated copies (opt-in via flags on `spawn.sh`).
 
+> **Where the workspace lives.** In developer mode the host-side workspace and Claude config live **outside this repo** by default — under `$XDG_STATE_HOME/ai-sandbox` (i.e. `~/.local/state/ai-sandbox`) on Linux/macOS, or `%LOCALAPPDATA%\ai-sandbox` on Windows. This is deliberate: keeping the workspace out of the working tree makes it structurally impossible for a stray `cp -a . workspace` to recurse into a freshly-created `workspace/` and fill your disk. See [Workspace location](#workspace-location) for the override and migration details.
+
 ## How to use
 
 ### First-time setup
@@ -23,8 +25,8 @@ It steps you through:
 2. **Git identity** — sets the `user.name` / `user.email` recorded on every commit Claude makes. Detects defaults from your host `git config --global` (and the SSH key's `.pub` comment as a secondary hint), prompts to confirm or override, writes `secrets/gitconfig`. The container applies it at boot via `git config --global include.path`, so it survives `clean.sh` and image rebuilds (the file lives on the host).
 3. **Container image** — first asks which optional **toolchains** to bake into the image (see [Testing Android apps inside the sandbox](#testing-android-apps-inside-the-sandbox-uc22)), then builds `ai-context:latest` if needed.
 4. **`gh` login (optional)** — launches a disposable container that runs `gh auth login` and writes the resulting token to `secrets/gh-token`. Skip if you don't need `gh issue` / `gh pr` etc.
-5. **Claude first-run** — launches Claude in a disposable container so you can do `/login`, accept the "trust this folder" prompt, and acknowledge the bypass-permissions warning. The state lives in `claude-config/` and persists, so the long-running daemon never asks again.
-6. **First session** — initializes the gitignored `./.ai-sandbox-counter` (it holds the *last issued* N, so it starts at `0` and the first spawn produces `ai-sandbox-1`), takes down any leftover legacy unnumbered `ai-sandbox` container, and brings up `ai-sandbox-1` via `./spawn.sh --non-interactive`. Idempotent — re-running setup when an `ai-sandbox-*` project already exists logs "skipping spawn" and continues.
+5. **Claude first-run** — launches Claude in a disposable container so you can do `/login`, accept the "trust this folder" prompt, and acknowledge the bypass-permissions warning. The state lives in the resolved `<root>/claude-config/` (see [Workspace location](#workspace-location)) and persists, so the long-running daemon never asks again. Before this step the wizard resolves `<root>` and, if it finds a populated in-repo workspace from before relocation, prompts once to migrate or keep it (the answer is persisted to `./.ai-sandbox-workspace-root`).
+6. **First session** — initializes the gitignored `./.ai-sandbox-counter` (it holds the *last issued* N, so it starts at `0` and the first spawn produces `ai-sandbox-1`), takes down any leftover legacy unnumbered `ai-sandbox` container, and brings up `ai-sandbox-1` via `./spawn.sh --non-interactive`. Because `<root>` was already persisted in step 5, this non-interactive spawn never refuses. Idempotent — re-running setup when an `ai-sandbox-*` project already exists logs "skipping spawn" and continues.
 
 The script is idempotent — re-run it any time to re-authenticate, rebuild, or replay the Claude first-run.
 
@@ -38,7 +40,7 @@ After setup completes, attach to Claude:
 ./attach.sh         # or .\attach.ps1 on Windows
 ```
 
-You'll drop straight into your already-authenticated session. None of `secrets/`, `claude-config/`, `claude-config-*/`, `workspace/`, `workspace-*/`, or `.ai-sandbox-counter` is tracked by git.
+You'll drop straight into your already-authenticated session. None of your runtime state is tracked by git: `secrets/` stays in the repo (gitignored apart from its `.gitkeep`), and the workspace + Claude config live entirely outside the repo by default (see [Workspace location](#workspace-location)). The in-repo `workspace/`, `workspace-*/`, `claude-config/`, `claude-config-*/`, and `.ai-sandbox-counter` paths remain gitignored for backward compatibility and for operators who deliberately opt back in to keeping the workspace in-tree.
 
 ### Testing Android apps inside the sandbox (UC22)
 
@@ -123,6 +125,28 @@ follow-up — x86_64 system images won't boot on arm64). Docker Desktop on
 **Windows/macOS** does not expose `/dev/kvm`, so the emulator path is
 Linux-host-only there; the build + JVM-test lane works on any host.
 
+### Workspace location
+
+In developer mode, the host-side workspace and Claude config live **outside this repo by default**. The base directory (`<root>` below) is resolved with this precedence:
+
+1. **Server pin (highest).** When the management server drives a spawn it sets `AI_SANDBOX_WORKSPACE_HOST_PATH` (the per-session bind source) or `AI_SANDBOX_HOST_STATE_ROOT` (the install-mode state root, e.g. `/var/lib/ai-sandbox-server/sessions`). Either one short-circuits everything below — the server owns the path and developer-mode relocation is not consulted. `AI_SANDBOX_WORKSPACE_HOST_PATH` names *one session's* bind-mount source directly; `AI_SANDBOX_DEV_WORKSPACE_ROOT` (below) names the developer-mode *base* under which `workspace/`, `workspace-<N>/`, and `claude-config-<N>/` are created — they operate at different levels and never both apply.
+2. **Explicit operator override.** Set `AI_SANDBOX_DEV_WORKSPACE_ROOT=<dir>` and it is used verbatim as `<root>`. Use `AI_SANDBOX_DEV_WORKSPACE_ROOT=.` to deliberately keep the workspace inside the repo (the recorded in-repo opt-in — `spawn.sh` will warn but proceed).
+3. **Persisted choice.** The first interactive `setup.sh` writes the chosen absolute `<root>` to the gitignored `./.ai-sandbox-workspace-root` (per-machine, mirroring `.ai-sandbox-counter`). `spawn.sh` and `clean.sh` both read this frozen value so they always agree on where sessions live.
+4. **First-run default.** `$XDG_STATE_HOME/ai-sandbox` (i.e. `~/.local/state/ai-sandbox`) on Linux/macOS, `%LOCALAPPDATA%\ai-sandbox` on Windows.
+
+So the shared workspace is `<root>/workspace`, an isolated session's is `<root>/workspace-<N>`, and per-session Claude configs are `<root>/claude-config-<N>`.
+
+**Migration.** The first time you run `setup.sh` (or `spawn.sh` interactively) in a repo that still has a populated in-repo `./workspace` or any `./workspace-*/`, you are prompted once:
+
+- **migrate** (default) — the directories are `mv`d to the new `<root>`, and `<root>` is persisted. A cross-filesystem `mv` (the state dir is often on a different mount than the repo) becomes a copy+delete and can be slow on a large tree; the script prints a progress line so it doesn't look hung.
+- **keep** — the repo root is persisted as `<root>` (the in-repo opt-in), and nothing moves.
+
+The prompt is shown **once** and the answer is frozen in `./.ai-sandbox-workspace-root`. A **non-interactive** `spawn.sh` that finds an unconfigured repo with a populated in-repo workspace **refuses to spawn** rather than silently migrating a multi-GB / live-git tree or silently keeping the unsafe path — it tells you to run `setup.sh` interactively or set `AI_SANDBOX_DEV_WORKSPACE_ROOT`. A fresh checkout (only `workspace/.gitkeep` present) is not "populated", so it takes the safe default with no prompt.
+
+**Recursion guard.** Independently of where `<root>` lands, `spawn.sh` refuses to start if the resolved workspace **is**, **contains**, or **is an ancestor of** this repo's root — the exact shape that lets `cp -a . workspace` recurse and fill the disk. If the workspace is a strict descendant *inside* the repo (the deliberate `=.` opt-in), it warns instead of failing.
+
+**Getting project source into a session.** A session's `/workspace` is host state, **not** a checkout of this repo. Bring code in the way you would into any container: `git clone` a repo from inside the session, `git archive | tar -x` a snapshot, or add your own bind mount. **Never** populate the workspace with a working-tree copy of this repo (`cp -a .` / `rsync .` from the repo root) — that is exactly the self-copy the relocation and recursion guard exist to prevent.
+
 ### Spawning additional sessions
 
 ```bash
@@ -136,10 +160,10 @@ Flags:
 
 | Flag | Effect |
 |---|---|
-| `--isolated-workspace` | Mount `./workspace-<N>/` (auto-created) instead of the shared `./workspace/`. |
-| `--shared-workspace` | Mount the shared `./workspace/` (default). |
-| `--isolated-claude-config` | Mount `./claude-config-<N>/` (auto-created) instead of the shared `./claude-config/`. |
-| `--shared-claude-config` | Mount the shared `./claude-config/` (default). |
+| `--isolated-workspace` | Mount `<root>/workspace-<N>/` (auto-created) instead of the shared `<root>/workspace/`. |
+| `--shared-workspace` | Mount the shared `<root>/workspace/` (default). |
+| `--isolated-claude-config` | Mount `<root>/claude-config-<N>/` (auto-created) instead of the shared `<root>/claude-config/`. |
+| `--shared-claude-config` | Mount the shared `<root>/claude-config/` (default). |
 | `--label <value>` | Set the `com.ai-sandbox.label` container label. Surfaced by `attach.sh` and by the UC03 management REST API. |
 | `--non-interactive` | Never prompt; use defaults for any flag not explicitly set. Also engaged automatically when stdin is not a TTY. |
 | `-h`, `--help` | Show usage. |
@@ -148,10 +172,10 @@ The `secrets/` mount is **always** shared (and always read-only) — one SSH key
 
 **Shared vs. isolated trade-offs:**
 
-- **Shared workspace** (default) — every session sees the same `./workspace/`. Two sessions can collaborate on the same project, but they race on file edits and on git operations. Use this when you're running parallel agents on the same repo and you accept the coordination risk.
-- **Isolated workspace** (`--isolated-workspace`) — `./workspace-<N>/` is a fresh, empty folder. Each session clones its own copy of whatever it wants. Use this when you want sessions to be independent.
+- **Shared workspace** (default) — every session sees the same `<root>/workspace/` (see [Workspace location](#workspace-location) for `<root>`). Two sessions can collaborate on the same project, but they race on file edits and on git operations. Use this when you're running parallel agents on the same repo and you accept the coordination risk.
+- **Isolated workspace** (`--isolated-workspace`) — `<root>/workspace-<N>/` is a fresh, empty folder. Each session clones its own copy of whatever it wants. Use this when you want sessions to be independent.
 - **Shared `claude-config`** (default) — every session reuses the same Anthropic auth, the same `~/.claude/projects/` history, the same `settings.json`. Quick to spin up, but concurrent writes to that folder can clobber each other (see "Known foot-guns" below).
-- **Isolated `claude-config`** (`--isolated-claude-config`) — `./claude-config-<N>/` is a fresh folder. The very first time you start an isolated-config session, you'll need to `/login` again inside it (the auth lives there).
+- **Isolated `claude-config`** (`--isolated-claude-config`) — `<root>/claude-config-<N>/` is a fresh folder. The very first time you start an isolated-config session, you'll need to `/login` again inside it (the auth lives there).
 
 ### Attaching to a session
 
@@ -190,7 +214,7 @@ To run shell commands inside a session without disturbing Claude's tmux window:
 docker compose -p ai-sandbox-5 exec claude-sandbox sh
 ```
 
-Inside that shell you're in `/workspace` as the `claude` user, with the SSH key already configured. Anything you clone here also appears in `./workspace/` (or `./workspace-5/`, depending on the session's mount) on the host (and vice versa).
+Inside that shell you're in `/workspace` as the `claude` user, with the SSH key already configured. Anything you clone here also appears in `<root>/workspace/` (or `<root>/workspace-5/`, depending on the session's mount) on the host — where `<root>` is the resolved workspace base (see [Workspace location](#workspace-location)) — and vice versa.
 
 ### Resetting (clean per-session, or factory-reset)
 
@@ -208,30 +232,34 @@ Flags:
 |---|---|
 | `--session <N>` | Same as the positional `<N>` argument. |
 | `--all` | Clean every `ai-sandbox-*` Compose project (mutually exclusive with `<N>`). |
-| `--keep-workspace` | Don't delete `./workspace-<N>/` even if it exists. |
-| `--keep-claude-config` | Don't delete `./claude-config-<N>/` even if it exists. |
+| `--keep-workspace` | Don't delete `<root>/workspace-<N>/` even if it exists. |
+| `--keep-claude-config` | Don't delete `<root>/claude-config-<N>/` even if it exists. |
 | `--non-interactive` | Never prompt. With no target, exits non-zero. Also engaged automatically when stdin is not a TTY. |
 | `-h`, `--help` | Show usage. |
 
 `clean.sh` **never** touches:
 
-- the shared `./workspace/` folder,
-- the shared `./claude-config/` folder,
+- the shared `<root>/workspace/` folder,
+- the shared `<root>/claude-config/` folder,
 - the read-only `./secrets/` folder,
 - the monotonic `./.ai-sandbox-counter` file,
+- the persisted `./.ai-sandbox-workspace-root` (where `<root>` is recorded),
 - the `ai-context:latest` Docker image.
 
-It removes only per-session containers, per-session named volumes, and the per-session isolated host directories (`./workspace-<N>/`, `./claude-config-<N>/`) when they exist — i.e. only when that session opted into isolation via `spawn.sh`. The counter is **never** decremented or reset by any `clean` operation; after `./clean.sh --all`, the next `./spawn.sh` issues `N = max-issued-so-far + 1`.
+`clean.sh` resolves the per-session directories under the same `<root>` that `spawn.sh` used (read from `./.ai-sandbox-workspace-root`, or the server's state root when management-server-driven — see [Workspace location](#workspace-location)). It removes only per-session containers, per-session named volumes, and the per-session isolated host directories (`<root>/workspace-<N>/`, `<root>/claude-config-<N>/`) when they exist — i.e. only when that session opted into isolation via `spawn.sh`. The counter is **never** decremented or reset by any `clean` operation; after `./clean.sh --all`, the next `./spawn.sh` issues `N = max-issued-so-far + 1`.
 
-For a **factory reset** — wipe every container, the image, all shared host state, and copied secrets — run the following manually:
+For a **factory reset** — wipe every container, the image, all shared host state, and copied secrets — run the following manually (`<root>` is the value in `./.ai-sandbox-workspace-root`, defaulting to `~/.local/state/ai-sandbox`):
 
 ```bash
 ./clean.sh --all
 docker rmi ai-context:latest
-rm -rf workspace/* claude-config/* secrets/git-key secrets/gh-token secrets/gitconfig
+rm -rf "$(cat .ai-sandbox-workspace-root 2>/dev/null || echo ~/.local/state/ai-sandbox)"/{workspace,workspace-*,claude-config,claude-config-*}
+rm -f secrets/git-key secrets/gh-token secrets/gitconfig
 # Counter is left in place by design (monotonic across the project lifetime).
 # If you really want to start session numbering from 1 again, remove it:
 #   rm -f .ai-sandbox-counter
+# To also forget the persisted workspace location (re-prompts on next setup):
+#   rm -f .ai-sandbox-workspace-root
 ```
 
 After that, `./setup.sh` starts everything fresh (rebuilds the image — slower).
@@ -581,7 +609,7 @@ build time.
 
 The default shared-workspace + shared-claude-config layout trades safety for ergonomics. Nothing in the code prevents the following — be aware:
 
-- **Concurrent file edits across sessions sharing `./workspace/`.** Two sessions editing the same file race on writes; the loser is silently overwritten. Two sessions running `git checkout` on the same repo can leave the working tree in an inconsistent state. If you need this isolation, spawn with `--isolated-workspace`.
+- **Concurrent file edits across sessions sharing the workspace.** Two sessions editing the same file in the shared `<root>/workspace/` race on writes; the loser is silently overwritten. Two sessions running `git checkout` on the same repo can leave the working tree in an inconsistent state. If you need this isolation, spawn with `--isolated-workspace`.
 - **Concurrent writes to `claude-config/` shared state.** `~/.claude/projects/`, `~/.claude/settings.json`, and various hook-state files inside `claude-config/` are not designed to be concurrently mutated by multiple Claude processes. Settings updates from one session can clobber another's; hook state can desync. If you need isolation, spawn with `--isolated-claude-config` (you'll re-`/login` once).
 - **Concurrent `git push` races against the same remote branch.** Every session uses the same `secrets/git-key`, so to your git host they all look like the same author. Two sessions pushing to the same branch will hit a non-fast-forward error on whichever one loses the race; the operator (you) has to resolve.
 - **Manually `rm`ing `.ai-sandbox-counter` while sessions exist.** The counter is the source of truth for "last issued N." If you remove it, the file is recreated at `0` on the next spawn — meaning the next `./spawn.sh` will issue `N = 1` and try to bring up `ai-sandbox-1`. If `ai-sandbox-1` already exists, `docker compose up -d` is a benign no-op and you end up reattaching to the existing one (not a fresh session). To restart numbering safely, run `./clean.sh --all` first.

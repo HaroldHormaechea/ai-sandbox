@@ -571,6 +571,14 @@ aisb_dev_workspace_setup() {
                     # large tree; say so up front so it doesn't look hung.
                     info "Moving $base → $default_root/ (may take a while if it's large or on another disk)…" >&2
                     mv "$d" "$default_root/$base"
+                    # The shared ./workspace dir carries the TRACKED workspace/
+                    # .gitkeep bind-mount placeholder; moving the whole dir would
+                    # delete it from the working tree. Re-seed it so the repo
+                    # stays clean and a fresh clone still finds the placeholder.
+                    if [ "$base" = "workspace" ]; then
+                        mkdir -p ./workspace
+                        : > ./workspace/.gitkeep
+                    fi
                 done
                 aisb_write_dev_workspace_root "$default_root"
                 ok "Workspace relocated to $default_root (recorded in $AISB_DEV_WORKSPACE_STATE_FILE)." >&2
