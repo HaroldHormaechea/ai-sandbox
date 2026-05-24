@@ -137,6 +137,41 @@ class DebPackageTest {
     }
 
     @Test
+    void deb_ships_uc22_kvm_override_and_emulator_helper_with_correct_modes() throws Exception {
+        Path deb = findDeb();
+        assumeTrue(
+                deb != null,
+                "deb not built yet — run `./gradlew :server:debPackage` to produce build/distributions/ai-sandbox-server_*_amd64.deb");
+        assumeTrue(dpkgDebOnPath() != null, "dpkg-deb not on PATH — skipping (CI runner always has it)");
+
+        String contents = runCapturing("dpkg-deb", "-c", deb.toString());
+
+        // UC22 § AC13 — docker-compose.kvm.yml ships beside docker-compose.yml
+        // under /opt/ai-sandbox-server/host/ so spawn.sh can layer the
+        // /dev/kvm override for a .deb-installed / server-spawned Android
+        // session. It is a data file: mode 0644 (Block 2 jdeb mapper),
+        // matching the .ps1 mirrors and SandboxDockerfile.
+        String kvmPath = "/opt/ai-sandbox-server/host/docker-compose.kvm.yml";
+        assertThat(contents).as("missing entry %s", kvmPath).contains(kvmPath);
+        assertThat(modeLineFor(contents, kvmPath))
+                .as("mode on %s — KVM override must ship 0644 like the rest of the compose context", kvmPath)
+                .startsWith("-rw-r--r--");
+
+        // UC22 § AC8,AC10 — the in-container emulator helper ships under
+        // /opt/ai-sandbox-server/host/container-bin/ (part of the container
+        // build context a bundled `docker compose build` consumes). It MUST
+        // carry the exec bit (0755). jdeb's DataProducerDirectory hardcodes
+        // 0644, so the build.gradle.kts named-file include
+        // (`**/container-bin/aisandbox-emulator` in Block 1) is what keeps
+        // +x — this assertion is the regression guard for that include.
+        String emuPath = "/opt/ai-sandbox-server/host/container-bin/aisandbox-emulator";
+        assertThat(contents).as("missing entry %s", emuPath).contains(emuPath);
+        assertThat(modeLineFor(contents, emuPath))
+                .as("mode on %s — emulator helper must ship 0755 (named-file include in jdeb Block 1)", emuPath)
+                .startsWith("-rwxr-xr-x");
+    }
+
+    @Test
     void deb_control_fields_match_published_metadata() throws Exception {
         Path deb = findDeb();
         assumeTrue(
