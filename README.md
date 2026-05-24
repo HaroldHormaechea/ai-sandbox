@@ -57,11 +57,24 @@ When **Android testing** is enabled, the image gains:
   `platform-tools`, `platforms;android-36`, `build-tools;36.0.0`) — matching
   `.github/workflows/android-ci.yml` + `gradle/libs.versions.toml`.
 
-That makes the full CI build lane work inside the session, offline:
+The Android image stays on the **Alpine base** — `gcompat` is sufficient for the
+SDK's glibc-linked binaries. Verified on a Docker + KVM + amd64 host: `aapt2
+version` and `adb version` both load and run cleanly under `gcompat` (no
+`ld-linux`/loader error), so the documented glibc-base (Debian/Ubuntu) fallback
+was **not** needed. If a future SDK component ever fails to load under `gcompat`,
+that fallback is the escape hatch (see the use-case file).
+
+That makes the full CI build lane work inside the session:
 
 ```bash
 ./gradlew :android:lint :android:test :android:assembleDebug :android:bundleDebug
 ```
+
+The **SDK components** (platform-tools, `platforms;android-36`, `build-tools;36.0.0`)
+are baked into the image, so this lane never downloads them — verified green
+inside the image, producing the debug APK + AAB + the lint XML report. Gradle's
+own Maven/AGP/Compose dependencies still resolve over the network on a cold
+build (and cache afterward); only the Android SDK side is guaranteed offline.
 
 #### Running instrumented tests (the emulator)
 
@@ -96,10 +109,7 @@ and refuses to launch (pass `--no-accel` to force very slow software emulation).
 **Limitations.** Android testing is **amd64-only** today (arm64 is a documented
 follow-up — x86_64 system images won't boot on arm64). Docker Desktop on
 **Windows/macOS** does not expose `/dev/kvm`, so the emulator path is
-Linux-host-only there; the build + JVM-test lane works on any host. This feature
-was authored without a Docker/KVM environment to validate end-to-end — see
-`use-cases/22-onboarding-toolchain-android-testing.md` → "Testing Limitations"
-for exactly what remains to be verified on a capable host.
+Linux-host-only there; the build + JVM-test lane works on any host.
 
 ### Spawning additional sessions
 
