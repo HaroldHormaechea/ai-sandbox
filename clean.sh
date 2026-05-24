@@ -23,6 +23,23 @@ if [ -n "${AI_SANDBOX_HOST_STATE_ROOT:-}" ]; then
     cd "$AI_SANDBOX_HOST_STATE_ROOT"
 fi
 
+# ── Resolve the per-session host-dir base ────────────────────────────────────
+#
+# Rule 0 — server pin wins. Under AI_SANDBOX_HOST_STATE_ROOT the per-session
+# dirs live under the state-root cwd as the historical relative
+# ./workspace-<N> / ./claude-config-<N>, so the base is ".".
+# Developer-mode runs resolve the SAME out-of-tree base spawn.sh used (read
+# from the frozen state file — clean only ever READS, never writes/migrates).
+# If the dev base can't be resolved (no spawn has ever run in this repo), there
+# is nothing relocated to clean, so fall back to "." — the per-session dirs
+# simply won't exist and the rm guards are no-ops.
+SESSION_DIR_BASE="."
+if [ -z "${AI_SANDBOX_HOST_STATE_ROOT:-}" ]; then
+    if WS_ROOT="$(aisb_dev_workspace_root 2>/dev/null)"; then
+        SESSION_DIR_BASE="$WS_ROOT"
+    fi
+fi
+
 usage() {
     cat >&2 <<'EOF'
 Usage: ./clean.sh [<N>] [flags]
@@ -113,13 +130,19 @@ clean_one() {
     local down_rc=0
     ai_sandbox_compose -p "$name" down -v --remove-orphans 2>/dev/null || down_rc=$?
 
-    if [ "$KEEP_WORKSPACE" -eq 0 ] && [ -d "./workspace-${n}" ]; then
-        info "  rm -rf ./workspace-${n}" >&2
-        rm -rf "./workspace-${n}"
+    # Per-session isolated dirs live under SESSION_DIR_BASE (the same out-of-tree
+    # base spawn.sh resolved in dev mode, or "." under a server pin). Using the
+    # resolved base — not a hardcoded ./workspace-<N> — is what prevents the
+    # silent leak after relocation.
+    local ws_dir="${SESSION_DIR_BASE}/workspace-${n}"
+    local cc_dir="${SESSION_DIR_BASE}/claude-config-${n}"
+    if [ "$KEEP_WORKSPACE" -eq 0 ] && [ -d "$ws_dir" ]; then
+        info "  rm -rf $ws_dir" >&2
+        rm -rf "$ws_dir"
     fi
-    if [ "$KEEP_CLAUDE_CONFIG" -eq 0 ] && [ -d "./claude-config-${n}" ]; then
-        info "  rm -rf ./claude-config-${n}" >&2
-        rm -rf "./claude-config-${n}"
+    if [ "$KEEP_CLAUDE_CONFIG" -eq 0 ] && [ -d "$cc_dir" ]; then
+        info "  rm -rf $cc_dir" >&2
+        rm -rf "$cc_dir"
     fi
 
     # If `down` reported failure, re-check whether containers actually remain

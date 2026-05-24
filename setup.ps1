@@ -434,6 +434,23 @@ if ($doAuth) {
     Write-Ok "Token saved to secrets/gh-token"
 }
 
+# --- Resolve (and, if needed, migrate to) the dev workspace root -------------
+#
+# Mirror of setup.sh: the dev workspace now lives OUTSIDE the repo by default so
+# a stray `cp -a . workspace` can never recurse and fill the disk. setup is the
+# ONLY interactive path that writes the state file — it resolves the root, runs
+# the shared migrate-or-keep prompt when a legacy in-repo workspace is found,
+# and persists the choice to `.ai-sandbox-workspace-root`. spawn.ps1 (Step 6)
+# then hits the persisted value (Rule 2) and never refuses; clean.ps1 reads the
+# same frozen value. Rule 0: skip under a server pin (be defensive).
+if (-not $env:AI_SANDBOX_HOST_STATE_ROOT -and -not $env:AI_SANDBOX_WORKSPACE_HOST_PATH) {
+    $DevWsRoot = Invoke-AisbDevWorkspaceSetup
+    New-Item -ItemType Directory -Force -Path (Join-Path $DevWsRoot 'workspace') | Out-Null
+    New-Item -ItemType Directory -Force -Path (Join-Path $DevWsRoot 'claude-config') | Out-Null
+} else {
+    $DevWsRoot = (Get-Location).Path
+}
+
 # --- Step 5: Claude Code first-run -------------------------------------------
 Clear-Host
 Write-Step 5 6 "Claude Code first-run"
@@ -462,8 +479,8 @@ if ($doClaudeSetup) {
     Write-Info "Launching Claude - answer the prompts, then type /exit to return."
     Write-Blank
     docker run --rm -it `
-        -v "${PWD}/workspace:/workspace" `
-        -v "${PWD}/claude-config:/home/claude/.claude" `
+        -v "$(Join-Path $DevWsRoot 'workspace'):/workspace" `
+        -v "$(Join-Path $DevWsRoot 'claude-config'):/home/claude/.claude" `
         -v "${PWD}/secrets:/etc/secrets:ro" `
         ai-context:latest `
         claude --dangerously-skip-permissions

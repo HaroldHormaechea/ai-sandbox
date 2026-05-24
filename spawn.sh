@@ -134,14 +134,69 @@ release_counter_lock
 PROJECT="ai-sandbox-${N}"
 
 # ── Pre-create per-session host dirs ─────────────────────────────────────────
-WORKSPACE_HOST_PATH="./workspace"
-CLAUDE_CONFIG_HOST_PATH="./claude-config"
+#
+# Rule 0 — server pin wins. When the management server set
+# AI_SANDBOX_HOST_STATE_ROOT, we already cd'd into it (above) and the dev-mode
+# relocation helper is NOT consulted: the historical relative `./workspace` /
+# `./workspace-<N>` (resolved against the state-root cwd) is byte-identical to
+# pre-UC05/isolated behaviour. Developer-mode runs (the var unset) resolve the
+# workspace base OUTSIDE the repo via aisb_dev_workspace_root so a stray
+# `cp -a . workspace` can never recurse into the repo (the disk-filler).
+if [ -n "${AI_SANDBOX_HOST_STATE_ROOT:-}" ]; then
+    WORKSPACE_HOST_PATH="./workspace"
+    CLAUDE_CONFIG_HOST_PATH="./claude-config"
+    if [ "$WORKSPACE_MODE" = "isolated" ]; then
+        WORKSPACE_HOST_PATH="./workspace-${N}"
+    fi
+    if [ "$CLAUDE_CONFIG_MODE" = "isolated" ]; then
+        CLAUDE_CONFIG_HOST_PATH="./claude-config-${N}"
+    fi
+else
+    REPO_ROOT="$(pwd -P)"
+    # Resolve the dev workspace base (absolute). A non-zero return means the
+    # state file is absent AND no override is set — i.e. an unconfigured
+    # first run. On a non-interactive run we must NOT silently pick a default
+    # (the operator may have a populated in-repo workspace to migrate first),
+    # so refuse with instructions. On a TTY, run the shared resolve-migrate-
+    # persist routine so the choice is frozen for clean.sh too.
+    if WS_ROOT="$(aisb_dev_workspace_root)"; then
+        :
+    else
+        if [ ! -t 0 ]; then
+            warn "Dev workspace root is not configured for this repo." >&2
+            warn "Run ./setup.sh interactively once to pick (and migrate to) a location," >&2
+            warn "or set AI_SANDBOX_DEV_WORKSPACE_ROOT explicitly (use '.' to keep it in-repo)." >&2
+            exit 1
+        fi
+        WS_ROOT="$(aisb_dev_workspace_setup)" || exit 1
+    fi
 
-if [ "$WORKSPACE_MODE" = "isolated" ]; then
-    WORKSPACE_HOST_PATH="./workspace-${N}"
-fi
-if [ "$CLAUDE_CONFIG_MODE" = "isolated" ]; then
-    CLAUDE_CONFIG_HOST_PATH="./claude-config-${N}"
+    # Recursion guard — the structural defence against the self-copy disk-filler.
+    SHARED_WS="$WS_ROOT/workspace"
+    guard_rc=0
+    aisb_check_workspace_recursion "$REPO_ROOT" "$SHARED_WS" || guard_rc=$?
+    case "$guard_rc" in
+        2)
+            warn "Refusing to spawn: the resolved workspace ($SHARED_WS) is, contains, or is an" >&2
+            warn "ancestor of the repo ($REPO_ROOT). A 'cp -a . workspace' here would recurse and" >&2
+            warn "fill the disk. Point AI_SANDBOX_DEV_WORKSPACE_ROOT at a directory outside the repo." >&2
+            exit 1
+            ;;
+        1)
+            warn "Workspace ($SHARED_WS) is inside the repo tree — the recorded in-repo opt-in." >&2
+            warn "A 'cp -a . workspace' from the repo root would recurse; never copy this repo's" >&2
+            warn "working tree into the workspace (use git clone / archive / a bind mount instead)." >&2
+            ;;
+    esac
+
+    WORKSPACE_HOST_PATH="$WS_ROOT/workspace"
+    CLAUDE_CONFIG_HOST_PATH="$WS_ROOT/claude-config"
+    if [ "$WORKSPACE_MODE" = "isolated" ]; then
+        WORKSPACE_HOST_PATH="$WS_ROOT/workspace-${N}"
+    fi
+    if [ "$CLAUDE_CONFIG_MODE" = "isolated" ]; then
+        CLAUDE_CONFIG_HOST_PATH="$WS_ROOT/claude-config-${N}"
+    fi
 fi
 
 # UC-17 — pre-create the resolved bind-mount source dirs (BOTH shared and

@@ -22,6 +22,14 @@ templates/claude-config/*
 # build args). Machine-local; never committed.
 .ai-sandbox-toolchains
 
+# Persisted, per-machine dev workspace root. As of the workspace-relocation
+# change the dev-mode workspace lives OUTSIDE this repo by default (under
+# $XDG_STATE_HOME/ai-sandbox or %LOCALAPPDATA%\ai-sandbox); spawn.sh / clean.sh
+# read the frozen absolute path from this file so they always agree. The
+# in-repo `workspace/`/`workspace-*/` entries below are kept for backward compat
+# (an operator may deliberately opt back in with AI_SANDBOX_DEV_WORKSPACE_ROOT=.).
+.ai-sandbox-workspace-root
+
 # Per-session isolated host directories created by ./spawn.sh.
 workspace-*/
 claude-config-*/

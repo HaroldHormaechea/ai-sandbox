@@ -21,6 +21,21 @@ if ($env:AI_SANDBOX_HOST_STATE_ROOT) {
     Set-Location $env:AI_SANDBOX_HOST_STATE_ROOT
 }
 
+# --- Resolve the per-session host-dir base ----------------------------------
+#
+# Rule 0 — server pin wins. Under AI_SANDBOX_HOST_STATE_ROOT the per-session
+# dirs live under the state-root cwd as the historical relative
+# .\workspace-<N> / .\claude-config-<N>, so the base is '.'. Developer-mode
+# runs resolve the SAME out-of-tree base spawn.ps1 used (read from the frozen
+# state file — clean only ever READS, never writes/migrates). If the dev base
+# can't be resolved (no spawn has ever run in this repo), fall back to '.' —
+# the per-session dirs simply won't exist and the rm guards are no-ops.
+$SessionDirBase = '.'
+if (-not $env:AI_SANDBOX_HOST_STATE_ROOT) {
+    $resolvedBase = Get-AisbDevWorkspaceRoot
+    if ($resolvedBase) { $SessionDirBase = $resolvedBase }
+}
+
 function Show-Usage {
     @"
 Usage: .\clean.ps1 [<N>] [flags]
@@ -118,13 +133,19 @@ function Clean-One {
         $downRc = 1
     }
 
-    if (-not $KeepWorkspace -and (Test-Path ".\workspace-$N")) {
-        Write-Info "  rm -rf .\workspace-$N"
-        Remove-Item -Recurse -Force ".\workspace-$N"
+    # Per-session isolated dirs live under $SessionDirBase (the same out-of-tree
+    # base spawn.ps1 resolved in dev mode, or '.' under a server pin). Using the
+    # resolved base — not a hardcoded .\workspace-<N> — is what prevents the
+    # silent leak after relocation.
+    $wsDir = Join-Path $SessionDirBase "workspace-$N"
+    $ccDir = Join-Path $SessionDirBase "claude-config-$N"
+    if (-not $KeepWorkspace -and (Test-Path $wsDir)) {
+        Write-Info "  rm -rf $wsDir"
+        Remove-Item -Recurse -Force $wsDir
     }
-    if (-not $KeepClaudeConfig -and (Test-Path ".\claude-config-$N")) {
-        Write-Info "  rm -rf .\claude-config-$N"
-        Remove-Item -Recurse -Force ".\claude-config-$N"
+    if (-not $KeepClaudeConfig -and (Test-Path $ccDir)) {
+        Write-Info "  rm -rf $ccDir"
+        Remove-Item -Recurse -Force $ccDir
     }
 
     # If `down` reported failure, re-check whether containers actually remain

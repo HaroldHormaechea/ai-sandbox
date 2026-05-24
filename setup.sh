@@ -504,6 +504,25 @@ if [ "$do_auth" = true ]; then
     ok "Token saved to secrets/gh-token"
 fi
 
+# ── Resolve (and, if needed, migrate to) the dev workspace root ──────────────
+#
+# The dev-mode workspace now lives OUTSIDE the repo by default so a stray
+# `cp -a . workspace` can never recurse and fill the disk. setup is the ONLY
+# interactive path that writes the state file: it resolves the root, runs the
+# shared migrate-or-keep prompt when a legacy in-repo workspace is found, and
+# persists the choice to `.ai-sandbox-workspace-root`. After this, ./spawn.sh
+# (Step 6) hits the persisted value (Rule 2) and never refuses; clean.sh reads
+# the same frozen value so the two always agree. Rule 0: skip entirely when a
+# server pin is active (setup is a developer-mode tool, but be defensive).
+if [ -z "${AI_SANDBOX_HOST_STATE_ROOT:-}" ] && [ -z "${AI_SANDBOX_WORKSPACE_HOST_PATH:-}" ]; then
+    DEV_WS_ROOT="$(aisb_dev_workspace_setup)"
+    mkdir -p "$DEV_WS_ROOT/workspace" "$DEV_WS_ROOT/claude-config"
+else
+    # Under a server pin, keep the historical in-repo paths for the first-run
+    # docker run mount (setup is not normally run in that mode).
+    DEV_WS_ROOT="$(pwd)"
+fi
+
 # ── Step 5: Claude Code first-run ────────────────────────────────────────────
 clear_screen
 screen_header 5 6 "Claude Code first-run"
@@ -534,8 +553,8 @@ if [ "$do_claude_setup" = true ]; then
     info "Launching Claude — answer the prompts, then type /exit to return."
     hr
     docker run --rm -it \
-        -v "$(pwd)/workspace:/workspace" \
-        -v "$(pwd)/claude-config:/home/claude/.claude" \
+        -v "$DEV_WS_ROOT/workspace:/workspace" \
+        -v "$DEV_WS_ROOT/claude-config:/home/claude/.claude" \
         -v "$(pwd)/secrets:/etc/secrets:ro" \
         ai-context:latest \
         claude --dangerously-skip-permissions
