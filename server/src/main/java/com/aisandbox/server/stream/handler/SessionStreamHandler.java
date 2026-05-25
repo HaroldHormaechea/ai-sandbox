@@ -4,6 +4,7 @@ import com.aisandbox.server.identity.ActiveConnectionRegistry;
 import com.aisandbox.server.identity.ActiveStreamRegistry;
 import com.aisandbox.server.identity.ClientIdentity;
 import com.aisandbox.server.stream.dto.ControlMessage;
+import com.aisandbox.server.stream.dto.StreamServerMessage;
 import com.aisandbox.server.stream.facade.StreamFacade;
 import com.aisandbox.server.stream.service.OutputRingBuffer;
 import com.aisandbox.server.stream.service.StreamControlMessageService;
@@ -13,6 +14,9 @@ import com.aisandbox.server.stream.service.TmuxBridgeService;
 import io.netty.channel.ChannelId;
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -56,6 +60,9 @@ public class SessionStreamHandler implements WebSocketHandler {
 
     /** Key under which the resolved identity is stored on the WebSocket session. */
     public static final String IDENTITY_ATTR = "ai-sandbox.client-identity";
+
+    /** Id of the always-present main-session target (AC#10). */
+    public static final String TARGET_MAIN = "main";
 
     private static final Logger LOG = LoggerFactory.getLogger(SessionStreamHandler.class);
 
@@ -134,6 +141,16 @@ public class SessionStreamHandler implements WebSocketHandler {
         Sinks.Many<WebSocketMessage> outbound = Sinks.many().unicast().onBackpressureBuffer();
         AtomicReference<TmuxBridgeService.Bridge> bridgeRef = new AtomicReference<>();
         AtomicReference<StreamId> idRef = new AtomicReference<>();
+        // UC-21 — a generation token bumped on every mid-stream re-bridge so the
+        // single long-lived pump knows to pick up the swapped-in bridge; a
+        // separate sequence keeps per-client tmux session names unique across
+        // swaps. cols/rows track the last resize so a re-bridge starts at the
+        // right geometry. selectedTarget is reflected in Targets enumerations.
+        AtomicInteger generation = new AtomicInteger(0);
+        AtomicInteger rebridgeSeq = new AtomicInteger(0);
+        AtomicInteger cols = new AtomicInteger(80);
+        AtomicInteger rows = new AtomicInteger(24);
+        AtomicReference<String> selectedTarget = new AtomicReference<>(TARGET_MAIN);
 
         // UC04 § B2 — index this WS session against its fingerprint so
         // the revoke() orchestration can graceful-close it on cert
@@ -151,23 +168,31 @@ public class SessionStreamHandler implements WebSocketHandler {
                 .flatMap(streamId -> {
                     idRef.set(streamId);
                     try {
-                        TmuxBridgeService.Bridge bridge = facade.tmux().start(n, streamId.value(), 80, 24);
+                        TmuxBridgeService.Bridge bridge =
+                                facade.tmux().start(n, streamId.value(), cols.get(), rows.get());
                         bridgeRef.set(bridge);
                     } catch (IOException io) {
                         LOG.warn("tmux bridge failed for stream {}: {}", streamId.value(), io.toString());
-                        return session.send(Mono.just(session.textMessage(controlError(io))))
+                        return session.send(Mono.just(session.textMessage(
+                                        serverErrorFrame("bridge_failed", "Bridge failed", io.getMessage()))))
                                 .then(session.close(CloseStatus.SERVER_ERROR));
                     }
 
-                    // Reader thread: PTY stdout → outbound binary frames.
-                    Thread reader = new Thread(() -> pump(bridgeRef.get(), ring, outbound, session, streamId));
+                    StreamCtx ctx = new StreamCtx(
+                            n, streamId, bridgeRef, generation, rebridgeSeq, cols, rows, selectedTarget, outbound);
+
+                    // Single long-lived reader: PTY stdout → outbound binary
+                    // frames, surviving mid-stream bridge swaps via the
+                    // generation token (it never completes the outbound sink on a
+                    // swap — only on true teardown).
+                    Thread reader = new Thread(() -> pump(ring, session, ctx));
                     reader.setDaemon(true);
                     reader.setName("ai-sandbox-pty-out-" + streamId.value());
                     reader.start();
 
                     // Incoming pipeline: text → control, binary → PTY stdin.
                     Flux<Void> incoming = session.receive()
-                            .flatMap(msg -> handleIncoming(msg, bridgeRef.get(), session, streamId))
+                            .flatMap(msg -> handleIncoming(msg, session, ctx))
                             .then()
                             .flux();
 
@@ -259,13 +284,13 @@ public class SessionStreamHandler implements WebSocketHandler {
         return null;
     }
 
-    private Mono<Void> handleIncoming(
-            WebSocketMessage msg, TmuxBridgeService.Bridge bridge, WebSocketSession session, StreamId streamId) {
-        if (bridge == null) {
-            return Mono.empty();
-        }
+    private Mono<Void> handleIncoming(WebSocketMessage msg, WebSocketSession session, StreamCtx ctx) {
         switch (msg.getType()) {
             case BINARY:
+                TmuxBridgeService.Bridge bridge = ctx.bridgeRef.get();
+                if (bridge == null) {
+                    return Mono.empty();
+                }
                 ByteBuffer bb = msg.getPayload().asByteBuffer();
                 if (bb.remaining() > maxBinaryBytes) {
                     return session.close(CloseStatus.TOO_BIG_TO_PROCESS);
@@ -277,7 +302,7 @@ public class SessionStreamHandler implements WebSocketHandler {
                 } catch (IOException io) {
                     return session.close(CloseStatus.SERVER_ERROR);
                 }
-                facade.streamRegistry().touch(streamId);
+                facade.streamRegistry().touch(ctx.streamId);
                 return Mono.empty();
             case TEXT:
                 String text = msg.getPayloadAsText();
@@ -286,25 +311,36 @@ public class SessionStreamHandler implements WebSocketHandler {
                 }
                 try {
                     ControlMessage cm = controlSvc.parse(text);
-                    facade.streamRegistry().touch(streamId);
-                    return applyControl(cm, bridge, session);
+                    facade.streamRegistry().touch(ctx.streamId);
+                    return applyControl(cm, session, ctx);
                 } catch (IllegalArgumentException iae) {
-                    return session.send(Mono.just(session.textMessage(controlError(iae))))
-                            .then();
+                    ctx.outbound.tryEmitNext(session.textMessage(
+                            serverErrorFrame("bad_request", "Bad control message", iae.getMessage())));
+                    return Mono.empty();
                 }
             default:
                 return Mono.empty();
         }
     }
 
-    private Mono<Void> applyControl(ControlMessage cm, TmuxBridgeService.Bridge bridge, WebSocketSession session) {
+    private Mono<Void> applyControl(ControlMessage cm, WebSocketSession session, StreamCtx ctx) {
         switch (cm) {
-            case ControlMessage.Resize r -> bridge.resize(r.cols(), r.rows());
+            case ControlMessage.Resize r -> {
+                ctx.cols.set(r.cols());
+                ctx.rows.set(r.rows());
+                TmuxBridgeService.Bridge bridge = ctx.bridgeRef.get();
+                if (bridge != null) {
+                    bridge.resize(r.cols(), r.rows());
+                }
+            }
             case ControlMessage.MouseControl m -> {
-                try {
-                    bridge.writeStdin(controlSvc.toXtermSgr(m));
-                } catch (IOException io) {
-                    return session.close(CloseStatus.SERVER_ERROR);
+                TmuxBridgeService.Bridge bridge = ctx.bridgeRef.get();
+                if (bridge != null) {
+                    try {
+                        bridge.writeStdin(controlSvc.toXtermSgr(m));
+                    } catch (IOException io) {
+                        return session.close(CloseStatus.SERVER_ERROR);
+                    }
                 }
             }
             case ControlMessage.CloseControl c -> {
@@ -313,49 +349,160 @@ public class SessionStreamHandler implements WebSocketHandler {
             case ControlMessage.ErrorMessage e -> {
                 // Server side does not act on client-emitted error frames.
             }
+            case ControlMessage.EnumerateTargets et -> {
+                // Enumeration shells docker/tmux — never on the Reactor event loop.
+                Schedulers.boundedElastic().schedule(() -> {
+                    List<StreamServerMessage.TargetInfo> targets = facade.enumerateTargets(ctx.n);
+                    emit(ctx.outbound, session, new StreamServerMessage.Targets(targets, ctx.selectedTarget.get()));
+                });
+            }
+            case ControlMessage.SelectTarget st -> {
+                // Re-bridge mid-stream — off the event loop (blocking docker/tmux).
+                Schedulers.boundedElastic().schedule(() -> rebridge(session, ctx, st.targetId()));
+            }
         }
         return Mono.empty();
     }
 
-    private void pump(
-            TmuxBridgeService.Bridge bridge,
-            OutputRingBuffer ring,
-            Sinks.Many<WebSocketMessage> outbound,
-            WebSocketSession session,
-            StreamId streamId) {
+    /**
+     * Switch the stream's bridged target on the same WebSocket. Honours the
+     * swap-ordering invariant (challenger guardrail #1):
+     *
+     * <pre>
+     *   start new bridge → swap bridgeRef + bump generation → THEN close old.
+     * </pre>
+     *
+     * <p>Closing the old bridge first would unblock the pump's {@code readStdout}
+     * while it still holds the OLD generation, so it would treat the EOF as true
+     * teardown and complete the shared outbound sink — killing the WebSocket
+     * instead of continuing on the new bridge.
+     */
+    private void rebridge(WebSocketSession session, StreamCtx ctx, String targetId) {
+        try {
+            String bridgeSessionId = ctx.streamId.value() + "-g" + ctx.rebridgeSeq.incrementAndGet();
+            TmuxBridgeService.Bridge fresh =
+                    facade.rebridge(ctx.n, bridgeSessionId, targetId, ctx.cols.get(), ctx.rows.get());
+            // ── guardrail #1 swap ordering: new started above → swap + bump → close old ──
+            TmuxBridgeService.Bridge old = ctx.bridgeRef.getAndSet(fresh); // swap
+            ctx.generation.incrementAndGet(); // bump → the pump picks up `fresh`
+            if (old != null) {
+                old.close(); // close old LAST (unblocks the pump's now-stale read)
+            }
+            ctx.selectedTarget.set(targetId == null ? TARGET_MAIN : targetId);
+            fresh.resize(ctx.cols.get(), ctx.rows.get());
+            emit(ctx.outbound, session, new StreamServerMessage.TargetSelected(targetId));
+        } catch (Exception e) {
+            LOG.warn("re-bridge to target {} failed: {}", targetId, e.toString());
+            emit(
+                    ctx.outbound,
+                    session,
+                    new StreamServerMessage.ServerError(
+                            "rebridge_failed", "Target switch failed", e.getMessage() == null ? "" : e.getMessage()));
+        }
+    }
+
+    /** Serialize a server frame and enqueue it on the shared outbound sink. */
+    private void emit(Sinks.Many<WebSocketMessage> outbound, WebSocketSession session, StreamServerMessage msg) {
+        outbound.tryEmitNext(session.textMessage(new String(controlSvc.serialize(msg), StandardCharsets.UTF_8)));
+    }
+
+    private String serverErrorFrame(String code, String title, String detail) {
+        return new String(
+                controlSvc.serialize(new StreamServerMessage.ServerError(code, title, detail == null ? "" : detail)),
+                StandardCharsets.UTF_8);
+    }
+
+    /**
+     * Single long-lived PTY reader. Reads from the <em>current</em> bridge
+     * ({@code ctx.bridgeRef}); on a mid-stream re-bridge the generation token
+     * advances and this loop picks up the swapped-in bridge instead of treating
+     * the old bridge's EOF as teardown. The outbound sink is completed ONLY on
+     * true teardown (the loop exit, in the finally) — never on a swap.
+     */
+    private void pump(OutputRingBuffer ring, WebSocketSession session, StreamCtx ctx) {
         byte[] buf = new byte[8192];
         StreamRegistryService registry = facade.streamRegistry();
+        int myGen = ctx.generation.get();
+        TmuxBridgeService.Bridge bridge = ctx.bridgeRef.get();
         try {
-            while (bridge.isAlive()) {
-                int n = bridge.readStdout(buf);
-                if (n < 0) {
+            while (true) {
+                if (ctx.generation.get() != myGen) {
+                    // A re-bridge swapped the bridge in; switch to it.
+                    myGen = ctx.generation.get();
+                    bridge = ctx.bridgeRef.get();
+                }
+                if (bridge == null) {
+                    break; // true teardown
+                }
+                int rd;
+                try {
+                    rd = bridge.readStdout(buf);
+                } catch (IOException io) {
+                    if (ctx.generation.get() != myGen) {
+                        continue; // old bridge closed by a swap — pick up the new one
+                    }
+                    LOG.info("PTY reader done: {}", io.toString());
                     break;
                 }
-                if (n == 0) {
+                if (rd < 0) {
+                    if (ctx.generation.get() != myGen) {
+                        continue; // old bridge EOF due to a swap — continue on the new one
+                    }
+                    break; // true EOF → teardown
+                }
+                if (rd == 0) {
                     continue;
                 }
-                if (!ring.write(buf, 0, n)) {
-                    String err = "{\"type\":\"error\",\"code\":\"stream_overflow\",\"detail\":\"output buffer full\"}";
-                    outbound.tryEmitNext(session.textMessage(err));
+                if (!ring.write(buf, 0, rd)) {
+                    ctx.outbound.tryEmitNext(session.textMessage(
+                            serverErrorFrame("stream_overflow", "Stream overflow", "output buffer full")));
                     session.close(CloseStatus.TOO_BIG_TO_PROCESS).subscribe();
                     return;
                 }
                 byte[] drained = ring.drain(maxBinaryBytes);
                 if (drained.length > 0) {
-                    outbound.tryEmitNext(session.binaryMessage(bf -> bf.wrap(drained)));
-                    registry.touch(streamId);
+                    ctx.outbound.tryEmitNext(session.binaryMessage(bf -> bf.wrap(drained)));
+                    registry.touch(ctx.streamId);
                 }
             }
-        } catch (IOException io) {
-            LOG.info("PTY reader done: {}", io.toString());
         } finally {
-            outbound.tryEmitComplete();
+            // Reached only on true teardown — never on a bridge swap.
+            ctx.outbound.tryEmitComplete();
         }
     }
 
-    private String controlError(Exception e) {
-        return "{\"type\":\"error\",\"code\":\"bad_request\",\"detail\":\""
-                + (e.getMessage() == null ? "" : e.getMessage().replace("\"", "'")) + "\"}";
+    /** Per-stream context shared between the incoming pipeline and the pump. */
+    private static final class StreamCtx {
+        final int n;
+        final StreamId streamId;
+        final AtomicReference<TmuxBridgeService.Bridge> bridgeRef;
+        final AtomicInteger generation;
+        final AtomicInteger rebridgeSeq;
+        final AtomicInteger cols;
+        final AtomicInteger rows;
+        final AtomicReference<String> selectedTarget;
+        final Sinks.Many<WebSocketMessage> outbound;
+
+        StreamCtx(
+                int n,
+                StreamId streamId,
+                AtomicReference<TmuxBridgeService.Bridge> bridgeRef,
+                AtomicInteger generation,
+                AtomicInteger rebridgeSeq,
+                AtomicInteger cols,
+                AtomicInteger rows,
+                AtomicReference<String> selectedTarget,
+                Sinks.Many<WebSocketMessage> outbound) {
+            this.n = n;
+            this.streamId = streamId;
+            this.bridgeRef = bridgeRef;
+            this.generation = generation;
+            this.rebridgeSeq = rebridgeSeq;
+            this.cols = cols;
+            this.rows = rows;
+            this.selectedTarget = selectedTarget;
+            this.outbound = outbound;
+        }
     }
 
     private static int extractN(WebSocketSession session) {

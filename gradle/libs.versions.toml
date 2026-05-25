@@ -67,6 +67,7 @@ androidxWindow           = "1.5.1"
 androidxDatastore        = "1.2.1"
 androidxSecurityCrypto   = "1.1.0"
 androidxAppcompat        = "1.7.0"
+androidxAnnotation       = "1.9.0"
 
 cameraX                  = "1.6.1"
 zxingCore                = "3.5.4"
@@ -169,6 +170,7 @@ androidx-activity-compose       = { module = "androidx.activity:activity-compose
 androidx-core-ktx               = { module = "androidx.core:core-ktx", version.ref = "androidxCoreKtx" }
 androidx-fragment-ktx           = { module = "androidx.fragment:fragment-ktx", version.ref = "androidxFragment" }
 androidx-appcompat              = { module = "androidx.appcompat:appcompat", version.ref = "androidxAppcompat" }
+androidx-annotation             = { module = "androidx.annotation:annotation", version.ref = "androidxAnnotation" }
 
 androidx-lifecycle-runtime-ktx  = { module = "androidx.lifecycle:lifecycle-runtime-ktx", version.ref = "androidxLifecycle" }
 androidx-lifecycle-viewmodel-compose = { module = "androidx.lifecycle:lifecycle-viewmodel-compose", version.ref = "androidxLifecycle" }

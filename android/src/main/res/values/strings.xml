@@ -47,6 +47,8 @@
     <string name="terminal_back">Back</string>
     <string name="terminal_split">Toggle split pane</string>
     <string name="terminal_more">More</string>
+    <string name="terminal_menu_delete">Delete session</string>
+    <string name="terminal_menu_disconnect">Disconnect</string>
     <string name="terminal_modifier_tmux">⌘ tmux</string>
     <string name="terminal_modifier_ctrl">Ctrl</string>
     <string name="terminal_modifier_alt">Alt</string>

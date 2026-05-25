@@ -76,6 +76,80 @@ Mirrors the RFC 9457 problem-details shape. Emitted by the server when
 something the WebSocket cannot recover from happens. Typically followed
 by a WebSocket close.
 
+## Agent-team switcher frames (UC-21)
+
+A single stream can switch which tmux target it bridges — the **main**
+session or one **agent-team member** — without reconnecting. Agent-team
+teammates are Claude Code's own agent-team feature, rendered as tmux
+**panes** in a window on a separate `claude-swarm-<pid>` socket; the main
+session lives on the container's default socket. The server enumerates
+targets and re-bridges in place; the client mirrors the selection.
+
+### `enumerate-targets` (client → server)
+
+```json
+{ "type": "enumerate-targets" }
+```
+
+Asks the server to list the targets for this session. The server replies
+with a `targets` frame. Discovery is dynamic (no hard-coded pid): the
+server scans the container's tmux sockets and reads pane metadata.
+
+### `targets` (server → client)
+
+```json
+{
+  "type": "targets",
+  "selectedId": "main",
+  "targets": [
+    { "id": "main", "kind": "main", "title": "main",
+      "agentName": null, "agentType": null, "agentColor": null, "teamName": null,
+      "socket": null, "session": "main", "window": null, "pane": null },
+    { "id": "swarm:claude-swarm-15713:0.0", "kind": "orchestrator", "title": "✳ general-purpose",
+      "agentName": null, "agentType": "general-purpose", "agentColor": null, "teamName": "pingpong-functest",
+      "socket": "/tmp/tmux-997/claude-swarm-15713", "session": "claude-swarm", "window": "0", "pane": "0" },
+    { "id": "swarm:claude-swarm-15713:0.1", "kind": "swarm", "title": "✳ ping",
+      "agentName": "ping", "agentType": "general-purpose", "agentColor": "blue", "teamName": "pingpong-functest",
+      "socket": "/tmp/tmux-997/claude-swarm-15713", "session": "claude-swarm", "window": "0", "pane": "1" }
+  ]
+}
+```
+
+| Field        | Meaning                                                                 |
+|--------------|-------------------------------------------------------------------------|
+| `selectedId` | `id` of the target this stream is currently bridged to.                 |
+| `id`         | Opaque, stable id the client echoes back in `select-target`.            |
+| `kind`       | `main` \| `swarm` (a teammate) \| `orchestrator` (pane without `--agent-name`). |
+| `title`      | tmux pane title (e.g. the agent's display label).                       |
+| `agentName` / `agentType` / `agentColor` / `teamName` | Agent-team metadata from the pane process argv; `null` when unreadable. |
+| `socket` / `session` / `window` / `pane` | tmux coordinates the server re-bridges to; `null` fields ⇒ the default-socket main session. |
+
+The **main** target is always present and always first, even when no team
+is running (or when the default socket has no server yet — a placeholder).
+
+### `select-target` (client → server)
+
+```json
+{ "type": "select-target", "targetId": "swarm:claude-swarm-15713:0.1" }
+```
+
+Switch the stream to `targetId` **mid-stream, on the same WebSocket**. The
+server starts a fresh bridge to the new target, atomically swaps the live
+bridge, then tears the old one down (so the long-lived output pump never
+sees a gap), and replies with `target-selected`. On failure (unknown or
+vanished target, tmux error) it replies with an `error` frame and the
+stream stays on its current target. The client should re-send a `resize`
+after a switch so the new PTY matches the rendered geometry.
+
+### `target-selected` (server → client)
+
+```json
+{ "type": "target-selected", "targetId": "swarm:claude-swarm-15713:0.1" }
+```
+
+Acknowledges a successful switch. Subsequent binary frames carry the new
+target's PTY stdout, and binary stdin is routed to it.
+
 ## WebSocket close-code matrix
 
 | Close code | When                                                              |

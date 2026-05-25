@@ -1,0 +1,207 @@
+package com.aisandbox.android.terminal
+
+import android.content.Context
+import com.aisandbox.android.net.AiSandboxHttpClient
+import com.aisandbox.android.net.ServerProfileStore
+import com.aisandbox.android.net.StreamClient
+import com.aisandbox.android.ui.screens.TerminalState
+import java.util.concurrent.atomic.AtomicInteger
+import org.assertj.core.api.Assertions.assertThat
+import org.junit.jupiter.api.BeforeEach
+import org.junit.jupiter.api.Test
+import org.mockito.Mockito.mock
+import org.mockito.Mockito.verify
+
+/**
+ * UC-21 — pure-JVM coverage for [TerminalStreamController], the process-scoped
+ * owner of one session's stream. Runs on the JUnit-5 (Jupiter) unit lane
+ * (`:android:testDebugUnitTest`) — no Robolectric, no emulator, no real network.
+ *
+ * <h2>What this pins</h2>
+ *
+ * <ul>
+ *   <li>AC#13 client mirror — [TerminalStreamController.onControlFrame] parses
+ *       the server's {@code targets} / {@code target-selected} / {@code error}
+ *       frames into the [targets] / [selectedTargetId] state, degrading
+ *       gracefully on malformed / unknown frames (driven by reflection so the
+ *       parse contract is tested deterministically, without the reconnect
+ *       loop's coroutines / suspend network calls).</li>
+ *   <li>AC#11 — [selectTarget] optimistically records the selection AND routes
+ *       to the existing client via {@code sendSelectTarget} + a re-asserting
+ *       {@code sendResize} (no reconnect — the {@code streamClientFactory} is
+ *       never re-invoked).</li>
+ *   <li>AC#4 — [sendResize] mirrors geometry and ignores non-positive dims.</li>
+ *   <li>AC#7 — [close] tears the client down and reports closed.</li>
+ *   <li>AC#10 — the always-present main target id is {@code "main"}; the
+ *       controller starts on it with an empty target row (AC#12 hidden state).</li>
+ * </ul>
+ *
+ * <p>The streamClient is normally private and assigned only inside the connect
+ * loop; the reflection seam below injects a mock so the no-reconnect routing +
+ * teardown paths are exercised without spinning the loop (which would require
+ * stubbing suspend {@code StreamClient.connect()} and
+ * {@code ServerProfileStore.current()} — fragile under plain Mockito). The
+ * enumerate-on-open + reconnect-re-apply loop wiring is the integration concern
+ * verified by {@code StreamClientControlFrameTest} (the wire JSON) plus review.
+ */
+class TerminalStreamControllerTest {
+
+    private val factoryCount = AtomicInteger(0)
+    private val closedSessions = mutableListOf<Int>()
+    private lateinit var controller: TerminalStreamController
+
+    @BeforeEach
+    fun setUp() {
+        val ctx = mock(Context::class.java)
+        controller = TerminalStreamController(
+            appContext = ctx,
+            sessionN = 7,
+            profileStore = mock(ServerProfileStore::class.java),
+            httpClientFactory = { mock(AiSandboxHttpClient::class.java) },
+            streamClientFactory = { _, _ ->
+                factoryCount.incrementAndGet()
+                mock(StreamClient::class.java)
+            },
+            onClosed = { closedSessions.add(it) },
+        )
+    }
+
+    // ── initial state ───────────────────────────────────────────────────────
+
+    @Test
+    fun `starts on the main target with an empty switcher row`() {
+        assertThat(TerminalStreamController.MAIN_TARGET_ID).isEqualTo("main")
+        assertThat(controller.selectedTargetId.value).isEqualTo("main")
+        assertThat(controller.targets.value).isEmpty()
+        assertThat(controller.state.value).isEqualTo(TerminalState.Idle)
+    }
+
+    // ── AC#13 — control-frame parse (client mirror) ──────────────────────────
+
+    @Test
+    fun `targets frame populates the switcher with metadata and applies selectedId`() {
+        onControlFrame(
+            """
+            {"type":"targets","targets":[
+              {"id":"main","kind":"main","title":"main"},
+              {"id":"swarm:claude-swarm-1:0.0","kind":"swarm","title":"agent ping",
+               "agentName":"ping","agentType":"general-purpose","agentColor":"blue","teamName":"pingpong"}
+            ],"selectedId":"swarm:claude-swarm-1:0.0"}
+            """.trimIndent(),
+        )
+
+        val targets = controller.targets.value
+        assertThat(targets).hasSize(2)
+        assertThat(targets[0].id).isEqualTo("main")
+        val ping = targets[1]
+        assertThat(ping.kind).isEqualTo("swarm")
+        assertThat(ping.title).isEqualTo("agent ping")
+        assertThat(ping.agentName).isEqualTo("ping")
+        assertThat(ping.agentType).isEqualTo("general-purpose")
+        assertThat(ping.agentColor).isEqualTo("blue")
+        assertThat(ping.teamName).isEqualTo("pingpong")
+        // AC#13 — the server's current selection is mirrored.
+        assertThat(controller.selectedTargetId.value).isEqualTo("swarm:claude-swarm-1:0.0")
+    }
+
+    @Test
+    fun `target title falls back to agentName then id when absent`() {
+        onControlFrame(
+            """{"type":"targets","targets":[
+                 {"id":"main","kind":"main","title":"main"},
+                 {"id":"swarm:s:0.1","kind":"swarm","agentName":"pong"},
+                 {"id":"swarm:s:0.2","kind":"swarm"}
+               ],"selectedId":"main"}""",
+        )
+        val targets = controller.targets.value
+        assertThat(targets).hasSize(3)
+        assertThat(targets[1].title).isEqualTo("pong") // title absent -> agentName
+        assertThat(targets[2].title).isEqualTo("swarm:s:0.2") // title + agentName absent -> id
+    }
+
+    @Test
+    fun `target-selected frame updates the selection`() {
+        onControlFrame("""{"type":"target-selected","targetId":"swarm:claude-swarm-1:0.1"}""")
+        assertThat(controller.selectedTargetId.value).isEqualTo("swarm:claude-swarm-1:0.1")
+    }
+
+    @Test
+    fun `malformed, unknown and error frames are ignored without disturbing state`() {
+        // Seed a known-good target list first.
+        onControlFrame("""{"type":"targets","targets":[{"id":"main","kind":"main","title":"main"}],"selectedId":"main"}""")
+        val before = controller.targets.value
+
+        onControlFrame("not-json-at-all")
+        onControlFrame("""{"type":"bogus-frame"}""")
+        onControlFrame("""{"type":"error","code":"rebridge_failed","title":"x","detail":"y"}""")
+
+        assertThat(controller.targets.value).isEqualTo(before)
+        assertThat(controller.selectedTargetId.value).isEqualTo("main")
+    }
+
+    // ── AC#11 — selectTarget: optimistic + routes + no reconnect ──────────────
+
+    @Test
+    fun `selectTarget optimistically records the selection even when not connected`() {
+        controller.selectTarget("swarm:claude-swarm-1:0.1")
+        assertThat(controller.selectedTargetId.value).isEqualTo("swarm:claude-swarm-1:0.1")
+        // No connect attempt was triggered.
+        assertThat(factoryCount.get()).isZero()
+    }
+
+    @Test
+    fun `selectTarget routes to the live client via sendSelectTarget plus resize without reconnecting`() {
+        val client = mock(StreamClient::class.java)
+        setStreamClient(client)
+
+        controller.selectTarget("swarm:claude-swarm-1:0.1")
+
+        assertThat(controller.selectedTargetId.value).isEqualTo("swarm:claude-swarm-1:0.1")
+        verify(client).sendSelectTarget("swarm:claude-swarm-1:0.1")
+        // Re-asserts the current geometry on the switched PTY (AC#4 interplay);
+        // defaults are 80x24 until a resize arrives.
+        verify(client).sendResize(80, 24)
+        // AC#11 — switching is mid-stream; the client is NOT rebuilt.
+        assertThat(factoryCount.get()).isZero()
+    }
+
+    // ── AC#4 — resize mirroring ──────────────────────────────────────────────
+
+    @Test
+    fun `sendResize mirrors geometry and ignores non-positive dimensions`() {
+        controller.sendResize(120, 40)
+        assertThat(controller.size.value).isEqualTo(TermSize(120, 40))
+
+        controller.sendResize(0, 24)
+        controller.sendResize(80, -1)
+        assertThat(controller.size.value).isEqualTo(TermSize(120, 40))
+    }
+
+    // ── AC#7 — explicit teardown ──────────────────────────────────────────────
+
+    @Test
+    fun `close tears down the client and reports closed`() {
+        val client = mock(StreamClient::class.java)
+        setStreamClient(client)
+
+        controller.close("user-disconnect")
+
+        verify(client).close("user-disconnect")
+        assertThat(controller.state.value).isEqualTo(TerminalState.Idle)
+        assertThat(closedSessions).containsExactly(7)
+    }
+
+    // ── reflection seams ─────────────────────────────────────────────────────
+
+    private fun onControlFrame(text: String) {
+        val m = TerminalStreamController::class.java.getDeclaredMethod("onControlFrame", String::class.java)
+        m.isAccessible = true
+        m.invoke(controller, text)
+    }
+
+    private fun setStreamClient(client: StreamClient?) {
+        val f = TerminalStreamController::class.java.getDeclaredField("streamClient")
+        f.isAccessible = true
+        f.set(controller, client)
+    }
+}

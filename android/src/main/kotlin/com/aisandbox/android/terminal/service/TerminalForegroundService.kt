@@ -66,12 +66,13 @@ class TerminalForegroundService : Service() {
                 stopForegroundAndSelf()
             }
             else -> {
-                // Spurious restart by the OS (rare; START_NOT_STICKY is
-                // not what we want — we DO want to be restarted if the
-                // OS killed us mid-attach, so we use START_STICKY).
-                // Without an intent we don't know which session to
-                // attach; just keep the service alive without posting
-                // a notification.
+                // UC-21 AC#8 — START_STICKY redelivers a null intent after the
+                // OS kills + restarts the process. The WebSocket + emulator died
+                // with that process (they live in the process-scoped
+                // TerminalStreamController, not here), and we have no session
+                // context to re-attach, so a lingering foreground notification
+                // would be a zombie. Self-stop instead of leaking the FGS.
+                stopForegroundAndSelf()
             }
         }
         return START_STICKY

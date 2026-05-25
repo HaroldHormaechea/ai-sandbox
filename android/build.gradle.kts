@@ -249,6 +249,11 @@ dependencies {
     implementation(libs.kotlinx.coroutines.android)
     implementation(libs.kotlinx.serialization.json)
 
+    // ── Terminal emulator + view (vendored Termux, Apache-2.0; UC-21) ──
+    // `:terminal-view` transitively exposes `:terminal-emulator`
+    // (TerminalEmulator / TerminalSession) via its `api` edge.
+    implementation(project(":terminal-view"))
+
     // ── Crypto (PKCS#12 import) — UC13 ────────────────────────────────
     // Android's stock "BC" provider (the stripped-down one bundled with
     // the platform) does not register a SecretKeyFactory under the bare
