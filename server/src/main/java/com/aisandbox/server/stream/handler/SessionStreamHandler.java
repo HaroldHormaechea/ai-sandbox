@@ -4,6 +4,7 @@ import com.aisandbox.server.identity.ActiveConnectionRegistry;
 import com.aisandbox.server.identity.ActiveStreamRegistry;
 import com.aisandbox.server.identity.ClientIdentity;
 import com.aisandbox.server.stream.dto.ControlMessage;
+import com.aisandbox.server.stream.dto.StreamServerMessage;
 import com.aisandbox.server.stream.facade.StreamFacade;
 import com.aisandbox.server.stream.service.OutputRingBuffer;
 import com.aisandbox.server.stream.service.StreamControlMessageService;
@@ -13,6 +14,7 @@ import com.aisandbox.server.stream.service.TmuxBridgeService;
 import io.netty.channel.ChannelId;
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -56,6 +58,9 @@ public class SessionStreamHandler implements WebSocketHandler {
 
     /** Key under which the resolved identity is stored on the WebSocket session. */
     public static final String IDENTITY_ATTR = "ai-sandbox.client-identity";
+
+    /** Id of the always-present main-session target (AC#10). */
+    public static final String TARGET_MAIN = "main";
 
     private static final Logger LOG = LoggerFactory.getLogger(SessionStreamHandler.class);
 
@@ -167,7 +172,7 @@ public class SessionStreamHandler implements WebSocketHandler {
 
                     // Incoming pipeline: text → control, binary → PTY stdin.
                     Flux<Void> incoming = session.receive()
-                            .flatMap(msg -> handleIncoming(msg, bridgeRef.get(), session, streamId))
+                            .flatMap(msg -> handleIncoming(msg, bridgeRef.get(), session, streamId, outbound))
                             .then()
                             .flux();
 
@@ -260,7 +265,11 @@ public class SessionStreamHandler implements WebSocketHandler {
     }
 
     private Mono<Void> handleIncoming(
-            WebSocketMessage msg, TmuxBridgeService.Bridge bridge, WebSocketSession session, StreamId streamId) {
+            WebSocketMessage msg,
+            TmuxBridgeService.Bridge bridge,
+            WebSocketSession session,
+            StreamId streamId,
+            Sinks.Many<WebSocketMessage> outbound) {
         if (bridge == null) {
             return Mono.empty();
         }
@@ -287,7 +296,7 @@ public class SessionStreamHandler implements WebSocketHandler {
                 try {
                     ControlMessage cm = controlSvc.parse(text);
                     facade.streamRegistry().touch(streamId);
-                    return applyControl(cm, bridge, session);
+                    return applyControl(cm, bridge, session, outbound);
                 } catch (IllegalArgumentException iae) {
                     return session.send(Mono.just(session.textMessage(controlError(iae))))
                             .then();
@@ -297,7 +306,11 @@ public class SessionStreamHandler implements WebSocketHandler {
         }
     }
 
-    private Mono<Void> applyControl(ControlMessage cm, TmuxBridgeService.Bridge bridge, WebSocketSession session) {
+    private Mono<Void> applyControl(
+            ControlMessage cm,
+            TmuxBridgeService.Bridge bridge,
+            WebSocketSession session,
+            Sinks.Many<WebSocketMessage> outbound) {
         switch (cm) {
             case ControlMessage.Resize r -> bridge.resize(r.cols(), r.rows());
             case ControlMessage.MouseControl m -> {
@@ -313,8 +326,33 @@ public class SessionStreamHandler implements WebSocketHandler {
             case ControlMessage.ErrorMessage e -> {
                 // Server side does not act on client-emitted error frames.
             }
+            case ControlMessage.EnumerateTargets et -> {
+                // M3(b) replaces this with real swarm enumeration via the facade.
+                // Placeholder: reply with the always-present main target only.
+                StreamServerMessage reply = new StreamServerMessage.Targets(
+                        List.of(mainTargetInfo()), TARGET_MAIN);
+                emit(outbound, session, reply);
+            }
+            case ControlMessage.SelectTarget st -> {
+                // M3(b) replaces this with a real mid-stream re-bridge.
+                // Placeholder: acknowledge the selection without switching.
+                emit(outbound, session, new StreamServerMessage.TargetSelected(st.targetId()));
+            }
         }
         return Mono.empty();
+    }
+
+    /** Serialize a server frame and enqueue it on the shared outbound sink. */
+    private void emit(
+            Sinks.Many<WebSocketMessage> outbound, WebSocketSession session, StreamServerMessage msg) {
+        outbound.tryEmitNext(
+                session.textMessage(new String(controlSvc.serialize(msg), java.nio.charset.StandardCharsets.UTF_8)));
+    }
+
+    /** The synthesized always-present main-session target (AC#10). */
+    private static StreamServerMessage.TargetInfo mainTargetInfo() {
+        return new StreamServerMessage.TargetInfo(
+                TARGET_MAIN, "main", "main", null, null, null, null, null, "main", null, null);
     }
 
     private void pump(

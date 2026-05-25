@@ -13,13 +13,17 @@ import com.fasterxml.jackson.annotation.JsonTypeInfo;
     @JsonSubTypes.Type(value = ControlMessage.Resize.class, name = "resize"),
     @JsonSubTypes.Type(value = ControlMessage.MouseControl.class, name = "mouse"),
     @JsonSubTypes.Type(value = ControlMessage.CloseControl.class, name = "close"),
-    @JsonSubTypes.Type(value = ControlMessage.ErrorMessage.class, name = "error")
+    @JsonSubTypes.Type(value = ControlMessage.ErrorMessage.class, name = "error"),
+    @JsonSubTypes.Type(value = ControlMessage.EnumerateTargets.class, name = "enumerate-targets"),
+    @JsonSubTypes.Type(value = ControlMessage.SelectTarget.class, name = "select-target")
 })
 public sealed interface ControlMessage
         permits ControlMessage.Resize,
                 ControlMessage.MouseControl,
                 ControlMessage.CloseControl,
-                ControlMessage.ErrorMessage {
+                ControlMessage.ErrorMessage,
+                ControlMessage.EnumerateTargets,
+                ControlMessage.SelectTarget {
 
     record Resize(int cols, int rows) implements ControlMessage {}
 
@@ -35,4 +39,21 @@ public sealed interface ControlMessage
 
     /** Server-emitted error frame (RFC 9457 shape). */
     record ErrorMessage(String code, String title, String detail) implements ControlMessage {}
+
+    /**
+     * UC-21 — client asks the server to enumerate the stream targets
+     * available for this session (the main tmux session plus any agent-team
+     * panes). The server replies with a {@link StreamServerMessage.Targets}
+     * frame. No payload.
+     */
+    record EnumerateTargets() implements ControlMessage {}
+
+    /**
+     * UC-21 — client asks the server to switch this stream to a different
+     * target mid-stream (the server re-bridges on the same WebSocket). The
+     * server replies with {@link StreamServerMessage.TargetSelected} on
+     * success or a {@link StreamServerMessage.ServerError} frame on failure.
+     * {@code targetId} is the id from a prior {@code Targets} enumeration.
+     */
+    record SelectTarget(String targetId) implements ControlMessage {}
 }

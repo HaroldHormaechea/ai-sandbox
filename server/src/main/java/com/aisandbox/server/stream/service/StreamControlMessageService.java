@@ -1,6 +1,7 @@
 package com.aisandbox.server.stream.service;
 
 import com.aisandbox.server.stream.dto.ControlMessage;
+import com.aisandbox.server.stream.dto.StreamServerMessage;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import java.nio.charset.StandardCharsets;
@@ -27,6 +28,22 @@ public class StreamControlMessageService {
     }
 
     public byte[] serialize(ControlMessage msg) {
+        try {
+            return json.writeValueAsBytes(msg);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException jpe) {
+            return ("{\"type\":\"error\",\"code\":\"serialize_failed\",\"detail\":\""
+                            + jpe.getMessage().replace("\"", "'") + "\"}")
+                    .getBytes(StandardCharsets.UTF_8);
+        }
+    }
+
+    /**
+     * UC-21 — dedicated serialization path for the server→client
+     * {@link StreamServerMessage} hierarchy (challenger guardrail #3:
+     * {@link #serialize(ControlMessage)} does not cover it — the two hierarchies
+     * carry separate {@code @JsonSubTypes} discriminators).
+     */
+    public byte[] serialize(StreamServerMessage msg) {
         try {
             return json.writeValueAsBytes(msg);
         } catch (com.fasterxml.jackson.core.JsonProcessingException jpe) {
