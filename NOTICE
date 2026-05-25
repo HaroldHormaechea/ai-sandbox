@@ -1,0 +1,45 @@
+ai-sandbox — third-party attribution
+=====================================
+
+This product bundles source code from the following third-party projects.
+
+--------------------------------------------------------------------------
+Termux terminal libraries  (terminal-emulator/, terminal-view/)
+--------------------------------------------------------------------------
+
+Vendored under UC-21 to render a real ANSI/VT terminal in the Android client.
+
+  Origin:   https://github.com/termux/termux-app
+            (modules `terminal-emulator` and `terminal-view`)
+  Upstream lineage: derived from "Terminal Emulator for Android"
+            https://github.com/jackpal/Android-Terminal-Emulator
+  License:  Apache License, Version 2.0 — see LICENSE-termux.
+
+Copyright (C) Termux contributors and the Terminal Emulator for Android
+authors.
+
+Modifications made in ai-sandbox (each retains the Apache-2.0 license):
+
+  * The JNI local-process module was NOT vendored. Specifically
+    `com/termux/terminal/JNI.java` and `src/main/jni/**` (the native
+    `termux.c` pseudoterminal spawner) are omitted: the ai-sandbox client
+    has no local shell — the shell runs in a remote Docker container and
+    is reached over a WebSocket.
+
+  * `com/termux/terminal/TerminalSession.java` was rewritten to be driven
+    by that external byte stream instead of a local PTY: outbound bytes
+    (keystrokes + emulator replies) are forwarded to a pluggable
+    `OutputListener` (wired to the WebSocket), and inbound PTY stdout is
+    pushed in via `appendToEmulator(byte[], int)`. The public API consumed
+    by `TerminalView` is unchanged.
+
+  * A `getBytesAvailable()` accessor was added to
+    `com/termux/terminal/ByteQueue.java`.
+
+  * The Groovy `build.gradle` + maven-publish config of each module was
+    replaced with a Kotlin-DSL `build.gradle.kts` wired to this repo's
+    Gradle version catalog. No functional code changes.
+
+  * Upstream unit tests under `src/test/**` were not vendored.
+
+`com/termux/view/**` is vendored unmodified.

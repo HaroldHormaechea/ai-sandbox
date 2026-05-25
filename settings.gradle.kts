@@ -48,3 +48,11 @@ project(":server").projectDir = file("server")
 // docker-compose / shell-script work in the repo root.
 include(":android")
 project(":android").projectDir = file("android")
+
+// UC-21 — vendored Termux terminal libraries (Apache-2.0), used by the
+// Android client to render a real ANSI/VT terminal over the WebSocket
+// stream. `:terminal-view` depends on `:terminal-emulator`. See NOTICE.
+include(":terminal-emulator")
+project(":terminal-emulator").projectDir = file("terminal-emulator")
+include(":terminal-view")
+project(":terminal-view").projectDir = file("terminal-view")
