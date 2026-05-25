@@ -32,4 +32,5 @@ Statuses:
 | 20 | [use-cases/20-android-swipe-to-delete-session.md](use-cases/20-android-swipe-to-delete-session.md) | Android client — swipe-to-delete a session (reveal red + trash, confirm, actually delete) | done | 2026-05-23 |
 | 21 | [use-cases/21-android-terminal-emulator-and-agent-switcher.md](use-cases/21-android-terminal-emulator-and-agent-switcher.md) | Android client — usable terminal (real emulator + keyboard) + hamburger delete/disconnect + agent-team switcher | done | 2026-05-25 |
 | 22 | [use-cases/22-onboarding-toolchain-android-testing.md](use-cases/22-onboarding-toolchain-android-testing.md) | Onboarding toolchain selection with full Android build/test/emulator image support | done | 2026-05-25 |
+| 23 | [use-cases/23-android-terminal-keyboard-insets.md](use-cases/23-android-terminal-keyboard-insets.md) | Android terminal — on-screen keyboard occludes the input (IME insets) | done | 2026-05-25 |
 
