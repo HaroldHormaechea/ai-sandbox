@@ -4,8 +4,11 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.aisandbox.android.AiSandboxApplication
+import com.aisandbox.android.net.ApiResult
+import com.aisandbox.android.net.SessionSummary
 import com.aisandbox.android.terminal.StreamTarget
 import com.aisandbox.android.terminal.TerminalStreamController
+import com.aisandbox.android.terminal.service.TerminalForegroundService
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -55,6 +58,14 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
     private val _selectedTargetId = MutableStateFlow(TerminalStreamController.MAIN_TARGET_ID)
     val selectedTargetId: StateFlow<String> = _selectedTargetId.asStateFlow()
 
+    /**
+     * The current session's summary, used by the hamburger Delete action's
+     * confirm dialog (the force toggle keys on `activeStreams`). Best-effort —
+     * falls back to a minimal summary if the list call fails (AC#6).
+     */
+    private val _currentSummary = MutableStateFlow<SessionSummary?>(null)
+    val currentSummary: StateFlow<SessionSummary?> = _currentSummary.asStateFlow()
+
     /** Resolve the controller for [sessionN] and (idempotently) start its loop. */
     fun attach(sessionN: Int) {
         if (this.sessionN == sessionN && controller != null) {
@@ -70,6 +81,19 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
         viewModelScope.launch { c.haptic.collect { _haptic.tryEmit(it) } }
         viewModelScope.launch { c.targets.collect { _targets.value = it } }
         viewModelScope.launch { c.selectedTargetId.collect { _selectedTargetId.value = it } }
+        viewModelScope.launch { refreshSummary(sessionN) }
+    }
+
+    private suspend fun refreshSummary(n: Int) {
+        val profile = container.profileStore.current() ?: run {
+            _currentSummary.value = SessionSummary(n = n)
+            return
+        }
+        val api = container.sessionsApi(container.httpClient(profile))
+        _currentSummary.value = when (val r = api.list()) {
+            is ApiResult.Success -> r.value.firstOrNull { it.n == n } ?: SessionSummary(n = n)
+            is ApiResult.HttpFailure -> SessionSummary(n = n)
+        }
     }
 
     /** Send PTY stdin bytes (the modifier bar dispatches through here — AC#3). */
@@ -90,6 +114,46 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
     /** AC#25 "tap to reconnect". */
     fun userTriggeredReconnect() {
         controller?.userTriggeredReconnect()
+    }
+
+    /**
+     * AC#7 — Disconnect: tear down the stream + stop the foreground service.
+     * No confirmation; the screen navigates back immediately after.
+     */
+    fun disconnect() {
+        controller?.close("user-disconnect")
+        controller = null
+        sessionN = -1
+        stopForegroundService()
+    }
+
+    /**
+     * AC#6 — Delete the session on the server (reusing UC-20's force semantics),
+     * then tear down the stream + foreground service. [onResult] is invoked with
+     * the outcome on the main thread; the screen navigates back on success.
+     */
+    fun deleteSession(force: Boolean, onResult: (Boolean) -> Unit) {
+        val n = sessionN
+        viewModelScope.launch {
+            val profile = container.profileStore.current()
+            if (profile == null) {
+                onResult(false)
+                return@launch
+            }
+            val api = container.sessionsApi(container.httpClient(profile))
+            val ok = api.delete(n, force) is ApiResult.Success
+            if (ok) {
+                controller?.close("deleted")
+                controller = null
+                sessionN = -1
+                stopForegroundService()
+            }
+            onResult(ok)
+        }
+    }
+
+    private fun stopForegroundService() {
+        TerminalForegroundService.stop(getApplication<Application>())
     }
 
     // NOTE: onCleared() intentionally does NOT close the controller — the WS

@@ -17,6 +17,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material3.CenterAlignedTopAppBar
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -28,7 +30,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -39,6 +43,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.aisandbox.android.R
+import com.aisandbox.android.net.SessionSummary
 import com.aisandbox.android.requireContainer
 import com.aisandbox.android.terminal.TerminalStreamController
 import com.aisandbox.android.terminal.service.TerminalForegroundService
@@ -122,12 +127,15 @@ fun TerminalScreen(
     if (state is TerminalState.Open) {
         BatteryOptPrompt()
     }
-    // NOTE (UC-21 M1): the WebSocket + emulator are process-scoped now, so
-    // leaving the screen no longer tears the stream down. The remaining FGS
-    // lifecycle (back keeps syncing; Disconnect/Delete stop) lands in M2.
-    androidx.compose.runtime.DisposableEffect(Unit) {
-        onDispose { TerminalForegroundService.stop(context) }
-    }
+    // AC#8 — the WebSocket + emulator are process-scoped, so leaving the screen
+    // via the back arrow no longer tears anything down (the prior DisposableEffect
+    // onDispose{ stop } is intentionally gone). Teardown is now explicit: the
+    // hamburger's Disconnect / Delete actions, or process death (FGS self-stops).
+
+    // Hamburger menu + delete-confirm dialog state (AC#5/#6/#7).
+    var menuOpen by remember { mutableStateOf(false) }
+    var showDeleteDialog by remember { mutableStateOf(false) }
+    val summary by viewModel.currentSummary.collectAsState()
 
     val scrollBehavior = TopAppBarDefaults.pinnedScrollBehavior()
 
@@ -171,12 +179,35 @@ fun TerminalScreen(
                     }
                 },
                 actions = {
-                    // M2 turns this into a Delete / Disconnect dropdown.
-                    IconButton(onClick = { /* M2: overflow menu */ }) {
-                        Icon(
-                            imageVector = Icons.Outlined.MoreVert,
-                            contentDescription = stringResource(R.string.terminal_more),
-                        )
+                    // AC#5 — hamburger menu with Delete session + Disconnect.
+                    Box {
+                        IconButton(onClick = { menuOpen = true }) {
+                            Icon(
+                                imageVector = Icons.Outlined.MoreVert,
+                                contentDescription = stringResource(R.string.terminal_more),
+                            )
+                        }
+                        DropdownMenu(
+                            expanded = menuOpen,
+                            onDismissRequest = { menuOpen = false },
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.terminal_menu_delete)) },
+                                onClick = {
+                                    menuOpen = false
+                                    showDeleteDialog = true
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text(stringResource(R.string.terminal_menu_disconnect)) },
+                                onClick = {
+                                    menuOpen = false
+                                    // AC#7 — tear down + leave, no confirmation.
+                                    viewModel.disconnect()
+                                    onBack()
+                                },
+                            )
+                        }
                     }
                 },
                 scrollBehavior = scrollBehavior,
@@ -189,6 +220,20 @@ fun TerminalScreen(
             controller = controller,
             viewModel = viewModel,
             onReconnect = viewModel::userTriggeredReconnect,
+        )
+    }
+
+    // AC#6 — Delete reuses UC-20's confirm dialog (incl. the force toggle for
+    // attached sessions). On confirm we delete on the server, tear down the
+    // stream + FGS (in the ViewModel), and return to the list on success.
+    if (showDeleteDialog) {
+        DeleteSessionDialog(
+            target = summary ?: SessionSummary(n = sessionN),
+            onCancel = { showDeleteDialog = false },
+            onConfirm = { force ->
+                showDeleteDialog = false
+                viewModel.deleteSession(force) { ok -> if (ok) onBack() }
+            },
         )
     }
 }
