@@ -47,6 +47,7 @@ import com.aisandbox.android.net.SessionSummary
 import com.aisandbox.android.requireContainer
 import com.aisandbox.android.terminal.TerminalStreamController
 import com.aisandbox.android.terminal.service.TerminalForegroundService
+import com.aisandbox.android.ui.components.AgentSwitcherBar
 import com.aisandbox.android.ui.components.BatteryOptPrompt
 import com.aisandbox.android.ui.components.HapticEventListener
 import com.aisandbox.android.ui.components.KeyEncoding
@@ -246,6 +247,9 @@ private fun TerminalBody(
     viewModel: TerminalViewModel,
     onReconnect: () -> Unit,
 ) {
+    val targets by viewModel.targets.collectAsState()
+    val selectedTargetId by viewModel.selectedTargetId.collectAsState()
+
     Column(modifier = Modifier.fillMaxSize().padding(padding).background(BgWorkbench)) {
         if (state is TerminalState.Reconnecting) {
             ReconnectBanner(state = state)
@@ -253,6 +257,13 @@ private fun TerminalBody(
         if (state is TerminalState.GaveUp) {
             DisconnectedBanner(onReconnect = onReconnect)
         }
+        // AC#9–12 — agent-team switcher between the top bar and the terminal.
+        // Self-hides when only the main target is present.
+        AgentSwitcherBar(
+            targets = targets,
+            selectedTargetId = selectedTargetId,
+            onSelect = viewModel::selectTarget,
+        )
         // Body: the real terminal surface (Termux TerminalView via AndroidView).
         Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
             TerminalSurface(controller = controller, modifier = Modifier.fillMaxSize())

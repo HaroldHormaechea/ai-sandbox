@@ -26,6 +26,11 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonPrimitive
 
 /**
  * UC-21 — process-scoped owner of one session's terminal stream.
@@ -64,6 +69,7 @@ class TerminalStreamController(
     /** Application-scoped — cancelled only by [close]; never tied to a screen. */
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val reconnect = ReconnectController()
+    private val controlJson = Json { ignoreUnknownKeys = true; isLenient = true }
 
     private var streamClient: StreamClient? = null
     private var connectJob: Job? = null
@@ -113,14 +119,45 @@ class TerminalStreamController(
     }
 
     /**
-     * Switch the streamed target mid-stream on the existing WebSocket (no
-     * reconnect). The actual `select-target` control frame is wired in M3; for
-     * now this records the selection so reconnect can re-apply it (AC#14).
+     * AC#11 — switch the streamed target mid-stream on the existing WebSocket
+     * (no reconnect). Optimistically records the selection (the server confirms
+     * with a {@code target-selected} frame) and re-sends resize so the new PTY
+     * matches the rendered geometry.
      */
     fun selectTarget(targetId: String) {
         _selectedTargetId.value = targetId
-        // M3: streamClient?.sendSelectTarget(targetId); then re-send resize.
-        streamClient?.sendResize(_size.value.cols, _size.value.rows)
+        val client = streamClient ?: return
+        client.sendSelectTarget(targetId)
+        client.sendResize(_size.value.cols, _size.value.rows)
+    }
+
+    /** Parse a server control frame (targets / target-selected / error). */
+    private fun onControlFrame(text: String) {
+        val obj = runCatching { controlJson.parseToJsonElement(text) }.getOrNull() as? JsonObject ?: return
+        when (obj["type"]?.jsonPrimitive?.contentOrNull) {
+            "targets" -> {
+                val arr = obj["targets"] as? JsonArray ?: JsonArray(emptyList())
+                _targets.value = arr.mapNotNull { e ->
+                    val o = e as? JsonObject ?: return@mapNotNull null
+                    val id = o["id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+                    StreamTarget(
+                        id = id,
+                        kind = o["kind"]?.jsonPrimitive?.contentOrNull ?: "swarm",
+                        title = o["title"]?.jsonPrimitive?.contentOrNull
+                            ?: o["agentName"]?.jsonPrimitive?.contentOrNull ?: id,
+                        agentName = o["agentName"]?.jsonPrimitive?.contentOrNull,
+                        agentType = o["agentType"]?.jsonPrimitive?.contentOrNull,
+                        agentColor = o["agentColor"]?.jsonPrimitive?.contentOrNull,
+                        teamName = o["teamName"]?.jsonPrimitive?.contentOrNull,
+                    )
+                }
+                obj["selectedId"]?.jsonPrimitive?.contentOrNull?.let { _selectedTargetId.value = it }
+            }
+            "target-selected" ->
+                obj["targetId"]?.jsonPrimitive?.contentOrNull?.let { _selectedTargetId.value = it }
+            "error" -> Log.w(TAG, "stream control error frame: ${text.take(200)}")
+            else -> { /* unknown frame type — ignore */ }
+        }
     }
 
     /** AC#25 "tap to reconnect" — reset back-off and restart the loop. */
@@ -169,17 +206,22 @@ class TerminalStreamController(
                     is StreamClient.State.Open -> {
                         reconnect.reset()
                         _state.value = TerminalState.Open
-                        // Re-assert geometry + selected target so a reconnect
-                        // restores the prior view (AC#4 / AC#14).
+                        // Re-assert geometry, refresh the target list, and
+                        // re-apply any prior selection so a reconnect restores
+                        // the prior view (AC#4 / AC#14).
                         val s = _size.value
                         client.sendResize(s.cols, s.rows)
+                        client.sendEnumerate()
                         if (_selectedTargetId.value != MAIN_TARGET_ID) {
-                            // M3: client.sendSelectTarget(_selectedTargetId.value)
+                            client.sendSelectTarget(_selectedTargetId.value)
                         }
-                        // Pump WS stdout into the emulator until the WS leaves Open.
+                        // Pump WS stdout into the emulator + collect control
+                        // frames until the WS leaves Open.
                         val pump = launch { client.incoming.collect { wsSession.feed(it) } }
+                        val control = launch { client.controlIncoming.collect { onControlFrame(it) } }
                         val terminal = client.state.first { it !is StreamClient.State.Open }
                         pump.cancel()
+                        control.cancel()
                         if (terminal is StreamClient.State.Revoked) {
                             _state.value = TerminalState.Revoked
                             return@launch

@@ -57,6 +57,15 @@ class StreamClient(
     private val _incoming = MutableSharedFlow<ByteArray>(replay = 0, extraBufferCapacity = 64)
     val incoming: SharedFlow<ByteArray> = _incoming.asSharedFlow()
 
+    /**
+     * UC-21 — server→client JSON text frames (the agent-switcher protocol:
+     * {@code targets} / {@code target-selected} / {@code error}). Emitted raw;
+     * the caller parses. Hot {@link SharedFlow} so the controller doesn't miss
+     * frames between collectors.
+     */
+    private val _controlIncoming = MutableSharedFlow<String>(replay = 0, extraBufferCapacity = 16)
+    val controlIncoming: SharedFlow<String> = _controlIncoming.asSharedFlow()
+
     private var ws: WebSocket? = null
     private val openedSignal = CompletableDeferred<Unit>()
 
@@ -95,6 +104,13 @@ class StreamClient(
     fun sendResize(cols: Int, rows: Int): Boolean =
         sendControl("""{"type":"resize","cols":$cols,"rows":$rows}""")
 
+    /** UC-21 — ask the server to enumerate stream targets (main + agent panes). */
+    fun sendEnumerate(): Boolean = sendControl("""{"type":"enumerate-targets"}""")
+
+    /** UC-21 — ask the server to switch this stream to {@code targetId} mid-stream. */
+    fun sendSelectTarget(targetId: String): Boolean =
+        sendControl("""{"type":"select-target","targetId":"${jsonEscape(targetId)}"}""")
+
     /**
      * Close the WebSocket cleanly with code 1000. Idempotent — once
      * closed the WS reference is nulled and re-connects must build a
@@ -129,11 +145,10 @@ class StreamClient(
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {
-            // The server may emit JSON text frames (control errors, ack
-            // messages) — log at info; the terminal renderer ignores text
-            // for now. Future revisions can pipe these through a
-            // separate flow.
+            // UC-21 — server JSON control frames (targets / target-selected /
+            // error). Surface raw on controlIncoming; the controller parses.
             Log.i(TAG, "WS text frame: ${text.take(200)}")
+            _controlIncoming.tryEmit(text)
         }
 
         override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
@@ -179,6 +194,10 @@ class StreamClient(
 
     @Suppress("unused")
     private fun bytesOf(text: String): ByteString = text.encodeUtf8()
+
+    /** Minimal JSON string escaping for a target id embedded in a control frame. */
+    private fun jsonEscape(s: String): String =
+        s.replace("\\", "\\\\").replace("\"", "\\\"")
 
     companion object {
         private const val TAG = "StreamClient"
