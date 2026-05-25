@@ -1,19 +1,27 @@
 package com.aisandbox.server.stream;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.aisandbox.server.audit.AuditAction;
 import com.aisandbox.server.audit.AuditLogger;
 import com.aisandbox.server.config.ServerProperties;
 import com.aisandbox.server.identity.ClientIdentity;
 import com.aisandbox.server.sessions.dto.SessionRecord;
 import com.aisandbox.server.sessions.facade.internal.PerSessionMutexRegistry;
 import com.aisandbox.server.sessions.service.SessionRegistryService;
+import com.aisandbox.server.stream.dto.StreamServerMessage.TargetInfo;
 import com.aisandbox.server.stream.facade.StreamFacade;
 import com.aisandbox.server.stream.facade.StreamFacade.AuthorizeResult;
 import com.aisandbox.server.stream.service.StreamRegistryService;
+import com.aisandbox.server.stream.service.SwarmEnumerationService;
 import com.aisandbox.server.stream.service.TmuxBridgeService;
+import com.aisandbox.server.stream.service.TmuxBridgeService.BridgeTarget;
 import java.math.BigInteger;
 import java.nio.file.Path;
 import java.time.Instant;
@@ -173,5 +181,93 @@ class StreamFacadeTest {
         assertThat(r).isInstanceOfSatisfying(StreamFacade.NotRunning.class, nr -> {
             assertThat(nr.state()).isEqualTo("starting");
         });
+    }
+
+    // ── UC-21 AC#13 — enumerate targets ─────────────────────────────────────
+
+    @Test
+    void enumerateTargets_degrades_to_main_only_when_swarm_enumerator_is_unwired() {
+        // No setSwarmEnumeration() call → the facade returns the always-present
+        // main target by itself (AC#10), never throwing.
+        StreamFacade f = build(mock(SessionRegistryService.class), new StreamRegistryService(props(10, 100)));
+        List<TargetInfo> targets = f.enumerateTargets(7);
+        assertThat(targets).hasSize(1);
+        assertThat(targets.get(0).id()).isEqualTo("main");
+        assertThat(targets.get(0).kind()).isEqualTo("main");
+    }
+
+    @Test
+    void enumerateTargets_delegates_to_the_swarm_enumerator_when_wired() {
+        SwarmEnumerationService swarm = mock(SwarmEnumerationService.class);
+        TargetInfo main = new TargetInfo("main", "main", "main", null, null, null, null, null, "main", null, null);
+        TargetInfo pane = new TargetInfo(
+                "swarm:s:0.0", "swarm", "ping", "ping", "general-purpose", "blue", "t", "/sock", "claude-swarm", "0",
+                "0");
+        when(swarm.enumerate(7)).thenReturn(List.of(main, pane));
+
+        StreamFacade f = build(mock(SessionRegistryService.class), new StreamRegistryService(props(10, 100)));
+        f.setSwarmEnumeration(swarm);
+
+        assertThat(f.enumerateTargets(7)).containsExactly(main, pane);
+    }
+
+    // ── UC-21 AC#11 / AC#13 — re-bridge ─────────────────────────────────────
+
+    @Test
+    void rebridge_resolves_target_starts_a_bridge_and_audits() throws Exception {
+        TmuxBridgeService tmux = mock(TmuxBridgeService.class);
+        TmuxBridgeService.Bridge bridge = mock(TmuxBridgeService.Bridge.class);
+        SwarmEnumerationService swarm = mock(SwarmEnumerationService.class);
+        AuditLogger audit = mock(AuditLogger.class);
+
+        BridgeTarget resolved = new BridgeTarget("/tmp/tmux-997/claude-swarm-1", "claude-swarm", "0", "1");
+        when(swarm.resolveTarget(7, "swarm:claude-swarm-1:0.1")).thenReturn(resolved);
+        when(tmux.start(eq(7), eq("stream-7-g1"), any(BridgeTarget.class), anyInt(), anyInt()))
+                .thenReturn(bridge);
+
+        StreamFacade f = new StreamFacade(
+                mock(SessionRegistryService.class),
+                new StreamRegistryService(props(10, 100)),
+                tmux,
+                new PerSessionMutexRegistry(),
+                audit,
+                props(10, 100));
+        f.setSwarmEnumeration(swarm);
+
+        TmuxBridgeService.Bridge got = f.rebridge(7, "stream-7-g1", "swarm:claude-swarm-1:0.1", 120, 40);
+
+        assertThat(got).isSameAs(bridge);
+        // The resolved target's tmux coordinates are handed to the bridge.
+        verify(tmux).start(eq(7), eq("stream-7-g1"), eq(resolved), eq(120), eq(40));
+        // AC42 — the switch is audited with the requested target id.
+        verify(audit)
+                .logEvent(
+                        eq(AuditAction.STREAM_REBRIDGE),
+                        eq("ok"),
+                        eq("n"),
+                        eq(7),
+                        eq("targetId"),
+                        eq("swarm:claude-swarm-1:0.1"));
+    }
+
+    @Test
+    void rebridge_without_swarm_enumerator_falls_back_to_the_main_target() throws Exception {
+        TmuxBridgeService tmux = mock(TmuxBridgeService.class);
+        TmuxBridgeService.Bridge bridge = mock(TmuxBridgeService.Bridge.class);
+        when(tmux.start(eq(7), eq("stream-7-g2"), any(BridgeTarget.class), anyInt(), anyInt()))
+                .thenReturn(bridge);
+
+        StreamFacade f = new StreamFacade(
+                mock(SessionRegistryService.class),
+                new StreamRegistryService(props(10, 100)),
+                tmux,
+                new PerSessionMutexRegistry(),
+                mock(AuditLogger.class),
+                props(10, 100));
+        // No swarm wired → main target.
+        TmuxBridgeService.Bridge got = f.rebridge(7, "stream-7-g2", "swarm:ignored:0.0", 80, 24);
+
+        assertThat(got).isSameAs(bridge);
+        verify(tmux).start(eq(7), eq("stream-7-g2"), eq(BridgeTarget.main()), eq(80), eq(24));
     }
 }
