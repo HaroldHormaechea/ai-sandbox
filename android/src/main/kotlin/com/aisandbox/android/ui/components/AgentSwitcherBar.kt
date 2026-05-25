@@ -52,6 +52,7 @@ fun AgentSwitcherBar(
     selectedTargetId: String,
     onSelect: (String) -> Unit,
     modifier: Modifier = Modifier,
+    compact: Boolean = false,
 ) {
     // AC#12 — hide unless at least one non-main target is present.
     if (targets.none { it.id != MAIN_TARGET_ID }) return
@@ -59,19 +60,23 @@ fun AgentSwitcherBar(
     // AC#10 — main always first; the rest keep server order.
     val ordered = targets.sortedByDescending { it.id == MAIN_TARGET_ID }
 
+    // UC-23 AC#4 — when [compact] (the IME is up), condense the row to reclaim
+    // vertical space: tighter outer/tile padding and spacing. Ordering,
+    // selection highlight, labels, and per-agent dots are all unchanged.
     Surface(modifier = modifier.fillMaxWidth(), color = SurfaceLow) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
                 .horizontalScroll(rememberScrollState())
-                .padding(horizontal = 6.dp, vertical = 6.dp),
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
+                .padding(horizontal = 6.dp, vertical = if (compact) 2.dp else 6.dp),
+            horizontalArrangement = Arrangement.spacedBy(if (compact) 4.dp else 6.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             ordered.forEach { target ->
                 AgentTile(
                     target = target,
                     selected = target.id == selectedTargetId,
+                    compact = compact,
                     onClick = { onSelect(target.id) },
                 )
             }
@@ -83,6 +88,7 @@ fun AgentSwitcherBar(
 private fun AgentTile(
     target: StreamTarget,
     selected: Boolean,
+    compact: Boolean,
     onClick: () -> Unit,
 ) {
     val bg = if (selected) Accent else AccentContainer
@@ -94,7 +100,10 @@ private fun AgentTile(
             .clip(RoundedCornerShape(8.dp))
             .background(bg)
             .clickable(onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 8.dp),
+            .padding(
+                horizontal = if (compact) 8.dp else 10.dp,
+                vertical = if (compact) 3.dp else 8.dp,
+            ),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
