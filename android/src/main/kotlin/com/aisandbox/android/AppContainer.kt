@@ -7,6 +7,7 @@ import com.aisandbox.android.net.ServerProfile
 import com.aisandbox.android.net.ServerProfileStore
 import com.aisandbox.android.net.SessionsApi
 import com.aisandbox.android.net.StreamClient
+import com.aisandbox.android.terminal.TerminalStreamController
 
 /**
  * Hand-rolled service locator. UC04 AC29 forbids analytics / telemetry
@@ -41,6 +42,32 @@ class AppContainer(applicationContext: Context) {
 
     fun streamClient(client: AiSandboxHttpClient, sessionN: Int): StreamClient =
         StreamClient(http = client, sessionN = sessionN)
+
+    // ── Terminal stream controllers (UC-21) ─────────────────────────────────
+    // Process-scoped, keyed by session N. Owning the controller here (not in
+    // the NavBackStackEntry-scoped ViewModel) is what lets the WebSocket +
+    // emulator survive back-navigation (AC#8 continuity). Only one session
+    // streams at a time: opening a different N closes the prior controller.
+    private val controllers = HashMap<Int, TerminalStreamController>()
+
+    @Synchronized
+    fun terminalController(sessionN: Int): TerminalStreamController {
+        controllers[sessionN]?.let { return it }
+        // Single active controller — tear down any other session's stream.
+        controllers.keys.filter { it != sessionN }.forEach { other ->
+            controllers.remove(other)?.close("switch-session")
+        }
+        val controller = TerminalStreamController(
+            appContext = appContext,
+            sessionN = sessionN,
+            profileStore = profileStore,
+            httpClientFactory = ::httpClient,
+            streamClientFactory = ::streamClient,
+            onClosed = { closedN -> synchronized(this) { controllers.remove(closedN) } },
+        )
+        controllers[sessionN] = controller
+        return controller
+    }
 }
 
 /** Lookup helper for ViewModels / Composables; throws if the Application class is mis-wired. */

@@ -46,6 +46,15 @@ public final class TerminalSession extends TerminalOutput {
         void onOutput(byte[] data, int offset, int count);
     }
 
+    /**
+     * Notified whenever {@link #updateSize(int, int, int, int)} establishes a new
+     * column/row geometry, so the client can forward a resize frame to the server
+     * PTY (ai-sandbox addition — upstream pushed size to the local PTY via JNI).
+     */
+    public interface ResizeListener {
+        void onResize(int columns, int rows);
+    }
+
     public final String mHandle = UUID.randomUUID().toString();
 
     TerminalEmulator mEmulator;
@@ -65,6 +74,7 @@ public final class TerminalSession extends TerminalOutput {
     TerminalSessionClient mClient;
 
     private OutputListener mOutputListener;
+    private ResizeListener mResizeListener;
 
     /** Set by the application for user identification of the session, not by terminal. */
     public String mSessionName;
@@ -88,6 +98,10 @@ public final class TerminalSession extends TerminalOutput {
         this.mOutputListener = outputListener;
     }
 
+    public void setResizeListener(ResizeListener resizeListener) {
+        this.mResizeListener = resizeListener;
+    }
+
     /**
      * @param client The {@link TerminalSessionClient} interface implementation to allow
      *               for communication between {@link TerminalSession} and its client.
@@ -104,6 +118,7 @@ public final class TerminalSession extends TerminalOutput {
         } else {
             mEmulator.resize(columns, rows, cellWidthPixels, cellHeightPixels);
         }
+        if (mResizeListener != null) mResizeListener.onResize(columns, rows);
     }
 
     /** The terminal title as set through escape sequences, or null if none set. */
