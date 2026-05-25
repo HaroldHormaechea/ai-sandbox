@@ -82,10 +82,8 @@ public class StreamFacade {
     public List<TargetInfo> enumerateTargets(int n) {
         SwarmEnumerationService s = this.swarm;
         if (s == null) {
-            return List.of(
-                    new TargetInfo(
-                            SwarmEnumerationService.MAIN_ID, "main", "main", null, null, null, null, null, "main",
-                            null, null));
+            return List.of(new TargetInfo(
+                    SwarmEnumerationService.MAIN_ID, "main", "main", null, null, null, null, null, "main", null, null));
         }
         return s.enumerate(n);
     }
@@ -107,8 +105,7 @@ public class StreamFacade {
     public TmuxBridgeService.Bridge rebridge(int n, String bridgeSessionId, String targetId, int cols, int rows)
             throws IOException {
         SwarmEnumerationService s = this.swarm;
-        BridgeTarget target =
-                (s == null) ? BridgeTarget.main() : s.resolveTarget(n, targetId);
+        BridgeTarget target = (s == null) ? BridgeTarget.main() : s.resolveTarget(n, targetId);
 
         ReentrantLock l = perN.get(n);
         try {

@@ -104,8 +104,21 @@ public class SwarmEnumerationService {
         try {
             ProcessExecutor.Result r = exec.run(
                     List.of(
-                            "docker", "compose", "-p", project, "exec", "-T", "claude-sandbox",
-                            "find", "/tmp", "-maxdepth", "2", "-type", "s", "-name", "claude-swarm-*"),
+                            "docker",
+                            "compose",
+                            "-p",
+                            project,
+                            "exec",
+                            "-T",
+                            "claude-sandbox",
+                            "find",
+                            "/tmp",
+                            "-maxdepth",
+                            "2",
+                            "-type",
+                            "s",
+                            "-name",
+                            "claude-swarm-*"),
                     null,
                     TIMEOUT);
             if (r.exitCode() != 0) {
@@ -132,8 +145,20 @@ public class SwarmEnumerationService {
         try {
             ProcessExecutor.Result r = exec.run(
                     List.of(
-                            "docker", "compose", "-p", project, "exec", "-T", "claude-sandbox",
-                            "tmux", "-S", socket, "list-panes", "-a", "-F", PANE_FORMAT),
+                            "docker",
+                            "compose",
+                            "-p",
+                            project,
+                            "exec",
+                            "-T",
+                            "claude-sandbox",
+                            "tmux",
+                            "-S",
+                            socket,
+                            "list-panes",
+                            "-a",
+                            "-F",
+                            PANE_FORMAT),
                     null,
                     TIMEOUT);
             if (r.exitCode() != 0) {
@@ -202,8 +227,15 @@ public class SwarmEnumerationService {
         try {
             ProcessExecutor.Result r = exec.run(
                     List.of(
-                            "docker", "compose", "-p", project, "exec", "-T", "claude-sandbox",
-                            "cat", "/proc/" + pid + "/cmdline"),
+                            "docker",
+                            "compose",
+                            "-p",
+                            project,
+                            "exec",
+                            "-T",
+                            "claude-sandbox",
+                            "cat",
+                            "/proc/" + pid + "/cmdline"),
                     null,
                     TIMEOUT);
             if (r.exitCode() != 0 || r.stdout().isEmpty()) {

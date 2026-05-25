@@ -201,7 +201,16 @@ class StreamFacadeTest {
         SwarmEnumerationService swarm = mock(SwarmEnumerationService.class);
         TargetInfo main = new TargetInfo("main", "main", "main", null, null, null, null, null, "main", null, null);
         TargetInfo pane = new TargetInfo(
-                "swarm:s:0.0", "swarm", "ping", "ping", "general-purpose", "blue", "t", "/sock", "claude-swarm", "0",
+                "swarm:s:0.0",
+                "swarm",
+                "ping",
+                "ping",
+                "general-purpose",
+                "blue",
+                "t",
+                "/sock",
+                "claude-swarm",
+                "0",
                 "0");
         when(swarm.enumerate(7)).thenReturn(List.of(main, pane));
 

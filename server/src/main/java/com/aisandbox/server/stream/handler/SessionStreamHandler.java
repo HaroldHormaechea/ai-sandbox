@@ -393,8 +393,11 @@ public class SessionStreamHandler implements WebSocketHandler {
             emit(ctx.outbound, session, new StreamServerMessage.TargetSelected(targetId));
         } catch (Exception e) {
             LOG.warn("re-bridge to target {} failed: {}", targetId, e.toString());
-            emit(ctx.outbound, session, new StreamServerMessage.ServerError(
-                    "rebridge_failed", "Target switch failed", e.getMessage() == null ? "" : e.getMessage()));
+            emit(
+                    ctx.outbound,
+                    session,
+                    new StreamServerMessage.ServerError(
+                            "rebridge_failed", "Target switch failed", e.getMessage() == null ? "" : e.getMessage()));
         }
     }
 

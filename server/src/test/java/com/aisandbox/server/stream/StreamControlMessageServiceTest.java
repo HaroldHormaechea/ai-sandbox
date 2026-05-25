@@ -162,8 +162,8 @@ class StreamControlMessageServiceTest {
         ControlMessage inboundError = svc.parse("{\"type\":\"error\",\"code\":\"c\",\"title\":\"t\",\"detail\":\"d\"}");
         assertThat(inboundError).isInstanceOf(ControlMessage.ErrorMessage.class);
 
-        String outbound = new String(
-                svc.serialize(new StreamServerMessage.ServerError("c", "t", "d")), StandardCharsets.UTF_8);
+        String outbound =
+                new String(svc.serialize(new StreamServerMessage.ServerError("c", "t", "d")), StandardCharsets.UTF_8);
         assertThat(outbound).contains("\"type\":\"error\"");
     }
 

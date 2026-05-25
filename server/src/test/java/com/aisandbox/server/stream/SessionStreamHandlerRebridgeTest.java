@@ -144,15 +144,15 @@ class SessionStreamHandlerRebridgeTest {
         when(swarm.resolveTarget(eq(7), eq("swarm:claude-swarm-1:0.1")))
                 .thenReturn(new BridgeTarget("/tmp/tmux-997/claude-swarm-1", "claude-swarm", "0", "1"));
 
-        FakeSession session = startStream(tmux, swarm, "{\"type\":\"select-target\",\"targetId\":\"swarm:claude-swarm-1:0.1\"}");
+        FakeSession session =
+                startStream(tmux, swarm, "{\"type\":\"select-target\",\"targetId\":\"swarm:claude-swarm-1:0.1\"}");
 
         // Wait until both the swap and the close happened, and the new bridge's
         // output surfaced (continuity).
         Awaitility.await()
                 .atMost(Duration.ofSeconds(5))
-                .until(() -> events.contains("start-b1")
-                        && events.contains("close-b0")
-                        && !session.sentBinary.isEmpty());
+                .until(() ->
+                        events.contains("start-b1") && events.contains("close-b0") && !session.sentBinary.isEmpty());
 
         // ── guardrail #1 — new started BEFORE old closed ──
         assertThat(events.indexOf("start-b1"))
@@ -162,7 +162,9 @@ class SessionStreamHandlerRebridgeTest {
         // ── continuity — the sink was NOT completed on the swap ──
         assertThat(session.sentBinary).anySatisfy(b -> assertThat(new String(b, StandardCharsets.UTF_8))
                 .isEqualTo("B1-OUT"));
-        assertThat(session.closedWith).as("a successful swap must not close the WebSocket").isNull();
+        assertThat(session.closedWith)
+                .as("a successful swap must not close the WebSocket")
+                .isNull();
 
         // ── off-event-loop dispatch ──
         assertThat(dispatchThreads).isNotEmpty();
@@ -171,9 +173,8 @@ class SessionStreamHandlerRebridgeTest {
                 .contains("boundedElastic");
 
         // ── TargetSelected reply ──
-        Awaitility.await()
-                .atMost(Duration.ofSeconds(2))
-                .until(() -> session.sentText.stream().anyMatch(t -> t.contains("\"type\":\"target-selected\"")));
+        Awaitility.await().atMost(Duration.ofSeconds(2)).until(() -> session.sentText.stream()
+                .anyMatch(t -> t.contains("\"type\":\"target-selected\"")));
         assertThat(session.sentText)
                 .anySatisfy(t -> assertThat(t).contains("\"targetId\":\"swarm:claude-swarm-1:0.1\""));
     }
@@ -189,15 +190,23 @@ class SessionStreamHandlerRebridgeTest {
         SwarmEnumerationService swarm = mock(SwarmEnumerationService.class);
         TargetInfo main = new TargetInfo("main", "main", "main", null, null, null, null, null, "main", null, null);
         TargetInfo pane = new TargetInfo(
-                "swarm:claude-swarm-1:0.0", "swarm", "ping", "ping", "general-purpose", "blue", "t",
-                "/sock", "claude-swarm", "0", "0");
+                "swarm:claude-swarm-1:0.0",
+                "swarm",
+                "ping",
+                "ping",
+                "general-purpose",
+                "blue",
+                "t",
+                "/sock",
+                "claude-swarm",
+                "0",
+                "0");
         when(swarm.enumerate(7)).thenReturn(List.of(main, pane));
 
         FakeSession session = startStream(tmux, swarm, "{\"type\":\"enumerate-targets\"}");
 
-        Awaitility.await()
-                .atMost(Duration.ofSeconds(5))
-                .until(() -> session.sentText.stream().anyMatch(t -> t.contains("\"type\":\"targets\"")));
+        Awaitility.await().atMost(Duration.ofSeconds(5)).until(() -> session.sentText.stream()
+                .anyMatch(t -> t.contains("\"type\":\"targets\"")));
 
         String frame = session.sentText.stream()
                 .filter(t -> t.contains("\"type\":\"targets\""))
@@ -223,9 +232,8 @@ class SessionStreamHandlerRebridgeTest {
 
         FakeSession session = startStream(tmux, swarm, "{\"type\":\"select-target\",\"targetId\":\"swarm:gone:9.9\"}");
 
-        Awaitility.await()
-                .atMost(Duration.ofSeconds(5))
-                .until(() -> session.sentText.stream().anyMatch(t -> t.contains("\"code\":\"rebridge_failed\"")));
+        Awaitility.await().atMost(Duration.ofSeconds(5)).until(() -> session.sentText.stream()
+                .anyMatch(t -> t.contains("\"code\":\"rebridge_failed\"")));
 
         // The original bridge is untouched and the stream stays open.
         assertThat(events).doesNotContain("close-b0");

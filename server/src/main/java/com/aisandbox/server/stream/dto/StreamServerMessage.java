@@ -29,9 +29,7 @@ import java.util.List;
     @JsonSubTypes.Type(value = StreamServerMessage.ServerError.class, name = "error")
 })
 public sealed interface StreamServerMessage
-        permits StreamServerMessage.Targets,
-                StreamServerMessage.TargetSelected,
-                StreamServerMessage.ServerError {
+        permits StreamServerMessage.Targets, StreamServerMessage.TargetSelected, StreamServerMessage.ServerError {
 
     /**
      * The enumerated stream targets for a session — the always-present main

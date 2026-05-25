@@ -102,10 +102,8 @@ public class TmuxBridgeService {
             throw new IOException("tmux new-session failed: " + r1.stderr());
         }
         // Step 2 — enable mouse mode (best-effort).
-        ProcessExecutor.Result r2 = exec.run(
-                tmuxExec(project, socket, "set-option", "-t", session, "mouse", "on"),
-                null,
-                STARTUP_TIMEOUT);
+        ProcessExecutor.Result r2 =
+                exec.run(tmuxExec(project, socket, "set-option", "-t", session, "mouse", "on"), null, STARTUP_TIMEOUT);
         if (r2.exitCode() != 0) {
             LOG.warn("tmux set-option mouse on failed (continuing): {}", r2.stderr());
         }
@@ -146,8 +144,8 @@ public class TmuxBridgeService {
 
     /** Build {@code docker compose … exec -T claude-sandbox tmux [-S socket] <args>}. */
     private static List<String> tmuxExec(String project, String socket, String... tmuxArgs) {
-        List<String> argv = new ArrayList<>(
-                List.of("docker", "compose", "-p", project, "exec", "-T", "claude-sandbox", "tmux"));
+        List<String> argv =
+                new ArrayList<>(List.of("docker", "compose", "-p", project, "exec", "-T", "claude-sandbox", "tmux"));
         if (socket != null && !socket.isBlank()) {
             argv.add("-S");
             argv.add(socket);
@@ -158,8 +156,8 @@ public class TmuxBridgeService {
 
     /** Build the interactive PTY-attach argv ({@code exec -it … tmux [-S socket] attach}). */
     private static String[] attachArgv(String project, String socket, String session) {
-        List<String> argv = new ArrayList<>(
-                List.of("docker", "compose", "-p", project, "exec", "-it", "claude-sandbox", "tmux"));
+        List<String> argv =
+                new ArrayList<>(List.of("docker", "compose", "-p", project, "exec", "-it", "claude-sandbox", "tmux"));
         if (socket != null && !socket.isBlank()) {
             argv.add("-S");
             argv.add(socket);
