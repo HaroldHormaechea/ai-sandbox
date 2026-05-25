@@ -20,9 +20,12 @@ import org.junit.jupiter.api.io.TempDir;
  *   <li>Interactive path runs the documented single-container argv:
  *       {@code docker run --rm -it --user 0 -v <secrets-dir>:/etc/secrets
  *       --entrypoint sh ai-context:latest -c "gh auth login --hostname
- *       github.com --git-protocol ssh --skip-ssh-key --web && gh auth
- *       token > /etc/secrets/gh-token"}. This is the "one container,
- *       two commands" auth-state fix from the proposal.</li>
+ *       github.com --git-protocol https --web && gh auth token >
+ *       /etc/secrets/gh-token"}. This is the "one container, two
+ *       commands" auth-state fix from the proposal. {@code --git-protocol
+ *       https} keeps the {@code --web} device flow unattended (ssh would
+ *       trigger gh's interactive SSH-key-upload step); the server's real
+ *       git transport still uses the separately-seeded SSH key.</li>
  *   <li>Docker exit ≠ 0 surfaces with remediation pointing at
  *       {@code --gh-token-file} and {@code --no-gh}.</li>
  *   <li>Empty / missing post-docker output is detected (defends
@@ -117,8 +120,8 @@ class GhTokenStepTest {
         assertThat(shellCmd)
                 .contains("gh auth login")
                 .contains("--hostname github.com")
-                .contains("--git-protocol ssh")
-                .contains("--skip-ssh-key")
+                .contains("--git-protocol https")
+                .doesNotContain("--skip-ssh-key")
                 .contains("--web")
                 .contains("&& gh auth token")
                 .contains("> /etc/secrets/gh-token");

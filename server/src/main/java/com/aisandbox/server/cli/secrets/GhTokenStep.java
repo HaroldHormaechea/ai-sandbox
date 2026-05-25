@@ -111,7 +111,16 @@ public final class GhTokenStep {
                 "sh",
                 SANDBOX_IMAGE,
                 "-c",
-                "gh auth login --hostname github.com --git-protocol ssh --skip-ssh-key --web"
+                // --git-protocol https (not ssh) is deliberate: this is a
+                // throwaway --rm container whose only kept output is the PAT
+                // (`gh auth token`). With --git-protocol ssh, gh runs an
+                // interactive SSH-key-upload step that has no flag to skip
+                // (the old --skip-ssh-key was not a real gh flag and aborted
+                // the run); https suppresses it, so the --web device flow is
+                // unattended. The server's actual git transport still uses
+                // the separately-seeded SSH key (git-key) — unaffected by the
+                // git-protocol gh records inside this discarded container.
+                "gh auth login --hostname github.com --git-protocol https --web"
                         + " && gh auth token > /etc/secrets/"
                         + tokenFileName);
 
