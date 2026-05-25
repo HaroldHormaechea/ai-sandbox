@@ -173,10 +173,18 @@ class HostScriptComposeEnvTest {
 
     /**
      * Developer-mode regression guard — with {@code
-     * AI_SANDBOX_HOST_STATE_ROOT} unset, {@code spawn.sh} continues to
-     * write the counter into its own parent dir (the repo root). This
-     * preserves the pre-UC05 contract so plain
-     * {@code git clone … && ./spawn.sh} keeps working unchanged.
+     * AI_SANDBOX_HOST_STATE_ROOT} unset, {@code spawn.sh} writes the
+     * counter into its own parent dir (the repo root), independent of
+     * where the per-session workspace lives.
+     *
+     * <p>Developer mode requires the dev workspace root to be configured —
+     * interactively via {@code ./setup.sh}, or explicitly via
+     * {@code AI_SANDBOX_DEV_WORKSPACE_ROOT}. A non-TTY run refuses to
+     * default silently (so a stray {@code cp -a . workspace} can never
+     * recurse into the repo and fill the disk — the recursion guard at
+     * {@code spawn.sh} lines 162-190). This test runs non-interactively,
+     * so it supplies the root explicitly (a temp dir outside the staged
+     * repo) and asserts the counter still lands beside the script.
      */
     @Test
     void spawn_sh_without_host_state_root_writes_counter_into_script_parent(@TempDir Path tmp) throws Exception {
@@ -191,7 +199,16 @@ class HostScriptComposeEnvTest {
 
         Map<String, String> env = new HashMap<>();
         env.put("PATH", bin.toString() + ":" + System.getenv("PATH"));
-        // UC05 env vars intentionally unset.
+        // UC05 host-install vars (AI_SANDBOX_HOST_STATE_ROOT / _COMPOSE_FILE)
+        // stay unset — this is the developer-mode path. Developer mode now
+        // requires the dev workspace root to be chosen up front; on a non-TTY
+        // run spawn.sh refuses to default silently, so supply it explicitly
+        // (the documented non-interactive equivalent of running ./setup.sh
+        // once). Pointed outside the staged repo so the recursion guard stays
+        // quiet; the counter location under test is independent of it.
+        Path devWorkspaceRoot = tmp.resolve("dev-workspace");
+        Files.createDirectories(devWorkspaceRoot);
+        env.put("AI_SANDBOX_DEV_WORKSPACE_ROOT", devWorkspaceRoot.toString());
 
         int rc = runShell(
                 tmp,
