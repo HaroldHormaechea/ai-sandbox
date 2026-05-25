@@ -54,6 +54,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -68,6 +69,7 @@ jobs:
 
   integration:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     needs: build
     env:
       AI_SANDBOX_DIND: "1"
@@ -101,6 +103,7 @@ jobs:
   # so triage doesn't require a re-run.
   real-docker-integration:
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     needs: build
     env:
       AI_SANDBOX_REAL_DOCKER_IT: "1"
@@ -162,6 +165,7 @@ jobs:
   # AI_SANDBOX_REAL_DOCKER_IT=1 gate.
   real-docker-onboarding:
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     needs: build
     env:
       AI_SANDBOX_REAL_DOCKER_IT: "1"
@@ -214,6 +218,7 @@ jobs:
   #      outside host/ would fail here).
   release-install-smoke:
     runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -730,7 +735,7 @@ jobs:
                   # the install + configure in `timeout` so a regression that
                   # hangs waiting for input fails loudly here instead of stalling.
                   timeout 180 dpkg -i /tmp/release/release.deb </dev/null || true
-                  apt-get install -y --no-install-recommends -f
+                  timeout 180 apt-get install -y --no-install-recommends -f </dev/null
                   timeout 180 dpkg --configure -a </dev/null
 
                   # AC layout — jars under /opt/ai-sandbox-server/lib/.
@@ -1040,6 +1045,11 @@ jobs:
           DEB_PATH: ${{ steps.deb.outputs.path }}
         run: |
           set -euxo pipefail
+          # Noninteractive frontend for every apt/dpkg in this leg. Exported
+          # for the shell here AND re-passed inline on each `sudo` invocation
+          # below (sudo's env_reset would otherwise drop it before dpkg runs
+          # the postinst, defeating the postinst's noninteractive guard).
+          export DEBIAN_FRONTEND=noninteractive
 
           # The .deb's postinst expects /usr/bin/java + the `docker`
           # group on the host. ubuntu-latest GHA runners pre-install
@@ -1085,11 +1095,17 @@ jobs:
           docker compose ls --help 2>&1 | head -25 || true
 
           # Install the .deb. dpkg + `apt-get -f install` follows the
-          # same pattern as the docker .deb phase above so missing
-          # Depends are satisfied automatically.
-          sudo dpkg -i "$DEB_PATH" || true
-          sudo apt-get install -f -y --no-install-recommends
-          sudo dpkg --configure -a
+          # same bounded pattern as the docker .deb phase above so missing
+          # Depends are satisfied automatically. Every dpkg/apt invocation is
+          # timeout-wrapped, has stdin redirected from /dev/null, and runs
+          # under DEBIAN_FRONTEND=noninteractive (passed inline so it survives
+          # sudo's env_reset): the postinst onboarding hook must never block
+          # waiting for input on this host-runner leg. The ~6h CI hang
+          # originated in an unbounded postinst read reached via the
+          # previously un-timeout-wrapped `apt-get install -f` configure step.
+          sudo DEBIAN_FRONTEND=noninteractive timeout 180 dpkg -i "$DEB_PATH" </dev/null || true
+          sudo DEBIAN_FRONTEND=noninteractive timeout 180 apt-get install -f -y --no-install-recommends </dev/null
+          sudo DEBIAN_FRONTEND=noninteractive timeout 180 dpkg --configure -a </dev/null
 
           # Sanity-check the install before touching the unit.
           test -f /opt/ai-sandbox-server/lib/aisandbox-server.jar

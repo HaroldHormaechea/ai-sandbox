@@ -387,7 +387,10 @@ On a **`.deb` install** onboarding adapts to whether a terminal is present:
   the container-image build included, so sessions spawned afterward start at
   Claude's normal prompt. Any answers already collected by debconf (git
   name/email, SSH key path, gh token) prefill the wizard. Decline, and the
-  install finishes with a single command to onboard later.
+  install finishes with a single command to onboard later. The invite waits up
+  to 30 seconds for an answer; if none arrives it defers like a headless
+  install (printing the same onboard-later step), so an unattended `dpkg` can
+  never stall on the prompt.
 - **Headless / unattended** — noninteractive frontend, piped fds, or
   `ssh host 'sudo dpkg -i …'` — the install **never hangs or fails**: if
   onboarding was preseeded via debconf it runs non-interactively (skipping the

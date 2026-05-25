@@ -137,6 +137,14 @@ case "$1" in
         if ( true <>/dev/tty ) 2>/dev/null; then
             HAVE_TTY=1
         fi
+        # Defense-in-depth (Debian Policy 3.9.1 — maintainer scripts must not
+        # prompt under a noninteractive frontend). When DEBIAN_FRONTEND is
+        # noninteractive, force HAVE_TTY=0 so the [Y/n] invite is skipped
+        # entirely: CI and unattended installs never even reach the bounded
+        # read below (no 30s wait), layered on top of its timeout guard.
+        if [ "${DEBIAN_FRONTEND:-}" = "noninteractive" ]; then
+            HAVE_TTY=0
+        fi
 
         # gh token → 0600 temp file (used by whichever branch onboards) so the
         # token never appears in the process table. Shredded after onboard runs.
@@ -158,35 +166,52 @@ case "$1" in
             exec 3<>/dev/tty
             printf '\n' >&3
             printf 'ai-sandbox-server: run the onboarding wizard now (Claude login + image build)? [Y/n] ' >&3
+            # Bounded, dash-portable read on the controlling terminal. A real
+            # operator answers within 30s; an automated / non-interactive
+            # install where input never arrives (or fd 3 hits EOF) MUST DEFER
+            # rather than block. An unbounded read here ran to GitHub Actions'
+            # 360-min job ceiling and produced the ~6h CI hang. The inner read
+            # runs inside a `timeout`-wrapped child shell so a stuck read can
+            # never wedge dpkg. Behaviour contract (verified on /usr/bin/dash):
+            #   blocking input -> timeout (exit 124)   -> defer
+            #   EOF            -> read non-zero (1)     -> defer
+            #   typed `y`      -> exit 0, REPLY="y"     -> proceed
+            #   bare Enter     -> exit 0, REPLY=""      -> proceed
             REPLY=""
-            read REPLY <&3 || REPLY=""
-            case "$REPLY" in
-                [Nn]*)
-                    : # declined — fall through to the deferred Next-steps block.
-                    ;;
-                *)
-                    # Prefill the onboard argv from any debconf answers (each
-                    # optional) via positional params — no eval, no word-split
-                    # of operator-supplied values. `set --` first drops $1
-                    # ("configure"); IS_UPGRADE was already captured above.
-                    set --
-                    if [ -n "$GIT_NAME" ]; then set -- "$@" --git-name "$GIT_NAME"; fi
-                    if [ -n "$GIT_EMAIL" ]; then set -- "$@" --git-email "$GIT_EMAIL"; fi
-                    if [ -n "$SSH_KEY_PATH" ]; then set -- "$@" --git-key "$SSH_KEY_PATH"; fi
-                    if [ -n "$GH_TOKEN_FILE" ]; then set -- "$@" --gh-token-file "$GH_TOKEN_FILE"; fi
-                    echo "ai-sandbox-server: launching interactive onboarding (Ctrl-C to abort)..." >&3
-                    # Wire stdin+stdout+stderr to the terminal: onboard's TTY
-                    # gate is System.console(), non-null only when BOTH stdin and
-                    # stdout are terminals. WITHOUT --no-claude-preinit /
-                    # --no-image-build so the full device-flow + image build run.
-                    if /usr/bin/aisandboxctl onboard "$@" <&3 >&3 2>&3; then
-                        ONBOARD_DONE=1
-                        ONBOARD_INTERACTIVE=1
-                    else
-                        echo "ai-sandbox-server: onboarding did not complete; re-run later with: sudo aisandboxctl onboard" >&3
-                    fi
-                    ;;
-            esac
+            if REPLY="$(timeout 30 sh -c 'IFS= read -r r; ec=$?; printf %s "$r"; exit $ec' <&3 2>/dev/null)"; then
+                case "$REPLY" in
+                    [Nn]*)
+                        : # declined — fall through to the deferred Next-steps block.
+                        ;;
+                    *)
+                        # Prefill the onboard argv from any debconf answers (each
+                        # optional) via positional params — no eval, no word-split
+                        # of operator-supplied values. `set --` first drops $1
+                        # ("configure"); IS_UPGRADE was already captured above.
+                        set --
+                        if [ -n "$GIT_NAME" ]; then set -- "$@" --git-name "$GIT_NAME"; fi
+                        if [ -n "$GIT_EMAIL" ]; then set -- "$@" --git-email "$GIT_EMAIL"; fi
+                        if [ -n "$SSH_KEY_PATH" ]; then set -- "$@" --git-key "$SSH_KEY_PATH"; fi
+                        if [ -n "$GH_TOKEN_FILE" ]; then set -- "$@" --gh-token-file "$GH_TOKEN_FILE"; fi
+                        echo "ai-sandbox-server: launching interactive onboarding (Ctrl-C to abort)..." >&3
+                        # Wire stdin+stdout+stderr to the terminal: onboard's TTY
+                        # gate is System.console(), non-null only when BOTH stdin and
+                        # stdout are terminals. WITHOUT --no-claude-preinit /
+                        # --no-image-build so the full device-flow + image build run.
+                        if /usr/bin/aisandboxctl onboard "$@" <&3 >&3 2>&3; then
+                            ONBOARD_DONE=1
+                            ONBOARD_INTERACTIVE=1
+                        else
+                            echo "ai-sandbox-server: onboarding did not complete; re-run later with: sudo aisandboxctl onboard" >&3
+                        fi
+                        ;;
+                esac
+            else
+                # Bounded read returned non-zero: timeout (rc 124, input never
+                # arrived) or EOF (rc 1, fd 3 closed). DEFER — do NOT fall
+                # through to onboard.
+                echo "ai-sandbox-server: no response — deferring onboarding (run: sudo aisandboxctl onboard)" >&3 || true
+            fi
             exec 3>&- || true
         elif [ "$ONBOARD" = "true" ] && [ -n "$GIT_NAME" ] && [ -n "$GIT_EMAIL" ]; then
             # ── Branch 2 — no terminal but debconf preseeded (UC-17) ──

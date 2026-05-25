@@ -406,4 +406,115 @@ class DebPostinstContractTest {
                 .as("deferred block marker occurs exactly once")
                 .isEqualTo(1);
     }
+
+    // ── server-ci 6h-hang fix — bounded interactive read + noninteractive guard ──
+    //
+    // Root cause (challenger-approved proposal): the postinst Branch-1 [Y/n]
+    // onboarding invite did an UNBOUNDED `read REPLY <&3` which, reached via the
+    // un-timeout-wrapped `apt-get install -f` configure step, blocked the
+    // `release-install-smoke` job until GitHub Actions' 360-min ceiling (~6h hang).
+    // The three guards below pin the fix so a future edit can't silently re-open it.
+
+    /**
+     * Hang fix (i) — the interactive {@code [Y/n]} invite's read on the
+     * controlling terminal (fd 3) MUST be BOUNDED.
+     *
+     * <ul>
+     *   <li>POSITIVE — the read runs inside a {@code timeout <N> sh -c '… read … '}
+     *       child shell fed from fd 3 ({@code <&3}), so a stuck or EOF read can
+     *       never wedge {@code dpkg}.</li>
+     *   <li>NEGATIVE — there is NO bare, un-{@code timeout}-wrapped
+     *       {@code read … <&3} statement (the regressed form). Asserted against
+     *       comment-stripped CODE so the postinst's explanatory comments — which
+     *       deliberately name the old unbounded form to document why it was
+     *       removed — do not trip the check.</li>
+     * </ul>
+     */
+    @Test
+    void postinst_interactive_read_is_timeout_bounded_with_no_unbounded_fd3_read() throws IOException {
+        String text = postinst();
+
+        // POSITIVE — the fd-3 read is wrapped in a `timeout <N> sh -c '… read … '`.
+        assertThat(text)
+                .as("hang fix (i) — the interactive fd-3 read MUST be wrapped in a `timeout <N> sh -c` child")
+                .containsPattern("timeout\\s+\\d+\\s+sh\\s+-c\\b[^\\n]*\\bread\\b[^\\n]*<&3");
+
+        // NEGATIVE — no bare `read <var> <&3` line (the unbounded regressed form).
+        assertThat(stripCommentLines(text))
+                .as("hang fix (i) — postinst MUST NOT contain a bare, un-timeout-wrapped `read … <&3` "
+                        + "(the unbounded form that produced the ~6h CI hang)")
+                .doesNotContainPattern("(?m)^\\s*read\\b[^\\n]*<&3");
+    }
+
+    /**
+     * Hang fix (ii) — when the bounded read times out (no input within the
+     * window) or hits EOF (fd 3 closed), the postinst MUST DEFER: it falls into
+     * the read-{@code if}'s {@code else} arm and NEVER reaches the
+     * {@code aisandboxctl onboard} invocation. A regression that dropped the
+     * {@code else} — or wired onboard onto the failure path — would re-open the
+     * door to a stuck install.
+     *
+     * <p>Strategy: isolate the read conditional's success arm (up to its
+     * {@code esac}) and its defer arm (the {@code else} after {@code esac}, up to
+     * the {@code exec 3>&-} that closes Branch 1). The interactive onboard
+     * invocation MUST live only in the success arm.
+     */
+    @Test
+    void postinst_bounded_read_timeout_or_eof_defers_without_invoking_onboard() throws IOException {
+        String code = stripCommentLines(postinst());
+
+        // The actual wizard exec on the interactive path (fd 3 wired in).
+        final String onboardInvocation = "/usr/bin/aisandboxctl onboard \"$@\" <&3";
+
+        int readIf = code.indexOf("REPLY=\"$(timeout");
+        assertThat(readIf)
+                .as("hang fix (ii) — the bounded fd-3 read conditional must be present")
+                .isGreaterThanOrEqualTo(0);
+
+        int esac = code.indexOf("esac", readIf);
+        assertThat(esac)
+                .as("hang fix (ii) — the read conditional must wrap a `case \"$REPLY\"` … `esac`")
+                .isGreaterThan(readIf);
+
+        int deferElse = code.indexOf("else", esac);
+        assertThat(deferElse)
+                .as("hang fix (ii) — the bounded read MUST have an `else` (defer) arm for the timeout/EOF case")
+                .isGreaterThan(esac);
+
+        int branchEnd = code.indexOf("exec 3>&-", deferElse);
+        assertThat(branchEnd)
+                .as("hang fix (ii) — Branch 1 must close with `exec 3>&-` after the defer arm")
+                .isGreaterThan(deferElse);
+
+        String successArm = code.substring(readIf, esac);
+        String deferArm = code.substring(deferElse, branchEnd);
+
+        assertThat(successArm)
+                .as("hang fix (ii) — the interactive onboard invocation MUST live in the read-SUCCESS arm")
+                .contains(onboardInvocation);
+        assertThat(deferArm)
+                .as("hang fix (ii) — the timeout/EOF DEFER arm MUST NOT invoke onboard")
+                .doesNotContain(onboardInvocation);
+    }
+
+    /**
+     * Hang fix (iii) — defence-in-depth on top of the timeout: when
+     * {@code DEBIAN_FRONTEND=noninteractive} (every CI / unattended install),
+     * the postinst forces {@code HAVE_TTY=0} so the {@code [Y/n]} invite — and
+     * the bounded read beneath it — is skipped entirely (no 30s wait). Debian
+     * Policy 3.9.1 also forbids maintainer-script prompting under the
+     * noninteractive frontend.
+     */
+    @Test
+    void postinst_forces_have_tty_zero_under_noninteractive_frontend() throws IOException {
+        String text = postinst();
+
+        assertThat(text)
+                .as("hang fix (iii) — postinst MUST test DEBIAN_FRONTEND for `noninteractive`")
+                .containsPattern("\\$\\{DEBIAN_FRONTEND:-\\}\"\\s*=\\s*\"noninteractive\"");
+        assertThat(text)
+                .as("hang fix (iii) — under the noninteractive frontend the postinst MUST force HAVE_TTY=0 "
+                        + "(skip the [Y/n] invite + the bounded read)")
+                .containsPattern("\\$\\{DEBIAN_FRONTEND:-\\}\"\\s*=\\s*\"noninteractive\"[^\\n]*\\n\\s*HAVE_TTY=0");
+    }
 }
