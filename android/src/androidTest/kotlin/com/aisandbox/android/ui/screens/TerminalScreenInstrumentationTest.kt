@@ -1,16 +1,27 @@
 package com.aisandbox.android.ui.screens
 
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.click
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.aisandbox.android.R
@@ -184,5 +195,187 @@ class TerminalScreenInstrumentationTest {
         // breaks AC#5 surfaces on-device.
         assertEquals("Delete session", ctx.getString(R.string.terminal_menu_delete))
         assertEquals("Disconnect", ctx.getString(R.string.terminal_menu_disconnect))
+    }
+
+    // ══ UC-23 — IME-inset / keyboard-occlusion layout contract (AC#1–#4, #6, #8) ══
+    //
+    // These drive the production [TerminalScaffoldLayout] seam directly with a
+    // SYNTHETIC, controllable `imeInsets` (server-free, no real IME) and assert
+    // the keyboard-up geometry contract via the production test tags
+    // [TerminalViewportTestTag] / [ModifierBarTestTag]. The slots are lightweight
+    // stand-ins — the real TerminalView / ModifierBar internals are exercised by
+    // the UC-21 tests above and the JVM suites.
+    //
+    // HONESTY CAVEAT (recorded for the coverage summary): the assertions below are
+    // STRUCTURAL layout-contract checks. They bypass the real
+    // Scaffold/consumeWindowInsets stack and the real TerminalView.updateSize()
+    // PTY-resize path. True on-device IME docking + the no-resize guarantee remain
+    // a manual emulator check; this file's job is to pin the layout contract and
+    // run green on a real device via connectedDebugAndroidTest.
+
+    /**
+     * Render [TerminalScaffoldLayout] full-screen with a fabricated, mutable
+     * `imeInsets` (px) and lightweight stand-in slots. The agent-switcher slot
+     * tags itself [SWITCHER_COMPACT_TAG] / [SWITCHER_NORMAL_TAG] by the `compact`
+     * flag the layout hands it, so AC#4 wiring is observable.
+     */
+    private fun setUc23Layout(imeBottom: MutableState<Int>) {
+        composeTestRule.setContent {
+            AiSandboxTheme {
+                TerminalScaffoldLayout(
+                    modifier = Modifier.fillMaxSize(),
+                    // AC#8 seam: the sole inset source, fabricated + controllable.
+                    imeInsets = WindowInsets(bottom = imeBottom.value),
+                    agentSwitcher = { compact ->
+                        Box(
+                            Modifier
+                                .fillMaxWidth()
+                                .height(if (compact) 24.dp else 44.dp)
+                                .testTag(if (compact) SWITCHER_COMPACT_TAG else SWITCHER_NORMAL_TAG),
+                        )
+                    },
+                    terminal = { Box(Modifier.fillMaxSize()) },
+                    modifierBar = { Box(Modifier.fillMaxWidth().height(48.dp)) },
+                )
+            }
+        }
+    }
+
+    private fun rootBottomPx(): Float =
+        composeTestRule.onRoot().fetchSemanticsNode().boundsInRoot.bottom
+
+    private fun tagBottomPx(tag: String): Float =
+        composeTestRule.onNodeWithTag(tag).fetchSemanticsNode().boundsInRoot.bottom
+
+    /** Measured (unclipped) height of a tagged node — the signal a PTY resize keys off. */
+    private fun tagHeightPx(tag: String): Int =
+        composeTestRule.onNodeWithTag(tag).fetchSemanticsNode().size.height
+
+    private fun setIme(imeBottom: MutableState<Int>, px: Int) {
+        composeTestRule.runOnUiThread { imeBottom.value = px }
+        composeTestRule.waitForIdle()
+    }
+
+    // ── AC#1 / AC#8(a) — cursor/terminal region not occluded by the keyboard ──
+
+    @Test
+    fun ime_shown_terminal_viewport_sits_above_keyboard_band() {
+        val ime = mutableStateOf(0)
+        setUc23Layout(ime)
+        composeTestRule.waitForIdle()
+        setIme(ime, IME_BOTTOM_PX)
+
+        val ceiling = rootBottomPx() - IME_BOTTOM_PX
+        val viewportBottom = tagBottomPx(TerminalViewportTestTag)
+        assertTrue(
+            "AC#1/#8a — terminal viewport bottom ($viewportBottom) must sit above the IME band " +
+                "(rootBottom - ime = $ceiling): the cursor row is not occluded.",
+            viewportBottom <= ceiling + EPS,
+        )
+    }
+
+    // ── AC#3 / AC#8(b) — the modifier bar docks directly above the keyboard ───
+
+    @Test
+    fun ime_shown_modifier_bar_docked_above_keyboard_band() {
+        val ime = mutableStateOf(0)
+        setUc23Layout(ime)
+        composeTestRule.waitForIdle()
+        setIme(ime, IME_BOTTOM_PX)
+
+        val ceiling = rootBottomPx() - IME_BOTTOM_PX
+        val modifierBarBottom = tagBottomPx(ModifierBarTestTag)
+        assertTrue(
+            "AC#3/#8b — modifier-bar content bottom ($modifierBarBottom) must dock at/above the IME " +
+                "band (rootBottom - ime = $ceiling): the keys stay reachable above the keyboard.",
+            modifierBarBottom <= ceiling + EPS,
+        )
+    }
+
+    // ── AC#2 — no PTY resize on IME toggle (structural: slot height pinned) ───
+
+    @Test
+    fun ime_toggle_does_not_resize_terminal_slot() {
+        val ime = mutableStateOf(0)
+        setUc23Layout(ime)
+        composeTestRule.waitForIdle()
+
+        val hidden = tagHeightPx(TerminalViewportTestTag)
+        setIme(ime, IME_BOTTOM_PX)
+        val shown = tagHeightPx(TerminalViewportTestTag)
+
+        // The terminal slot pins its measured height via requiredHeight(), so the
+        // measured (unclipped) height is identical keyboard-hidden vs shown —
+        // TerminalView.updateSize()'s row/col guard never fires → no sendResize.
+        // (±1px allowed for the dp round-trip rounding in requiredHeight().)
+        assertTrue(
+            "AC#2 — terminal slot measured height must be unchanged on IME toggle " +
+                "(hidden=$hidden, shown=$shown); a delta means the PTY would resize.",
+            kotlin.math.abs(hidden - shown) <= 1,
+        )
+    }
+
+    // ── AC#4 — switcher collapses to a compact strip while the keyboard is up ─
+
+    @Test
+    fun ime_visibility_drives_switcher_compact_state() {
+        val ime = mutableStateOf(0)
+        setUc23Layout(ime)
+        composeTestRule.waitForIdle()
+
+        // Keyboard down → normal row.
+        composeTestRule.onNodeWithTag(SWITCHER_NORMAL_TAG).assertExists()
+        composeTestRule.onNodeWithTag(SWITCHER_COMPACT_TAG).assertDoesNotExist()
+
+        setIme(ime, IME_BOTTOM_PX)
+
+        // Keyboard up → compact strip.
+        composeTestRule.onNodeWithTag(SWITCHER_COMPACT_TAG).assertExists()
+        composeTestRule.onNodeWithTag(SWITCHER_NORMAL_TAG).assertDoesNotExist()
+    }
+
+    // ── AC#6 — dismissing the keyboard restores the full layout ───────────────
+
+    @Test
+    fun ime_dismiss_restores_full_layout() {
+        val ime = mutableStateOf(0)
+        setUc23Layout(ime)
+        composeTestRule.waitForIdle()
+        val restingHeight = tagHeightPx(TerminalViewportTestTag)
+
+        setIme(ime, IME_BOTTOM_PX) // keyboard up …
+        setIme(ime, 0) // … then dismissed
+
+        // Switcher restored to its normal row.
+        composeTestRule.onNodeWithTag(SWITCHER_NORMAL_TAG).assertExists()
+        composeTestRule.onNodeWithTag(SWITCHER_COMPACT_TAG).assertDoesNotExist()
+
+        // Modifier bar back at the bottom edge (no IME band beneath it).
+        val rootBottom = rootBottomPx()
+        val modifierBarBottom = tagBottomPx(ModifierBarTestTag)
+        assertTrue(
+            "AC#6 — modifier bar must return to the bottom edge once the IME is dismissed " +
+                "(modifierBarBottom=$modifierBarBottom, rootBottom=$rootBottom).",
+            kotlin.math.abs(modifierBarBottom - rootBottom) <= EPS,
+        )
+
+        // Terminal slot resumes its resting (full) height.
+        val afterHeight = tagHeightPx(TerminalViewportTestTag)
+        assertTrue(
+            "AC#6 — terminal slot must resume its resting height after IME dismiss " +
+                "(resting=$restingHeight, after=$afterHeight).",
+            kotlin.math.abs(afterHeight - restingHeight) <= 1,
+        )
+    }
+
+    private companion object {
+        /** Synthetic keyboard height (px) injected through the [WindowInsets] seam. */
+        const val IME_BOTTOM_PX = 600
+
+        /** Float tolerance for px geometry comparisons (sub-pixel rounding). */
+        const val EPS = 1.5f
+
+        const val SWITCHER_NORMAL_TAG = "uc23_switcher_normal"
+        const val SWITCHER_COMPACT_TAG = "uc23_switcher_compact"
     }
 }

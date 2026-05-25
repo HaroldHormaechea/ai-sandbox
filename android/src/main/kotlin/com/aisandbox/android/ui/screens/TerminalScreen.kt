@@ -6,12 +6,17 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.requiredHeight
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ArrowBack
@@ -36,10 +41,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.aisandbox.android.R
@@ -239,6 +249,14 @@ fun TerminalScreen(
     }
 }
 
+/**
+ * UC-23 — test tags for the instrumented inset/occlusion assertions (AC#8).
+ * Public so the androidTest module can target the terminal viewport and the
+ * docked modifier-bar regions by tag.
+ */
+const val TerminalViewportTestTag = "uc23_terminal_viewport"
+const val ModifierBarTestTag = "uc23_modifier_bar"
+
 @Composable
 private fun TerminalBody(
     padding: PaddingValues,
@@ -250,26 +268,151 @@ private fun TerminalBody(
     val targets by viewModel.targets.collectAsState()
     val selectedTargetId by viewModel.selectedTargetId.collectAsState()
 
-    Column(modifier = Modifier.fillMaxSize().padding(padding).background(BgWorkbench)) {
+    // UC-23 — the body wrapper owns the Scaffold's system-bar insets via
+    // padding(padding) and *consumes* them via consumeWindowInsets(padding) so
+    // descendants don't double-count the navigation bar. The IME inset is
+    // deliberately NOT consumed here: TerminalScaffoldLayout reads it through
+    // its single injected `imeInsets` seam, and the docked ModifierBar
+    // re-applies it via windowInsetsPadding — which then nets max(ime, navBar)
+    // on the bottom edge because the nav bar is already consumed.
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(padding)
+            .consumeWindowInsets(padding)
+            .background(BgWorkbench),
+    ) {
         if (state is TerminalState.Reconnecting) {
             ReconnectBanner(state = state)
         }
         if (state is TerminalState.GaveUp) {
             DisconnectedBanner(onReconnect = onReconnect)
         }
-        // AC#9–12 — agent-team switcher between the top bar and the terminal.
-        // Self-hides when only the main target is present.
-        AgentSwitcherBar(
-            targets = targets,
-            selectedTargetId = selectedTargetId,
-            onSelect = viewModel::selectTarget,
+        TerminalScaffoldLayout(
+            modifier = Modifier.weight(1f),
+            // AC#9–12 — agent-team switcher between the top bar and the
+            // terminal. Self-hides when only the main target is present, and
+            // collapses to a compact strip while the IME is up (AC#4).
+            agentSwitcher = { compact ->
+                AgentSwitcherBar(
+                    targets = targets,
+                    selectedTargetId = selectedTargetId,
+                    onSelect = viewModel::selectTarget,
+                    compact = compact,
+                )
+            },
+            // The real terminal surface (Termux TerminalView via AndroidView).
+            // It fills the requiredHeight-pinned slot supplied by the layout.
+            terminal = {
+                TerminalSurface(controller = controller, modifier = Modifier.fillMaxSize())
+            },
+            // AC15 / AC3 modifier bar — docked above the keyboard by the layout.
+            modifierBar = {
+                ModifierBar(onKey = { event -> dispatchKey(event, viewModel) })
+            },
         )
-        // Body: the real terminal surface (Termux TerminalView via AndroidView).
-        Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
-            TerminalSurface(controller = controller, modifier = Modifier.fillMaxSize())
+    }
+}
+
+/**
+ * UC-23 — the IME-aware terminal layout. Owns ALL of this screen's inset reads
+ * through the single injected [imeInsets] parameter, which is the AC#8 test
+ * seam: an instrumented test can pass a fabricated [WindowInsets] to drive the
+ * keyboard-up geometry deterministically (no real IME needed) and assert that
+ * (a) the terminal/cursor region's bottom sits above the IME inset and (b) the
+ * modifier bar is positioned above the keyboard.
+ *
+ * <p>Behaviour: while the IME is up, the modifier-bar slot grows by the IME
+ * height (windowInsetsPadding), shrinking the bottom-anchored, clipped terminal
+ * viewport [Box]. The terminal slot inside pins its measured pixel height to the
+ * resting (keyboard-hidden) height via [requiredHeight], so it ignores the
+ * shrunk constraint, overflows the top (clipped), and keeps the cursor row just
+ * above the modifier bar — without ever changing the [com.termux.view.TerminalView]'s
+ * measured height, which is what would otherwise trigger a PTY resize.
+ *
+ * @param imeInsets the sole inset source for this layout (AC#8 test seam).
+ * @param agentSwitcher slot; receives `compact = imeVisible` (AC#4).
+ * @param terminal slot; sized by this layout via requiredHeight (see below).
+ * @param modifierBar slot; docked above the keyboard via windowInsetsPadding.
+ */
+// `internal` (not `private`) so the androidTest source set can inject a
+// fabricated `imeInsets` to drive the AC#8 instrumented assertions.
+@Composable
+internal fun TerminalScaffoldLayout(
+    modifier: Modifier = Modifier,
+    imeInsets: WindowInsets = WindowInsets.ime,
+    agentSwitcher: @Composable (compact: Boolean) -> Unit,
+    terminal: @Composable () -> Unit,
+    modifierBar: @Composable () -> Unit,
+) {
+    val density = LocalDensity.current
+    // AC#8 seam: the ONLY inset read in this layout.
+    val imeBottomPx = imeInsets.getBottom(density)
+    val imeVisible = imeBottomPx > 0
+
+    // Resting (keyboard-hidden) viewport height. Captured only while the IME is
+    // down. Null until the first keyboard-hidden layout → fall back to
+    // fillMaxSize (entering the screen with the IME already up yields one
+    // self-correcting resize on the first keyboard-hidden frame; accepted).
+    var restingViewportHeight by remember { mutableStateOf<Dp?>(null) }
+
+    Column(modifier = modifier.fillMaxWidth()) {
+        // AC#4 — collapse the switcher to a compact strip while typing.
+        agentSwitcher(imeVisible)
+
+        // Terminal viewport: a shrinking, clipped, bottom-anchored Box. As the
+        // IME pushes the modifier bar up, this Box loses height; the terminal
+        // slot pins its own height and overflows the (clipped) top so the
+        // cursor row stays just above the modifier bar (AC#1).
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .fillMaxWidth()
+                .clipToBounds()
+                .onSizeChanged { size ->
+                    // Re-capture the resting height ONLY while the keyboard is
+                    // hidden. This is also exactly what lets genuine geometry
+                    // changes (rotation, font/size changes) still flow a resize
+                    // to the PTY: the resting height changes, the requiredHeight
+                    // below changes with it, and TerminalView.updateSize() fires
+                    // normally. IME toggles never reach here (guarded), so they
+                    // never resize (AC#2).
+                    if (!imeVisible) {
+                        restingViewportHeight = with(density) { size.height.toDp() }
+                    }
+                },
+            contentAlignment = Alignment.BottomStart,
+        ) {
+            // ⚠️ LOAD-BEARING (challenger guardrail #1): the no-PTY-resize
+            // guarantee (AC#2) depends on requiredHeight() here — NOT height()
+            // and NOT letting the view fill the shrinking Box. requiredHeight
+            // makes the TerminalView ignore the parent's shrunk constraint, keep
+            // its measured pixel height constant, and overflow the clipped Box.
+            // Because getHeight() never changes on an IME toggle,
+            // TerminalView.updateSize()'s column/row change-guard never fires, so
+            // no sendResize is emitted. Switching to height()/fill re-introduces
+            // the resize and BREAKS AC#2 — do not change this.
+            val terminalSizeModifier = restingViewportHeight
+                ?.let { Modifier.fillMaxWidth().requiredHeight(it) }
+                ?: Modifier.fillMaxSize()
+            Box(modifier = terminalSizeModifier.testTag(TerminalViewportTestTag)) {
+                terminal()
+            }
         }
-        // AC15 / AC3 modifier bar.
-        ModifierBar(onKey = { event -> dispatchKey(event, viewModel) })
+
+        // AC#3 — dock the modifier bar directly above the keyboard. The wrapper
+        // consumed the nav-bar inset, so windowInsetsPadding(imeInsets) nets
+        // max(ime, navBar) on the bottom edge: it rests on the nav bar with the
+        // keyboard down and rides up to sit on the keyboard when it's shown.
+        // The ModifierBar's internals (escape sequences / KeyEncoding) are
+        // untouched, so AC#3's sequence correctness is preserved.
+        Box(
+            modifier = Modifier
+                .windowInsetsPadding(imeInsets)
+                .testTag(ModifierBarTestTag),
+        ) {
+            modifierBar()
+        }
     }
 }
 
