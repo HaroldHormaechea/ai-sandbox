@@ -7,6 +7,7 @@ import com.pty4j.WinSize;
 import java.io.IOException;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -118,9 +119,18 @@ public class TmuxBridgeService {
             runBestEffort(tmuxExec(project, socket, "resize-pane", "-Z", "-t", paneSpec));
         }
         // Step 3 — PTY attach.
+        // pty4j's setEnvironment REPLACES the child environment, so we must
+        // inherit the JVM env (notably $PATH, matching ProcessExecutor's
+        // ProcessBuilder behaviour) and overlay TERM. Otherwise the bare
+        // "docker" argv can't be resolved ("Unable to get $PATH" /
+        // Exec_tty error). The PATH fallback covers a systemd unit started
+        // without one in its environment.
+        Map<String, String> ptyEnv = new HashMap<>(System.getenv());
+        ptyEnv.put("TERM", "xterm-256color");
+        ptyEnv.computeIfAbsent("PATH", k -> "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
         PtyProcessBuilder pb = new PtyProcessBuilder()
                 .setCommand(attachArgv(project, socket, session))
-                .setEnvironment(Map.of("TERM", "xterm-256color"))
+                .setEnvironment(ptyEnv)
                 .setInitialColumns(cols > 0 ? cols : 80)
                 .setInitialRows(rows > 0 ? rows : 24);
         PtyProcess proc;
