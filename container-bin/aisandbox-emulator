@@ -15,9 +15,10 @@
 # restart/rebuild (AC9). First `start` therefore needs network; the build lane
 # does not.
 #
-#   ⚠ EMPIRICALLY UNVERIFIED at authoring time — there was no Docker/KVM in the
-#     authoring environment, so this script has only been static-checked
-#     (bash -n / shellcheck). Validate on a Docker+KVM+amd64 host per
+#   ✓ VALIDATED on a Docker+KVM+amd64 ai-sandbox (KVM) session: `start` lazily
+#     installs the emulator + system image, builds the unified SDK root, creates
+#     the AVD, and boots a headless KVM AVD to sys.boot_completed=1 (adb sees
+#     emulator-5554). See
 #     use-cases/22-onboarding-toolchain-android-testing.md → "Testing
 #     Limitations".
 set -euo pipefail

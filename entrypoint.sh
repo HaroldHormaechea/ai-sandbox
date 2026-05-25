@@ -44,6 +44,25 @@ if [ -d /etc/claude-template ] && [ ! -e "$HOME/.claude/.seeded" ]; then
     touch "$HOME/.claude/.seeded"
 fi
 
+# Android emulator skill (KVM-capable image only). The Android-toolchain image
+# bakes the step-by-step emulator runbook at /opt/ai-sandbox/skills/. ~/.claude
+# is bind-mounted, so a build-time copy into ~/.claude/skills/ would be masked;
+# install it here instead — BEFORE tmux launches claude, so Claude Code sees it
+# at session start (it only hot-loads skills present when the session begins).
+# The presence of /opt/ai-sandbox/skills marks the Android image; the lean image
+# has no such dir and skips this. Refreshed every start so image updates
+# propagate; a copy failure warns-and-continues so the session still boots.
+if [ -d /opt/ai-sandbox/skills ]; then
+    mkdir -p "$HOME/.claude/skills"
+    for _skill_src in /opt/ai-sandbox/skills/*/; do
+        [ -d "$_skill_src" ] || continue
+        _skill_name=$(basename "$_skill_src")
+        rm -rf "$HOME/.claude/skills/$_skill_name"
+        cp -a "$_skill_src" "$HOME/.claude/skills/$_skill_name" \
+            || echo "WARNING: failed to install Android skill '$_skill_name' into ~/.claude/skills." >&2
+    done
+fi
+
 # RTK (Rust Token Killer) wiring. MUST run here (post-mount, pre-tmux), NOT in
 # the Dockerfile: anything `rtk init -g` writes lives under ~/.claude/, which is
 # bind-mounted from the host's claude-config/ at runtime — the build-time copy

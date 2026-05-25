@@ -141,6 +141,15 @@ ARG ANDROID_CMDLINE_TOOLS_VERSION=11076708
 ENV ANDROID_HOME=/opt/android-sdk
 ENV ANDROID_SDK_ROOT=/opt/android-sdk
 ENV PATH="/opt/android-sdk/cmdline-tools/latest/bin:/opt/android-sdk/platform-tools:${PATH}"
+
+# Skill source for the in-session Android emulator runbook. A Dockerfile COPY
+# can't branch on an ARG, so it lands in a staging path here; the
+# ANDROID_TESTING=1 RUN below relocates it into /opt/ai-sandbox/skills, and a
+# later unconditional RUN deletes the staging copy so the lean (non-Android)
+# image carries no Android skill. entrypoint.sh seeds /opt/ai-sandbox/skills/*
+# into ~/.claude/skills at session start — a build-time copy can't go straight
+# there because ~/.claude is bind-mounted at runtime and would mask it.
+COPY container-bin/skills/ /opt/ai-sandbox/skills-staging/
 RUN set -eu; \
     if [ "${ANDROID_TESTING}" = "1" ]; then \
       if [ "${TARGETARCH}" != "amd64" ]; then \
@@ -203,8 +212,19 @@ RUN set -eu; \
         'export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$ANDROID_HOME/build-tools/36.0.0:$PATH"' \
         > /etc/profile.d/android-sdk.sh; \
       chmod 0644 /etc/profile.d/android-sdk.sh; \
+      # Install the baked emulator-setup skill (entrypoint.sh seeds it into
+      # ~/.claude/skills at session start). Android image only — relocated out
+      # of the staging dir COPYed above, with gid-0 = uid perms so an
+      # arbitrary-uid (server-spawned) runtime user can still read it.
+      mkdir -p /opt/ai-sandbox/skills; \
+      cp -a /opt/ai-sandbox/skills-staging/. /opt/ai-sandbox/skills/; \
+      chgrp -R 0 /opt/ai-sandbox/skills && chmod -R g=u /opt/ai-sandbox/skills; \
       echo "Android toolchain baked OK ($(java -version 2>&1 | head -1))"; \
     fi
+# The skills staging dir (COPYed above) is consumed only by the ANDROID_TESTING
+# branch, which relocates it to /opt/ai-sandbox/skills. Remove the staging copy
+# unconditionally so the lean (non-Android) image carries no Android skill.
+RUN rm -rf /opt/ai-sandbox/skills-staging
 # Stamp the toolchain state onto the image so spawn.sh can decide /dev/kvm
 # passthrough at run time (and so server-spawned sessions inherit it). "1" when
 # baked, "0" otherwise.
