@@ -6,6 +6,7 @@ import com.pty4j.PtyProcessBuilder;
 import com.pty4j.WinSize;
 import java.io.IOException;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -18,15 +19,22 @@ import org.springframework.stereotype.Service;
  *
  * <ol>
  *   <li>{@code docker compose -p ai-sandbox-N exec -T claude-sandbox tmux
- *       new-session -d -s client-<id> -t main} — creates the per-client
- *       tmux session linked to {@code main}.</li>
+ *       [-S <socket>] new-session -d -s client-<id> -t <baseSession>} — creates
+ *       the per-client tmux session linked to the target's base session.</li>
  *   <li>{@code docker compose -p ai-sandbox-N exec -T claude-sandbox tmux
- *       set-option -t client-<id> mouse on} — enable xterm-mouse mode.</li>
+ *       [-S <socket>] set-option -t client-<id> mouse on} — enable xterm-mouse
+ *       mode.</li>
  *   <li>pty4j spawns {@code docker compose -p ai-sandbox-N exec -it
- *       claude-sandbox tmux attach -t client-<id>}; PTY stdout becomes
- *       binary WebSocket frames, PTY stdin receives keystrokes + xterm
+ *       claude-sandbox tmux [-S <socket>] attach -t client-<id>}; PTY stdout
+ *       becomes binary WebSocket frames, PTY stdin receives keystrokes + xterm
  *       mouse sequences.</li>
  * </ol>
+ *
+ * <p>UC-21 generalizes the bridge to target any {@link BridgeTarget}: the main
+ * tmux session on the default socket (the original behaviour), or an agent-team
+ * pane on a separate {@code claude-swarm-<pid>} socket. When the target names a
+ * window/pane, the per-client session focuses + zooms that pane after creation
+ * so the single pane fills the client view.
  *
  * <p>This service does NOT manage WebSocket I/O directly — that's the
  * facade's job. It exposes start / size / write / read / close primitives.
@@ -44,59 +52,76 @@ public class TmuxBridgeService {
     }
 
     /**
-     * Starts the per-client tmux session and the PTY-attached process.
+     * A bridge destination. The default socket / {@code main} session is the
+     * original single-target behaviour; a {@code claude-swarm-<pid>} socket with
+     * a window/pane addresses one agent-team teammate.
+     *
+     * @param socketPath  absolute tmux socket path, or {@code null} for the
+     *                    container's default socket (the main session).
+     * @param baseSession the source session the per-client session links to
+     *                    (e.g. {@code main} or {@code claude-swarm}).
+     * @param window      tmux window index to focus, or {@code null} (main).
+     * @param pane        tmux pane index to focus + zoom, or {@code null} (main).
+     */
+    public record BridgeTarget(String socketPath, String baseSession, String window, String pane) {
+        /** The default-socket main session — the pre-UC-21 single target. */
+        public static BridgeTarget main() {
+            return new BridgeTarget(null, "main", null, null);
+        }
+
+        public boolean hasPane() {
+            return window != null && !window.isBlank() && pane != null && !pane.isBlank();
+        }
+    }
+
+    /**
+     * Main-compatible overload (pre-UC-21 signature). Bridges the default-socket
+     * {@code main} session. Retained so existing callers + test mocks compile
+     * unchanged.
      */
     public Bridge start(int n, String streamId, int cols, int rows) throws IOException {
+        return start(n, streamId, BridgeTarget.main(), cols, rows);
+    }
+
+    /**
+     * Starts the per-client tmux session against {@code target} and the
+     * PTY-attached process.
+     */
+    public Bridge start(int n, String streamId, BridgeTarget target, int cols, int rows) throws IOException {
         String project = "ai-sandbox-" + n;
         String session = "client-" + streamId;
-        // Step 1.
+        String socket = (target == null ? null : target.socketPath());
+        String baseSession = (target == null || target.baseSession() == null) ? "main" : target.baseSession();
+
+        // Step 1 — create the per-client session linked to the base session.
         ProcessExecutor.Result r1 = exec.run(
-                List.of(
-                        "docker",
-                        "compose",
-                        "-p",
-                        project,
-                        "exec",
-                        "-T",
-                        "claude-sandbox",
-                        "tmux",
-                        "new-session",
-                        "-d",
-                        "-s",
-                        session,
-                        "-t",
-                        "main"),
+                tmuxExec(project, socket, "new-session", "-d", "-s", session, "-t", baseSession),
                 null,
                 STARTUP_TIMEOUT);
         if (r1.exitCode() != 0) {
             throw new IOException("tmux new-session failed: " + r1.stderr());
         }
-        // Step 2.
+        // Step 2 — enable mouse mode (best-effort).
         ProcessExecutor.Result r2 = exec.run(
-                List.of(
-                        "docker",
-                        "compose",
-                        "-p",
-                        project,
-                        "exec",
-                        "-T",
-                        "claude-sandbox",
-                        "tmux",
-                        "set-option",
-                        "-t",
-                        session,
-                        "mouse",
-                        "on"),
+                tmuxExec(project, socket, "set-option", "-t", session, "mouse", "on"),
                 null,
                 STARTUP_TIMEOUT);
         if (r2.exitCode() != 0) {
             LOG.warn("tmux set-option mouse on failed (continuing): {}", r2.stderr());
         }
+        // Step 2b — focus + zoom the requested pane (agent-team target). The
+        // operations are scoped to the per-client session so they don't disturb
+        // the orchestrator's own view of the shared window.
+        if (target != null && target.hasPane()) {
+            String windowSpec = session + ":" + target.window();
+            String paneSpec = windowSpec + "." + target.pane();
+            runBestEffort(tmuxExec(project, socket, "select-window", "-t", windowSpec));
+            runBestEffort(tmuxExec(project, socket, "select-pane", "-t", paneSpec));
+            runBestEffort(tmuxExec(project, socket, "resize-pane", "-Z", "-t", paneSpec));
+        }
         // Step 3 — PTY attach.
         PtyProcessBuilder pb = new PtyProcessBuilder()
-                .setCommand(new String[] {
-                    "docker", "compose", "-p", project, "exec", "-it", "claude-sandbox", "tmux", "attach", "-t", session
-                })
+                .setCommand(attachArgv(project, socket, session))
                 .setEnvironment(Map.of("TERM", "xterm-256color"))
                 .setInitialColumns(cols > 0 ? cols : 80)
                 .setInitialRows(rows > 0 ? rows : 24);
@@ -105,41 +130,59 @@ public class TmuxBridgeService {
             proc = pb.start();
         } catch (IOException io) {
             // Best-effort kill of the orphaned tmux session.
-            try {
-                exec.run(
-                        List.of(
-                                "docker",
-                                "compose",
-                                "-p",
-                                project,
-                                "exec",
-                                "-T",
-                                "claude-sandbox",
-                                "tmux",
-                                "kill-session",
-                                "-t",
-                                session),
-                        null,
-                        STARTUP_TIMEOUT);
-            } catch (IOException ignored) {
-                // best-effort
-            }
+            runBestEffort(tmuxExec(project, socket, "kill-session", "-t", session));
             throw io;
         }
-        return new Bridge(project, session, proc, exec);
+        return new Bridge(project, session, socket, proc, exec);
+    }
+
+    private void runBestEffort(List<String> argv) {
+        try {
+            exec.run(argv, null, STARTUP_TIMEOUT);
+        } catch (IOException ignored) {
+            // best-effort
+        }
+    }
+
+    /** Build {@code docker compose … exec -T claude-sandbox tmux [-S socket] <args>}. */
+    private static List<String> tmuxExec(String project, String socket, String... tmuxArgs) {
+        List<String> argv = new ArrayList<>(
+                List.of("docker", "compose", "-p", project, "exec", "-T", "claude-sandbox", "tmux"));
+        if (socket != null && !socket.isBlank()) {
+            argv.add("-S");
+            argv.add(socket);
+        }
+        argv.addAll(List.of(tmuxArgs));
+        return argv;
+    }
+
+    /** Build the interactive PTY-attach argv ({@code exec -it … tmux [-S socket] attach}). */
+    private static String[] attachArgv(String project, String socket, String session) {
+        List<String> argv = new ArrayList<>(
+                List.of("docker", "compose", "-p", project, "exec", "-it", "claude-sandbox", "tmux"));
+        if (socket != null && !socket.isBlank()) {
+            argv.add("-S");
+            argv.add(socket);
+        }
+        argv.add("attach");
+        argv.add("-t");
+        argv.add(session);
+        return argv.toArray(new String[0]);
     }
 
     /** Active bridge handle returned by {@link #start}. */
     public static final class Bridge {
         private final String project;
         private final String session;
+        private final String socket;
         private final PtyProcess process;
         private final ProcessExecutor exec;
         private final AtomicBoolean closed = new AtomicBoolean(false);
 
-        Bridge(String project, String session, PtyProcess process, ProcessExecutor exec) {
+        Bridge(String project, String session, String socket, PtyProcess process, ProcessExecutor exec) {
             this.project = project;
             this.session = session;
+            this.socket = socket;
             this.process = process;
             this.exec = exec;
         }
@@ -175,21 +218,7 @@ public class TmuxBridgeService {
                 // best-effort
             }
             try {
-                exec.run(
-                        List.of(
-                                "docker",
-                                "compose",
-                                "-p",
-                                project,
-                                "exec",
-                                "-T",
-                                "claude-sandbox",
-                                "tmux",
-                                "kill-session",
-                                "-t",
-                                session),
-                        null,
-                        STARTUP_TIMEOUT);
+                exec.run(tmuxExec(project, socket, "kill-session", "-t", session), null, STARTUP_TIMEOUT);
             } catch (IOException ignored) {
                 // best-effort
             }

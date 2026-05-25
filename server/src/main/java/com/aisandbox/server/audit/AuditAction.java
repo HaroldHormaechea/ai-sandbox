@@ -9,6 +9,8 @@ public enum AuditAction {
     SESSION_KILL,
     STREAM_OPEN,
     STREAM_CLOSE,
+    // UC-21 — a stream switched its bridged target mid-stream (agent switcher).
+    STREAM_REBRIDGE,
     CLIENT_ADD,
     CLIENT_REMOVE,
     // UC04 — successful POST /v1/enrollment redemption.
