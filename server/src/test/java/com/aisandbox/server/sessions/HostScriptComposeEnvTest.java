@@ -222,6 +222,226 @@ class HostScriptComposeEnvTest {
         assertThat(Files.readString(counter).trim()).isEqualTo("1");
     }
 
+    // ── UC-26 — dev-tools spawn-time env injection ──────────────────
+
+    /**
+     * UC-26 AC#5 / AC#7 — with the `dind` devtool enabled in
+     * {@code .ai-sandbox-devtools}, sourcing {@code lib.sh} and calling
+     * {@code inject_devtool_spawn_env} MUST:
+     *
+     * <ul>
+     *   <li>append {@code docker-compose.dind.yml} to
+     *       {@code AI_SANDBOX_EXTRA_COMPOSE_FILES} so {@code ai_sandbox_compose}
+     *       prepends {@code -f docker-compose.dind.yml} on every {@code docker
+     *       compose} call;</li>
+     *   <li>export {@code AI_SANDBOX_DEVTOOL_DIND=1} so the spawned
+     *       container's environment carries the same flag — the shim
+     *       {@code entrypoint.sh} reads it to decide whether to start the
+     *       in-session rootless daemon;</li>
+     *   <li>resolve to the SAME ledger path that the wizard writes to (the
+     *       wizard's write path == spawn.sh's read path by construction —
+     *       both use {@code AI_SANDBOX_HOST_STATE_ROOT/.ai-sandbox-devtools}
+     *       in install mode, the cwd otherwise).</li>
+     * </ul>
+     *
+     * <p>Strategy: copy {@code lib.sh} + {@code docker-compose.dind.yml}
+     * into a temp dir, stage the ledger, source the lib and invoke
+     * {@code inject_devtool_spawn_env}, then prove the env vars + the
+     * downstream {@code ai_sandbox_compose} argv carry the expected
+     * flags via the same fake docker shim used above.
+     */
+    @Test
+    void inject_devtool_spawn_env_with_dind_alone_layers_dind_compose_and_exports_env_flag(@TempDir Path tmp)
+            throws Exception {
+        Path stage = tmp.resolve("stage");
+        Files.createDirectories(stage);
+        copyExec(REPO_ROOT.resolve("lib.sh"), stage.resolve("lib.sh"));
+        // The DinD override must live next to docker-compose.yml so spawn.sh
+        // (and inject_devtool_spawn_env's path resolution) finds it.
+        Files.copy(
+                REPO_ROOT.resolve("docker-compose.dind.yml"),
+                stage.resolve("docker-compose.dind.yml"),
+                StandardCopyOption.REPLACE_EXISTING);
+        Files.copy(
+                REPO_ROOT.resolve("docker-compose.yml"),
+                stage.resolve("docker-compose.yml"),
+                StandardCopyOption.REPLACE_EXISTING);
+        // Persisted ledger — single entry: `dind  session-spawn`. This is
+        // the exact shape DevToolsConfig.writeEnabled / write_enabled_devtools
+        // produce (tab-separated, one record per line).
+        Files.writeString(stage.resolve(".ai-sandbox-devtools"), "dind\tsession-spawn\n");
+
+        Path bin = mkBinDir(tmp);
+        Path log = tmp.resolve("docker.log");
+        installFakeDocker(bin, log);
+
+        Map<String, String> env = new HashMap<>();
+        env.put("PATH", bin.toString() + ":" + System.getenv("PATH"));
+        // No install-mode pins — lib.sh resolves the ledger relative to cwd,
+        // which we set to the stage dir via runShell's working-dir argument.
+        env.put("AI_SANDBOX_COMPOSE_FILE", stage.resolve("docker-compose.yml").toString());
+
+        // One-liner: source lib.sh, inject the env vars, dump the resulting
+        // EXTRA_COMPOSE_FILES + DEVTOOL_DIND to a probe file, then call
+        // ai_sandbox_compose so the fake docker captures the argv prefix.
+        Path probe = tmp.resolve("probe.env");
+        int rc = runShell(
+                stage,
+                env,
+                "source './lib.sh' && inject_devtool_spawn_env && "
+                        + "printf 'EXTRA=%s\\nDIND=%s\\n' "
+                        + "\"${AI_SANDBOX_EXTRA_COMPOSE_FILES:-}\" \"${AI_SANDBOX_DEVTOOL_DIND:-0}\" > '" + probe + "' && "
+                        + "ai_sandbox_compose -p ai-sandbox-1 up -d");
+        assertThat(rc).isZero();
+
+        // AC#7 — the wizard's write path == spawn.sh's read path: the ledger
+        // we wrote at <stage>/.ai-sandbox-devtools is what
+        // inject_devtool_spawn_env actually read.
+        String probeText = Files.readString(probe);
+        assertThat(probeText)
+                .as("UC-26 AC#5/AC#7 — dind ledger entry MUST surface in spawn-time env vars")
+                .contains("DIND=1")
+                // EXTRA must reference the override file the spawn-time layer reads.
+                .contains("docker-compose.dind.yml");
+
+        // The downstream `ai_sandbox_compose -p ai-sandbox-1 up -d` argv MUST
+        // carry `-f docker-compose.yml -f .../docker-compose.dind.yml` (base
+        // first, override after) so the rootless DinD bits layer additively.
+        List<String> argv = Files.readAllLines(log);
+        assertThat(argv).as("fake docker captured argv with DinD override").contains("compose", "-f");
+        // The first `-f` carries the base compose file (the env var we set).
+        // A later `-f` carries the override. Find the override's index and
+        // assert its file value is the dind override.
+        int firstF = argv.indexOf("-f");
+        assertThat(firstF).as("first -f index").isGreaterThanOrEqualTo(0);
+        // Look for the dind override path in the captured argv.
+        boolean dindOverridePresent = argv.stream().anyMatch(a -> a.endsWith("docker-compose.dind.yml"));
+        assertThat(dindOverridePresent)
+                .as("UC-26 AC#5 — ai_sandbox_compose MUST layer docker-compose.dind.yml as a -f override")
+                .isTrue();
+    }
+
+    /**
+     * UC-26 AC#5 (concurrent with UC-22) — Android-image testing and DinD
+     * compose ADDITIVELY: both env vars MUST surface and BOTH override
+     * files MUST land in the argv, in a stable order (base → kvm → dind).
+     *
+     * <p>The KVM override is layered by spawn.sh's own image-detection
+     * branch; this test simulates that by pre-exporting
+     * {@code AI_SANDBOX_EXTRA_COMPOSE_FILES} with the KVM override before
+     * calling {@code inject_devtool_spawn_env} so we exercise the
+     * combining path inside lib.sh.
+     */
+    @Test
+    void inject_devtool_spawn_env_with_dind_layers_additively_on_top_of_kvm_override(@TempDir Path tmp)
+            throws Exception {
+        Path stage = tmp.resolve("stage");
+        Files.createDirectories(stage);
+        copyExec(REPO_ROOT.resolve("lib.sh"), stage.resolve("lib.sh"));
+        Files.copy(
+                REPO_ROOT.resolve("docker-compose.dind.yml"),
+                stage.resolve("docker-compose.dind.yml"),
+                StandardCopyOption.REPLACE_EXISTING);
+        Files.copy(
+                REPO_ROOT.resolve("docker-compose.kvm.yml"),
+                stage.resolve("docker-compose.kvm.yml"),
+                StandardCopyOption.REPLACE_EXISTING);
+        Files.copy(
+                REPO_ROOT.resolve("docker-compose.yml"),
+                stage.resolve("docker-compose.yml"),
+                StandardCopyOption.REPLACE_EXISTING);
+        Files.writeString(stage.resolve(".ai-sandbox-devtools"), "dind\tsession-spawn\n");
+
+        Path bin = mkBinDir(tmp);
+        Path log = tmp.resolve("docker.log");
+        installFakeDocker(bin, log);
+
+        Map<String, String> env = new HashMap<>();
+        env.put("PATH", bin.toString() + ":" + System.getenv("PATH"));
+        env.put("AI_SANDBOX_COMPOSE_FILE", stage.resolve("docker-compose.yml").toString());
+        // Simulate the KVM override having been layered by spawn.sh's
+        // own /dev/kvm detection branch (UC-22 AC#13). DinD must append to
+        // this, not replace it.
+        env.put("AI_SANDBOX_EXTRA_COMPOSE_FILES", stage.resolve("docker-compose.kvm.yml").toString());
+
+        Path probe = tmp.resolve("probe.env");
+        int rc = runShell(
+                stage,
+                env,
+                "source './lib.sh' && inject_devtool_spawn_env && "
+                        + "printf 'EXTRA=%s\\nDIND=%s\\n' "
+                        + "\"${AI_SANDBOX_EXTRA_COMPOSE_FILES:-}\" \"${AI_SANDBOX_DEVTOOL_DIND:-0}\" > '" + probe + "' && "
+                        + "ai_sandbox_compose -p ai-sandbox-1 up -d");
+        assertThat(rc).isZero();
+
+        String probeText = Files.readString(probe);
+        assertThat(probeText)
+                .as("AC#5 — dind env var MUST be set even when KVM is already layered")
+                .contains("DIND=1");
+        assertThat(probeText)
+                .as("AC#5 — both overrides MUST be present in EXTRA_COMPOSE_FILES")
+                .contains("docker-compose.kvm.yml")
+                .contains("docker-compose.dind.yml");
+
+        // ai_sandbox_compose's argv MUST carry BOTH `-f docker-compose.kvm.yml`
+        // AND `-f docker-compose.dind.yml` (the base compose file is layered
+        // first via AI_SANDBOX_COMPOSE_FILE).
+        List<String> argv = Files.readAllLines(log);
+        boolean kvmPresent = argv.stream().anyMatch(a -> a.endsWith("docker-compose.kvm.yml"));
+        boolean dindPresent = argv.stream().anyMatch(a -> a.endsWith("docker-compose.dind.yml"));
+        assertThat(kvmPresent)
+                .as("AC#5 — KVM override MUST survive the dind injection")
+                .isTrue();
+        assertThat(dindPresent)
+                .as("AC#5 — DinD override MUST be appended alongside the KVM override")
+                .isTrue();
+    }
+
+    /**
+     * UC-26 AC#6 — with the ledger absent (operator never enabled
+     * devtools), {@code inject_devtool_spawn_env} is a no-op: no env
+     * flags get set, no override files get appended, and
+     * {@code ai_sandbox_compose} resolves to the same argv as a vanilla
+     * developer-mode invocation. Pins the "DinD-disabled session is
+     * byte-identical to today's behaviour" guarantee.
+     */
+    @Test
+    void inject_devtool_spawn_env_with_no_ledger_is_a_no_op(@TempDir Path tmp) throws Exception {
+        Path stage = tmp.resolve("stage");
+        Files.createDirectories(stage);
+        copyExec(REPO_ROOT.resolve("lib.sh"), stage.resolve("lib.sh"));
+        // No .ai-sandbox-devtools file.
+
+        Path bin = mkBinDir(tmp);
+        Path log = tmp.resolve("docker.log");
+        installFakeDocker(bin, log);
+
+        Map<String, String> env = new HashMap<>();
+        env.put("PATH", bin.toString() + ":" + System.getenv("PATH"));
+
+        Path probe = tmp.resolve("probe.env");
+        int rc = runShell(
+                stage,
+                env,
+                "source './lib.sh' && inject_devtool_spawn_env && "
+                        + "printf 'EXTRA=%s\\nDIND=%s\\n' "
+                        + "\"${AI_SANDBOX_EXTRA_COMPOSE_FILES:-}\" \"${AI_SANDBOX_DEVTOOL_DIND:-0}\" > '" + probe + "' && "
+                        + "ai_sandbox_compose -p ai-sandbox-5 up -d");
+        assertThat(rc).isZero();
+
+        // AC#6 — no env vars, no extra compose files.
+        assertThat(Files.readString(probe))
+                .as("AC#6 — empty ledger MUST leave DIND=0 and EXTRA empty")
+                .contains("EXTRA=")
+                .contains("DIND=0");
+
+        // ai_sandbox_compose argv carries no -f flags at all (no base, no override).
+        List<String> argv = Files.readAllLines(log);
+        assertThat(argv)
+                .as("AC#6 — ai_sandbox_compose with no devtools enabled resolves to bare `docker compose`")
+                .containsExactly("compose", "-p", "ai-sandbox-5", "up", "-d");
+    }
+
     // ── helpers ──────────────────────────────────────────────────────
 
     private static Path mkBinDir(Path tmp) throws IOException {

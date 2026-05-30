@@ -305,8 +305,16 @@ class OnboardCommandTest {
 
         ByteArrayOutputStream outBuf = new ByteArrayOutputStream();
         ByteArrayOutputStream errBuf = new ByteArrayOutputStream();
+        // UC-26 — opt out of the new dev-tools step so the existing UC-17
+        // assertions (everything else unchanged, nothing configured this
+        // run) stay accurate. The dev-tools step is exercised on its own
+        // in DevToolsStepTest / ReconfigureCommandTest / the dedicated
+        // OnboardCommand devtools cases below.
         int exit = executeCapturing(
-                new CommandLine(onboard(runner, io, tmp.resolve("ssh-dir"))), args(layout), outBuf, errBuf);
+                new CommandLine(onboard(runner, io, tmp.resolve("ssh-dir"))),
+                args(layout, "--no-devtools"),
+                outBuf,
+                errBuf);
 
         assertThat(exit).isZero();
         String stdout = outBuf.toString();
@@ -354,9 +362,11 @@ class OnboardCommandTest {
 
         ByteArrayOutputStream outBuf = new ByteArrayOutputStream();
         ByteArrayOutputStream errBuf = new ByteArrayOutputStream();
+        // UC-26 — opt out of the new dev-tools step so the original UC-17
+        // assertion of "only git-key was configured" stays exact.
         int exit = executeCapturing(
                 new CommandLine(onboard(runner, io, tmp.resolve("ssh-dir"))),
-                args(layout, "--git-key", srcKey.toString()),
+                args(layout, "--git-key", srcKey.toString(), "--no-devtools"),
                 outBuf,
                 errBuf);
 
@@ -475,6 +485,10 @@ class OnboardCommandTest {
 
         ByteArrayOutputStream outBuf = new ByteArrayOutputStream();
         ByteArrayOutputStream errBuf = new ByteArrayOutputStream();
+        // UC-26 — opt out of dev-tools so the assertion of "claude template
+        // (--no-claude-preinit) appears and the template dir is empty" stays
+        // accurate (the dev-tools step would otherwise APPLY and write the
+        // ledger, which is fine but is not what this test is about).
         int exit = executeCapturing(
                 new CommandLine(onboard(runner, io, tmp.resolve("ssh-dir"))),
                 args(
@@ -486,7 +500,8 @@ class OnboardCommandTest {
                         "--git-email",
                         "a@b.co",
                         "--no-gh",
-                        "--no-claude-preinit"),
+                        "--no-claude-preinit",
+                        "--no-devtools"),
                 outBuf,
                 errBuf);
 
@@ -548,6 +563,10 @@ class OnboardCommandTest {
 
         ByteArrayOutputStream outBuf = new ByteArrayOutputStream();
         ByteArrayOutputStream errBuf = new ByteArrayOutputStream();
+        // UC-26 — opt out of dev-tools so the "no docker shell-outs"
+        // assertion stays exact (dev-tools doesn't shell out today, but the
+        // test's intent is "every required step ran flag-driven"; keeping
+        // the new step out of scope makes the test future-proof).
         int exit = executeCapturing(
                 new CommandLine(onboard(runner, io, tmp.resolve("ssh-dir"))),
                 args(
@@ -562,7 +581,8 @@ class OnboardCommandTest {
                         "--gh-token-file",
                         ghToken.toString(),
                         "--claude-config-source",
-                        claudeSrc.toString()),
+                        claudeSrc.toString(),
+                        "--no-devtools"),
                 outBuf,
                 errBuf);
 
@@ -596,6 +616,11 @@ class OnboardCommandTest {
 
         ByteArrayOutputStream outBuf = new ByteArrayOutputStream();
         ByteArrayOutputStream errBuf = new ByteArrayOutputStream();
+        // UC-26 — opt out of dev-tools so the "every component reconfigured"
+        // intent stays exact. The dev-tools step is independent of --force
+        // (its own --no-devtools is the opt-out) and would otherwise APPLY,
+        // landing one line in "unchanged" (-/configured-) that this test
+        // doesn't care about.
         int exit = executeCapturing(
                 new CommandLine(onboard(runner, io, tmp.resolve("ssh-dir"))),
                 args(
@@ -610,19 +635,27 @@ class OnboardCommandTest {
                         "--gh-token-file",
                         ghToken.toString(),
                         "--claude-config-source",
-                        claudeSrc.toString()),
+                        claudeSrc.toString(),
+                        "--no-devtools"),
                 outBuf,
                 errBuf);
 
         assertThat(exit).isZero();
         String stdout = outBuf.toString();
-        // Everything (re-)configured, nothing reported unchanged.
+        // Every PKI/secret component (re-)configured.
         assertThat(stdout)
                 .contains("configured")
                 .contains("pki")
                 .contains("git-key")
                 .contains("gh-token");
-        assertThat(stdout).doesNotContain("unchanged :");
+        // The dev-tools line lands in `unchanged :` because --no-devtools
+        // was set; assert no PKI/secret component leaked into unchanged.
+        assertThat(stdout)
+                .doesNotContain("pki (cert + key + config.yaml present)")
+                .doesNotContain("git-key (present)")
+                .doesNotContain("gitconfig (present)")
+                .doesNotContain("gh-token (present)")
+                .doesNotContain("claude template (present)");
 
         // PKI re-minted by `pki init --force` (real cert generator).
         assertThat(layout.crt()).exists();
@@ -658,6 +691,9 @@ class OnboardCommandTest {
 
         ByteArrayOutputStream outBuf = new ByteArrayOutputStream();
         ByteArrayOutputStream errBuf = new ByteArrayOutputStream();
+        // UC-26 — opt out of dev-tools so the "configured: pki + git-key + git-id"
+        // intent stays exact (this test is about the PKI-missing path,
+        // not about the orthogonal dev-tools step).
         int exit = executeCapturing(
                 new CommandLine(onboard(runner, io, tmp.resolve("ssh-dir"))),
                 args(
@@ -669,7 +705,8 @@ class OnboardCommandTest {
                         "--git-email",
                         "dan@example.com",
                         "--no-gh",
-                        "--no-claude-preinit"),
+                        "--no-claude-preinit",
+                        "--no-devtools"),
                 outBuf,
                 errBuf);
 
@@ -683,6 +720,92 @@ class OnboardCommandTest {
         assertThat(Files.readAllBytes(layout.gitKeyOut())).isEqualTo(KEY_BYTES);
         assertThat(layout.gitconfigOut()).exists();
         assertThat(runner.inheritCalls).isEmpty();
+    }
+
+    // ── UC-26 — dev-tools selection step (appended to the pipeline) ─
+
+    @Test
+    void no_devtools_flag_routes_dev_tools_into_unchanged_list(@TempDir Path tmp) throws Exception {
+        // UC-26 — every onboard run tails the dev-tools step. With
+        // --no-devtools the step short-circuits to SKIPPED, which surfaces
+        // as a "dev-tools (--no-devtools)" entry on the unchanged list (so
+        // the operator can see exactly what the install opted out of).
+        Layout layout = layout(tmp);
+        layout.seedPkiPresent();
+        layout.seedSecretsPresent();
+
+        FakeProcessRunner runner = permissiveRunner();
+        FakeConsoleIO io = new FakeConsoleIO();
+        io.tty = true;
+
+        ByteArrayOutputStream outBuf = new ByteArrayOutputStream();
+        ByteArrayOutputStream errBuf = new ByteArrayOutputStream();
+        int exit = executeCapturing(
+                new CommandLine(onboard(runner, io, tmp.resolve("ssh-dir"))),
+                args(layout, "--no-devtools"),
+                outBuf,
+                errBuf);
+
+        assertThat(exit).isZero();
+        assertThat(outBuf.toString()).contains("dev-tools (--no-devtools)");
+        // No ledger written when SKIPPED.
+        assertThat(layout.sessionsDir().resolve(".ai-sandbox-devtools")).doesNotExist();
+    }
+
+    @Test
+    void no_tty_routes_dev_tools_into_deferred_list_with_reconfigure_hint(@TempDir Path tmp) throws Exception {
+        // UC-26 — under no-TTY (the headless .deb postinst path) the
+        // dev-tools step DEFERS rather than prompting; the deferred bullet
+        // tells the operator to re-run `aisandboxctl reconfigure` from a
+        // terminal. AC#7 — selections are persistence-only; no headless
+        // default chosen on their behalf.
+        Layout layout = layout(tmp);
+        layout.seedPkiPresent();
+
+        FakeProcessRunner runner = permissiveRunner();
+        FakeConsoleIO io = new FakeConsoleIO();
+        io.tty = false;
+
+        ByteArrayOutputStream outBuf = new ByteArrayOutputStream();
+        ByteArrayOutputStream errBuf = new ByteArrayOutputStream();
+        int exit = executeCapturing(
+                new CommandLine(onboard(runner, io, tmp.resolve("ssh-dir"))), args(layout), outBuf, errBuf);
+
+        assertThat(exit).isZero();
+        String stdout = outBuf.toString();
+        assertThat(stdout).contains("Dev tools").contains("aisandboxctl reconfigure");
+        assertThat(layout.sessionsDir().resolve(".ai-sandbox-devtools")).doesNotExist();
+    }
+
+    @Test
+    void tty_run_with_dind_enabled_persists_ledger_into_sessions_dir(@TempDir Path tmp) throws Exception {
+        // End-to-end wiring — onboard pipes its sessions-dir + ConsoleIO
+        // into DevToolsStep and the resulting ledger lands at the right
+        // path. Exercises the AC#7 spawn-time read path: the wizard's
+        // write path = the spawn.sh read path by construction (the same
+        // sessions-dir / .ai-sandbox-devtools).
+        Layout layout = layout(tmp);
+        layout.seedPkiPresent();
+        layout.seedSecretsPresent();
+
+        FakeProcessRunner runner = permissiveRunner();
+        FakeConsoleIO io = new FakeConsoleIO();
+        io.tty = true;
+        io.inputLines.add("1"); // toggle dind on
+        io.inputLines.add("y"); // confirm trust-boundary warning
+        io.inputLines.add(""); // commit
+
+        ByteArrayOutputStream outBuf = new ByteArrayOutputStream();
+        ByteArrayOutputStream errBuf = new ByteArrayOutputStream();
+        int exit = executeCapturing(
+                new CommandLine(onboard(runner, io, tmp.resolve("ssh-dir"))), args(layout), outBuf, errBuf);
+
+        assertThat(exit).isZero();
+        Path ledger = layout.sessionsDir().resolve(".ai-sandbox-devtools");
+        assertThat(ledger).exists();
+        assertThat(com.aisandbox.server.cli.secrets.DevToolsConfig.readEnabled(ledger))
+                .containsExactly("dind");
+        assertThat(outBuf.toString()).contains("dev-tools selection");
     }
 
     // ── Guard: writable dirs may not live under the read-only install dir ──

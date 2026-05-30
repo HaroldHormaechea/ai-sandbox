@@ -171,6 +171,53 @@ class DebPackageTest {
                 .startsWith("-rwxr-xr-x");
     }
 
+    /**
+     * UC-26 § debian-package contract — the rootless-DinD plumbing must
+     * also ship in the .deb so a {@code dpkg -i}/{@code apt install}
+     * operator can opt into DinD via {@code aisandboxctl reconfigure} and
+     * have spawn.sh actually layer the override on the next session.
+     *
+     * <p>Mirrors {@link ReleaseBundleTest#uc26_dind_override_and_helper_ship_with_correct_modes()}
+     * for the .deb install path. The two artifacts:
+     *
+     * <ul>
+     *   <li>{@code /opt/ai-sandbox-server/host/docker-compose.dind.yml}
+     *       at mode 0644 — spawn.sh resolves it under the install
+     *       location's {@code host/} dir. Missing => UC-26 AC#5 fails on
+     *       .deb installs.</li>
+     *   <li>{@code /opt/ai-sandbox-server/host/container-bin/aisandbox-dind}
+     *       at mode 0755 — same reasoning as the emulator helper above
+     *       (jdeb's DataProducerDirectory hardcodes 0644 unless a named-
+     *       file include sets +x).</li>
+     * </ul>
+     */
+    @Test
+    void deb_ships_uc26_dind_override_and_helper_with_correct_modes() throws Exception {
+        Path deb = findDeb();
+        assumeTrue(
+                deb != null,
+                "deb not built yet — run `./gradlew :server:debPackage` to produce build/distributions/ai-sandbox-server_*_amd64.deb");
+        assumeTrue(dpkgDebOnPath() != null, "dpkg-deb not on PATH — skipping (CI runner always has it)");
+
+        String contents = runCapturing("dpkg-deb", "-c", deb.toString());
+
+        // UC-26 AC#5 — docker-compose.dind.yml ships beside docker-compose.yml.
+        String dindComposePath = "/opt/ai-sandbox-server/host/docker-compose.dind.yml";
+        assertThat(contents).as("missing entry %s", dindComposePath).contains(dindComposePath);
+        assertThat(modeLineFor(contents, dindComposePath))
+                .as("mode on %s — DinD override MUST ship 0644 like the other compose context files", dindComposePath)
+                .startsWith("-rw-r--r--");
+
+        // UC-26 AC#5 — aisandbox-dind helper ships with the +x bit.
+        String dindHelperPath = "/opt/ai-sandbox-server/host/container-bin/aisandbox-dind";
+        assertThat(contents).as("missing entry %s", dindHelperPath).contains(dindHelperPath);
+        assertThat(modeLineFor(contents, dindHelperPath))
+                .as(
+                        "mode on %s — DinD helper MUST ship 0755 (SandboxDockerfile COPYs it into the image)",
+                        dindHelperPath)
+                .startsWith("-rwxr-xr-x");
+    }
+
     @Test
     void deb_control_fields_match_published_metadata() throws Exception {
         Path deb = findDeb();

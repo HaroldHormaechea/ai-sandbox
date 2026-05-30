@@ -498,6 +498,64 @@ class DebPostinstContractTest {
     }
 
     /**
+     * UC-26 § postinst-docs contract — every operator-facing "Next steps"
+     * block that fires AFTER an onboard-related branch (interactive
+     * onboard, non-interactive onboard, or full defer) MUST carry a one-
+     * line pointer at {@code sudo aisandboxctl reconfigure}. Rationale:
+     * the dev-tools step (UC-26) is the only re-runnable post-install
+     * choice on the server side; without a docs breadcrumb in the
+     * postinst's Next-steps output, an operator who installed the .deb
+     * pre-UC-26 will never discover the new affordance.
+     *
+     * <p>The three branches in scope:
+     *
+     * <ul>
+     *   <li>{@code ONBOARD_DONE=1 && ONBOARD_INTERACTIVE=1} — operator
+     *       took the interactive [Y/n] invite.</li>
+     *   <li>{@code ONBOARD_DONE=1} — operator was preseeded via debconf
+     *       (no TTY) and the non-interactive wizard ran.</li>
+     *   <li>{@code else} (the deferred-everything branch) — no onboard
+     *       happened, operator will re-run by hand.</li>
+     * </ul>
+     *
+     * <p>The two branches NOT in scope are {@code IS_UPGRADE=1 &&
+     * CLAUDE_SNAPSHOT_PRESENT=0} (upgrade-with-stale-template — already
+     * a narrow "go run onboard --force" pointer) and
+     * {@code CLAUDE_SNAPSHOT_PRESENT=1} (already-onboarded idempotent
+     * re-install — should stay terse). Including the reminder there
+     * would mostly add noise.
+     *
+     * <p>The assertion is intentionally loose on wording: it pins the
+     * exact CLI command shape (the {@code sudo aisandboxctl reconfigure}
+     * invocation) and the count (≥ 3 occurrences — one per onboard-
+     * related branch). A future copy edit can rephrase the surrounding
+     * sentence without breaking the test.
+     */
+    @Test
+    void postinst_next_steps_blocks_advertise_reconfigure_for_devtools_revisit() throws IOException {
+        String text = postinst();
+
+        // The reminder MUST appear at least three times — once in each of
+        // the three onboard-related "Next steps" branches. We assert the
+        // canonical command shape rather than the surrounding prose so a
+        // copy-edit only breaks the test when the command itself drifts.
+        int occurrences = count(text, "sudo aisandboxctl reconfigure");
+        assertThat(occurrences)
+                .as(
+                        "UC-26 — `sudo aisandboxctl reconfigure` reminder MUST appear in each of the three onboard-"
+                                + "related Next-steps branches (interactive, non-interactive, deferred) so an operator"
+                                + " who installed the .deb pre-UC-26 discovers the new dev-tools affordance.")
+                .isGreaterThanOrEqualTo(3);
+
+        // The reminder line MUST also mention "Docker-in-Docker" (or
+        // "DinD") so the operator knows what the affordance actually does
+        // — not just "go run a command, trust me". Match either spelling.
+        assertThat(text)
+                .as("UC-26 — the reconfigure-reminder line MUST name the v1 capability so the operator knows what it gates")
+                .containsPattern("Docker-in-Docker|DinD");
+    }
+
+    /**
      * Hang fix (iii) — defence-in-depth on top of the timeout: when
      * {@code DEBIAN_FRONTEND=noninteractive} (every CI / unattended install),
      * the postinst forces {@code HAVE_TTY=0} so the {@code [Y/n]} invite — and

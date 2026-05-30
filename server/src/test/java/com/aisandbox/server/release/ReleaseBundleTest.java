@@ -137,6 +137,101 @@ class ReleaseBundleTest {
                 .isEqualTo(0755);
     }
 
+    /**
+     * UC-26 § release-bundle contract — the rootless-DinD plumbing must
+     * ship in the same zip as the rest of the container build context,
+     * so a {@code .deb}/zip-installed operator can opt into DinD via
+     * {@code aisandboxctl reconfigure} and have spawn.sh actually layer
+     * the override on the next session.
+     *
+     * <p>Two assets are load-bearing:
+     *
+     * <ul>
+     *   <li>{@code host/docker-compose.dind.yml} (mode 0644, like the
+     *       other compose context files) — spawn.sh resolves it via
+     *       {@code $(dirname AI_SANDBOX_COMPOSE_FILE)/docker-compose.dind.yml}
+     *       and adds it to {@code AI_SANDBOX_EXTRA_COMPOSE_FILES}. Without
+     *       this file the DinD override silently can't be layered for a
+     *       zip/.deb/server-spawned session (UC-26 AC#5 fails).</li>
+     *   <li>{@code host/container-bin/aisandbox-dind} (mode 0755) — the
+     *       in-container helper {@code entrypoint.sh} invokes as
+     *       {@code aisandbox-dind install} + {@code start} when
+     *       {@code AI_SANDBOX_DEVTOOL_DIND=1}. SandboxDockerfile
+     *       {@code COPY}s {@code container-bin/aisandbox-dind} into the
+     *       image; without the +x bit on the source the in-image binary
+     *       is non-executable and the entrypoint short-circuits.</li>
+     * </ul>
+     *
+     * <p>This is the regression guard for both bundling steps. The fix,
+     * if missing, lives in {@code server/build.gradle.kts}'s
+     * {@code releaseBundle} task: explicit {@code from(rootProject.file(
+     * "docker-compose.dind.yml")) { into("host") }} (mirrors the
+     * docker-compose.kvm.yml line) and the existing {@code from(
+     * rootProject.file("container-bin"))} block already covers the helper.
+     */
+    @Test
+    void uc26_dind_override_and_helper_ship_with_correct_modes() throws Exception {
+        Path zip = findZip();
+        assumeTrue(zip != null, "release bundle not built: ./gradlew :server:releaseBundle");
+
+        Set<String> entries = readEntryNames(zip);
+        Map<String, Integer> modes = readPosixModes(zip);
+
+        // host/docker-compose.dind.yml — data file, mode 0644.
+        assertThat(entries)
+                .as("UC-26 AC#5 — release zip MUST ship docker-compose.dind.yml beside docker-compose.yml")
+                .contains("host/docker-compose.dind.yml");
+        Integer dindComposeMode = modes.get("host/docker-compose.dind.yml");
+        assertThat(dindComposeMode).as("mode of host/docker-compose.dind.yml").isNotNull();
+        assertThat(dindComposeMode & 0777).as("mode of host/docker-compose.dind.yml").isEqualTo(0644);
+
+        // host/container-bin/aisandbox-dind — exec helper, mode 0755.
+        assertThat(entries)
+                .as("UC-26 AC#5 — release zip MUST ship the container-bin/aisandbox-dind helper")
+                .contains("host/container-bin/aisandbox-dind");
+        Integer dindHelperMode = modes.get("host/container-bin/aisandbox-dind");
+        assertThat(dindHelperMode)
+                .as("mode of host/container-bin/aisandbox-dind")
+                .isNotNull();
+        assertThat(dindHelperMode & 0777)
+                .as("mode of host/container-bin/aisandbox-dind — must be exec for the SandboxDockerfile COPY to land it +x")
+                .isEqualTo(0755);
+    }
+
+    @Test
+    void uc26_bundled_dind_override_and_helper_are_byte_identical_to_repo_originals() throws Exception {
+        Path zip = findZip();
+        assumeTrue(zip != null, "release bundle not built: ./gradlew :server:releaseBundle");
+
+        // UC-26 — the bundling step MUST copy both new DinD assets verbatim
+        // from the repo. No templating happens at build time, matching the
+        // UC-22 KVM-asset pattern above.
+        Map<String, Path> bundled = new HashMap<>();
+        bundled.put("host/docker-compose.dind.yml", REPO_ROOT.resolve("docker-compose.dind.yml"));
+        bundled.put(
+                "host/container-bin/aisandbox-dind",
+                REPO_ROOT.resolve("container-bin").resolve("aisandbox-dind"));
+
+        try (ZipFile zf = new ZipFile(zip.toFile())) {
+            for (Map.Entry<String, Path> e : bundled.entrySet()) {
+                ZipEntry ze = zf.getEntry(e.getKey());
+                assertThat(ze).as("entry %s", e.getKey()).isNotNull();
+                byte[] inZip;
+                try (InputStream in = zf.getInputStream(ze)) {
+                    inZip = in.readAllBytes();
+                }
+                Path original = e.getValue();
+                assertThat(Files.exists(original))
+                        .as("repo original at %s", original)
+                        .isTrue();
+                byte[] onDisk = Files.readAllBytes(original);
+                assertThat(inZip)
+                        .as("byte-identity of %s vs %s", e.getKey(), original)
+                        .isEqualTo(onDisk);
+            }
+        }
+    }
+
     @Test
     void uc22_bundled_kvm_override_and_emulator_helper_are_byte_identical_to_repo_originals() throws Exception {
         Path zip = findZip();
