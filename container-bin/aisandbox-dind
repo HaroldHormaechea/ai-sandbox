@@ -1,0 +1,323 @@
+#!/usr/bin/env bash
+# aisandbox-dind — manage a rootless Docker-in-Docker daemon inside an
+# ai-sandbox session (UC-26).
+#
+# The session container IS a Claude Code session; when the operator enabled
+# the `dind` devtool in setup.sh's "Select the development tools you want to
+# install" step (UC-26), spawn.sh layers docker-compose.dind.yml and sets
+# AI_SANDBOX_DEVTOOL_DIND=1. entrypoint.sh then calls `aisandbox-dind install`
+# (idempotent provisioning) followed by `aisandbox-dind start` (boots the
+# rootless dockerd in the background).
+#
+# Subcommands:
+#   install   curl rootless-docker static tarball from download.docker.com into
+#             /workspace/environment-utilities/dind/ on first DinD-enabled
+#             start, idempotent thereafter (cache reuse — UC-22 emulator-cache
+#             precedent). Network required on first run only.
+#   start     export XDG_RUNTIME_DIR, run `dockerd-rootless.sh` in the
+#             background, wait for the unix socket, and persist DOCKER_HOST=
+#             to ~/.profile.d/aisandbox-dind.sh so interactive shells pick it
+#             up automatically.
+#   stop      best-effort `pkill dockerd-rootless` + cleanup.
+#   doctor    docker info + summary (rootless flag, storage driver,
+#             fuse-overlayfs availability). AC#9 verification (a).
+#   selftest  writes a one-service alpine compose file, brings it up, execs
+#             `tmux -V` inside, asserts a version string, brings it down.
+#             AC#9 verification (c)+(d). Load-bearing fixture.
+#
+# Dormant unless AI_SANDBOX_DEVTOOL_DIND=1. The binary is always shipped in the
+# image (no Dockerfile branching needed) but every subcommand short-circuits
+# unless the env var is set, so non-DinD sessions never download or run a
+# rootless daemon (AC#6).
+#
+# Cache layout under /workspace/environment-utilities/dind/:
+#   bin/                — extracted dockerd-rootless.sh, dockerd, docker, runc,
+#                         containerd, fuse-overlayfs, slirp4netns, …
+#   var/                — daemon state (image layers, containers).
+#   .docker-version     — pinned version string, used to skip re-extraction.
+set -euo pipefail
+
+# Idempotency / gating ───────────────────────────────────────────────────────
+require_enabled() {
+    if [ "${AI_SANDBOX_DEVTOOL_DIND:-0}" != "1" ]; then
+        printf '  [aisandbox-dind] ERROR: DinD is not enabled for this session. '
+        printf 'Re-run `./setup.sh --reconfigure` on the host to enable it, then respawn.\n' >&2
+        exit 2
+    fi
+}
+
+# Cache root lives under /workspace so it persists across container restart /
+# rebuild (same precedent as aisandbox-emulator's /workspace/environment-
+# utilities/android cache). Sessions with --isolated-workspace get their own
+# cache and re-download on first use (matches UC-22's stance on emulator cache;
+# AC#3 / README caveat).
+CACHE_ROOT="${AISB_DIND_CACHE:-/workspace/environment-utilities/dind}"
+BIN_DIR="$CACHE_ROOT/bin"
+VAR_DIR="$CACHE_ROOT/var"
+VERSION_FILE="$CACHE_ROOT/.docker-version"
+
+# Pinned rootless-Docker version. Bumping is a normal patch; keep an eye on
+# the upstream changelog at https://docs.docker.com/engine/security/rootless/.
+# The static tarballs published by Docker Inc. at download.docker.com are
+# self-contained: docker, dockerd, runc, containerd, ctr, plus the rootless
+# extras helper (dockerd-rootless.sh, rootlesskit, slirp4netns,
+# fuse-overlayfs).
+DOCKER_VERSION="${AISB_DIND_DOCKER_VERSION:-27.3.1}"
+
+# State persisted to a profile.d snippet inside ~/.profile (sourced by login
+# shells) so an operator opening a fresh `tmux` window inside the session
+# automatically inherits DOCKER_HOST and PATH additions. The marker block is
+# idempotent — replaced wholesale on every successful start.
+PROFILE_SNIPPET="$HOME/.profile.aisandbox-dind"
+SOCK_DIR="/run/user/$(id -u)"
+SOCK_PATH="$SOCK_DIR/docker.sock"
+LOG_FILE="$CACHE_ROOT/dockerd-rootless.log"
+PID_FILE="$CACHE_ROOT/dockerd-rootless.pid"
+
+log() { printf '  [aisandbox-dind] %s\n' "$*" >&2; }
+die() { printf '  [aisandbox-dind] ERROR: %s\n' "$*" >&2; exit 1; }
+
+# ── install ──────────────────────────────────────────────────────────────────
+cmd_install() {
+    require_enabled
+    mkdir -p "$BIN_DIR" "$VAR_DIR"
+
+    if [ -x "$BIN_DIR/dockerd-rootless.sh" ] \
+        && [ -f "$VERSION_FILE" ] \
+        && [ "$(cat "$VERSION_FILE" 2>/dev/null)" = "$DOCKER_VERSION" ]; then
+        log "rootless Docker $DOCKER_VERSION already provisioned at $BIN_DIR."
+        return 0
+    fi
+
+    log "First DinD-enabled start: provisioning rootless Docker $DOCKER_VERSION into $BIN_DIR (needs network)..."
+    local arch
+    case "$(uname -m)" in
+        x86_64|amd64) arch="x86_64" ;;
+        aarch64|arm64) arch="aarch64" ;;
+        *) die "Unsupported architecture: $(uname -m). rootless Docker tarballs ship for x86_64 / aarch64." ;;
+    esac
+
+    local engine_url="https://download.docker.com/linux/static/stable/${arch}/docker-${DOCKER_VERSION}.tgz"
+    local rootless_url="https://download.docker.com/linux/static/stable/${arch}/docker-rootless-extras-${DOCKER_VERSION}.tgz"
+
+    local tmp
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    log "Downloading $engine_url …"
+    curl -fsSL -o "$tmp/engine.tgz" "$engine_url" || die "Failed to download $engine_url"
+    log "Downloading $rootless_url …"
+    curl -fsSL -o "$tmp/rootless.tgz" "$rootless_url" || die "Failed to download $rootless_url"
+
+    # Both tarballs unpack to a top-level `docker/` dir; strip it and flatten
+    # into $BIN_DIR. Extraction order matters only insofar as the rootless
+    # extras (dockerd-rootless.sh, slirp4netns, fuse-overlayfs, rootlesskit)
+    # are LATER than the engine binaries, so they overlay cleanly without
+    # collisions.
+    tar -xzf "$tmp/engine.tgz" --strip-components=1 -C "$BIN_DIR"
+    tar -xzf "$tmp/rootless.tgz" --strip-components=1 -C "$BIN_DIR"
+
+    chmod +x "$BIN_DIR"/* 2>/dev/null || true
+    printf '%s\n' "$DOCKER_VERSION" > "$VERSION_FILE"
+    log "rootless Docker $DOCKER_VERSION provisioned."
+}
+
+# ── start ────────────────────────────────────────────────────────────────────
+cmd_start() {
+    require_enabled
+
+    if [ ! -x "$BIN_DIR/dockerd-rootless.sh" ]; then
+        die "rootless Docker is not installed yet. Run \`aisandbox-dind install\` first (entrypoint should do this automatically)."
+    fi
+
+    # XDG_RUNTIME_DIR must exist and be private to the runtime user. The mode
+    # 0700 is what systemd / pam_systemd would set for an interactive login,
+    # and what rootlesskit expects. Re-creating it is harmless on every start.
+    mkdir -p "$SOCK_DIR"
+    chmod 0700 "$SOCK_DIR" 2>/dev/null || true
+    export XDG_RUNTIME_DIR="$SOCK_DIR"
+
+    # PATH so rootless extras (rootlesskit, slirp4netns, fuse-overlayfs) and
+    # the engine binaries are discoverable by dockerd-rootless.sh's child
+    # processes.
+    export PATH="$BIN_DIR:$PATH"
+
+    # Pin daemon state (image layers, containers, network configs) under the
+    # workspace cache so a `docker compose down` followed by a respawn keeps
+    # any pulled images. --data-root is interpreted by `dockerd`, propagated
+    # via DOCKERD_ROOTLESS_OPT_*-style env var or appended after `--`.
+    export DOCKERD_ROOTLESS_OPT="${DOCKERD_ROOTLESS_OPT:-}"
+
+    # Already running?
+    if [ -S "$SOCK_PATH" ] && DOCKER_HOST="unix://$SOCK_PATH" "$BIN_DIR/docker" info >/dev/null 2>&1; then
+        log "rootless dockerd is already running ($SOCK_PATH)."
+        write_profile_snippet
+        return 0
+    fi
+
+    log "Starting rootless dockerd (logs: $LOG_FILE)..."
+    # Run in background; nohup so the daemon survives a `docker compose exec`
+    # tmux window that started us. dockerd-rootless.sh expects `dockerd` on
+    # PATH (set above). We pass `--data-root` after `--` so it reaches dockerd.
+    nohup "$BIN_DIR/dockerd-rootless.sh" \
+        --data-root "$VAR_DIR/lib-docker" \
+        --exec-root "$VAR_DIR/run-docker" \
+        --pidfile "$PID_FILE" \
+        >>"$LOG_FILE" 2>&1 &
+    echo "$!" > "$PID_FILE"
+
+    # Wait for the socket. dockerd-rootless takes a few seconds to set up the
+    # userns + rootlesskit network namespace + fuse-overlayfs mount. 30s is
+    # plenty on a warm cache; first-ever start might need slightly more if
+    # rootlesskit has to set up cgroups.
+    local tries=0
+    while [ ! -S "$SOCK_PATH" ]; do
+        tries=$((tries + 1))
+        if [ "$tries" -gt 60 ]; then
+            log "rootless dockerd did not produce $SOCK_PATH within 30s."
+            log "Last 20 lines of $LOG_FILE:"
+            tail -n 20 "$LOG_FILE" >&2 || true
+            die "rootless dockerd failed to start"
+        fi
+        sleep 0.5
+    done
+
+    export DOCKER_HOST="unix://$SOCK_PATH"
+    if ! "$BIN_DIR/docker" info >/dev/null 2>&1; then
+        log "Socket appeared but \`docker info\` failed. Last 20 lines of $LOG_FILE:"
+        tail -n 20 "$LOG_FILE" >&2 || true
+        die "rootless dockerd is not responsive"
+    fi
+    log "rootless dockerd is up. DOCKER_HOST=$DOCKER_HOST"
+    write_profile_snippet
+}
+
+# Persist DOCKER_HOST + PATH so a fresh tmux window / shell inherits them.
+# Replaces any prior snippet wholesale (sentinel-guarded for idempotency).
+write_profile_snippet() {
+    cat > "$PROFILE_SNIPPET" <<EOF
+# Managed by aisandbox-dind — do not hand-edit.
+export PATH="$BIN_DIR:\$PATH"
+export DOCKER_HOST="unix://$SOCK_PATH"
+export XDG_RUNTIME_DIR="$SOCK_DIR"
+EOF
+    chmod 0644 "$PROFILE_SNIPPET" 2>/dev/null || true
+    # Stitch it into ~/.profile and ~/.bashrc if not already referenced. We
+    # source instead of inlining so a future re-init updates every shell.
+    local marker="# aisandbox-dind:env"
+    local target
+    for target in "$HOME/.profile" "$HOME/.bashrc"; do
+        # Create the file if missing so the marker check is well-defined.
+        [ -f "$target" ] || : > "$target"
+        if ! grep -qF "$marker" "$target" 2>/dev/null; then
+            printf '\n%s\n[ -r %s ] && . %s\n' "$marker" "$PROFILE_SNIPPET" "$PROFILE_SNIPPET" >> "$target"
+        fi
+    done
+}
+
+# ── stop ─────────────────────────────────────────────────────────────────────
+cmd_stop() {
+    if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null; then
+        log "Killing rootless dockerd ($(cat "$PID_FILE"))."
+        kill "$(cat "$PID_FILE")" 2>/dev/null || true
+    fi
+    pkill -f dockerd-rootless 2>/dev/null || true
+    rm -f "$PID_FILE"
+    log "rootless dockerd stopped (best-effort)."
+}
+
+# ── doctor ───────────────────────────────────────────────────────────────────
+cmd_doctor() {
+    require_enabled
+    log "cache root        : $CACHE_ROOT"
+    log "Docker version    : $(cat "$VERSION_FILE" 2>/dev/null || echo 'not installed yet')"
+    log "XDG_RUNTIME_DIR   : $SOCK_DIR ($([ -d "$SOCK_DIR" ] && echo present || echo MISSING))"
+    log "socket            : $SOCK_PATH ($([ -S "$SOCK_PATH" ] && echo present || echo MISSING))"
+    log "/dev/fuse         : $([ -e /dev/fuse ] && echo 'present + accessible' || echo 'ABSENT — fuse-overlayfs unavailable')"
+    log "fuse-overlayfs    : $("$BIN_DIR/fuse-overlayfs" --version 2>&1 | head -1 || echo 'MISSING / loader error')"
+    log "dockerd           : $("$BIN_DIR/dockerd" --version 2>&1 | head -1 || echo 'MISSING')"
+    if [ -S "$SOCK_PATH" ]; then
+        DOCKER_HOST="unix://$SOCK_PATH" "$BIN_DIR/docker" info 2>&1 | sed 's/^/    /' >&2 || true
+    else
+        log "daemon            : not running — start with \`aisandbox-dind start\`"
+    fi
+}
+
+# ── selftest (AC#9 verification (c)+(d)) ─────────────────────────────────────
+cmd_selftest() {
+    require_enabled
+    if [ ! -S "$SOCK_PATH" ]; then
+        die "rootless dockerd is not running. Start it first: \`aisandbox-dind start\`."
+    fi
+    export DOCKER_HOST="unix://$SOCK_PATH"
+    export PATH="$BIN_DIR:$PATH"
+
+    local tmpdir
+    tmpdir="$(mktemp -d)"
+    trap 'rm -rf "$tmpdir"' EXIT
+    local compose_file="$tmpdir/selftest.yml"
+
+    # alpine + tmux — both are tiny, ubiquitous, and `tmux -V` is a clear
+    # smoke-test signal. The image is pulled the first time selftest runs;
+    # subsequent runs hit the cache.
+    cat > "$compose_file" <<'EOF'
+services:
+  svc:
+    image: alpine:latest
+    command: ["sh", "-c", "apk add --no-cache tmux >/dev/null 2>&1; sleep 30"]
+EOF
+
+    log "Bringing up alpine self-test container..."
+    "$BIN_DIR/docker" compose -f "$compose_file" -p aisandbox-dind-selftest up -d >/dev/null \
+        || die "docker compose up failed — see $LOG_FILE for daemon details."
+
+    # Give the apk install ~10s. tmux is small; on a warm cache it lands well
+    # within that. On a cold network it may be slower; we retry.
+    log "Waiting for tmux to install inside the container..."
+    local tries=0 version=""
+    while [ "$tries" -lt 30 ]; do
+        if version="$("$BIN_DIR/docker" compose -f "$compose_file" -p aisandbox-dind-selftest exec -T svc sh -c 'command -v tmux >/dev/null && tmux -V' 2>/dev/null)"; then
+            break
+        fi
+        sleep 1
+        tries=$((tries + 1))
+    done
+
+    "$BIN_DIR/docker" compose -f "$compose_file" -p aisandbox-dind-selftest down --remove-orphans >/dev/null 2>&1 || true
+
+    if [ -z "$version" ]; then
+        die "selftest could not read \`tmux -V\` from the container. See \`docker compose logs\` for details."
+    fi
+    log "selftest OK: $version"
+}
+
+usage() {
+    cat >&2 <<'EOF'
+Usage: aisandbox-dind <command>
+
+Commands:
+  install   Provision rootless Docker into /workspace/environment-utilities/dind/
+            (first run only; cached thereafter; needs network on first use).
+  start     Start the rootless daemon and persist DOCKER_HOST to a profile
+            snippet sourced by ~/.profile and ~/.bashrc.
+  stop      Stop the daemon (best-effort).
+  doctor    Print daemon + storage-driver diagnostics (verifies fuse-overlayfs,
+            /dev/fuse, the socket, and `docker info`). UC-26 AC#9 (a).
+  selftest  Bring up a one-service alpine container, exec `tmux -V` inside,
+            assert a version string, then tear it down. Load-bearing fixture
+            for the UC-26 AC#9 (c)+(d) verification path.
+
+DinD is gated on the AI_SANDBOX_DEVTOOL_DIND env var (set automatically by
+spawn.sh when the operator selected the `dind` devtool in `./setup.sh`).
+Without it every command short-circuits with an instructive error.
+EOF
+}
+
+case "${1:-}" in
+    install)  cmd_install ;;
+    start)    cmd_start ;;
+    stop)     cmd_stop ;;
+    doctor)   cmd_doctor ;;
+    selftest) cmd_selftest ;;
+    -h|--help|"") usage; exit 2 ;;
+    *) log "Unknown command: $1"; usage; exit 2 ;;
+esac

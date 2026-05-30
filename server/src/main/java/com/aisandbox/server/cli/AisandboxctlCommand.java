@@ -19,6 +19,7 @@ import picocli.CommandLine.Command;
             PkiInitCommand.class,
             SecretsSeedCommand.class,
             OnboardCommand.class,
+            ReconfigureCommand.class,
             ClientMintCommand.class,
             ClientRevokeCommand.class,
             ClientListCommand.class

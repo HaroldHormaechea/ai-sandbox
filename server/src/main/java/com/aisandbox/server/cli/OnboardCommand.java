@@ -2,6 +2,7 @@ package com.aisandbox.server.cli;
 
 import com.aisandbox.server.cli.secrets.ClaudePreInitStep;
 import com.aisandbox.server.cli.secrets.ConsoleIO;
+import com.aisandbox.server.cli.secrets.DevToolsStep;
 import com.aisandbox.server.cli.secrets.EncryptedKeyDecryptor;
 import com.aisandbox.server.cli.secrets.EnsureSandboxImage;
 import com.aisandbox.server.cli.secrets.GhTokenStep;
@@ -184,6 +185,13 @@ public class OnboardCommand implements Callable<Integer> {
 
     @Option(names = "--no-claude-preinit", description = "Skip the Claude pre-init step entirely.")
     boolean noClaudePreInit;
+
+    // ── Dev tools (UC-26) ──
+
+    @Option(
+            names = "--no-devtools",
+            description = "Skip the development-tools picker entirely (Docker-in-Docker, etc.).")
+    boolean noDevtools;
 
     // ── policy ──
 
@@ -425,6 +433,31 @@ public class OnboardCommand implements Callable<Integer> {
             if (ownership != null) {
                 ownership.chown(claudeOut);
             }
+        }
+
+        // ── Dev tools (UC-26) ─────────────────────────────────────────
+        // Always tail the onboard pipeline so the `.deb` auto-onboard captures
+        // a selection out of the box. The step itself handles three outcomes:
+        //   APPLIED  → ledger was written (or kept after /skip).
+        //   SKIPPED  → --no-devtools was set; we never touched the ledger.
+        //   DEFERRED → no TTY; defer with a clear re-run instruction.
+        // The picker is purely interactive — there's no per-capability flag
+        // surface today, so headless installs always defer (operator runs
+        // `aisandboxctl reconfigure` later from a terminal).
+        Path devtoolsLedger = sessionsDir.resolve(".ai-sandbox-devtools");
+        DevToolsStep.Outcome devOutcome =
+                new DevToolsStep(consoleIO, processRunner).run(devtoolsLedger, noDevtools, hasTty, ownership);
+        switch (devOutcome) {
+            case APPLIED:
+                done.add("dev-tools selection");
+                break;
+            case SKIPPED:
+                unchanged.add("dev-tools (--no-devtools)");
+                break;
+            case DEFERRED:
+                deferred.add("Dev tools — interactive picker needs a terminal; run later from a TTY:"
+                        + " sudo aisandboxctl reconfigure.");
+                break;
         }
 
         // ── summary (stdout; stderr was reserved for prompts / warnings) ──

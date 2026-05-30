@@ -1,4 +1,10 @@
 #!/usr/bin/env pwsh
+[CmdletBinding()]
+param(
+    # UC26 — -Reconfigure: jump straight to the dev-tools step and exit. Mirrors
+    # setup.sh's --reconfigure flag (AC#4).
+    [switch]$Reconfigure
+)
 $ErrorActionPreference = "Stop"
 
 Set-Location $PSScriptRoot
@@ -162,18 +168,115 @@ function Write-GitConfig {
     )
 }
 
+# --- UC26 - devtools step ----------------------------------------------------
+# Mirror of setup.sh's run_devtools_step. The caller is responsible for the
+# screen header / reconfigure banner; this function renders the checklist,
+# handles numeric toggles + the trust-boundary confirmation, and writes the
+# selection out via Write-EnabledDevTools.
+function Invoke-DevToolsStep {
+    $ids = @(Get-DevToolCatalogIds)
+    if ($ids.Count -eq 0) {
+        Write-Warn "No development-tool capabilities are registered in the catalog."
+        return
+    }
+
+    $selected = @{}
+    foreach ($id in $ids) {
+        $selected[$id] = [bool](Test-DevToolEnabled -Id $id)
+    }
+
+    Write-Info "Pick optional development tools to provision into the sessions"
+    Write-Info "your sandbox spawns. Each entry below is a toggle:"
+    Write-Blank
+    Write-Info "Type a number to flip an entry, then press Enter to commit."
+    Write-Host "  Type $M/skip$R to leave the current selection unchanged, or $M/exit$R to quit."
+    Write-Blank
+
+    $lastError = ""
+    while ($true) {
+        for ($i = 0; $i -lt $ids.Count; $i++) {
+            $id = $ids[$i]
+            $mark = if ($selected[$id]) { 'x' } else { ' ' }
+            Write-Host ("    [{0}] {1}. {2}" -f $mark, ($i + 1), (Get-DevToolLabel -Id $id))
+        }
+        Write-Blank
+        if ($lastError) { Write-Warn $lastError; $lastError = "" }
+        $resp = Read-Host "  >"
+        if (-not $resp -or $resp -eq '/skip') { break }
+        if ($resp -eq '/exit') { Write-Host "  Exiting setup."; exit 0 }
+        if ($resp -match '^\d+$') {
+            $n = [int]$resp
+            if ($n -ge 1 -and $n -le $ids.Count) {
+                $targetId = $ids[$n - 1]
+                if (-not $selected[$targetId]) {
+                    $warning = Get-DevToolWarning -Id $targetId
+                    if ($warning) {
+                        Write-Blank
+                        Write-Warn $warning
+                        Write-Blank
+                        $confirm = Read-Host "  Continue? [y/N]"
+                        if ($confirm -match '^[Yy]([Ee][Ss])?$') {
+                            $selected[$targetId] = $true
+                            Write-Ok ("Enabled: " + (Get-DevToolLabel -Id $targetId))
+                        } else {
+                            Write-Info "Cancelled. $targetId left disabled."
+                        }
+                    } else {
+                        $selected[$targetId] = $true
+                        Write-Ok ("Enabled: " + (Get-DevToolLabel -Id $targetId))
+                    }
+                } else {
+                    $selected[$targetId] = $false
+                    Write-Ok ("Disabled: " + (Get-DevToolLabel -Id $targetId))
+                }
+                Write-Blank
+                continue
+            }
+        }
+        $lastError = "Type a number 1..$($ids.Count), /skip, or /exit."
+    }
+
+    $final = @()
+    foreach ($id in $ids) {
+        if ($selected[$id]) { $final += $id }
+    }
+    Write-EnabledDevTools -Ids $final
+
+    Write-Blank
+    if ($final.Count -eq 0) {
+        Write-Ok "Development tools: none enabled (sessions remain identical to the default)."
+    } else {
+        Write-Ok ("Development tools persisted: " + ($final -join ', '))
+        Write-Info "Changes apply to NEW sessions only - existing sessions are unaffected."
+        Write-Info "Recycle a session via .\clean.ps1 + .\spawn.ps1 to retrofit it."
+    }
+}
+
+# UC26 - -Reconfigure short-circuit. When passed, render ONLY the devtools step
+# under a reconfigure banner and exit. Skips all other wizard steps (AC#4).
+if ($Reconfigure) {
+    Clear-Host
+    Write-Host "=== Reconfigure: development tools ===" -ForegroundColor Cyan
+    Write-Host ""
+    Invoke-DevToolsStep
+    Write-Blank
+    Write-Host "  Re-run any time with $M.\setup.ps1 -Reconfigure$R."
+    exit 0
+}
+
 # --- Welcome screen ----------------------------------------------------------
 Clear-Host
 Write-Host "=== ai-sandbox setup ===" -ForegroundColor Cyan
 Write-Host ""
-Write-Info "This walks you through setting up the sandbox in 6 steps:"
+Write-Info "This walks you through setting up the sandbox in 7 steps:"
 Write-Blank
 Write-Info "  1. SSH key      - register a key for git operations"
 Write-Info "  2. Git identity - set the author name + email for commits"
 Write-Info "  3. Image        - build the container if needed"
 Write-Info "  4. gh login     - optional, for the GitHub CLI (gh issue / pr / etc.)"
 Write-Info "  5. Claude setup - /login, trust folder, accept bypass warning"
-Write-Info "  6. Start        - bring the container up"
+Write-Info "  6. Dev tools    - opt-in capabilities for spawned sessions"
+Write-Info "  7. Start        - bring the container up"
 Write-Blank
 Write-Host "  Press Enter to begin (or $M/exit$R to quit)."
 $intro = Read-Host "  >"
@@ -186,7 +289,7 @@ New-Item -ItemType Directory -Force -Path .\secrets, .\workspace, .\claude-confi
 
 # --- Step 1: SSH key ---------------------------------------------------------
 Clear-Host
-Write-Step 1 6 "SSH key"
+Write-Step 1 7 "SSH key"
 
 $script:SshKeySource = $null
 
@@ -199,7 +302,7 @@ if (Test-Path .\secrets\git-key) {
 
     while ($true) {
         Clear-Host
-        Write-Step 1 6 "SSH key"
+        Write-Step 1 7 "SSH key"
         Write-Warn "No SSH key at secrets/git-key"
         Write-Blank
         if ($keys.Count -gt 0) {
@@ -251,7 +354,7 @@ if (Test-Path .\secrets\git-key) {
 
 # --- Step 2: Git author identity ---------------------------------------------
 Clear-Host
-Write-Step 2 6 "Git author identity"
+Write-Step 2 7 "Git author identity"
 
 $cur = @{ Name = ""; Email = "" }
 $action = $null
@@ -324,7 +427,7 @@ Press-Enter
 
 # --- Step 3: Container image -------------------------------------------------
 Clear-Host
-Write-Step 3 6 "Container image"
+Write-Step 3 7 "Container image"
 
 # UC22 — optional toolchain selection (mirror of setup.sh). Persists to
 # ./.ai-sandbox-toolchains (gitignored) and passes build args to
@@ -403,7 +506,7 @@ if (docker images -q ai-context:latest) {
 
 # --- Step 4: gh authentication -----------------------------------------------
 Clear-Host
-Write-Step 4 6 "GitHub CLI (gh) authentication - optional"
+Write-Step 4 7 "GitHub CLI (gh) authentication - optional"
 Write-Info "``gh`` is the official GitHub command-line client (https://cli.github.com)."
 Write-Info "Authenticating it lets you create PRs, list issues, and call the GitHub"
 Write-Info "API from inside the sandbox. Cloning / pushing already works via SSH and"
@@ -453,7 +556,7 @@ if (-not $env:AI_SANDBOX_HOST_STATE_ROOT -and -not $env:AI_SANDBOX_WORKSPACE_HOS
 
 # --- Step 5: Claude Code first-run -------------------------------------------
 Clear-Host
-Write-Step 5 6 "Claude Code first-run"
+Write-Step 5 7 "Claude Code first-run"
 
 $doClaudeSetup = $false
 if (Test-ClaudeConfigSetUp) {
@@ -487,9 +590,15 @@ if ($doClaudeSetup) {
     Write-Ok "First-run setup complete"
 }
 
-# --- Step 6: Initialize counter & spawn first session ------------------------
+# --- Step 6: Development tools (UC-26) ---------------------------------------
 Clear-Host
-Write-Step 6 6 "Starting first session"
+Write-Step 6 7 "Select the development tools you want to install"
+Invoke-DevToolsStep
+Press-Enter
+
+# --- Step 7: Initialize counter & spawn first session ------------------------
+Clear-Host
+Write-Step 7 7 "Starting first session"
 
 # Ensure the monotonic session counter exists. The file holds the last issued
 # N (increment-before-use): initializing it to 0 makes the first .\spawn.ps1

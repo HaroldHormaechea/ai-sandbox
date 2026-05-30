@@ -270,6 +270,9 @@ captured; session image built). Remaining steps:
 Re-run `sudo aisandboxctl onboard --force` any time to refresh credentials or
 re-capture the Claude pre-init snapshot. The CLI wrapper is at /usr/bin/aisandboxctl.
 
+Re-run `sudo aisandboxctl reconfigure` to revisit development-tool selections
+(Docker-in-Docker, etc.) — changes apply to NEW sessions only.
+
 EOM
         elif [ "$ONBOARD_DONE" = "1" ]; then
             cat <<'EOM'
@@ -288,6 +291,9 @@ Claude pre-init was NOT captured (it needs a terminal). From a terminal, run
 `sudo aisandboxctl onboard` to capture it so spawned sessions skip Claude's
 first-run wizard — or `sudo aisandboxctl onboard --claude-config-source <dir>`
 for an unattended seed. Re-run any time to refresh credentials.
+
+Re-run `sudo aisandboxctl reconfigure` to revisit development-tool selections
+(Docker-in-Docker, etc.) — changes apply to NEW sessions only.
 
 EOM
         elif [ "$IS_UPGRADE" = "1" ] && [ "$CLAUDE_SNAPSHOT_PRESENT" = "0" ]; then
@@ -342,6 +348,9 @@ ai-sandbox-server installed. Onboarding was deferred. Next steps:
 
 The CLI wrapper is at /usr/bin/aisandboxctl (a thin POSIX shell shim
 around the bundled aisandboxctl jar — `aisandboxctl --help` for usage).
+
+Re-run `sudo aisandboxctl reconfigure` to revisit development-tool selections
+(Docker-in-Docker, etc.) — changes apply to NEW sessions only.
 
 EOM
         fi

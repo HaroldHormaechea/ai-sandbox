@@ -22,6 +22,11 @@ templates/claude-config/*
 # build args). Machine-local; never committed.
 .ai-sandbox-toolchains
 
+# UC26 — operator's "Select the development tools you want to install" choices
+# (e.g. `dind` for Docker-in-Docker). Machine-local; never committed. Read by
+# spawn.sh / spawn.ps1 to inject spawn-time env vars + compose override files.
+.ai-sandbox-devtools
+
 # Persisted, per-machine dev workspace root. As of the workspace-relocation
 # change the dev-mode workspace lives OUTSIDE this repo by default (under
 # $XDG_STATE_HOME/ai-sandbox or %LOCALAPPDATA%\ai-sandbox); spawn.sh / clean.sh

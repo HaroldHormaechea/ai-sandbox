@@ -293,6 +293,134 @@ ai_sandbox_compose() {
     docker compose "${flags[@]}" "$@"
 }
 
+# ── UC26 — development-tools selection state ────────────────────────────────
+#
+# The operator's "Select the development tools you want to install" choices
+# persist as one whitespace-separated record per line: `<id>     <apply_at>`.
+# `apply_at` is `image-build` or `session-spawn`. Comments and blank lines
+# tolerated. v1's only entry is `dind` at `session-spawn`. Future capabilities
+# (Rust toolchain, Python interpreter, etc.) slot in by adding catalog rows
+# and a matching `apply_at` mechanism; the wizard step itself does not change.
+AISB_DEVTOOLS_FILE="${AISB_DEVTOOLS_FILE:-.ai-sandbox-devtools}"
+
+# Static catalog. Each row: `<id>|<apply_at>|<label>|<warning>`. The warning is
+# inlined by the wizard at the moment of selection (AC#3). To add a capability,
+# append a new row here AND the matching apply_at mechanism (a build arg for
+# image-build, a compose override + env injection for session-spawn).
+_aisb_devtool_catalog() {
+    printf '%s\n' \
+        'dind|session-spawn|Enable Docker-in-Docker (rootless; lets sessions run docker / docker compose inside their sandbox container)|Enabling Docker-in-Docker (rootless) lets code running inside a session start its own docker / docker compose commands. The rootless daemon runs as the non-root session user with no host-socket bind, so it does NOT widen the host trust boundary — but it DOES widen what code inside a session can reach (the session can now launch and inspect containers). Project policy is "the container is the trust boundary"; enabling this is a deliberate, opt-in expansion of that boundary.'
+}
+
+# _aisb_devtool_field ID FIELD_NUM → echo the FIELD_NUM'th `|`-delimited field
+# of ID's catalog row. FIELD_NUM is 1-indexed; 1=id, 2=apply_at, 3=label,
+# 4=warning. Returns non-zero when ID is unknown.
+_aisb_devtool_field() {
+    local id="$1" field="$2" row
+    while IFS= read -r row; do
+        case "$row" in
+            "${id}|"*)
+                printf '%s' "$row" | awk -F'|' -v f="$field" '{print $f}'
+                return 0
+                ;;
+        esac
+    done < <(_aisb_devtool_catalog)
+    return 1
+}
+
+# devtool_label ID → echo the human-readable label for ID; non-zero if unknown.
+devtool_label() { _aisb_devtool_field "$1" 3; }
+
+# devtool_apply_at ID → echo `image-build` or `session-spawn`; non-zero if unknown.
+devtool_apply_at() { _aisb_devtool_field "$1" 2; }
+
+# devtool_warning ID → echo the inline trust-boundary warning; non-zero if unknown.
+devtool_warning() { _aisb_devtool_field "$1" 4; }
+
+# devtool_catalog_ids → emit one ID per line, in catalog order.
+devtool_catalog_ids() {
+    local row
+    while IFS= read -r row; do
+        printf '%s\n' "${row%%|*}"
+    done < <(_aisb_devtool_catalog)
+}
+
+# devtool_is_enabled ID → 0 if ID is listed in the devtools file (first column).
+devtool_is_enabled() {
+    [ -f "$AISB_DEVTOOLS_FILE" ] || return 1
+    local id="$1" line first
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+            ''|\#*) continue ;;
+        esac
+        # shellcheck disable=SC2086
+        set -- $line
+        first="${1:-}"
+        [ "$first" = "$id" ] && return 0
+    done < "$AISB_DEVTOOLS_FILE"
+    return 1
+}
+
+# read_enabled_devtools → emit one enabled ID per line, in file order.
+# Tolerates comments + blank lines. Echoes nothing when the file is missing.
+read_enabled_devtools() {
+    [ -f "$AISB_DEVTOOLS_FILE" ] || return 0
+    local line first
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+            ''|\#*) continue ;;
+        esac
+        # shellcheck disable=SC2086
+        set -- $line
+        first="${1:-}"
+        [ -n "$first" ] && printf '%s\n' "$first"
+    done < "$AISB_DEVTOOLS_FILE"
+}
+
+# write_enabled_devtools [ID...] → truncate + rewrite the devtools file. Each
+# ID's apply_at is resolved from the catalog so the persisted record carries
+# both columns. Unknown IDs are skipped with a warning. Zero args → empty file.
+write_enabled_devtools() {
+    : > "$AISB_DEVTOOLS_FILE"
+    local id apply_at
+    for id in "$@"; do
+        apply_at="$(devtool_apply_at "$id" || true)"
+        if [ -z "$apply_at" ]; then
+            warn "Unknown devtool id '$id' — skipping." >&2
+            continue
+        fi
+        printf '%s\t%s\n' "$id" "$apply_at" >> "$AISB_DEVTOOLS_FILE"
+    done
+}
+
+# inject_devtool_spawn_env → consult the persisted ledger and, for each enabled
+# capability whose `apply_at` is `session-spawn`, export the env vars / append
+# the compose override files that spawn.sh needs. Idempotent. The injection
+# layer is per-capability so future spawn-time tools (e.g. a heavyweight
+# Python venv mount) compose without touching spawn.sh again.
+inject_devtool_spawn_env() {
+    local id
+    while IFS= read -r id; do
+        case "$id" in
+            dind)
+                # Tell entrypoint.sh + the rootless daemon helper to start.
+                export AI_SANDBOX_DEVTOOL_DIND=1
+                # Layer docker-compose.dind.yml over the base.
+                local dind_override="docker-compose.dind.yml"
+                if [ -n "${AI_SANDBOX_COMPOSE_FILE:-}" ]; then
+                    dind_override="$(dirname "$AI_SANDBOX_COMPOSE_FILE")/docker-compose.dind.yml"
+                fi
+                if [ -f "$dind_override" ]; then
+                    export AI_SANDBOX_EXTRA_COMPOSE_FILES="${AI_SANDBOX_EXTRA_COMPOSE_FILES:+$AI_SANDBOX_EXTRA_COMPOSE_FILES }$dind_override"
+                else
+                    warn "DinD enabled but $dind_override missing — sessions will start without the DinD override." >&2
+                fi
+                ;;
+            *) ;; # image-build capabilities (none today) need no spawn-time env.
+        esac
+    done < <(read_enabled_devtools)
+}
+
 # ── UC22 — toolchain selection state ─────────────────────────────────────────
 #
 # The operator's optional-toolchain choices (e.g. "android") persist in a

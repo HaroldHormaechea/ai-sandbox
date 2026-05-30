@@ -1,0 +1,50 @@
+# UC-26 — rootless Docker-in-Docker override for ai-sandbox sessions.
+#
+# Layered ON TOP of docker-compose.yml by spawn.sh / spawn.ps1 (via
+# ai_sandbox_compose's AI_SANDBOX_EXTRA_COMPOSE_FILES env var) ONLY when the
+# operator persisted the `dind` devtool via setup's "Select the development
+# tools you want to install" step (UC-26). Never applied otherwise, so non-DinD
+# sessions are completely unaffected (AC#6).
+#
+# What this override DOES vs. does NOT do:
+#
+#   ✓ Enables a rootless Docker daemon to run INSIDE the session container,
+#     accessible via /run/user/<uid>/docker.sock. The session can therefore
+#     run `docker info`, `docker compose up`, `docker run`, etc. (AC#5).
+#   ✓ Composes additively with docker-compose.kvm.yml (UC-22): both can be on
+#     at once. The base image, base mounts, and user mapping all come from
+#     docker-compose.yml; this file only adds DinD-specific bits.
+#   ✗ Does NOT bind-mount /var/run/docker.sock from the host. The session
+#     cannot see or control the host's docker daemon. The rootless daemon
+#     inside the session is the ONLY docker the session can reach (AC#5).
+#   ✗ Does NOT publish any ports. The rootless daemon binds a local UNIX
+#     socket inside the container's per-user runtime dir.
+#
+# Why the security_opt / devices entries:
+#
+#   /dev/fuse        — rootless dockerd uses fuse-overlayfs (or vfs as a
+#                      fallback) for layered storage. /dev/fuse is required
+#                      for fuse-overlayfs to mount.
+#   apparmor:unconfined / seccomp:unconfined  — rootless Docker's nested
+#                      mounts and namespaces hit the default AppArmor /
+#                      seccomp profiles inside the parent container; both
+#                      need to be relaxed for the nested daemon to start.
+#                      This widens what code inside the session can do
+#                      relative to a non-DinD session — that is the trust-
+#                      boundary widening the wizard step warns about at the
+#                      moment of selection (UC-26 AC#3 + AC#10).
+#
+# XDG_RUNTIME_DIR is created by `aisandbox-dind start` inside the container at
+# /run/user/$(id -u), so it is intentionally NOT declared here as a tmpfs —
+# Docker Compose's interpolation cannot evaluate `$(id -u)` at compose-parse
+# time, and per-spawn uid varies (the management server passes an arbitrary
+# host uid through `user:` in docker-compose.yml).
+services:
+  claude-sandbox:
+    devices:
+      - "/dev/fuse:/dev/fuse"
+    security_opt:
+      - "apparmor:unconfined"
+      - "seccomp:unconfined"
+    environment:
+      AI_SANDBOX_DEVTOOL_DIND: "1"

@@ -236,6 +236,122 @@ function Invoke-AiSandboxCompose {
     & docker compose @flags @args
 }
 
+# --- UC26 — development-tools selection state --------------------------------
+#
+# Mirror of lib.sh's devtools helpers. Each enabled capability persists as a
+# whitespace-separated `<id>     <apply_at>` line in a gitignored file at the
+# repo root. `apply_at` is `image-build` or `session-spawn`. v1's only entry is
+# `dind` (session-spawn). Catalog rows below mirror _aisb_devtool_catalog in
+# lib.sh — keep the two in sync.
+$script:AiSandboxDevToolsFile = if ($env:AISB_DEVTOOLS_FILE) { $env:AISB_DEVTOOLS_FILE } else { '.ai-sandbox-devtools' }
+
+$script:AiSandboxDevToolsCatalog = @(
+    [pscustomobject]@{
+        Id      = 'dind'
+        ApplyAt = 'session-spawn'
+        Label   = 'Enable Docker-in-Docker (rootless; lets sessions run docker / docker compose inside their sandbox container)'
+        Warning = 'Enabling Docker-in-Docker (rootless) lets code running inside a session start its own docker / docker compose commands. The rootless daemon runs as the non-root session user with no host-socket bind, so it does NOT widen the host trust boundary - but it DOES widen what code inside a session can reach (the session can now launch and inspect containers). Project policy is "the container is the trust boundary"; enabling this is a deliberate, opt-in expansion of that boundary.'
+    }
+)
+
+function Get-DevToolCatalogIds {
+    return $script:AiSandboxDevToolsCatalog | ForEach-Object { $_.Id }
+}
+
+function Get-DevToolLabel {
+    param([Parameter(Mandatory)][string]$Id)
+    $row = $script:AiSandboxDevToolsCatalog | Where-Object { $_.Id -eq $Id } | Select-Object -First 1
+    if ($null -eq $row) { return $null }
+    return $row.Label
+}
+
+function Get-DevToolApplyAt {
+    param([Parameter(Mandatory)][string]$Id)
+    $row = $script:AiSandboxDevToolsCatalog | Where-Object { $_.Id -eq $Id } | Select-Object -First 1
+    if ($null -eq $row) { return $null }
+    return $row.ApplyAt
+}
+
+function Get-DevToolWarning {
+    param([Parameter(Mandatory)][string]$Id)
+    $row = $script:AiSandboxDevToolsCatalog | Where-Object { $_.Id -eq $Id } | Select-Object -First 1
+    if ($null -eq $row) { return $null }
+    return $row.Warning
+}
+
+function Test-DevToolEnabled {
+    param([Parameter(Mandatory)][string]$Id)
+    if (-not (Test-Path $script:AiSandboxDevToolsFile)) { return $false }
+    foreach ($line in (Get-Content $script:AiSandboxDevToolsFile)) {
+        $trimmed = $line.Trim()
+        if (-not $trimmed) { continue }
+        if ($trimmed.StartsWith('#')) { continue }
+        $first = ($trimmed -split '\s+', 2)[0]
+        if ($first -eq $Id) { return $true }
+    }
+    return $false
+}
+
+function Read-EnabledDevTools {
+    if (-not (Test-Path $script:AiSandboxDevToolsFile)) { return @() }
+    $ids = @()
+    foreach ($line in (Get-Content $script:AiSandboxDevToolsFile)) {
+        $trimmed = $line.Trim()
+        if (-not $trimmed) { continue }
+        if ($trimmed.StartsWith('#')) { continue }
+        $first = ($trimmed -split '\s+', 2)[0]
+        if ($first) { $ids += $first }
+    }
+    return $ids
+}
+
+function Write-EnabledDevTools {
+    param([string[]]$Ids = @())
+    $lines = @()
+    foreach ($id in $Ids) {
+        $applyAt = Get-DevToolApplyAt -Id $id
+        if (-not $applyAt) {
+            Write-Warn "Unknown devtool id '$id' - skipping."
+            continue
+        }
+        $lines += ("{0}`t{1}" -f $id, $applyAt)
+    }
+    if ($lines.Count -eq 0) {
+        Set-Content -Path $script:AiSandboxDevToolsFile -Value '' -NoNewline
+    } else {
+        Set-Content -Path $script:AiSandboxDevToolsFile -Value $lines
+    }
+}
+
+# Invoke-InjectDevToolSpawnEnv - consult the persisted ledger and, for each
+# enabled capability whose apply_at is `session-spawn`, set the env vars /
+# append the compose override files that spawn.ps1 needs. Idempotent.
+function Invoke-InjectDevToolSpawnEnv {
+    foreach ($id in (Read-EnabledDevTools)) {
+        switch ($id) {
+            'dind' {
+                $env:AI_SANDBOX_DEVTOOL_DIND = '1'
+                $dindOverride = 'docker-compose.dind.yml'
+                if ($env:AI_SANDBOX_COMPOSE_FILE) {
+                    $dindOverride = Join-Path (Split-Path -Parent $env:AI_SANDBOX_COMPOSE_FILE) 'docker-compose.dind.yml'
+                }
+                if (Test-Path $dindOverride) {
+                    if ($env:AI_SANDBOX_EXTRA_COMPOSE_FILES) {
+                        $env:AI_SANDBOX_EXTRA_COMPOSE_FILES = "$($env:AI_SANDBOX_EXTRA_COMPOSE_FILES) $dindOverride"
+                    } else {
+                        $env:AI_SANDBOX_EXTRA_COMPOSE_FILES = $dindOverride
+                    }
+                } else {
+                    Write-Warn "DinD enabled but $dindOverride missing - sessions will start without the DinD override."
+                }
+            }
+            default {
+                # image-build capabilities (none today) need no spawn-time env.
+            }
+        }
+    }
+}
+
 # --- UC22 — toolchain selection state ----------------------------------------
 #
 # Mirror of lib.sh's toolchain helpers. The operator's optional-toolchain

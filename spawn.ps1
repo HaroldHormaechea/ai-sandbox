@@ -243,6 +243,17 @@ if (Test-ImageSupportsAndroid) {
     }
 }
 
+# UC26 - read the persisted devtools selection (./.ai-sandbox-devtools or
+# $AI_SANDBOX_HOST_STATE_ROOT/.ai-sandbox-devtools) and inject any spawn-time
+# capabilities (env vars + compose override files) BEFORE Invoke-AiSandboxCompose.
+# Persistence is the only source of truth - there is no spawn-time flag - so
+# changes only propagate to NEW sessions (AC#7). No devtools enabled -> no-op
+# and spawned sessions are byte-identical to today's behaviour (AC#6).
+Invoke-InjectDevToolSpawnEnv
+if ($env:AI_SANDBOX_DEVTOOL_DIND -eq '1') {
+    Write-Info "  devtools      : DinD enabled (rootless dockerd will start inside the session)"
+}
+
 Invoke-AiSandboxCompose -p $Project up -d
 if ($LASTEXITCODE -ne 0) {
     Write-Warn "docker compose up failed for $Project."

@@ -237,6 +237,14 @@ LABEL com.ai-sandbox.toolchain.android="${ANDROID_TESTING}"
 COPY container-bin/aisandbox-emulator /usr/local/bin/aisandbox-emulator
 RUN chmod +x /usr/local/bin/aisandbox-emulator
 
+# In-container DinD helper (UC-26) — manages the rootless Docker daemon when
+# the operator enabled the `dind` devtool in setup.sh. Always shipped; dormant
+# unless AI_SANDBOX_DEVTOOL_DIND=1 (spawn.sh sets that from the persisted
+# devtools ledger). The helper handles install/start/stop/doctor/selftest;
+# entrypoint.sh wires install + start at container boot.
+COPY container-bin/aisandbox-dind /usr/local/bin/aisandbox-dind
+RUN chmod +x /usr/local/bin/aisandbox-dind
+
 COPY --chown=claude:claude entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 

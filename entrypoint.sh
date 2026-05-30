@@ -164,6 +164,20 @@ fi
 START_DIR="$PROJECT_DIR"
 [ -d "$START_DIR" ] || START_DIR=/workspace
 
+# UC-26 — when the operator enabled the `dind` devtool in setup.sh, spawn.sh
+# sets AI_SANDBOX_DEVTOOL_DIND=1 (via docker-compose.dind.yml's `environment:`
+# block + the spawn-time `AI_SANDBOX_DEVTOOL_DIND` export) and layers
+# docker-compose.dind.yml on top of the base compose file. Install + start the
+# rootless dockerd here, BEFORE tmux launches claude, so a session's first
+# `docker info` works without further bootstrap. Both steps are best-effort:
+# if the network is unreachable on first run, or rootlesskit fails inside an
+# unusual host config, the session still boots and the operator gets clear
+# guidance via `aisandbox-dind doctor` (UC-26 AC#9 verification (a)).
+if [ "${AI_SANDBOX_DEVTOOL_DIND:-0}" = "1" ]; then
+    /usr/local/bin/aisandbox-dind install || echo "WARNING: DinD install failed; docker commands will fail." >&2
+    /usr/local/bin/aisandbox-dind start   || echo "WARNING: rootless dockerd did not start; docker commands will fail." >&2
+fi
+
 # If a command is passed (e.g. one-off setup runs), execute it in the project
 # directory after bootstrap. Otherwise launch the persistent tmux session.
 if [ "$#" -gt 0 ]; then

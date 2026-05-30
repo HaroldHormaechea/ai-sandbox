@@ -7,6 +7,22 @@ cd "$(dirname "$0")"
 # shellcheck source=lib.sh
 . "$(dirname "$0")/lib.sh"
 
+# ── UC26 — --reconfigure: jump straight to the devtools step ─────────────────
+# Parsed at the very top so the flag short-circuits BEFORE the welcome screen
+# and the full 1..7 wizard. With --reconfigure set, the script renders the
+# devtools step under a reconfigure banner with current selections pre-filled,
+# writes the updated ledger, and exits — no other step runs (AC#4).
+RECONFIGURE_MODE=0
+_setup_args=()
+for _a in "$@"; do
+    case "$_a" in
+        --reconfigure) RECONFIGURE_MODE=1 ;;
+        *) _setup_args+=("$_a") ;;
+    esac
+done
+# Leave the residual argv in place for any future flag parsing.
+set -- ${_setup_args[@]+"${_setup_args[@]}"}
+
 list_ssh_keys() {
     [ -d "$HOME/.ssh" ] || return 0
     for f in "$HOME/.ssh"/*; do
@@ -196,17 +212,153 @@ EOF
     chmod 644 secrets/gitconfig
 }
 
+# ── UC26 — devtools step ─────────────────────────────────────────────────────
+# Renders the "Select the development tools you want to install" checklist,
+# toggles entries by number, prompts for the inline trust-boundary warning when
+# enabling a new spawn-time capability, and persists the result via
+# write_enabled_devtools.
+#
+# Shape is shared between fresh-install (Step 6 of 7) and `--reconfigure` (run
+# under a banner with no surrounding wizard). Caller renders the screen header
+# / reconfigure banner before invoking this function. Honours /skip and /exit
+# the same way as the other wizard steps.
+run_devtools_step() {
+    # Snapshot every catalog ID + each one's current enabled state. Operating
+    # on a snapshot lets numeric input flip a bit without re-reading the file
+    # every keystroke; the file is only rewritten on commit.
+    local ids=() id state_line
+    while IFS= read -r id; do
+        [ -n "$id" ] && ids+=("$id")
+    done < <(devtool_catalog_ids)
+
+    if [ "${#ids[@]}" -eq 0 ]; then
+        warn "No development-tool capabilities are registered in the catalog."
+        return 0
+    fi
+
+    # `selected` is a parallel array of 0/1 flags indexed alongside `ids`.
+    local i=0 selected=()
+    for id in "${ids[@]}"; do
+        if devtool_is_enabled "$id"; then selected[$i]=1; else selected[$i]=0; fi
+        i=$(( i + 1 ))
+    done
+
+    info "Pick optional development tools to provision into the sessions"
+    info "your sandbox spawns. Each entry below is a toggle:"
+    hr
+    info "Type a number to flip an entry, then press Enter to commit."
+    printf "  Type %s/skip%s to leave the current selection unchanged, or %s/exit%s to quit.\n" \
+        "$MAGENTA" "$RESET" "$MAGENTA" "$RESET"
+    hr
+
+    local last_error=""
+    while true; do
+        # Render the checklist.
+        for i in "${!ids[@]}"; do
+            id="${ids[$i]}"
+            local mark=" "
+            [ "${selected[$i]}" = "1" ] && mark="x"
+            printf "    [%s] %d. %s\n" "$mark" "$((i + 1))" "$(devtool_label "$id")"
+        done
+        hr
+        [ -n "$last_error" ] && { warn "$last_error"; last_error=""; }
+        printf "  > "
+        local resp
+        IFS= read -r resp || break
+        case "$resp" in
+            ""|/skip)
+                break
+                ;;
+            /exit)
+                echo "  Exiting setup."
+                exit 0
+                ;;
+            *)
+                if [[ "$resp" =~ ^[0-9]+$ ]] && [ "$resp" -ge 1 ] && [ "$resp" -le "${#ids[@]}" ]; then
+                    local idx=$(( resp - 1 ))
+                    local target_id="${ids[$idx]}"
+                    if [ "${selected[$idx]}" = "0" ]; then
+                        # Enabling a spawn-time capability surfaces the trust-
+                        # boundary warning before commit (AC#3). For image-time
+                        # capabilities (none today) the same hook applies if a
+                        # warning is registered in the catalog.
+                        local warning
+                        warning="$(devtool_warning "$target_id" || true)"
+                        if [ -n "$warning" ]; then
+                            hr
+                            warn "$warning"
+                            hr
+                            printf "  Continue? [y/N]: "
+                            local confirm
+                            IFS= read -r confirm || confirm=""
+                            case "$confirm" in
+                                [yY]|[yY][eE][sS])
+                                    selected[$idx]=1
+                                    ok "Enabled: $(devtool_label "$target_id")"
+                                    ;;
+                                *)
+                                    info "Cancelled. $target_id left disabled."
+                                    ;;
+                            esac
+                        else
+                            selected[$idx]=1
+                            ok "Enabled: $(devtool_label "$target_id")"
+                        fi
+                    else
+                        selected[$idx]=0
+                        ok "Disabled: $(devtool_label "$target_id")"
+                    fi
+                    hr
+                else
+                    last_error="Type a number 1..${#ids[@]}, /skip, or /exit."
+                fi
+                ;;
+        esac
+    done
+
+    # Commit. write_enabled_devtools is idempotent: passing zero IDs writes an
+    # empty file, mirroring write_enabled_toolchains.
+    local final=()
+    for i in "${!ids[@]}"; do
+        [ "${selected[$i]}" = "1" ] && final+=("${ids[$i]}")
+    done
+    write_enabled_devtools ${final[@]+"${final[@]}"}
+
+    hr
+    if [ "${#final[@]}" -eq 0 ]; then
+        ok "Development tools: none enabled (sessions remain identical to the default)."
+    else
+        ok "Development tools persisted: ${final[*]}"
+        info "Changes apply to NEW sessions only — existing sessions are unaffected."
+        info "Recycle a session via ./clean.sh + ./spawn.sh to retrofit it."
+    fi
+}
+
+# ── UC26 — --reconfigure short-circuit ───────────────────────────────────────
+# When --reconfigure was on the argv, render ONLY the devtools step under a
+# distinct banner, then exit. Skips welcome, SSH key, git identity, image
+# build, gh auth, Claude pre-init, and the first-spawn step.
+if [ "$RECONFIGURE_MODE" -eq 1 ]; then
+    clear_screen
+    printf "%s%s=== Reconfigure: development tools ===%s\n\n" "$BOLD" "$CYAN" "$RESET"
+    run_devtools_step
+    hr
+    printf "  Re-run any time with %s./setup.sh --reconfigure%s.\n" "$MAGENTA" "$RESET"
+    exit 0
+fi
+
 # ── Welcome screen ───────────────────────────────────────────────────────────
 clear_screen
 printf "%s%s=== ai-sandbox setup ===%s\n\n" "$BOLD" "$CYAN" "$RESET"
-info "This walks you through setting up the sandbox in 6 steps:"
+info "This walks you through setting up the sandbox in 7 steps:"
 hr
 info "  1. SSH key      — register a key for git operations"
 info "  2. Git identity — set the author name + email for commits"
 info "  3. Image        — build the container if needed"
 info "  4. gh login     — optional, for the GitHub CLI (gh issue / pr / etc.)"
 info "  5. Claude setup — /login, trust folder, accept bypass warning"
-info "  6. Start        — bring the container up"
+info "  6. Dev tools    — opt-in capabilities for spawned sessions"
+info "  7. Start        — bring the container up"
 hr
 printf "  Press Enter to begin (or %s/exit%s to quit).\n" "$MAGENTA" "$RESET"
 read -r -p "  > " _intro
@@ -216,7 +368,7 @@ mkdir -p secrets workspace claude-config
 
 # ── Step 1: SSH key ──────────────────────────────────────────────────────────
 clear_screen
-screen_header 1 6 "SSH key"
+screen_header 1 7 "SSH key"
 
 SSH_KEY_SOURCE=""
 
@@ -232,7 +384,7 @@ else
     last_error=""
     while true; do
         clear_screen
-        screen_header 1 6 "SSH key"
+        screen_header 1 7 "SSH key"
         warn "No SSH key at secrets/git-key"
         hr
         if [ "${#keys[@]}" -gt 0 ]; then
@@ -286,7 +438,7 @@ fi
 
 # ── Step 2: Git author identity ──────────────────────────────────────────────
 clear_screen
-screen_header 2 6 "Git author identity"
+screen_header 2 7 "Git author identity"
 
 cur_name=""
 cur_email=""
@@ -383,7 +535,7 @@ press_enter
 
 # ── Step 3: Container image ──────────────────────────────────────────────────
 clear_screen
-screen_header 3 6 "Container image"
+screen_header 3 7 "Container image"
 
 # ── UC22 — optional toolchain selection ──────────────────────────────────────
 # Data-driven menu of optional toolchains baked into ai-context:latest. The
@@ -473,7 +625,7 @@ fi
 
 # ── Step 4: gh authentication ────────────────────────────────────────────────
 clear_screen
-screen_header 4 6 "GitHub CLI (gh) authentication — optional"
+screen_header 4 7 "GitHub CLI (gh) authentication — optional"
 info "\`gh\` is the official GitHub command-line client (https://cli.github.com)."
 info "Authenticating it lets you create PRs, list issues, and call the GitHub"
 info "API from inside the sandbox. Cloning / pushing already works via SSH and"
@@ -525,7 +677,7 @@ fi
 
 # ── Step 5: Claude Code first-run ────────────────────────────────────────────
 clear_screen
-screen_header 5 6 "Claude Code first-run"
+screen_header 5 7 "Claude Code first-run"
 
 do_claude_setup=false
 if claude_config_set_up; then
@@ -561,9 +713,15 @@ if [ "$do_claude_setup" = true ]; then
     ok "First-run setup complete"
 fi
 
-# ── Step 6: Initialize counter & spawn first session ────────────────────────
+# ── Step 6: Development tools (UC-26) ────────────────────────────────────────
 clear_screen
-screen_header 6 6 "Starting first session"
+screen_header 6 7 "Select the development tools you want to install"
+run_devtools_step
+press_enter
+
+# ── Step 7: Initialize counter & spawn first session ────────────────────────
+clear_screen
+screen_header 7 7 "Starting first session"
 
 # Ensure the monotonic session counter exists. The file holds the last issued
 # N (increment-before-use): initializing it to 0 makes the first ./spawn.sh

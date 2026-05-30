@@ -257,6 +257,18 @@ if image_supports_android; then
     fi
 fi
 
+# UC26 — read the persisted devtools selection (./.ai-sandbox-devtools or
+# $AI_SANDBOX_HOST_STATE_ROOT/.ai-sandbox-devtools) and inject any spawn-time
+# capabilities (env vars + compose override files) BEFORE `ai_sandbox_compose
+# up`. Persistence is the only source of truth — there's no spawn-time flag —
+# so changes only propagate to NEW sessions (AC#7). With no devtools enabled
+# the call is a no-op and spawned sessions are byte-identical to today's
+# behaviour (AC#6).
+inject_devtool_spawn_env
+if [ "${AI_SANDBOX_DEVTOOL_DIND:-0}" = "1" ]; then
+    info "  devtools      : DinD enabled (rootless dockerd will start inside the session)" >&2
+fi
+
 if ! ai_sandbox_compose -p "$PROJECT" up -d; then
     warn "docker compose up failed for $PROJECT." >&2
     warn "Counter NOT rolled back (monotonic by design); next spawn will use N=$(( N + 1 ))." >&2
