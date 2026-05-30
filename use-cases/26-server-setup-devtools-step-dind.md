@@ -34,3 +34,75 @@ The server setup wizard (`setup.sh` / `setup.ps1`, plus the `.deb` post-install 
   A: Only new sessions get DinD; existing untouched (AC#7).
 - Q: Wizard step label — keep the user's original phrase or shorten?
   A: Use **"Select the development tools you want to install"** verbatim as the step title (the user's chosen phrasing, refining their initial "Development environment setup" label).
+
+## Implementation Progress (2026-05-31, in-flight)
+
+Work branch: `feat/uc-26-server-setup-devtools-step-dind` (pushed; no PR opened yet — Completion phase did not run).
+
+### Authoritative design rulings made during the run
+
+- **AC#9 — permissive read** (team-lead ruling, not user-confirmed). AC#9's literal text suggests the in-session daemon visiting the host's `ai-sandbox-N` project; that is architecturally incompatible with the use case's own Clarifications (no host-socket bind-mount, no sysbox). The run was unblocked by adopting the permissive read: "the in-session rootless daemon is *capable* of `docker compose … exec -T … tmux …` shaped operations against ITS OWN child containers." Verification surface pinned as: (a) `aisandbox-dind doctor` reports a running rootless daemon; (b) `docker compose ls` runs without error; (c) `aisandbox-dind selftest` (alpine compose-up → `tmux -V` exec → compose-down) succeeds end-to-end — **load-bearing AC#9 fixture**; (d) selftest is idempotent + teardown-clean. **Open question for the user**: confirm this ruling, or pivot UC-26 to a host-daemon-tunnel design (which would scrap the rootless-only architecture and add a new mTLS-tunneled daemon-proxy surface to the management server).
+- **Wizard step placement**: inserted as Step 6 of 7, **before** the first-session spawn (which became Step 7) so the wizard's own first spawn inherits any DinD opt-in. Step ordering: 1 SSH → 2 git identity → 3 image (incl. UC22 toolchain) → 4 gh login → 5 Claude /login → 6 devtools → 7 first session.
+- **`OnboardCommand` default**: devtools step **runs** when `--no-devtools` is absent (matches `.deb` auto-onboard expectation). The 6 existing `OnboardCommandTest` cases were updated by QA to pass `--no-devtools` as back-compat housekeeping; new behaviour is covered by `DevToolsStepTest` + `ReconfigureCommandTest`.
+
+### Phase 1 — Analysis & Challenge: **DONE**
+
+Analyst + challenger peer loop converged in 2 rounds; final proposal approved. Notable design decisions:
+- `.ai-sandbox-devtools` ledger format `<id>     <apply_at>` with `apply_at: image-build | session-spawn` as the **AC#8 extensibility seam**.
+- `inject_devtool_spawn_env` in `lib.sh` / `lib.ps1` appends `docker-compose.dind.yml` to the existing `AI_SANDBOX_EXTRA_COMPOSE_FILES` chain (additive with `docker-compose.kvm.yml` from UC22).
+- Image-baked `container-bin/aisandbox-dind` helper is dormant unless `AI_SANDBOX_DEVTOOL_DIND=1`; on first DinD-enabled start it lazy-installs the rootless-Docker static tarball from `download.docker.com` into `/workspace/environment-utilities/dind/` (follows the `aisandbox-emulator` precedent).
+- Java install-time CLI: `ReconfigureCommand` (new), `DevToolsStep` + `DevToolsConfig` under `cli/secrets/` (new), `OnboardCommand` + `AisandboxctlCommand` modified. UC06 §AC25 install-time-CLI exemption covers all new `cli/**` code — no `profile-java-server-architecture` conflict.
+
+### Phase 2 — Implementation: **DONE** (developer's task closed)
+
+Commits on the work branch:
+- `4970edd` — `feat(server,setup): UC-26 — devtools selection step + rootless DinD plumbing` (17 files, +1606 / -20). All shell-side primitives + Docker plumbing + Java install-time CLI.
+- `09814ba` — `docs(server,setup): UC-26 — README + brief updates for devtools step` (2 files, +31 / -1). README "Optional development tools" subsection + PROJECT_BRIEF.md trust-boundary / components / data-flow / `build.commands.reconfigure` additions.
+
+PROJECT_BRIEF.md was updated in-flight: frontmatter `build.commands.reconfigure: "./setup.sh --reconfigure"` added; new bullets under `components`, `data_flow_narrative`, and `trust_boundaries`. `non_goals` reviewed; no change required (AC#10).
+
+`./gradlew :server:compileJava` and `./gradlew :server:spotlessCheck` clean at the time of handoff.
+
+### Phase 3 — Testing: **IN-FLIGHT** (QA at checkpoint #1)
+
+QA committed at `432079d` — `test(server): UC-26 — test suite for devtools step + DinD plumbing` (9 files, +1776 / -8):
+
+- NEW `server/src/test/java/com/aisandbox/server/cli/secrets/DevToolsConfigTest.java`
+- NEW `server/src/test/java/com/aisandbox/server/cli/secrets/DevToolsStepTest.java`
+- NEW `server/src/test/java/com/aisandbox/server/cli/ReconfigureCommandTest.java`
+- MODIFIED `server/src/test/java/com/aisandbox/server/cli/OnboardCommandTest.java` (6 cases get `--no-devtools` for back-compat; +3 new UC-26 routing cases)
+- MODIFIED `server/src/test/java/com/aisandbox/server/sessions/HostScriptComposeEnvTest.java` (+3 cells: DinD alone; DinD layered on KVM; empty ledger as AC#6 control)
+- MODIFIED `server/src/test/java/com/aisandbox/server/release/ReleaseBundleTest.java` (asserts `host/docker-compose.dind.yml` 0644 + `host/container-bin/aisandbox-dind` 0755 in the release zip)
+- MODIFIED `server/src/test/java/com/aisandbox/server/release/DebPackageTest.java` (same for the .deb at `/opt/ai-sandbox-server/host/`)
+- MODIFIED `server/src/test/java/com/aisandbox/server/release/DebPostinstContractTest.java` (asserts `sudo aisandboxctl reconfigure` reminder + names Docker-in-Docker)
+- NEW `docs/DinDSelftestVerificationDoc.md` — **operator runbook for AC#9 (a/b/c/d)**, the manual-verification artifact CI can't run.
+
+`./gradlew :server:compileTestJava` clean at checkpoint #1.
+
+### Known production-code gap pre-flagged by QA (not yet relayed to developer)
+
+`server/build.gradle.kts` does NOT include `docker-compose.dind.yml` or `container-bin/aisandbox-dind` in the release-zip / `.deb` packaging chain. The new `ReleaseBundleTest` + `DebPackageTest` assertions will fail until the developer extends the bundling glob. QA was instructed to confirm with a `./gradlew :server:test` run + capture the failing assertion lines, then send a bug report (not a fix) for relay to the developer. **Status at termination**: the run has not been confirmed; the gap is a high-confidence prediction, not a measured failure.
+
+### What still has to happen for UC-26 to close
+
+1. QA runs the full `./gradlew :server:test` suite. Expected fix-back items:
+   a. `server/build.gradle.kts` release/deb bundling — definitely missing (see above).
+   b. Any other production-code findings the suite surfaces (PowerShell-mirror gaps, ledger-file mode, deferred-onboard wording mismatches, etc.).
+2. Developer fix-back round(s) — up to 6 rounds permitted by the orchestrator protocol.
+3. Operator runs `docs/DinDSelftestVerificationDoc.md` end-to-end on a real host to confirm AC#9(a–d). This step cannot be automated by CI.
+4. PowerShell mirror parity (AC#1) exercised on a Windows host. The dev confirmed `pwsh` is not on this Linux host; mirrors were verified by inspection only.
+5. Orchestrator's Completion phase: final commit (if any uncommitted work), final push, `gh pr create` against `main`, and ledger status flip to `done`.
+
+### Ledger state at termination
+
+`USE_CASES.md` row 26 is `in-progress` (set 2026-05-30). The orchestrator did NOT flip it to `done` because Phase 3 is incomplete. On the next `/develop` resume against the same use case, do **not** auto-create the row — the orchestrator's resume protocol must observe the existing `in-progress` state.
+
+### How to resume
+
+From the root Claude Code session:
+
+1. `git -C /home/potato-server/ai-sandbox fetch origin && git -C /home/potato-server/ai-sandbox checkout feat/uc-26-server-setup-devtools-step-dind`
+2. Invoke `/develop` with `target_dir=/home/potato-server/ai-sandbox use_case=use-cases/26-server-setup-devtools-step-dind.md` and tell the orchestrator the run is a Phase 3 continuation (skip Phase 1 + 2; resume QA on `432079d`).
+3. Direct QA to run `./gradlew :server:test`, capture failures, and start the fix-back loop with the developer.
+
+**Memory cross-link**: `dev-team-dont-rebase-published-uc-branch` — when continuing an in-progress UC, do NOT rebase the work branch onto main; just add commits on top.
