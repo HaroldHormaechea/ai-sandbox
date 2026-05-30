@@ -13,6 +13,8 @@
     <string name="onboarding_replace_existing_confirm">Replace</string>
     <string name="onboarding_camera_permission_required">Camera access is required to scan the invite QR.</string>
     <string name="onboarding_camera_permission_grant">Grant camera access</string>
+    <string name="onboarding_close_label">Close scanner</string>
+    <string name="onboarding_torch_label">Toggle camera flash</string>
 
     <!-- Sessions list (UC04-2) -->
     <string name="sessions_title">ai-sandbox</string>

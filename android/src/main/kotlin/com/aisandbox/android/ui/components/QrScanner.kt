@@ -2,6 +2,7 @@ package com.aisandbox.android.ui.components
 
 import android.util.Log
 import android.view.ViewGroup
+import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ExperimentalGetImage
 import androidx.camera.core.ImageAnalysis
@@ -19,6 +20,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import java.util.concurrent.atomic.AtomicReference
 import com.google.zxing.BinaryBitmap
 import com.google.zxing.DecodeHintType
 import com.google.zxing.MultiFormatReader
@@ -58,6 +60,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 fun QrScanner(
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
+    torchOn: Boolean = false,
     onQr: (String) -> Unit,
 ) {
     val context = LocalContext.current
@@ -65,6 +68,11 @@ fun QrScanner(
     val triggered = remember { AtomicBoolean(false) }
     val executor = remember { Executors.newSingleThreadExecutor() }
     val coroutineScope = rememberCoroutineScope()
+    // Captured at bind time so the AndroidView `update` lambda can drive
+    // the torch from Compose state without rebinding the camera. The bound
+    // Camera exposes torch as a CameraControl future; only available once
+    // ProcessCameraProvider.bindToLifecycle has resolved.
+    val cameraRef = remember { AtomicReference<Camera?>(null) }
 
     DisposableEffect(Unit) {
         onDispose { executor.shutdownNow() }
@@ -106,13 +114,25 @@ fun QrScanner(
                 val selector = CameraSelector.DEFAULT_BACK_CAMERA
                 try {
                     provider.unbindAll()
-                    provider.bindToLifecycle(lifecycleOwner, selector, preview, analysis)
+                    val cam = provider.bindToLifecycle(lifecycleOwner, selector, preview, analysis)
+                    cameraRef.set(cam)
+                    // Honor any torchOn state that was set before the camera was bound.
+                    runCatching { cam.cameraControl.enableTorch(torchOn) }
                 } catch (t: Throwable) {
                     Log.w(TAG, "Cannot bind camera use cases: $t")
                 }
             }, ContextCompat.getMainExecutor(ctx))
 
             previewView
+        },
+        update = {
+            // Drive the torch from Compose state. enableTorch is a no-op on
+            // devices without a flash unit (returns a future that resolves
+            // exceptionally); the runCatching guard absorbs that quietly so
+            // a flashless emulator does not crash the screen.
+            cameraRef.get()?.let { cam ->
+                runCatching { cam.cameraControl.enableTorch(torchOn) }
+            }
         },
     )
 }
