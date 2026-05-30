@@ -63,46 +63,70 @@ PROJECT_BRIEF.md was updated in-flight: frontmatter `build.commands.reconfigure:
 
 `./gradlew :server:compileJava` and `./gradlew :server:spotlessCheck` clean at the time of handoff.
 
-### Phase 3 — Testing: **IN-FLIGHT** (QA at checkpoint #1)
+### Phase 3 — Testing: **IN-FLIGHT** (QA Round 1 complete; fix-back Round 2 underway)
 
-QA committed at `432079d` — `test(server): UC-26 — test suite for devtools step + DinD plumbing` (9 files, +1776 / -8):
+**QA committed at `432079d`** — `test(server): UC-26 — test suite for devtools step + DinD plumbing` (9 files, +1776 / -8):
 
-- NEW `server/src/test/java/com/aisandbox/server/cli/secrets/DevToolsConfigTest.java`
-- NEW `server/src/test/java/com/aisandbox/server/cli/secrets/DevToolsStepTest.java`
-- NEW `server/src/test/java/com/aisandbox/server/cli/ReconfigureCommandTest.java`
-- MODIFIED `server/src/test/java/com/aisandbox/server/cli/OnboardCommandTest.java` (6 cases get `--no-devtools` for back-compat; +3 new UC-26 routing cases)
+- NEW `server/src/test/java/com/aisandbox/server/cli/secrets/DevToolsConfigTest.java` — 12 cases
+- NEW `server/src/test/java/com/aisandbox/server/cli/secrets/DevToolsStepTest.java` — 13 cases
+- NEW `server/src/test/java/com/aisandbox/server/cli/ReconfigureCommandTest.java` — 10 cases
+- MODIFIED `server/src/test/java/com/aisandbox/server/cli/OnboardCommandTest.java` (6 cases get `--no-devtools` for back-compat; +3 new UC-26 routing cases: SKIPPED, DEFERRED, full TTY end-to-end ledger persistence)
 - MODIFIED `server/src/test/java/com/aisandbox/server/sessions/HostScriptComposeEnvTest.java` (+3 cells: DinD alone; DinD layered on KVM; empty ledger as AC#6 control)
 - MODIFIED `server/src/test/java/com/aisandbox/server/release/ReleaseBundleTest.java` (asserts `host/docker-compose.dind.yml` 0644 + `host/container-bin/aisandbox-dind` 0755 in the release zip)
 - MODIFIED `server/src/test/java/com/aisandbox/server/release/DebPackageTest.java` (same for the .deb at `/opt/ai-sandbox-server/host/`)
-- MODIFIED `server/src/test/java/com/aisandbox/server/release/DebPostinstContractTest.java` (asserts `sudo aisandboxctl reconfigure` reminder + names Docker-in-Docker)
+- MODIFIED `server/src/test/java/com/aisandbox/server/release/DebPostinstContractTest.java` (asserts `sudo aisandboxctl reconfigure` reminder appears ≥3× and names Docker-in-Docker)
 - NEW `docs/DinDSelftestVerificationDoc.md` — **operator runbook for AC#9 (a/b/c/d)**, the manual-verification artifact CI can't run.
 
-`./gradlew :server:compileTestJava` clean at checkpoint #1.
+`./gradlew :server:compileTestJava` clean at checkpoint #1. Coverage table maps every AC#1–10 to at least one test (or the operator-runbook step for AC#9).
 
-### Known production-code gap pre-flagged by QA (not yet relayed to developer)
+**QA local-host run results** (all NEW tests that can run locally pass):
+- DevToolsConfigTest: 12/12 ✅
+- DevToolsStepTest: 13/13 ✅
+- ReconfigureCommandTest: 10/10 ✅
+- HostScriptComposeEnvTest's 3 new cells: 3/3 ✅
+- DebPostinstContractTest's new case: 1/1 ✅
+- OnboardCommandTest: 12/14 fails — **pre-existing host artifact** (memory: `ai-sandbox-host-dev-constraints`); the 3 new UC-26 cases inherit the same `Ownership.resolve` / chown EPERM behaviour locally. CI passes the same harness shape today.
 
-`server/build.gradle.kts` does NOT include `docker-compose.dind.yml` or `container-bin/aisandbox-dind` in the release-zip / `.deb` packaging chain. The new `ReleaseBundleTest` + `DebPackageTest` assertions will fail until the developer extends the bundling glob. QA was instructed to confirm with a `./gradlew :server:test` run + capture the failing assertion lines, then send a bug report (not a fix) for relay to the developer. **Status at termination**: the run has not been confirmed; the gap is a high-confidence prediction, not a measured failure.
+### Phase 3 fix-back Round 1 (in flight)
+
+**Finding #1 — Critical: release zip + .deb don't ship `docker-compose.dind.yml`.** `server/build.gradle.kts` is missing the `from()` line in `releaseBundle` (~line 392) and the `hostData` entry in `prepDebStaging` (~line 524). Without these, every bundled-install path (zip + `.deb`) silently fails AC#5 + AC#7: `spawn.sh`'s `inject_devtool_spawn_env` (lib.sh:416) emits a `DinD enabled but $dind_override missing` warning and the spawned container has no `/dev/fuse`, `apparmor:unconfined`, or `seccomp:unconfined` → `aisandbox-dind start` cannot bring up the rootless daemon. Failing tests: `ReleaseBundleTest.uc26_dind_override_and_helper_ship_with_correct_modes` + `DebPackageTest.deb_ships_uc26_dind_override_and_helper_with_correct_modes`. Container-bin/aisandbox-dind IS shipped via the recursive `container-bin/` clause; only the compose override is missing. **Status**: relayed to developer for fix-back Round 1.
+
+**Finding #2 — Minor: `ReconfigureCommand` lacks root-check parity with `OnboardCommand`.** No root probe before writing the ledger and no `setRootCheck` test seam. A non-root operator running `aisandboxctl reconfigure` will fail at `Files.write` with EACCES (ledger lives under `/var/lib/ai-sandbox-server/sessions/`) — surfaces as an NIO exception rather than the friendly "must run as root (use sudo)" message. **Status**: relayed to developer as discretionary (defer-to-follow-up acceptable; if added, QA writes the matching test in the same round).
 
 ### What still has to happen for UC-26 to close
 
-1. QA runs the full `./gradlew :server:test` suite. Expected fix-back items:
-   a. `server/build.gradle.kts` release/deb bundling — definitely missing (see above).
-   b. Any other production-code findings the suite surfaces (PowerShell-mirror gaps, ledger-file mode, deferred-onboard wording mismatches, etc.).
-2. Developer fix-back round(s) — up to 6 rounds permitted by the orchestrator protocol.
-3. Operator runs `docs/DinDSelftestVerificationDoc.md` end-to-end on a real host to confirm AC#9(a–d). This step cannot be automated by CI.
-4. PowerShell mirror parity (AC#1) exercised on a Windows host. The dev confirmed `pwsh` is not on this Linux host; mirrors were verified by inspection only.
+1. Developer fix-back Round 1 lands the `build.gradle.kts` changes (and optionally the `ReconfigureCommand` root-check).
+2. QA re-runs `./gradlew :server:test --tests "*ReleaseBundleTest*" --tests "*DebPackageTest*"` against a fresh `./gradlew :server:releaseBundle :server:debPackage` → both turn green.
+3. Operator runs `docs/DinDSelftestVerificationDoc.md` end-to-end on a real host to confirm AC#9(a–d) on rootless DinD. Cannot be automated by CI.
+4. PowerShell mirror parity (AC#1) exercised on a Windows host. `pwsh` is not on this Linux host; mirrors were verified by inspection only.
 5. Orchestrator's Completion phase: final commit (if any uncommitted work), final push, `gh pr create` against `main`, and ledger status flip to `done`.
 
-### Ledger state at termination
+The 6-round fix-back cap applies to Round 1+. Currently at Round 1 of 6.
 
-`USE_CASES.md` row 26 is `in-progress` (set 2026-05-30). The orchestrator did NOT flip it to `done` because Phase 3 is incomplete. On the next `/develop` resume against the same use case, do **not** auto-create the row — the orchestrator's resume protocol must observe the existing `in-progress` state.
+### Open scope question
+
+`docs/DinDSelftestVerificationDoc.md` was authored by QA. It lives under `docs/` which is inside the brief's `paths.production` glob — but it is operator documentation (a runbook), not production source. Default chosen at run-time: QA owns it. Resume run may revisit if the human prefers developer ownership.
+
+### Ledger state
+
+`USE_CASES.md` row 26 is `in-progress` (set 2026-05-30). The orchestrator did NOT flip it to `done` because Phase 3 fix-back is not closed.
+
+### Commits on the work branch (chronological)
+
+| SHA | Subject |
+|---|---|
+| `4970edd` | feat(server,setup): UC-26 — devtools selection step + rootless DinD plumbing |
+| `09814ba` | docs(server,setup): UC-26 — README + brief updates for devtools step |
+| `432079d` | test(server): UC-26 — test suite for devtools step + DinD plumbing |
+| `30e0dc4` | docs(use-cases): UC-26 — record in-flight implementation progress for resume |
+| _(pending)_ | fix(server): UC-26 — bundle `docker-compose.dind.yml` in release zip + .deb |
 
 ### How to resume
 
 From the root Claude Code session:
 
 1. `git -C /home/potato-server/ai-sandbox fetch origin && git -C /home/potato-server/ai-sandbox checkout feat/uc-26-server-setup-devtools-step-dind`
-2. Invoke `/develop` with `target_dir=/home/potato-server/ai-sandbox use_case=use-cases/26-server-setup-devtools-step-dind.md` and tell the orchestrator the run is a Phase 3 continuation (skip Phase 1 + 2; resume QA on `432079d`).
-3. Direct QA to run `./gradlew :server:test`, capture failures, and start the fix-back loop with the developer.
+2. Invoke `/develop` with `target_dir=/home/potato-server/ai-sandbox use_case=use-cases/26-server-setup-devtools-step-dind.md` and tell the orchestrator the run is a Phase 3 fix-back continuation (skip Phase 1 + 2; QA's last summary is at fix-back Round 1; developer is mid-fix on `build.gradle.kts`).
+3. If the developer's fix-back commit is already on the branch, direct QA to re-run the failing tests against a fresh `releaseBundle` + `debPackage`. If not, re-spawn developer with finding #1 + (optionally) #2 from the QA Test Summary above.
 
 **Memory cross-link**: `dev-team-dont-rebase-published-uc-branch` — when continuing an in-progress UC, do NOT rebase the work branch onto main; just add commits on top.
