@@ -33,4 +33,6 @@ Statuses:
 | 21 | [use-cases/21-android-terminal-emulator-and-agent-switcher.md](use-cases/21-android-terminal-emulator-and-agent-switcher.md) | Android client — usable terminal (real emulator + keyboard) + hamburger delete/disconnect + agent-team switcher | done | 2026-05-25 |
 | 22 | [use-cases/22-onboarding-toolchain-android-testing.md](use-cases/22-onboarding-toolchain-android-testing.md) | Onboarding toolchain selection with full Android build/test/emulator image support | done | 2026-05-25 |
 | 23 | [use-cases/23-android-terminal-keyboard-insets.md](use-cases/23-android-terminal-keyboard-insets.md) | Android terminal — on-screen keyboard occludes the input (IME insets) | done | 2026-05-25 |
+| 24 | [use-cases/24-android-terminal-multi-window-leak-fix.md](use-cases/24-android-terminal-multi-window-leak-fix.md) | Android terminal — fix "all tmux windows shown" regression (only main pane + agent switcher) | pending | 2026-05-30 |
+| 25 | [use-cases/25-android-terminal-split-pane.md](use-cases/25-android-terminal-split-pane.md) | Android terminal — split-pane support (UC04-3c) [tentative, pending review] | pending | 2026-05-30 |
 
