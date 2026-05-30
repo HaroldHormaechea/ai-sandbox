@@ -135,6 +135,31 @@ re-download the ~1.5 GB system image on their first emulator use. Sessions on
 the shared `/workspace` (the default) all reuse the one cache. This is the
 accepted trade-off of caching under the workspace bind mount.
 
+### Optional development tools (UC26)
+
+`setup.sh` / `setup.ps1` Step 6 — **"Select the development tools you want to install"** — is a checklist of opt-in capabilities the sandbox provisions into the per-session containers spawned by `spawn.sh`. Selections persist on the host in the gitignored `./.ai-sandbox-devtools` file (one record per line: `<id>     <apply_at>`), and propagate to **NEW sessions only** — sessions running at the moment of the toggle are left untouched (recycle one via `./clean.sh <N>` + `./spawn.sh` to retrofit it).
+
+The wizard step is reachable two ways:
+
+- During first-time setup, after the Claude pre-init step and before the first session is spawned.
+- Any time after via `./setup.sh --reconfigure` (POSIX) or `.\setup.ps1 -Reconfigure` (PowerShell). The reconfigure path renders only the checklist with the current selection pre-filled — no other wizard step runs.
+
+The step is shaped as a generic numbered-menu checklist, not a single yes/no question, so future capabilities (e.g. an installed Rust toolchain, a Python interpreter + venv tooling) slot in by adding rows to the in-script catalog without restructuring the wizard.
+
+#### v1 capabilities
+
+**`dind` — Enable Docker-in-Docker (rootless)**
+
+Lets code running inside a session start its own `docker` / `docker compose` commands without touching the host's Docker socket.
+
+- **What you get.** When you enable DinD and respawn a session, `entrypoint.sh` calls `aisandbox-dind install` (one-time download of the rootless Docker static tarball from `download.docker.com` into `/workspace/environment-utilities/dind/`) and then `aisandbox-dind start` (boots a rootless `dockerd-rootless.sh` daemon in the background, exports `DOCKER_HOST=unix:///run/user/<uid>/docker.sock`, and persists that to `~/.profile`-sourced state so a fresh `tmux` window inherits it). `docker info`, `docker compose ls`, `docker run`, etc. then work inside the session — including the runtime path UC-24's diagnostic operations need.
+- **Verifying.** Inside the session, `aisandbox-dind doctor` prints the daemon + storage-driver + `/dev/fuse` status. `aisandbox-dind selftest` brings up a one-service alpine container, runs `tmux -V` inside it, asserts the version string, and tears it back down. From the host, `sudo aisandboxctl reconfigure --doctor` (`--session <N>` to target one) execs the doctor command into each enumerated session.
+- **Trust-boundary tradeoff (deliberate, opt-in).** The rootless daemon runs as the **non-root session user** with **no host-socket bind**, so it does **not** widen the host trust boundary — but it **does** widen what code inside a session can reach: the session can now launch and inspect containers, and the rootless-Docker bring-up requires `/dev/fuse` plus `apparmor:unconfined` + `seccomp:unconfined` on the session container. Project policy is "the container is the trust boundary"; enabling DinD is a deliberate, opt-in expansion of that boundary. The wizard surfaces the warning at the moment of selection, before commit.
+- **UC-26 delivers an in-session rootless daemon; it does NOT deliver host-daemon visibility from inside the session.** `/var/run/docker.sock` is **never** mounted in. If you need to drive the host's Docker from a Claude session today, do it from the host, not from inside a sandbox.
+- **First-use network.** The static rootless-Docker tarball is fetched from `download.docker.com` on first DinD-enabled start. The build + JVM-test lane (`./gradlew :android:lint`, `:android:test`, etc.) and the rest of the session never need network for this.
+- **Isolated-workspace caveat.** `/workspace/environment-utilities/dind/` lives under the session's workspace bind mount. Sessions given an **isolated** workspace (`spawn.sh --isolated-workspace`, or a management-server-assigned per-session workspace path) have their own `environment-utilities/dind/` cache and re-download on first DinD-enabled use. Sessions on the shared `/workspace` (the default) all reuse the one cache. Same trade-off as the UC-22 Android emulator cache.
+- **When DinD is disabled (or skipped).** Spawned sessions are byte/behaviour-identical to today: no rootless daemon, no `/dev/fuse` device, no `docker-compose.dind.yml` override applied.
+
 ### Workspace location
 
 In developer mode, the host-side workspace and Claude config live **outside this repo by default**. The base directory (`<root>` below) is resolved with this precedence:
