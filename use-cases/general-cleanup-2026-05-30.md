@@ -122,4 +122,4 @@ When both develop runs land green on the Android `androidTest` suite + `:server:
 
 - Merge each result to `main` (one commit per UC the team produces; no squashing on the dev-team's side, but if multiple commits land per UC their PR will already be a single squash from the orchestrator's bundle).
 - Tag the resulting state per the brief's release command convention (`git tag server-vX.Y.Z && git push --tags`) so the existing tag-triggered release workflow runs.
-- Confirm the GitHub Actions release pipeline finishes via the `github-pipeline-operations` skill before considering the cleanup closed.
+- Confirm the GitHub Actions release pipeline finishes via the `wait-and-monitor-operations` skill before considering the cleanup closed.
