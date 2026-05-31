@@ -1,73 +1,70 @@
-# UC22 — arg-driven base image.
+# UC-27 — single glibc (Debian) base for EVERY session.
 #
-# The DEFAULT base is Alpine (lean, musl) — used for the non-Android image and
-# byte/functionally identical to the pre-UC22 build. When the operator selects
-# "Android testing", docker-compose.yml sets ANDROID_BASE to a glibc base
-# (Debian) AND ANDROID_TESTING=1, because the Android emulator's QEMU binary
-# cannot load under gcompat on musl (it needs glibc's LFS symbol
-# `posix_fallocate64`, which gcompat does not export — empirically confirmed on
-# a Docker+KVM+amd64 host: java/aapt2/adb DO load under gcompat, but
-# `qemu-system-x86_64-headless` dies with a `posix_fallocate64: symbol not
-# found` relocation error). The build/lint/test/assemble/bundle lane does not
-# need the emulator, so it would work under gcompat too — but the emulator lane
-# (AC9/AC10) requires glibc, and forking the base by build flavour is the AC6
-# fallback the use case prescribes.
+# Pre-UC-27 the base forked by build flavour: a lean Alpine/musl base for normal
+# sessions and a glibc/Debian base only when "Android testing" was baked in. That
+# fork existed because the Android emulator's QEMU binary can't load under gcompat
+# on musl (missing `posix_fallocate64`). UC-27 makes toolchains opt-in capabilities
+# provisioned EAGERLY AT SPAWN rather than baked into the image, so the emulator
+# now needs glibc on every session that might enable Android — and the simplest,
+# least-surprising answer is a single glibc base for all sessions. No more apk/apt
+# fork, no `ANDROID_BASE`/`ANDROID_TESTING` build args, no build-time SDK bake.
 #
-# Every RUN block below detects the package manager (apk vs apt-get) so the SAME
-# Dockerfile drives both bases. On the Alpine default, only the apk paths run and
-# the result is unchanged from before UC22.
-ARG ANDROID_BASE=alpine:latest
-FROM ${ANDROID_BASE}
+# A no-capability session is behaviourally equivalent to the old Alpine session:
+# same tools (Node + Claude Code + git/tmux/gh/ssh + ripgrep + gitleaks + rtk),
+# same non-root `claude` user at uid/gid 1000, same arbitrary-uid (group-0) recipe.
+ARG BASE_IMAGE=node:20-bookworm-slim
+FROM ${BASE_IMAGE}
 
 ENV LANG=C.UTF-8
 ENV LC_ALL=C.UTF-8
-# UC-17 — pin HOME so the container resolves a home dir even when it runs as
-# an arbitrary host uid that has no /etc/passwd entry at start. entrypoint.sh
-# self-registers a passwd line on boot; this ENV is the belt-and-braces value
-# the shell/tools read before (and if) that runs. For the default `claude`
-# user (uid 1000) this is exactly the home it already had — no behaviour change.
+# UC-17 — pin HOME so the container resolves a home dir even when it runs as an
+# arbitrary host uid that has no /etc/passwd entry at start. entrypoint.sh
+# self-registers a passwd line on boot; this ENV is the value the shell/tools
+# read before (and if) that runs. For the default `claude` user (uid 1000) this
+# is exactly the home it already had — no behaviour change.
 ENV HOME=/home/claude
 
 ARG GITLEAKS_VERSION=8.21.0
 # BuildKit auto-populates TARGETARCH (amd64 / arm64 / ...). Used below to pick
-# the right RTK release tarball and to decide whether gcompat is needed.
+# the right RTK release tarball.
 ARG TARGETARCH
 
-# ── Base userland — Node + Claude Code + git/tmux/gh/ssh + gitleaks + claude user
-# Distro-agnostic: apk on Alpine (default), apt-get on the glibc (Debian) base
-# used for the Android variant. The set of installed tools is identical on both;
-# only the package manager and a couple of package names differ.
+# ── Base userland — Node + Claude Code + git/tmux/gh/ssh + ripgrep + gitleaks +
+#    the non-root `claude` user. glibc/Debian only now (no apk fork).
 RUN set -eu; \
-    if command -v apk >/dev/null 2>&1; then \
-      # ---- Alpine path (default; unchanged from pre-UC22) ----
-      apk add --no-cache nodejs npm git ripgrep bash ca-certificates tmux github-cli openssh-client curl; \
-      adduser -D -h /home/claude claude; \
-    else \
-      # ---- Debian/glibc path (Android variant) ----
-      export DEBIAN_FRONTEND=noninteractive; \
-      apt-get update -qq; \
-      apt-get install -y --no-install-recommends \
-        git ripgrep bash ca-certificates tmux gh openssh-client curl unzip; \
-      # node:*-bookworm-slim ships Node + npm preinstalled; only install them via
-      # apt when the base did not (defensive — keeps a plain debian base working).
-      if ! command -v node >/dev/null 2>&1; then \
-        apt-get install -y --no-install-recommends nodejs npm; \
-      fi; \
-      rm -rf /var/lib/apt/lists/*; \
-      # UC22 — pin claude to uid/gid 1000 on the glibc base, matching the
-      # Alpine image (where `adduser -D` lands on 1000) and the historical
-      # contract. The node:*-bookworm base ships a `node` user already holding
-      # uid/gid 1000, which would otherwise push claude to 1001 — and then a
-      # dev-mode session cannot write its bind mounts (./workspace and
-      # ./claude-config are created by spawn.sh as the operator's uid, almost
-      # always 1000), so the entrypoint dies with "Permission denied" creating
-      # ~/.claude. Free 1000 (the `node` user/group is unused by ai-sandbox —
-      # only the node binary matters) and pin claude to it. The UC-17 group-0
-      # ownership recipe below still covers the server-spawned <uid>:0 case.
-      if getent passwd node >/dev/null 2>&1; then userdel node; fi; \
-      if getent group node >/dev/null 2>&1; then groupdel node 2>/dev/null || true; fi; \
-      useradd -u 1000 -m -d /home/claude -s /bin/bash claude; \
+    export DEBIAN_FRONTEND=noninteractive; \
+    apt-get update -qq; \
+    apt-get install -y --no-install-recommends ca-certificates curl gnupg; \
+    # GitHub CLI is NOT in Debian's default repos (the Alpine base got it from the
+    # `github-cli` apk package). Add the official GitHub CLI apt repo so `gh` is
+    # present on the universal glibc base — required to keep the no-capability
+    # session behaviourally identical to the old Alpine one (UC-27 AC#11).
+    mkdir -p -m 755 /etc/apt/keyrings; \
+    curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+      -o /etc/apt/keyrings/githubcli-archive-keyring.gpg; \
+    chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg; \
+    echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+      > /etc/apt/sources.list.d/github-cli.list; \
+    apt-get update -qq; \
+    apt-get install -y --no-install-recommends \
+      git ripgrep bash tmux gh openssh-client unzip; \
+    # node:*-bookworm-slim ships Node + npm preinstalled; only install via apt
+    # when the base did not (defensive — keeps a plain debian base working).
+    if ! command -v node >/dev/null 2>&1; then \
+      apt-get install -y --no-install-recommends nodejs npm; \
     fi; \
+    rm -rf /var/lib/apt/lists/*; \
+    # Pin `claude` to uid/gid 1000. The node:*-bookworm base ships a `node` user
+    # already holding uid/gid 1000, which would otherwise push claude to 1001 —
+    # and then a dev-mode session cannot write its bind mounts (./workspace and
+    # ./claude-config are created by spawn.sh as the operator's uid, almost always
+    # 1000), so the entrypoint dies with "Permission denied" creating ~/.claude.
+    # Free 1000 (the `node` user/group is unused by ai-sandbox — only the node
+    # binary matters) and pin claude to it. The UC-17 group-0 recipe below still
+    # covers the server-spawned <uid>:0 case.
+    if getent passwd node >/dev/null 2>&1; then userdel node; fi; \
+    if getent group node >/dev/null 2>&1; then groupdel node 2>/dev/null || true; fi; \
+    useradd -u 1000 -m -d /home/claude -s /bin/bash claude; \
     npm install -g @anthropic-ai/claude-code; \
     curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_$(uname -m | sed 's/x86_64/x64/;s/aarch64/arm64/').tar.gz" \
        | tar -xz -C /usr/local/bin gitleaks; \
@@ -78,8 +75,7 @@ RUN set -eu; \
     # UC-17 — OpenShift arbitrary-uid recipe. Make $HOME and /workspace owned by
     # group 0 and group-writable (g=u mirrors the owner bits) so a container run
     # as <host-uid>:0 can create ~/.ssh, ~/.claude/*, ~/.config/rtk, etc. For the
-    # default uid-1000 `claude` user nothing changes functionally: it already
-    # owns these paths, and adding group-0 write access is a no-op for it.
+    # default uid-1000 `claude` user nothing changes functionally.
     chgrp -R 0 /home/claude /workspace; \
     chmod -R g=u /home/claude /workspace; \
     # Let an unknown runtime uid append its own passwd entry on boot (see
@@ -91,21 +87,14 @@ RUN set -eu; \
 # RTK (Rust Token Killer) — bundled CLI proxy that compresses Bash output before
 # it reaches the LLM. Rolling latest at build time (matches the
 # @anthropic-ai/claude-code pinning policy, NOT the pinned gitleaks pattern).
-# Upstream ships a musl binary for amd64 and a glibc binary for aarch64. The
-# amd64 musl build is statically linked, so it runs unchanged on BOTH the Alpine
-# and the Debian/glibc base (no `rtk-x86_64-unknown-linux-gnu` asset exists
-# upstream; the static musl binary is the correct choice on glibc too). On arm64
-# Alpine we add gcompat as a glibc shim for the gnu binary as before.
-# Source: https://github.com/rtk-ai/rtk
+# On amd64 the upstream musl build is statically linked, so it runs unchanged on
+# the glibc base; on arm64 the gnu build runs natively on glibc (no gcompat shim
+# needed now that the base is always glibc). Source: https://github.com/rtk-ai/rtk
 RUN set -eu; \
     case "${TARGETARCH}" in \
-      amd64) \
-        RTK_TARBALL="rtk-x86_64-unknown-linux-musl.tar.gz" ;; \
-      arm64) \
-        if command -v apk >/dev/null 2>&1; then apk add --no-cache gcompat; fi; \
-        RTK_TARBALL="rtk-aarch64-unknown-linux-gnu.tar.gz" ;; \
-      *) \
-        echo "Unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
+      amd64) RTK_TARBALL="rtk-x86_64-unknown-linux-musl.tar.gz" ;; \
+      arm64) RTK_TARBALL="rtk-aarch64-unknown-linux-gnu.tar.gz" ;; \
+      *) echo "Unsupported TARGETARCH: ${TARGETARCH}" >&2; exit 1 ;; \
     esac; \
     curl -fsSL "https://github.com/rtk-ai/rtk/releases/latest/download/${RTK_TARBALL}" \
        | tar -xz -C /usr/local/bin rtk; \
@@ -117,131 +106,31 @@ COPY git-hooks/ /etc/git-hooks/
 RUN chmod +x /etc/git-hooks/* \
     && git config --system core.hooksPath /etc/git-hooks
 
-# ── UC22 — optional Android build/test/emulator toolchain ────────────────────
-# Baked only when the operator selects "Android testing" in setup.sh, which
-# passes ANDROID_TESTING=1 (and the glibc ANDROID_BASE) as build args
-# (docker-compose.yml build.args). amd64-only — x86_64 system images won't run
-# on arm64 (arm64 is a documented UC22 follow-up, AC15).
+# ── UC-27 — capability provisioning assets (no build-time toolchain bake) ────
+# Capabilities (DinD / Java / Android) are provisioned EAGERLY AT SPAWN by
+# entrypoint.sh, which sources the manifests under /opt/ai-sandbox/devtools.d/
+# and runs each enabled capability's devtool_provision hook. Both trees are
+# shipped UNCONDITIONALLY and stay dormant unless AI_SANDBOX_DEVTOOLS lists a
+# capability — a no-capability session never touches them.
 #
-# Base decision (AC6): the Android variant runs on a glibc base (Debian). The
-# build binaries (aapt2/adb/java) load fine under gcompat on Alpine, but the
-# emulator's QEMU binary does NOT (posix_fallocate64 not exported by gcompat),
-# so the gcompat→glibc fallback the use case documents is taken. On glibc no
-# shim is needed; the emulator's X11/GL/pulse/etc. runtime libs are apt-installed
-# below.
-#
-# Baked (so the lint/test/assemble/bundle lane works without an SDK download,
-# AC7/AC8): JDK 21 + cmdline-tools + platform-tools + platforms;android-36 +
-# build-tools;36.0.0 (matches android-ci.yml + gradle/libs.versions.toml —
-# AC14). NOT baked (provisioned lazily on first emulator use by
-# `aisandbox-emulator`, into the persisted /workspace/environment-utilities —
-# AC9): the ~1.5 GB x86_64 system image, the emulator package, and the AVD.
-ARG ANDROID_TESTING=0
-ARG ANDROID_CMDLINE_TOOLS_VERSION=11076708
-ENV ANDROID_HOME=/opt/android-sdk
-ENV ANDROID_SDK_ROOT=/opt/android-sdk
-ENV PATH="/opt/android-sdk/cmdline-tools/latest/bin:/opt/android-sdk/platform-tools:${PATH}"
+# The Android emulator runbook skill ships here too; entrypoint.sh seeds it into
+# ~/.claude/skills ONLY when the `android` capability is enabled for the session
+# (a build-time copy into ~/.claude can't work — that dir is bind-mounted at
+# runtime and would mask it). gid-0 = uid perms so an arbitrary-uid runtime user
+# can still read both trees.
+COPY container-bin/skills/ /opt/ai-sandbox/skills/
+COPY devtools.d/ /opt/ai-sandbox/devtools.d/
+RUN chgrp -R 0 /opt/ai-sandbox && chmod -R g=u /opt/ai-sandbox
 
-# Skill source for the in-session Android emulator runbook. A Dockerfile COPY
-# can't branch on an ARG, so it lands in a staging path here; the
-# ANDROID_TESTING=1 RUN below relocates it into /opt/ai-sandbox/skills, and a
-# later unconditional RUN deletes the staging copy so the lean (non-Android)
-# image carries no Android skill. entrypoint.sh seeds /opt/ai-sandbox/skills/*
-# into ~/.claude/skills at session start — a build-time copy can't go straight
-# there because ~/.claude is bind-mounted at runtime and would mask it.
-COPY container-bin/skills/ /opt/ai-sandbox/skills-staging/
-RUN set -eu; \
-    if [ "${ANDROID_TESTING}" = "1" ]; then \
-      if [ "${TARGETARCH}" != "amd64" ]; then \
-        echo "ERROR: Android testing toolchain is amd64-only (TARGETARCH=${TARGETARCH}); arm64 is a documented follow-up (UC22 AC15)." >&2; \
-        exit 1; \
-      fi; \
-      if command -v apk >/dev/null 2>&1; then \
-        # The Android variant is expected on a glibc base; reaching here on
-        # Alpine means ANDROID_BASE was not flipped. The build lane would still
-        # work under gcompat, but the emulator would not — fail loud so the
-        # mistake is caught at build time rather than at first `emulator start`.
-        echo "ERROR: ANDROID_TESTING=1 on an Alpine (musl) base. The Android emulator needs a glibc base; build with ANDROID_BASE set to the Debian base (docker compose build sets this automatically when Android testing is selected)." >&2; \
-        exit 1; \
-      fi; \
-      export DEBIAN_FRONTEND=noninteractive; \
-      apt-get update -qq; \
-      # JDK 21 source: Debian bookworm's apt has no `openjdk-21-*` (its default
-      # OpenJDK is 17), so add the Eclipse Temurin (Adoptium) apt repo and
-      # install temurin-21-jdk — AC5/AC14 pin JDK 21. (Empirically: bookworm +
-      # Adoptium -> `openjdk version "21.0.11" LTS`.)
-      apt-get install -y --no-install-recommends wget apt-transport-https gnupg ca-certificates; \
-      mkdir -p /etc/apt/keyrings; \
-      wget -qO - https://packages.adoptium.net/artifactory/api/gpg/key/public \
-        | gpg --dearmor > /etc/apt/keyrings/adoptium.gpg; \
-      echo "deb [signed-by=/etc/apt/keyrings/adoptium.gpg] https://packages.adoptium.net/artifactory/deb $(awk -F= '/^VERSION_CODENAME/{print $2}' /etc/os-release) main" \
-        > /etc/apt/sources.list.d/adoptium.list; \
-      apt-get update -qq; \
-      # temurin-21-jdk (JDK 21) + unzip for cmdline-tools + the emulator's
-      # runtime shared libraries (X11 / GL / pulse / nss / tcmalloc / fontconfig
-      # / xkb / dbus). Verified on a Docker+KVM+amd64 host: with this set, the
-      # `emulator` launcher and qemu-system-x86_64 load with NO missing libs and
-      # `emulator -version` / `-accel-check` run clean (no posix_fallocate64
-      # error — that was the gcompat-only failure).
-      apt-get install -y --no-install-recommends \
-        temurin-21-jdk unzip \
-        libx11-6 libxcb1 libxext6 libxfixes3 libxdamage1 libxrandr2 libxrender1 \
-        libxi6 libxtst6 libgl1 libegl1 libgles2 libpulse0 libnss3 libxcomposite1 \
-        libxcursor1 libasound2 libgoogle-perftools4 libsm6 libfontconfig1 \
-        libfreetype6 libxkbfile1 libxkbcommon0 libdbus-1-3; \
-      rm -rf /var/lib/apt/lists/*; \
-      mkdir -p "${ANDROID_HOME}/cmdline-tools"; \
-      curl -fsSL "https://dl.google.com/android/repository/commandlinetools-linux-${ANDROID_CMDLINE_TOOLS_VERSION}_latest.zip" -o /tmp/cmdline-tools.zip; \
-      unzip -q /tmp/cmdline-tools.zip -d "${ANDROID_HOME}/cmdline-tools"; \
-      mv "${ANDROID_HOME}/cmdline-tools/cmdline-tools" "${ANDROID_HOME}/cmdline-tools/latest"; \
-      rm -f /tmp/cmdline-tools.zip; \
-      yes | "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null; \
-      "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" \
-        "platform-tools" "platforms;android-36" "build-tools;36.0.0" >/dev/null; \
-      chgrp -R 0 "${ANDROID_HOME}" && chmod -R g=u "${ANDROID_HOME}"; \
-      # UC22 CAVEAT-A — a LOGIN shell sources /etc/profile, which hardcodes
-      # `export PATH=/usr/local/sbin:...` and thereby WIPES the Dockerfile `ENV
-      # PATH` prepend (so `docker run ... sh -lc 'adb version'` fails on the bare
-      # name even though the binary loads fine — it just isn't on PATH; and
-      # build-tools/ is never on PATH at all). Drop a profile.d snippet so login
-      # shells (and a human poking around) get the SDK bins on PATH. Only on the
-      # Android variant; the lean image never installs the SDK so needs none.
-      printf '%s\n' \
-        'export ANDROID_HOME=/opt/android-sdk' \
-        'export ANDROID_SDK_ROOT=/opt/android-sdk' \
-        'export PATH="$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$ANDROID_HOME/build-tools/36.0.0:$PATH"' \
-        > /etc/profile.d/android-sdk.sh; \
-      chmod 0644 /etc/profile.d/android-sdk.sh; \
-      # Install the baked emulator-setup skill (entrypoint.sh seeds it into
-      # ~/.claude/skills at session start). Android image only — relocated out
-      # of the staging dir COPYed above, with gid-0 = uid perms so an
-      # arbitrary-uid (server-spawned) runtime user can still read it.
-      mkdir -p /opt/ai-sandbox/skills; \
-      cp -a /opt/ai-sandbox/skills-staging/. /opt/ai-sandbox/skills/; \
-      chgrp -R 0 /opt/ai-sandbox/skills && chmod -R g=u /opt/ai-sandbox/skills; \
-      echo "Android toolchain baked OK ($(java -version 2>&1 | head -1))"; \
-    fi
-# The skills staging dir (COPYed above) is consumed only by the ANDROID_TESTING
-# branch, which relocates it to /opt/ai-sandbox/skills. Remove the staging copy
-# unconditionally so the lean (non-Android) image carries no Android skill.
-RUN rm -rf /opt/ai-sandbox/skills-staging
-# Stamp the toolchain state onto the image so spawn.sh can decide /dev/kvm
-# passthrough at run time (and so server-spawned sessions inherit it). "1" when
-# baked, "0" otherwise.
-LABEL com.ai-sandbox.toolchain.android="${ANDROID_TESTING}"
-
-# In-container emulator helper (UC22 AC10) — invoked by the in-sandbox Claude
-# Code session to lazily provision + boot a headless AVD for
-# :android:connectedAndroidTest. Always shipped; it self-checks and prints clear
-# guidance if the Android toolchain was not baked into this image.
+# In-container capability helpers. Always shipped; each is dormant unless its
+# capability is provisioned at spawn.
+#   aisandbox-dind     — rootless Docker daemon (UC-26 semantics unchanged).
+#   aisandbox-emulator — headless AVD provisioning/boot (reworked in UC-27 to
+#                        drop its baked-SDK assumption).
+# (aisandbox-java / aisandbox-android are added alongside in the container-bin
+# slice.)
 COPY container-bin/aisandbox-emulator /usr/local/bin/aisandbox-emulator
 RUN chmod +x /usr/local/bin/aisandbox-emulator
-
-# In-container DinD helper (UC-26) — manages the rootless Docker daemon when
-# the operator enabled the `dind` devtool in setup.sh. Always shipped; dormant
-# unless AI_SANDBOX_DEVTOOL_DIND=1 (spawn.sh sets that from the persisted
-# devtools ledger). The helper handles install/start/stop/doctor/selftest;
-# entrypoint.sh wires install + start at container boot.
 COPY container-bin/aisandbox-dind /usr/local/bin/aisandbox-dind
 RUN chmod +x /usr/local/bin/aisandbox-dind
 
