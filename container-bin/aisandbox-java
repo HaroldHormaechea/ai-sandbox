@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+# aisandbox-java — provision a Temurin JDK into the per-session cache and wire
+# JAVA_HOME + PATH (UC-27 `java` capability).
+#
+# Invoked by the java manifest's devtool_provision hook from entrypoint.sh at
+# spawn, BEFORE tmux/claude launches, so the session is ready at handover. The
+# JDK is cached under the persisted /workspace mount, so a restart/respawn reuses
+# it; only the first provision needs network.
+#
+# Version constants come from devtools.d/lib/versions.sh — the SAME source the
+# manifest LABEL reads, so the installed JDK and the label the operator picked
+# can never drift (AC#9).
+#
+# Subcommands:
+#   install  download + extract the JDK (idempotent; cache-aware) and write the
+#            env snippet ($CACHE/env.sh) sourced by login shells.
+#   doctor   print provisioning diagnostics.
+#   env      print the env snippet path's contents (entrypoint sources it).
+set -euo pipefail
+
+VERSIONS_SH="${AISB_DEVTOOLS_VERSIONS:-/opt/ai-sandbox/devtools.d/lib/versions.sh}"
+PROV_LIB="${AISB_PROVISION_LIB:-/opt/ai-sandbox/devtools.d/lib/provision.sh}"
+# shellcheck disable=SC1090
+[ -r "$VERSIONS_SH" ] && . "$VERSIONS_SH" || true
+# shellcheck disable=SC1090
+[ -r "$PROV_LIB" ] && . "$PROV_LIB" || true
+
+JAVA_MAJOR="${AISB_JAVA_MAJOR:-21}"
+JAVA_BUILD="${AISB_JAVA_BUILD:-21.0.5+11}"
+CACHE_ROOT="${AISB_JAVA_CACHE:-/workspace/environment-utilities/java}"
+JDK_DIR="$CACHE_ROOT/jdk"
+VERSION_FILE="$CACHE_ROOT/.java-build"
+ENV_FILE="$CACHE_ROOT/env.sh"
+MARKER="# aisandbox-java:env"
+
+log() { printf '  [aisandbox-java] %s\n' "$*" >&2; }
+die() { printf '  [aisandbox-java] ERROR: %s\n' "$*" >&2; exit 1; }
+
+# Adoptium API arch token.
+adoptium_arch() {
+    case "$(uname -m)" in
+        x86_64|amd64)  printf 'x64' ;;
+        aarch64|arm64) printf 'aarch64' ;;
+        *) die "Unsupported arch $(uname -m) for Temurin JDK ${JAVA_MAJOR}." ;;
+    esac
+}
+
+write_env() {
+    mkdir -p "$CACHE_ROOT"
+    cat > "$ENV_FILE" <<EOF
+# Managed by aisandbox-java (UC-27) — do not hand-edit.
+export JAVA_HOME="$JDK_DIR"
+case ":\$PATH:" in
+    *":$JDK_DIR/bin:"*) ;;
+    *) export PATH="$JDK_DIR/bin:\$PATH" ;;
+esac
+EOF
+    chmod 0644 "$ENV_FILE" 2>/dev/null || true
+    if command -v aisb_stitch_profile >/dev/null 2>&1; then
+        aisb_stitch_profile "$ENV_FILE" "$MARKER"
+    fi
+}
+
+cmd_install() {
+    mkdir -p "$CACHE_ROOT"
+    if [ -x "$JDK_DIR/bin/java" ] && [ "$(cat "$VERSION_FILE" 2>/dev/null || true)" = "$JAVA_BUILD" ]; then
+        log "Temurin JDK $JAVA_BUILD already provisioned at $JDK_DIR."
+        write_env
+        return 0
+    fi
+    local arch url tmp
+    arch="$(adoptium_arch)"
+    # The Adoptium v3 binary API redirects to the correct asset for the exact
+    # build — more robust than constructing the tarball filename ourselves.
+    url="https://api.adoptium.net/v3/binary/version/jdk-${JAVA_BUILD}/linux/${arch}/jdk/hotspot/normal/eclipse?project=jdk"
+    log "Provisioning Temurin JDK $JAVA_BUILD ($arch) → $JDK_DIR (needs network on first run)…"
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    curl -fsSL -o "$tmp/jdk.tgz" "$url" || die "Failed to download Temurin JDK from $url"
+    rm -rf "$JDK_DIR"
+    mkdir -p "$JDK_DIR"
+    tar -xzf "$tmp/jdk.tgz" --strip-components=1 -C "$JDK_DIR" || die "Failed to extract the JDK tarball."
+    [ -x "$JDK_DIR/bin/java" ] || die "JDK extraction did not yield bin/java."
+    printf '%s\n' "$JAVA_BUILD" > "$VERSION_FILE"
+    write_env
+    log "JDK ready: $("$JDK_DIR/bin/java" -version 2>&1 | head -1)"
+}
+
+cmd_doctor() {
+    log "cache root : $CACHE_ROOT"
+    log "JAVA_HOME  : $JDK_DIR ($([ -x "$JDK_DIR/bin/java" ] && echo present || echo MISSING))"
+    log "version    : $("$JDK_DIR/bin/java" -version 2>&1 | head -1 || echo 'not installed yet')"
+    log "env file   : $ENV_FILE ($([ -f "$ENV_FILE" ] && echo present || echo MISSING))"
+}
+
+case "${1:-}" in
+    install) cmd_install ;;
+    doctor)  cmd_doctor ;;
+    env)     [ -f "$ENV_FILE" ] && cat "$ENV_FILE" || { die "no env file yet — run \`aisandbox-java install\`."; } ;;
+    -h|--help|"") printf 'Usage: aisandbox-java {install|doctor|env}\n' >&2; exit 2 ;;
+    *) die "Unknown command: $1" ;;
+esac

@@ -1,0 +1,129 @@
+#!/usr/bin/env bash
+# aisandbox-android — provision the Android SDK into the per-session cache and
+# wire ANDROID_HOME / ANDROID_SDK_ROOT + PATH (UC-27 `android` capability).
+#
+# Invoked by the android manifest's devtool_provision hook from entrypoint.sh at
+# spawn (the manifest DEPENDS_ON java, so entrypoint provisions java first and
+# this script sources the JDK env). amd64-only — x86_64 system image / emulator
+# (AC#11). Installs into the persisted /workspace cache so a restart/respawn
+# reuses the ~1.5 GB SDK; only the first provision needs network.
+#
+# Installs ONE self-consistent SDK root (cmdline-tools + platform-tools +
+# build-tools + platform + x86_64 system-image + emulator), so the emulator
+# helper no longer needs the old baked-SDK / unified-root reconciliation dance.
+#
+# Version constants come from devtools.d/lib/versions.sh (same source as the
+# manifest LABEL → no drift, AC#9).
+#
+# Subcommands: install | doctor | env.
+set -euo pipefail
+
+VERSIONS_SH="${AISB_DEVTOOLS_VERSIONS:-/opt/ai-sandbox/devtools.d/lib/versions.sh}"
+PROV_LIB="${AISB_PROVISION_LIB:-/opt/ai-sandbox/devtools.d/lib/provision.sh}"
+# shellcheck disable=SC1090
+[ -r "$VERSIONS_SH" ] && . "$VERSIONS_SH" || true
+# shellcheck disable=SC1090
+[ -r "$PROV_LIB" ] && . "$PROV_LIB" || true
+
+CMDLINE_VER="${AISB_ANDROID_CMDLINE_TOOLS_VERSION:-11076708}"
+BUILD_TOOLS="${AISB_ANDROID_BUILD_TOOLS_VERSION:-36.0.0}"
+PLATFORM="${AISB_ANDROID_PLATFORM:-android-36}"
+SYS_IMAGE="${AISB_ANDROID_SYSTEM_IMAGE:-system-images;android-36;google_apis;x86_64}"
+CACHE_ROOT="${AISB_ANDROID_CACHE:-/workspace/environment-utilities/android}"
+SDK_ROOT="$CACHE_ROOT/sdk"
+ENV_FILE="$CACHE_ROOT/env.sh"
+MARKER_FILE="$CACHE_ROOT/.android-provisioned"
+JAVA_ENV="${AISB_JAVA_CACHE:-/workspace/environment-utilities/java}/env.sh"
+PROFILE_MARKER="# aisandbox-android:env"
+SDKM="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+
+log() { printf '  [aisandbox-android] %s\n' "$*" >&2; }
+die() { printf '  [aisandbox-android] ERROR: %s\n' "$*" >&2; exit 1; }
+
+require_amd64() {
+    case "$(uname -m)" in
+        x86_64|amd64) ;;
+        *) die "Android SDK is amd64-only (host is $(uname -m)). arm64 is a documented follow-up." ;;
+    esac
+}
+
+# Android tooling (sdkmanager/avdmanager) needs a JDK. Source the JDK env the
+# java capability provisioned (the manifest DEPENDS_ON java guarantees order).
+ensure_java() {
+    # shellcheck disable=SC1090
+    [ -r "$JAVA_ENV" ] && . "$JAVA_ENV" || true
+    if ! command -v java >/dev/null 2>&1 && [ -z "${JAVA_HOME:-}" ]; then
+        die "Java is not provisioned. The android capability DEPENDS_ON java — enable both and respawn."
+    fi
+}
+
+write_env() {
+    mkdir -p "$CACHE_ROOT"
+    cat > "$ENV_FILE" <<EOF
+# Managed by aisandbox-android (UC-27) — do not hand-edit.
+export ANDROID_HOME="$SDK_ROOT"
+export ANDROID_SDK_ROOT="$SDK_ROOT"
+export PATH="$SDK_ROOT/cmdline-tools/latest/bin:$SDK_ROOT/platform-tools:$SDK_ROOT/build-tools/$BUILD_TOOLS:$SDK_ROOT/emulator:\$PATH"
+EOF
+    chmod 0644 "$ENV_FILE" 2>/dev/null || true
+    if command -v aisb_stitch_profile >/dev/null 2>&1; then
+        aisb_stitch_profile "$ENV_FILE" "$PROFILE_MARKER"
+    fi
+}
+
+cmd_install() {
+    require_amd64
+    ensure_java
+    mkdir -p "$SDK_ROOT/cmdline-tools"
+
+    if [ -f "$MARKER_FILE" ] && [ -x "$SDKM" ]; then
+        log "Android SDK already provisioned at $SDK_ROOT."
+        write_env
+        return 0
+    fi
+
+    # cmdline-tools (the bootstrap that gives us sdkmanager).
+    if [ ! -x "$SDKM" ]; then
+        local tmp url
+        url="https://dl.google.com/android/repository/commandlinetools-linux-${CMDLINE_VER}_latest.zip"
+        log "Downloading Android cmdline-tools ${CMDLINE_VER}…"
+        tmp="$(mktemp -d)"
+        trap 'rm -rf "$tmp"' EXIT
+        curl -fsSL -o "$tmp/clt.zip" "$url" || die "Failed to download cmdline-tools from $url"
+        rm -rf "$SDK_ROOT/cmdline-tools/latest" "$SDK_ROOT/cmdline-tools/cmdline-tools"
+        unzip -q "$tmp/clt.zip" -d "$SDK_ROOT/cmdline-tools" || die "Failed to unzip cmdline-tools."
+        # The zip unpacks to cmdline-tools/cmdline-tools/… ; sdkmanager expects a
+        # versioned dir, so move it to cmdline-tools/latest.
+        mv "$SDK_ROOT/cmdline-tools/cmdline-tools" "$SDK_ROOT/cmdline-tools/latest"
+    fi
+    [ -x "$SDKM" ] || die "sdkmanager not found at $SDKM after cmdline-tools install."
+
+    log "Accepting licenses + installing platform-tools, build-tools;$BUILD_TOOLS, platforms;$PLATFORM, $SYS_IMAGE, emulator (one-time, ~1.5 GB)…"
+    yes | "$SDKM" --sdk_root="$SDK_ROOT" --licenses >/dev/null 2>&1 || true
+    "$SDKM" --sdk_root="$SDK_ROOT" \
+        "platform-tools" "build-tools;$BUILD_TOOLS" "platforms;$PLATFORM" "$SYS_IMAGE" "emulator" \
+        || die "sdkmanager package install failed."
+
+    touch "$MARKER_FILE"
+    write_env
+    log "Android SDK ready at $SDK_ROOT."
+}
+
+cmd_doctor() {
+    log "cache root        : $CACHE_ROOT"
+    log "ANDROID_HOME      : $SDK_ROOT ($([ -d "$SDK_ROOT" ] && echo present || echo MISSING))"
+    log "sdkmanager        : $([ -x "$SDKM" ] && echo present || echo MISSING)"
+    log "platform-tools    : $([ -x "$SDK_ROOT/platform-tools/adb" ] && echo present || echo MISSING)"
+    log "build-tools $BUILD_TOOLS : $([ -x "$SDK_ROOT/build-tools/$BUILD_TOOLS/aapt2" ] && echo present || echo MISSING)"
+    log "emulator          : $([ -x "$SDK_ROOT/emulator/emulator" ] && echo present || echo MISSING)"
+    log "system image      : $([ -d "$SDK_ROOT/system-images" ] && echo present || echo MISSING) ($SYS_IMAGE)"
+    log "env file          : $ENV_FILE ($([ -f "$ENV_FILE" ] && echo present || echo MISSING))"
+}
+
+case "${1:-}" in
+    install) cmd_install ;;
+    doctor)  cmd_doctor ;;
+    env)     [ -f "$ENV_FILE" ] && cat "$ENV_FILE" || { die "no env file yet — run \`aisandbox-android install\`."; } ;;
+    -h|--help|"") printf 'Usage: aisandbox-android {install|doctor|env}\n' >&2; exit 2 ;;
+    *) die "Unknown command: $1" ;;
+esac
