@@ -390,6 +390,16 @@ val releaseBundle by tasks.registering(Zip::class) {
     // host/docker-compose.yml, so without this file the override silently
     // can't be layered and /dev/kvm passthrough never happens (AC13 fails).
     from(rootProject.file("docker-compose.kvm.yml")) { into("host") }
+    // UC-26 § AC5,AC7 — the DinD override compose file must ship beside
+    // docker-compose.yml exactly like the UC22 KVM override above. When `dind`
+    // is enabled, lib.sh's inject_devtool_spawn_env resolves it as
+    // `$(dirname AI_SANDBOX_COMPOSE_FILE)/docker-compose.dind.yml` and appends
+    // it to AI_SANDBOX_EXTRA_COMPOSE_FILES; for a server-spawned / .deb / zip
+    // session AI_SANDBOX_COMPOSE_FILE points at host/docker-compose.yml, so
+    // without this file the override silently can't be layered (the
+    // `/dev/fuse` passthrough + apparmor/seccomp unconfined opts never apply)
+    // and `aisandbox-dind start` cannot bring up the rootless daemon.
+    from(rootProject.file("docker-compose.dind.yml")) { into("host") }
     // UC05 § AC5,AC6 — SandboxDockerfile:42 does `COPY git-hooks/ /etc/git-hooks/`,
     // so git-hooks/ is part of the container build context and must ship in host/.
     // Exec bit preserves the convention (matches entrypoint.sh above); the
@@ -521,7 +531,12 @@ val prepDebStaging by tasks.registering(Copy::class) {
         // docker-compose.yml so spawn.sh can layer the /dev/kvm override for
         // .deb-installed / server-spawned sessions; mode 0644 like the other
         // compose context files.
-        "docker-compose.yml", "docker-compose.kvm.yml", "SandboxDockerfile",
+        // UC-26 § AC5,AC7 — docker-compose.dind.yml ships alongside for the
+        // same reason: lib.sh layers it onto AI_SANDBOX_EXTRA_COMPOSE_FILES
+        // when `dind` is enabled, so a .deb / server-spawned session needs it
+        // present beside host/docker-compose.yml or the DinD override never
+        // applies. Mode 0644 like the other compose context files.
+        "docker-compose.yml", "docker-compose.kvm.yml", "docker-compose.dind.yml", "SandboxDockerfile",
     )
     hostData.forEach { name ->
         from(rootProject.file(name)) {

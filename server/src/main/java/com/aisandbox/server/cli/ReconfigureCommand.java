@@ -5,11 +5,13 @@ import com.aisandbox.server.cli.secrets.DevToolsConfig;
 import com.aisandbox.server.cli.secrets.DevToolsStep;
 import com.aisandbox.server.cli.secrets.ProcessRunner;
 import java.io.IOException;
+import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.concurrent.Callable;
 import java.util.concurrent.TimeUnit;
+import java.util.function.BooleanSupplier;
 import picocli.CommandLine.Command;
 import picocli.CommandLine.Option;
 
@@ -89,6 +91,7 @@ public class ReconfigureCommand implements Callable<Integer> {
 
     private ProcessRunner processRunner = new ProcessRunner.Default();
     private ConsoleIO consoleIO = new ConsoleIO.Default();
+    private BooleanSupplier rootCheck = ReconfigureCommand::isRoot;
 
     /** Test seam — inject a fake {@link ProcessRunner}. */
     void setProcessRunner(ProcessRunner processRunner) {
@@ -100,12 +103,29 @@ public class ReconfigureCommand implements Callable<Integer> {
         this.consoleIO = consoleIO;
     }
 
+    /** Test seam — override the root-check probe (mirrors {@link OnboardCommand#setRootCheck}). */
+    void setRootCheck(BooleanSupplier rootCheck) {
+        this.rootCheck = rootCheck;
+    }
+
     @Override
     public Integer call() throws Exception {
         Path ledger = sessionsDir.resolve(".ai-sandbox-devtools");
 
         if (doctor) {
             return runDoctor(ledger);
+        }
+
+        // Root check — the interactive picker writes the ledger under
+        // <sessions-dir> (/var/lib/ai-sandbox-server/sessions in install mode),
+        // owned by ai-sandbox-server with mode 0750; a non-root operator's
+        // Files.write would otherwise surface as a raw EACCES NIO exception.
+        // Mirror OnboardCommand: fail with the friendly "must run as root"
+        // message + exit 2 instead. The --doctor path above is read-only (it
+        // only shells `docker compose exec`), so it is intentionally not gated.
+        if (isPosix() && !rootCheck.getAsBoolean()) {
+            System.err.println("aisandboxctl reconfigure: must run as root (use sudo).");
+            return 2;
         }
 
         // Interactive devtools picker. We don't pass an Ownership here — the
@@ -222,4 +242,27 @@ public class ReconfigureCommand implements Callable<Integer> {
     /** Reserved process timeout (used only by future async helpers). */
     @SuppressWarnings("unused")
     private static final long PROCESS_TIMEOUT_SECONDS = TimeUnit.MINUTES.toSeconds(5);
+
+    // ── root-check helpers (mirrored from OnboardCommand) ──────────────────
+
+    private static boolean isPosix() {
+        return FileSystems.getDefault().supportedFileAttributeViews().contains("posix");
+    }
+
+    private static boolean isRoot() {
+        try {
+            Process p = new ProcessBuilder("id", "-u").redirectErrorStream(true).start();
+            byte[] out = p.getInputStream().readAllBytes();
+            if (!p.waitFor(5, TimeUnit.SECONDS)) {
+                p.destroyForcibly();
+                return false;
+            }
+            return "0".equals(new String(out).trim());
+        } catch (IOException ioe) {
+            return false;
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
+    }
 }
