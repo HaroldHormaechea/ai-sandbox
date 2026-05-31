@@ -36,8 +36,8 @@ to:
 - `container-bin/aisandbox-dind` (any subcommand)
 - `docker-compose.dind.yml`
 - `entrypoint.sh` (the `aisandbox-dind install` / `start` block)
-- `setup.sh` / `setup.ps1` Step 6 (the "Select the development tools you
-  want to install" wizard)
+- `setup.sh` Step 6 / `devtools-select.sh` (the "Select the development tools
+  you want to install" selector)
 - `lib.sh` (the `_aisb_devtool_catalog`, `inject_devtool_spawn_env`, or
   `read_enabled_devtools`/`write_enabled_devtools` helpers)
 - Any code reachable from `OnboardCommand` / `ReconfigureCommand` that

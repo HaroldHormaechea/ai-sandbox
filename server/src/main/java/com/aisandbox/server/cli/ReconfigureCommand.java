@@ -1,7 +1,6 @@
 package com.aisandbox.server.cli;
 
 import com.aisandbox.server.cli.secrets.ConsoleIO;
-import com.aisandbox.server.cli.secrets.DevToolsConfig;
 import com.aisandbox.server.cli.secrets.DevToolsStep;
 import com.aisandbox.server.cli.secrets.ProcessRunner;
 import java.io.IOException;
@@ -22,12 +21,12 @@ import picocli.CommandLine.Option;
  * step. Two roles:
  *
  * <ul>
- *   <li>Bare (no flags) — interactive devtools picker. Reads the persisted
- *       ledger at {@code <sessions-dir>/.ai-sandbox-devtools}, renders the
- *       plain numbered checklist via {@link DevToolsStep}, prompts the
- *       inline trust-boundary confirmation when enabling a new spawn-time
- *       capability, and writes the updated ledger back. This is the
- *       install-mode equivalent of {@code ./setup.sh --reconfigure}.</li>
+ *   <li>Bare (no flags) — interactive devtools picker. Delegates to the shared
+ *       pure-shell raw-mode selector ({@code devtools-select.sh}) via
+ *       {@link DevToolsStep}, pointed at the ledger
+ *       {@code <sessions-dir>/.ai-sandbox-devtools}. This is the install-mode
+ *       equivalent of {@code ./setup.sh --reconfigure} and runs the IDENTICAL
+ *       selector (AC#1,#14).</li>
  *   <li>{@code --doctor} — diagnostic mode. For each enumerated /
  *       {@code --session} session, shells out to
  *       {@code docker compose ... exec aisandbox-dind doctor} so the
@@ -87,6 +86,11 @@ public class ReconfigureCommand implements Callable<Integer> {
                     + " kept for parity with OnboardCommand --no-devtools).")
     boolean noDevtools;
 
+    @Option(
+            names = "--devtools-selector",
+            description = "Path to the bundled devtools-select.sh raw-mode picker (default ${DEFAULT-VALUE}).")
+    Path devtoolsSelector = Path.of("/opt/ai-sandbox-server/host/devtools-select.sh");
+
     // ── test seams ─────────────────────────────────────────────────────────
 
     private ProcessRunner processRunner = new ProcessRunner.Default();
@@ -133,7 +137,7 @@ public class ReconfigureCommand implements Callable<Integer> {
         // ai-sandbox-server in install mode (created by postinst). If the
         // file is missing, the step creates it at the right mode.
         DevToolsStep step = new DevToolsStep(consoleIO, processRunner);
-        DevToolsStep.Outcome outcome = step.run(ledger, noDevtools, consoleIO.hasTty(), null);
+        DevToolsStep.Outcome outcome = step.run(ledger, devtoolsSelector, noDevtools, consoleIO.hasTty(), null);
         switch (outcome) {
             case SKIPPED:
                 consoleIO.println("  reconfigure: --no-devtools set; ledger left untouched.");
@@ -226,22 +230,6 @@ public class ReconfigureCommand implements Callable<Integer> {
         }
         return new java.util.ArrayList<>(projects);
     }
-
-    /**
-     * Convenience for callers that want to know whether anything would be
-     * applied without invoking the step — e.g. a future "is the ledger in
-     * sync with what the running sessions actually have" check. Defined
-     * here (rather than in {@link DevToolsConfig}) so the static-only
-     * config class stays free of higher-level orchestration helpers.
-     */
-    @SuppressWarnings("unused")
-    private static long pendingChangeCount(Path ledger) throws IOException {
-        return DevToolsConfig.readEnabled(ledger).size();
-    }
-
-    /** Reserved process timeout (used only by future async helpers). */
-    @SuppressWarnings("unused")
-    private static final long PROCESS_TIMEOUT_SECONDS = TimeUnit.MINUTES.toSeconds(5);
 
     // ── root-check helpers (mirrored from OnboardCommand) ──────────────────
 

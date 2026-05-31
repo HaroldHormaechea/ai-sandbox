@@ -3,352 +3,210 @@ package com.aisandbox.server.cli.secrets;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.io.IOException;
-import java.nio.file.FileSystems;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.attribute.PosixFilePermission;
-import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Set;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 /**
- * UC-26 — interactive coverage for {@link DevToolsStep}, the install-time
- * "Select the development tools you want to install" wizard step.
+ * UC-27 — coverage for {@link DevToolsStep}, the install-time delegation wrapper
+ * around the shared pure-shell raw-mode selector.
  *
- * <p>The step is the Java parallel of {@code setup.sh}'s
- * {@code run_devtools_step}. It is appended to {@code aisandboxctl onboard}'s
- * pipeline (so the {@code .deb} auto-onboard captures dev-tool selections
- * out of the box) and is the body of {@code aisandboxctl reconfigure}'s
- * interactive path.
- *
- * <p>The acceptance criteria this class covers:
+ * <p>Post-UC-27 the interactive picker lives in exactly one place: the shell
+ * script {@code devtools-select.sh} (AC#1, AC#4). {@link DevToolsStep} no longer
+ * renders a checklist or writes the ledger itself — it shells out to the selector
+ * via {@link ProcessRunner#runInheritIO} (raw-mode TTY requires inherited
+ * stdio; {@code runAndCapture} would pipe stdio and break the cursor UI) and maps
+ * the selector's exit code onto its {@link DevToolsStep.Outcome}:
  *
  * <ul>
- *   <li>AC#3 — enabling a capability triggers an inline trust-boundary
- *       warning + a {@code Continue? [y/N]} confirmation; decline returns
- *       to the checklist with the entry un-selected.</li>
- *   <li>AC#7 — selections persist to {@code .ai-sandbox-devtools}; the
- *       file's POSIX mode is 0644 (matches the documented install-time
- *       file-mode contract).</li>
- *   <li>AC#1/AC#2 — disabling an already-enabled capability does NOT
- *       trigger the trust-boundary warning (the warning fires on the
- *       boundary-WIDENING transition only).</li>
- *   <li>Non-TTY deferral — without a terminal the step short-circuits to
- *       {@link DevToolsStep.Outcome#DEFERRED} and the ledger is left
- *       untouched (no silent writes on a headless install).</li>
+ *   <li>{@code --no-devtools} → {@link DevToolsStep.Outcome#SKIPPED} (no spawn).</li>
+ *   <li>no TTY → {@link DevToolsStep.Outcome#DEFERRED} <i>before</i> spawning
+ *       (a raw-mode selector cannot run headless — the pitfall called out in the
+ *       use case).</li>
+ *   <li>selector missing → {@link DevToolsStep.Outcome#DEFERRED} with a "run
+ *       ./setup.sh on the host" hint.</li>
+ *   <li>selector exits 0 → {@link DevToolsStep.Outcome#APPLIED}.</li>
+ *   <li>selector exits non-zero (130 cancel, 3 no-TTY, 1 internal) →
+ *       {@link DevToolsStep.Outcome#DEFERRED} (degrade-to-DEFERRED; the ledger
+ *       is left in whatever state the selector left it).</li>
  * </ul>
  *
- * <p>The step has no shell-outs (no {@link ProcessRunner} use today), but
- * the constructor accepts one as a future-proofing seam; tests pass a fake
- * runner that records nothing.
+ * <p>The selector itself is faked through {@link FakeProcessRunner#inheritResponse}:
+ * tests script its exit code (and, where they assert persistence, the ledger
+ * side-effect a real selector would have produced on commit).
  */
 class DevToolsStepTest {
 
-    private static DevToolsStep step(FakeConsoleIO io) {
-        return new DevToolsStep(io, new FakeProcessRunner());
+    /** Materialise a stand-in selector file so {@code Files.isRegularFile} passes. */
+    private static Path selector(Path dir) throws IOException {
+        Path s = dir.resolve("devtools-select.sh");
+        Files.writeString(s, "#!/usr/bin/env bash\n# fake selector\n");
+        return s;
     }
 
-    private static FakeConsoleIO ttyConsole() {
-        FakeConsoleIO io = new FakeConsoleIO();
-        io.tty = true;
-        return io;
-    }
-
-    private static FakeConsoleIO noTtyConsole() {
-        FakeConsoleIO io = new FakeConsoleIO();
-        io.tty = false;
-        return io;
-    }
-
-    // ── AC#3 — enabling DinD triggers warning + confirmation ────────
+    // ── --no-devtools opt-out ───────────────────────────────────────
 
     @Test
-    void enable_dind_with_yes_confirmation_persists_dind_to_the_ledger(@TempDir Path tmp) throws IOException {
-        // Operator sees the checklist, types "1" to toggle dind on, the
-        // wizard surfaces the warning + Continue? prompt, operator types
-        // "y" → ledger now has dind, Outcome is APPLIED.
-        FakeConsoleIO io = ttyConsole();
-        io.inputLines.add("1"); // toggle dind
-        io.inputLines.add("y"); // confirm the trust-boundary warning
-        io.inputLines.add(""); // empty line = commit
-
+    void no_devtools_flag_short_circuits_with_skipped_and_never_spawns(@TempDir Path tmp) throws IOException {
         Path ledger = tmp.resolve(".ai-sandbox-devtools");
-        DevToolsStep.Outcome outcome = step(io).run(ledger, false, true, null);
+        Path selector = selector(tmp);
+        FakeProcessRunner runner = new FakeProcessRunner();
 
-        assertThat(outcome).isEqualTo(DevToolsStep.Outcome.APPLIED);
-        assertThat(DevToolsConfig.readEnabled(ledger)).containsExactly("dind");
+        // --no-devtools wins even with a TTY and a present selector.
+        DevToolsStep.Outcome outcome = new DevToolsStep(new FakeConsoleIO(), runner)
+                .run(ledger, selector, /* noDevtools */ true, /* hasTty */ true, null);
 
-        // AC#3 — the trust-boundary warning + Continue? prompt MUST have
-        // been emitted to the operator (matches the catalog warning row
-        // plus the literal Continue? prompt label).
-        String all = io.allOutput();
-        assertThat(all)
-                .as("AC#3 — wizard emits the trust-boundary warning before the y/N confirmation")
-                .contains("trust boundary")
-                .contains("Continue?");
-        // And the post-commit summary fires for the new-sessions-only caveat (AC#7).
-        assertThat(all)
-                .as("AC#7 — wizard notes that changes apply to NEW sessions only")
-                .contains("NEW sessions only");
-    }
-
-    @Test
-    void enable_dind_with_capital_yes_also_confirms(@TempDir Path tmp) throws IOException {
-        // Defence — the y/N matcher must accept both "y" and "yes" in any case.
-        FakeConsoleIO io = ttyConsole();
-        io.inputLines.add("1");
-        io.inputLines.add("YES");
-        io.inputLines.add("");
-
-        Path ledger = tmp.resolve(".ai-sandbox-devtools");
-        assertThat(step(io).run(ledger, false, true, null)).isEqualTo(DevToolsStep.Outcome.APPLIED);
-        assertThat(DevToolsConfig.readEnabled(ledger)).containsExactly("dind");
-    }
-
-    // ── AC#3 — decline returns to the checklist un-selected ─────────
-
-    @Test
-    void enable_dind_with_no_confirmation_leaves_ledger_unchanged(@TempDir Path tmp) throws IOException {
-        // Operator picks dind, sees the warning, types "n" → ledger stays
-        // empty AND the wizard signals that dind was left disabled
-        // (textual feedback so the operator knows the decline registered).
-        FakeConsoleIO io = ttyConsole();
-        io.inputLines.add("1"); // toggle dind on
-        io.inputLines.add("n"); // decline
-        io.inputLines.add(""); // commit (no changes)
-
-        Path ledger = tmp.resolve(".ai-sandbox-devtools");
-        DevToolsStep.Outcome outcome = step(io).run(ledger, false, true, null);
-
-        assertThat(outcome).isEqualTo(DevToolsStep.Outcome.APPLIED);
-        // AC#3 — decline returns to the checklist with the entry UN-selected;
-        // the persisted ledger therefore reflects "no devtools enabled".
-        assertThat(DevToolsConfig.readEnabled(ledger))
-                .as("AC#3 — declining the y/N prompt MUST leave dind disabled")
-                .isEmpty();
-        assertThat(io.allOutput())
-                .as("decline emits a clear cancelled message so the operator knows it stuck")
-                .contains("Cancelled")
-                .contains("dind");
-    }
-
-    @Test
-    void blank_response_to_confirmation_counts_as_decline(@TempDir Path tmp) throws IOException {
-        // [y/N] convention — bare Enter on the confirmation defaults to N.
-        // This is a guard against accidentally widening the trust boundary
-        // by mashing Enter through the wizard.
-        FakeConsoleIO io = ttyConsole();
-        io.inputLines.add("1"); // toggle dind on
-        io.inputLines.add(""); // blank response to Continue? → default N
-        io.inputLines.add(""); // commit
-
-        Path ledger = tmp.resolve(".ai-sandbox-devtools");
-        step(io).run(ledger, false, true, null);
-        assertThat(DevToolsConfig.readEnabled(ledger))
-                .as("[y/N] default — bare Enter on Continue? MUST decline")
+        assertThat(outcome).isEqualTo(DevToolsStep.Outcome.SKIPPED);
+        assertThat(ledger).doesNotExist();
+        assertThat(runner.inheritCalls)
+                .as("--no-devtools MUST NOT spawn the selector")
                 .isEmpty();
     }
 
-    // ── Disable existing — no warning fires ──────────────────────────
+    // ── Non-TTY deferral (headless install) ─────────────────────────
 
     @Test
-    void disabling_an_existing_enabled_capability_emits_no_trust_boundary_warning(@TempDir Path tmp)
-            throws IOException {
-        // Pre-seed the ledger so dind starts ENABLED; toggling it off
-        // must NOT re-fire the warning (warnings are for boundary-widening
-        // events, not boundary-narrowing ones).
+    void no_tty_defers_before_spawning_the_selector(@TempDir Path tmp) throws IOException {
+        // Pitfall (raw-mode robustness) — a cursor selector cannot run without
+        // a terminal, so the step short-circuits to DEFERRED and never launches
+        // the child. The caller is responsible for the "re-run from a TTY" hint.
         Path ledger = tmp.resolve(".ai-sandbox-devtools");
-        Set<String> seeded = new LinkedHashSet<>();
-        seeded.add("dind");
-        DevToolsConfig.writeEnabled(ledger, seeded);
+        Path selector = selector(tmp);
+        FakeProcessRunner runner = new FakeProcessRunner();
 
-        FakeConsoleIO io = ttyConsole();
-        io.inputLines.add("1"); // toggle dind OFF (already enabled)
-        io.inputLines.add(""); // commit
-
-        DevToolsStep.Outcome outcome = step(io).run(ledger, false, true, null);
-        assertThat(outcome).isEqualTo(DevToolsStep.Outcome.APPLIED);
-        assertThat(DevToolsConfig.readEnabled(ledger)).isEmpty();
-
-        // No "Continue?" prompt should have been emitted (we never
-        // prompted because we were narrowing, not widening, the boundary).
-        assertThat(io.allOutput())
-                .as("AC#3 — the warning is enable-only; disabling MUST NOT prompt")
-                .doesNotContain("Continue?");
-        // Confirm the wizard told the operator the entry was disabled.
-        assertThat(io.allOutput()).contains("Disabled");
-    }
-
-    // ── AC#4 — re-run pre-fills with current state ──────────────────
-
-    @Test
-    void rerun_renders_checklist_with_current_state_pre_selected(@TempDir Path tmp) throws IOException {
-        // Pre-seed with dind enabled; the operator commits without flipping
-        // anything (empty Enter). The post-commit summary reflects the
-        // pre-selection (AC#4 — re-run jumps to the step with current state).
-        Path ledger = tmp.resolve(".ai-sandbox-devtools");
-        Set<String> seeded = new LinkedHashSet<>();
-        seeded.add("dind");
-        DevToolsConfig.writeEnabled(ledger, seeded);
-
-        FakeConsoleIO io = ttyConsole();
-        io.inputLines.add(""); // immediate commit — no changes
-
-        step(io).run(ledger, false, true, null);
-
-        // Ledger unchanged.
-        assertThat(DevToolsConfig.readEnabled(ledger)).containsExactly("dind");
-
-        // The rendered checklist row for dind MUST carry the [x] marker
-        // (rather than [ ]), which is how AC#4's "current state pre-
-        // selected" presents to the operator.
-        boolean preSelectedRow =
-                io.printed.stream().anyMatch(line -> line.contains("[x]") && line.contains("Docker-in-Docker"));
-        assertThat(preSelectedRow)
-                .as("AC#4 — re-run MUST render the dind row with [x] when the ledger already enables it")
-                .isTrue();
-    }
-
-    // ── AC#7 — file mode 0644 on the written ledger ─────────────────
-
-    @Test
-    void written_ledger_has_mode_0644(@TempDir Path tmp) throws IOException {
-        // The developer comment in DevToolsStep.java declares the ledger
-        // ships at 0644 to match the rest of the install-time files. Pin
-        // that contract so a future refactor can't silently relax it.
-        if (!FileSystems.getDefault().supportedFileAttributeViews().contains("posix")) {
-            return; // Non-POSIX filesystem (Windows) — assertion is vacuously satisfied.
-        }
-        FakeConsoleIO io = ttyConsole();
-        io.inputLines.add("1");
-        io.inputLines.add("y");
-        io.inputLines.add("");
-
-        Path ledger = tmp.resolve(".ai-sandbox-devtools");
-        step(io).run(ledger, false, true, null);
-
-        Set<PosixFilePermission> perms = Files.getPosixFilePermissions(ledger);
-        assertThat(perms)
-                .containsExactlyInAnyOrder(
-                        PosixFilePermission.OWNER_READ,
-                        PosixFilePermission.OWNER_WRITE,
-                        PosixFilePermission.GROUP_READ,
-                        PosixFilePermission.OTHERS_READ);
-    }
-
-    // ── Non-TTY deferral (headless install path) ────────────────────
-
-    @Test
-    void non_tty_run_defers_without_touching_the_ledger(@TempDir Path tmp) throws IOException {
-        // No TTY + no --no-devtools opt-out → DEFERRED. The caller (onboard /
-        // reconfigure) is responsible for emitting the "re-run from a TTY"
-        // instruction in its summary; the step's contract is just "leave
-        // the ledger alone and return DEFERRED".
-        Path ledger = tmp.resolve(".ai-sandbox-devtools");
-
-        FakeConsoleIO io = noTtyConsole();
-        DevToolsStep.Outcome outcome = step(io).run(ledger, false, false, null);
+        DevToolsStep.Outcome outcome = new DevToolsStep(new FakeConsoleIO(), runner)
+                .run(ledger, selector, /* noDevtools */ false, /* hasTty */ false, null);
 
         assertThat(outcome).isEqualTo(DevToolsStep.Outcome.DEFERRED);
-        // No ledger written.
         assertThat(ledger).doesNotExist();
-        // No prompts or output emitted (the step returns silently).
-        assertThat(io.printed).isEmpty();
+        assertThat(runner.inheritCalls).isEmpty();
+    }
+
+    // ── Missing selector ────────────────────────────────────────────
+
+    @Test
+    void missing_selector_file_defers_with_a_hint(@TempDir Path tmp) throws IOException {
+        Path ledger = tmp.resolve(".ai-sandbox-devtools");
+        Path absent = tmp.resolve("does-not-exist.sh");
+        FakeConsoleIO io = new FakeConsoleIO();
+        FakeProcessRunner runner = new FakeProcessRunner();
+
+        DevToolsStep.Outcome outcome = new DevToolsStep(io, runner).run(ledger, absent, false, true, null);
+
+        assertThat(outcome).isEqualTo(DevToolsStep.Outcome.DEFERRED);
+        assertThat(runner.inheritCalls).isEmpty();
+        assertThat(io.allOutput()).contains("selector not found");
     }
 
     @Test
-    void no_devtools_flag_short_circuits_with_skipped_outcome(@TempDir Path tmp) throws IOException {
-        // --no-devtools is the explicit opt-out (used by the proposal-listed
-        // OnboardCommand back-compat housekeeping and by reconfigure --no-devtools).
-        // It is independent of TTY presence: even on a real terminal,
-        // --no-devtools must short-circuit cleanly.
+    void null_selector_path_defers_without_crashing(@TempDir Path tmp) throws IOException {
+        // The null-guard short-circuits before Files.isRegularFile, so a null
+        // selector path degrades cleanly to DEFERRED rather than NPE-ing.
         Path ledger = tmp.resolve(".ai-sandbox-devtools");
+        FakeProcessRunner runner = new FakeProcessRunner();
 
-        FakeConsoleIO io = ttyConsole();
-        DevToolsStep.Outcome outcome = step(io).run(ledger, true, true, null);
+        DevToolsStep.Outcome outcome =
+                new DevToolsStep(new FakeConsoleIO(), runner).run(ledger, null, false, true, null);
 
-        assertThat(outcome).isEqualTo(DevToolsStep.Outcome.SKIPPED);
-        assertThat(ledger).doesNotExist();
-        assertThat(io.printed).isEmpty();
+        assertThat(outcome).isEqualTo(DevToolsStep.Outcome.DEFERRED);
+        assertThat(runner.inheritCalls).isEmpty();
     }
 
-    @Test
-    void no_devtools_with_pre_existing_ledger_leaves_it_untouched(@TempDir Path tmp) throws IOException {
-        // Idempotency — --no-devtools must NOT trample a previously persisted
-        // selection. An operator who passes --no-devtools to onboard --force
-        // (to rerun every other component) should keep their devtools
-        // selection.
-        Path ledger = tmp.resolve(".ai-sandbox-devtools");
-        Set<String> seeded = new LinkedHashSet<>();
-        seeded.add("dind");
-        DevToolsConfig.writeEnabled(ledger, seeded);
-        byte[] before = Files.readAllBytes(ledger);
-
-        FakeConsoleIO io = ttyConsole();
-        DevToolsStep.Outcome outcome = step(io).run(ledger, true, true, null);
-
-        assertThat(outcome).isEqualTo(DevToolsStep.Outcome.SKIPPED);
-        assertThat(Files.readAllBytes(ledger))
-                .as("--no-devtools MUST NOT rewrite the ledger")
-                .isEqualTo(before);
-    }
-
-    // ── Input handling — invalid entries don't crash ─────────────────
+    // ── Happy path — selector commits ───────────────────────────────
 
     @Test
-    void invalid_number_input_reprompts_without_crashing(@TempDir Path tmp) throws IOException {
-        // Defensive — typing a number out of range or a non-numeric should
-        // re-render the prompt with an error and let the operator try again.
-        FakeConsoleIO io = ttyConsole();
-        io.inputLines.add("9"); // out of range
-        io.inputLines.add("zog"); // garbage
-        io.inputLines.add(""); // commit with nothing changed
-
+    void selector_exit_zero_yields_applied_and_shells_bash_selector_ledger(@TempDir Path tmp) throws IOException {
+        // AC#1/AC#14 — the step delegates to the raw-mode selector. The exact
+        // argv MUST be `bash <selector> <ledger>` so the selector reads/writes
+        // the right file. Exit 0 → APPLIED.
         Path ledger = tmp.resolve(".ai-sandbox-devtools");
-        DevToolsStep.Outcome outcome = step(io).run(ledger, false, true, null);
+        Path selector = selector(tmp);
+        FakeProcessRunner runner = new FakeProcessRunner();
+        runner.inheritResponse = argv -> 0;
+
+        DevToolsStep.Outcome outcome =
+                new DevToolsStep(new FakeConsoleIO(), runner).run(ledger, selector, false, true, null);
 
         assertThat(outcome).isEqualTo(DevToolsStep.Outcome.APPLIED);
-        assertThat(ledger).exists();
-        assertThat(Files.size(ledger)).as("no toggles → empty ledger written").isZero();
-        // The operator-facing nudge text fires at least once.
-        assertThat(io.allOutput()).contains("Type a number");
+        assertThat(runner.inheritCalls).hasSize(1);
+        assertThat(runner.inheritCalls.get(0)).containsExactly("bash", selector.toString(), ledger.toString());
     }
 
     @Test
-    void exit_command_returns_applied_without_writing_the_ledger(@TempDir Path tmp) throws IOException {
-        // /exit aborts the step mid-prompt without persisting; outcome is
-        // still APPLIED so the caller doesn't double-prompt the operator.
-        FakeConsoleIO io = ttyConsole();
-        io.inputLines.add("/exit");
-
+    void selector_commit_side_effect_is_visible_through_the_ledger(@TempDir Path tmp) throws IOException {
+        // AC#4/AC#7 — the SHELL selector persists the ledger; the Java step does
+        // not. Simulate the selector writing the enabled set on commit, then
+        // confirm DevToolsConfig.readEnabled sees it.
         Path ledger = tmp.resolve(".ai-sandbox-devtools");
-        DevToolsStep.Outcome outcome = step(io).run(ledger, false, true, null);
+        Path selector = selector(tmp);
+        FakeProcessRunner runner = new FakeProcessRunner();
+        runner.inheritResponse = argv -> {
+            try {
+                // argv = [bash, <selector>, <ledger>]
+                DevToolsConfig.writeEnabled(Path.of(argv.get(2)), Set.of("java", "android"));
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+            return 0;
+        };
+
+        DevToolsStep.Outcome outcome =
+                new DevToolsStep(new FakeConsoleIO(), runner).run(ledger, selector, false, true, null);
 
         assertThat(outcome).isEqualTo(DevToolsStep.Outcome.APPLIED);
-        assertThat(ledger).as("/exit MUST NOT create a ledger file").doesNotExist();
-        assertThat(io.allOutput()).contains("Exiting");
+        assertThat(DevToolsConfig.readEnabled(ledger)).containsExactlyInAnyOrder("java", "android");
+    }
+
+    // ── Degrade-to-DEFERRED on non-zero exit ────────────────────────
+
+    @Test
+    void selector_cancel_exit_130_degrades_to_deferred(@TempDir Path tmp) throws IOException {
+        assertDegradesToDeferred(tmp, 130);
     }
 
     @Test
-    void skip_command_keeps_pre_existing_selection_unchanged(@TempDir Path tmp) throws IOException {
-        // /skip is the "I'm just looking, don't change anything" affordance.
-        // It MUST behave identically to a bare Enter on the first prompt:
-        // committing the current state byte-for-byte.
+    void selector_no_tty_exit_3_degrades_to_deferred(@TempDir Path tmp) throws IOException {
+        assertDegradesToDeferred(tmp, 3);
+    }
+
+    @Test
+    void selector_internal_error_exit_1_degrades_to_deferred(@TempDir Path tmp) throws IOException {
+        assertDegradesToDeferred(tmp, 1);
+    }
+
+    private static void assertDegradesToDeferred(Path tmp, int selectorExit) throws IOException {
         Path ledger = tmp.resolve(".ai-sandbox-devtools");
-        Set<String> seeded = new LinkedHashSet<>();
-        seeded.add("dind");
-        DevToolsConfig.writeEnabled(ledger, seeded);
-        byte[] before = Files.readAllBytes(ledger);
+        Path selector = selector(tmp);
+        FakeProcessRunner runner = new FakeProcessRunner();
+        runner.inheritResponse = argv -> selectorExit;
 
-        FakeConsoleIO io = ttyConsole();
-        io.inputLines.add("/skip");
+        DevToolsStep.Outcome outcome =
+                new DevToolsStep(new FakeConsoleIO(), runner).run(ledger, selector, false, true, null);
 
-        DevToolsStep.Outcome outcome = step(io).run(ledger, false, true, null);
-        assertThat(outcome).isEqualTo(DevToolsStep.Outcome.APPLIED);
-        // The persisted ledger MUST round-trip to the same enabled set.
-        assertThat(DevToolsConfig.readEnabled(ledger)).containsExactly("dind");
-        // The written bytes equal the seeded bytes (deterministic output).
-        assertThat(Files.readAllBytes(ledger)).isEqualTo(before);
+        assertThat(outcome)
+                .as("selector exit %d → DEFERRED (only a clean exit 0 is APPLIED)", selectorExit)
+                .isEqualTo(DevToolsStep.Outcome.DEFERRED);
+        // The selector WAS spawned (this is the post-spawn degrade path).
+        assertThat(runner.inheritCalls).hasSize(1);
+    }
+
+    // ── currentlyEnabled static helper ──────────────────────────────
+
+    @Test
+    void currentlyEnabled_reads_the_enabled_ids_from_the_ledger(@TempDir Path tmp) throws IOException {
+        Path ledger = tmp.resolve(".ai-sandbox-devtools");
+        DevToolsConfig.writeEnabled(ledger, Set.of("dind"));
+
+        List<String> enabled = DevToolsStep.currentlyEnabled(ledger);
+        assertThat(enabled).containsExactly("dind");
+    }
+
+    @Test
+    void currentlyEnabled_on_missing_ledger_is_empty(@TempDir Path tmp) throws IOException {
+        assertThat(DevToolsStep.currentlyEnabled(tmp.resolve(".ai-sandbox-devtools")))
+                .isEmpty();
     }
 }

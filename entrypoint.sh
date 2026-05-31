@@ -1,4 +1,7 @@
-#!/bin/sh
+#!/usr/bin/env bash
+# UC-27 — runs under bash (present on the glibc base) so it can source the
+# devtool capability manifests (which declare bash arrays + use BASH_SOURCE) and
+# provision the operator-selected capabilities generically at boot.
 set -e
 
 PROJECT_DIR=/workspace/project-builder
@@ -6,6 +9,89 @@ KEY_FILE=/etc/secrets/git-key
 TOKEN_FILE=/etc/secrets/gh-token
 GITCONFIG_FILE=/etc/secrets/gitconfig
 export RTK_TELEMETRY_DISABLED=1
+
+# UC-27 — devtool provisioning wiring.
+#   AI_SANDBOX_DEVTOOLS  — space-separated capability ids the operator selected
+#                          (set by spawn.sh, passed through docker-compose.yml's
+#                          environment:). Empty/unset → no provisioning, a
+#                          session byte-identical to the no-capability default.
+#   DEVTOOLS_DIR         — the manifests COPYed into the image (slice D).
+#   READY_MARKER         — written AFTER tmux/claude is up; spawn.sh polls it so
+#                          attach tolerates the provisioning window. Removed at
+#                          the TOP of every run so a `compose restart`
+#                          re-provision can't expose a stale "ready".
+DEVTOOLS_DIR=/opt/ai-sandbox/devtools.d
+READY_MARKER=/tmp/aisandbox-ready
+ENV_UTILS_ROOT="${AISB_ENV_UTILS_ROOT:-/workspace/environment-utilities}"
+rm -f "$READY_MARKER" 2>/dev/null || true
+
+# devtools_enabled ID → 0 if ID appears in the AI_SANDBOX_DEVTOOLS list.
+devtools_enabled() {
+    case " ${AI_SANDBOX_DEVTOOLS:-} " in *" $1 "*) return 0 ;; *) return 1 ;; esac
+}
+
+# provision_capability ID — provision ID after its DEPENDS_ON (deps-first, via a
+# visited set so the order is correct regardless of the list order — e.g.
+# `android` provisions `java` first even though the list is alphabetical). Each
+# manifest's devtool_provision runs the in-container install + PATH wiring. A
+# failed provision is warn-and-continue (UC-27 offline policy §E) — it does NOT
+# mask the failure from the live G1 gate, which checks real binary resolution.
+_provisioned=" "
+provision_capability() {
+    local id="$1" manifest="$DEVTOOLS_DIR/$1/manifest.sh" deps dep
+    case "$_provisioned" in *" $id "*) return 0 ;; esac
+    if [ ! -f "$manifest" ]; then
+        echo "WARNING: no manifest for devtool '$id' at $manifest — skipping." >&2
+        return 0
+    fi
+    # Read DEPENDS_ON in a subshell (isolates the manifest's hook definitions),
+    # provision each dependency first.
+    deps="$( ID=""; DEPENDS_ON=(); . "$manifest" >/dev/null 2>&1; \
+             for dep in ${DEPENDS_ON[@]+"${DEPENDS_ON[@]}"}; do printf '%s\n' "$dep"; done )"
+    for dep in $deps; do
+        provision_capability "$dep"
+    done
+    # Source for real and run the provision hook.
+    unset -f devtool_spawn_env devtool_provision 2>/dev/null || true
+    ID=""; LABEL=""; APPLY_AT=""; ARCH=""; WARNING=""; DEPENDS_ON=()
+    # shellcheck disable=SC1090
+    . "$manifest"
+    _provisioned="$_provisioned$id "
+    if declare -F devtool_provision >/dev/null 2>&1; then
+        echo "Provisioning devtool capability: $id ..." >&2
+        devtool_provision || echo "WARNING: provisioning '$id' failed; continuing (offline policy). The capability's binaries may be unavailable this session." >&2
+    fi
+    unset -f devtool_spawn_env devtool_provision 2>/dev/null || true
+}
+
+# load_devtool_env — source every provisioned capability's env snippet into THIS
+# (the entrypoint's) environment so tmux/claude and EVERY `sh -c`/`bash -c` child
+# inherit JAVA_HOME / ANDROID_HOME / PATH (AC#10 layer 1 — non-interactive shells
+# read no profile/rc, so inheritance is the only path). The provisioners write
+# <cache>/env.sh; dind writes its own profile snippet. Also points BASH_ENV at an
+# aggregator so a fresh non-interactive bash re-applies the env (belt-and-braces
+# layer 3).
+load_devtool_env() {
+    local ef
+    if [ -d "$ENV_UTILS_ROOT" ]; then
+        for ef in "$ENV_UTILS_ROOT"/*/env.sh; do
+            # shellcheck disable=SC1090
+            [ -r "$ef" ] && . "$ef"
+        done
+    fi
+    # shellcheck disable=SC1090
+    [ -r "$HOME/.profile.aisandbox-dind" ] && . "$HOME/.profile.aisandbox-dind"
+    # Aggregator for BASH_ENV (non-interactive bash) — re-sources the same files.
+    local agg="$ENV_UTILS_ROOT/aisandbox-env.sh"
+    if [ -d "$ENV_UTILS_ROOT" ]; then
+        {
+            printf '# Managed by ai-sandbox entrypoint (UC-27) — do not hand-edit.\n'
+            printf 'for _ef in %s/*/env.sh; do [ -r "$_ef" ] && . "$_ef"; done\n' "$ENV_UTILS_ROOT"
+            printf '[ -r "$HOME/.profile.aisandbox-dind" ] && . "$HOME/.profile.aisandbox-dind"\n'
+        } > "$agg" 2>/dev/null || true
+        [ -f "$agg" ] && export BASH_ENV="$agg"
+    fi
+}
 
 # UC-17 — uid self-registration. MUST be the first thing we do, before any
 # ssh / git / gh / $HOME-resolving call. When the management server runs this
@@ -44,15 +130,16 @@ if [ -d /etc/claude-template ] && [ ! -e "$HOME/.claude/.seeded" ]; then
     touch "$HOME/.claude/.seeded"
 fi
 
-# Android emulator skill (KVM-capable image only). The Android-toolchain image
-# bakes the step-by-step emulator runbook at /opt/ai-sandbox/skills/. ~/.claude
-# is bind-mounted, so a build-time copy into ~/.claude/skills/ would be masked;
-# install it here instead — BEFORE tmux launches claude, so Claude Code sees it
-# at session start (it only hot-loads skills present when the session begins).
-# The presence of /opt/ai-sandbox/skills marks the Android image; the lean image
-# has no such dir and skips this. Refreshed every start so image updates
-# propagate; a copy failure warns-and-continues so the session still boots.
-if [ -d /opt/ai-sandbox/skills ]; then
+# Android emulator skill. The runbook ships at /opt/ai-sandbox/skills/ on EVERY
+# image now (UC-27 — the base no longer forks by flavour), so the seed is gated
+# on the `android` capability being enabled for THIS session rather than on the
+# dir's mere presence — otherwise a no-capability session would carry an Android
+# skill it can't use (G1 no-trace). ~/.claude is bind-mounted, so a build-time
+# copy into ~/.claude/skills/ would be masked; install it here instead — BEFORE
+# tmux launches claude, so Claude Code sees it at session start (it only
+# hot-loads skills present when the session begins). Refreshed every start; a
+# copy failure warns-and-continues so the session still boots.
+if devtools_enabled android && [ -d /opt/ai-sandbox/skills ]; then
     mkdir -p "$HOME/.claude/skills"
     for _skill_src in /opt/ai-sandbox/skills/*/; do
         [ -d "$_skill_src" ] || continue
@@ -164,18 +251,24 @@ fi
 START_DIR="$PROJECT_DIR"
 [ -d "$START_DIR" ] || START_DIR=/workspace
 
-# UC-26 — when the operator enabled the `dind` devtool in setup.sh, spawn.sh
-# sets AI_SANDBOX_DEVTOOL_DIND=1 (via docker-compose.dind.yml's `environment:`
-# block + the spawn-time `AI_SANDBOX_DEVTOOL_DIND` export) and layers
-# docker-compose.dind.yml on top of the base compose file. Install + start the
-# rootless dockerd here, BEFORE tmux launches claude, so a session's first
-# `docker info` works without further bootstrap. Both steps are best-effort:
-# if the network is unreachable on first run, or rootlesskit fails inside an
-# unusual host config, the session still boots and the operator gets clear
-# guidance via `aisandbox-dind doctor` (UC-26 AC#9 verification (a)).
-if [ "${AI_SANDBOX_DEVTOOL_DIND:-0}" = "1" ]; then
-    /usr/local/bin/aisandbox-dind install || echo "WARNING: DinD install failed; docker commands will fail." >&2
-    /usr/local/bin/aisandbox-dind start   || echo "WARNING: rootless dockerd did not start; docker commands will fail." >&2
+# UC-27 — provision every operator-selected capability EAGERLY AT SPAWN, BEFORE
+# tmux launches claude, so the session is ready at handover and pays no first-use
+# install delay (AC#3,#12). This is the generic capability dispatch loop: it
+# sources each manifest and runs its devtool_provision hook (deps-first), with no
+# per-id `case` — adding a capability needs no edit here (AC#2). DinD's
+# provision hook runs the same `aisandbox-dind install` + `start` as before;
+# Java/Android provision their toolchains into the persisted cache.
+#
+# Then load every provisioned capability's env into the entrypoint's own
+# environment so claude and every non-login `sh -c` child inherit JAVA_HOME /
+# ANDROID_HOME / PATH (AC#10 — the entrypoint PATH-inheritance fix, not just a
+# profile.d snippet). With no capabilities the loop is a no-op and the session is
+# byte-identical to today (AC#12).
+if [ -n "${AI_SANDBOX_DEVTOOLS:-}" ]; then
+    for _devtool_id in ${AI_SANDBOX_DEVTOOLS}; do
+        provision_capability "$_devtool_id"
+    done
+    load_devtool_env
 fi
 
 # If a command is passed (e.g. one-off setup runs), execute it in the project
@@ -192,5 +285,12 @@ fi
 # The tmux session itself never dies.
 tmux new-session -d -s main -c "$START_DIR" \
     'while true; do claude --dangerously-skip-permissions; tmux detach-client -s main 2>/dev/null; printf "\033c\033[3J"; sleep 1; done'
+
+# UC-27 — signal readiness AFTER the main tmux session exists (capabilities are
+# already provisioned above, so toolchains are ready at handover). spawn.sh polls
+# this marker via `docker compose exec` before reporting the session "running",
+# and attach tolerates the provisioning window. The marker was rm -f'd at the top
+# of this run, so a `compose restart` re-provision never exposes a stale ready.
+touch "$READY_MARKER" 2>/dev/null || true
 
 exec tail -f /dev/null

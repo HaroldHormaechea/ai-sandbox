@@ -193,6 +193,12 @@ public class OnboardCommand implements Callable<Integer> {
             description = "Skip the development-tools picker entirely (Docker-in-Docker, etc.).")
     boolean noDevtools;
 
+    @Option(
+            names = "--devtools-selector",
+            description = "Path to the bundled devtools-select.sh raw-mode picker. Defaults to"
+                    + " <install-dir>/host/devtools-select.sh.")
+    Path devtoolsSelector;
+
     // ── policy ──
 
     @Option(
@@ -445,8 +451,9 @@ public class OnboardCommand implements Callable<Integer> {
         // surface today, so headless installs always defer (operator runs
         // `aisandboxctl reconfigure` later from a terminal).
         Path devtoolsLedger = sessionsDir.resolve(".ai-sandbox-devtools");
+        Path selector = devtoolsSelector != null ? devtoolsSelector : installDir.resolve("host/devtools-select.sh");
         DevToolsStep.Outcome devOutcome =
-                new DevToolsStep(consoleIO, processRunner).run(devtoolsLedger, noDevtools, hasTty, ownership);
+                new DevToolsStep(consoleIO, processRunner).run(devtoolsLedger, selector, noDevtools, hasTty, ownership);
         switch (devOutcome) {
             case APPLIED:
                 done.add("dev-tools selection");

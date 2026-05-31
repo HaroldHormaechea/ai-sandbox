@@ -7,6 +7,7 @@ import com.aisandbox.server.cli.secrets.FakeConsoleIO;
 import com.aisandbox.server.cli.secrets.FakeProcessRunner;
 import com.aisandbox.server.cli.secrets.ProcessRunner;
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.io.PrintStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -76,6 +77,24 @@ class ReconfigureCommandTest {
         return r;
     }
 
+    /**
+     * A fake {@code runInheritIO} that mimics the shell selector committing the
+     * given ids: it writes them to the ledger (argv[2] = {@code bash <selector>
+     * <ledger>}) and exits 0. Lets the bare-path tests assert the end-to-end
+     * "selector persisted the ledger" outcome without a real raw-mode UI.
+     */
+    private static java.util.function.Function<List<String>, Integer> selectorWriting(String... ids) {
+        Set<String> enabled = new LinkedHashSet<>(java.util.Arrays.asList(ids));
+        return argv -> {
+            try {
+                DevToolsConfig.writeEnabled(Path.of(argv.get(2)), enabled);
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+            return 0;
+        };
+    }
+
     /** Capture stdout + stderr around the command's execute. */
     private static int executeCapturing(
             CommandLine cmd, String[] argv, ByteArrayOutputStream outBuf, ByteArrayOutputStream errBuf) {
@@ -126,60 +145,89 @@ class ReconfigureCommandTest {
     // ── Bare path — interactive picker ──────────────────────────────
 
     @Test
-    void bare_run_with_tty_writes_ledger_via_devtools_step(@TempDir Path tmp) throws Exception {
-        // Drive the wizard interactively: toggle dind on, confirm the
-        // warning, commit. The persisted ledger must contain dind.
+    void bare_run_with_tty_delegates_to_selector_which_persists_ledger(@TempDir Path tmp) throws Exception {
+        // UC-27 — the bare path delegates to the shared shell selector
+        // (devtools-select.sh) via DevToolsStep. We fake the selector through
+        // the injected ProcessRunner: it persists `dind` (the side-effect a
+        // real raw-mode commit would have) and exits 0 → APPLIED → exit 0.
         Path sessionsDir = tmp.resolve("sessions");
         Files.createDirectories(sessionsDir);
+        Path selector = tmp.resolve("devtools-select.sh");
+        Files.writeString(selector, "#!/usr/bin/env bash\n");
+
+        FakeProcessRunner runner = okRunner();
+        runner.inheritResponse = selectorWriting("dind");
 
         FakeConsoleIO io = new FakeConsoleIO();
         io.tty = true;
-        io.inputLines.add("1"); // toggle dind on
-        io.inputLines.add("y"); // confirm the trust-boundary warning
-        io.inputLines.add(""); // commit
 
         ByteArrayOutputStream outBuf = new ByteArrayOutputStream();
         ByteArrayOutputStream errBuf = new ByteArrayOutputStream();
         int exit = executeCapturing(
-                cmd(okRunner(), io), new String[] {"--sessions-dir", sessionsDir.toString()}, outBuf, errBuf);
+                cmd(runner, io),
+                new String[] {
+                    "--sessions-dir", sessionsDir.toString(),
+                    "--devtools-selector", selector.toString()
+                },
+                outBuf,
+                errBuf);
 
         assertThat(exit).isZero();
 
-        // Ledger persisted under sessions-dir.
+        // The selector was shelled out via runInheritIO with `bash <selector> <ledger>`.
         Path ledger = sessionsDir.resolve(".ai-sandbox-devtools");
+        assertThat(runner.inheritCalls).hasSize(1);
+        assertThat(runner.inheritCalls.get(0)).containsExactly("bash", selector.toString(), ledger.toString());
+
+        // And the ledger the selector persisted is readable.
         assertThat(ledger).exists();
         assertThat(DevToolsConfig.readEnabled(ledger)).containsExactly("dind");
     }
 
     @Test
-    void bare_run_pre_fills_with_current_ledger_state(@TempDir Path tmp) throws Exception {
-        // AC#4 — re-run jumps with current state pre-selected. Seed dind
-        // ON, then run reconfigure and commit immediately (no toggles) →
-        // ledger stays as-was.
+    void bare_run_passes_existing_ledger_to_selector_for_pre_fill(@TempDir Path tmp) throws Exception {
+        // AC#4 — re-run pre-fills with current state. Post-UC-27 the pre-fill is
+        // the SHELL selector's job (it reads the ledger it is handed and renders
+        // [x] rows); the Java side's contract is simply to point the selector at
+        // the existing ledger. Seed `dind`, run a selector that commits without
+        // changing anything, and assert the selector received the seeded ledger
+        // path AND the ledger is left intact.
         Path sessionsDir = tmp.resolve("sessions");
         Files.createDirectories(sessionsDir);
         Path ledger = sessionsDir.resolve(".ai-sandbox-devtools");
         Set<String> seeded = new LinkedHashSet<>();
         seeded.add("dind");
         DevToolsConfig.writeEnabled(ledger, seeded);
+        byte[] before = Files.readAllBytes(ledger);
+
+        Path selector = tmp.resolve("devtools-select.sh");
+        Files.writeString(selector, "#!/usr/bin/env bash\n");
+
+        FakeProcessRunner runner = okRunner();
+        runner.inheritResponse = argv -> 0; // commit with no change
 
         FakeConsoleIO io = new FakeConsoleIO();
         io.tty = true;
-        io.inputLines.add(""); // commit immediately
 
         ByteArrayOutputStream outBuf = new ByteArrayOutputStream();
         ByteArrayOutputStream errBuf = new ByteArrayOutputStream();
         int exit = executeCapturing(
-                cmd(okRunner(), io), new String[] {"--sessions-dir", sessionsDir.toString()}, outBuf, errBuf);
+                cmd(runner, io),
+                new String[] {
+                    "--sessions-dir", sessionsDir.toString(),
+                    "--devtools-selector", selector.toString()
+                },
+                outBuf,
+                errBuf);
 
         assertThat(exit).isZero();
+        // The selector was handed the existing ledger (the only thing it needs
+        // to render the current state pre-selected).
+        assertThat(runner.inheritCalls).hasSize(1);
+        assertThat(runner.inheritCalls.get(0)).containsExactly("bash", selector.toString(), ledger.toString());
+        // Ledger untouched (the fake selector committed no change).
+        assertThat(Files.readAllBytes(ledger)).isEqualTo(before);
         assertThat(DevToolsConfig.readEnabled(ledger)).containsExactly("dind");
-
-        // The rendered checklist must reflect the pre-selected state.
-        boolean preSelectedRow = io.printed.stream().anyMatch(line -> line.contains("[x]"));
-        assertThat(preSelectedRow)
-                .as("AC#4 — re-run MUST pre-fill the checklist with the current state")
-                .isTrue();
     }
 
     // ── Non-TTY deferral ────────────────────────────────────────────
@@ -280,17 +328,23 @@ class ReconfigureCommandTest {
         Path sessionsDir = tmp.resolve("sessions");
         Files.createDirectories(sessionsDir);
 
+        Path selector = tmp.resolve("devtools-select.sh");
+        Files.writeString(selector, "#!/usr/bin/env bash\n");
+
+        FakeProcessRunner runner = okRunner();
+        runner.inheritResponse = selectorWriting("dind");
+
         FakeConsoleIO io = new FakeConsoleIO();
         io.tty = true;
-        io.inputLines.add("1"); // toggle dind on
-        io.inputLines.add("y"); // confirm the trust-boundary warning
-        io.inputLines.add(""); // commit
 
         ByteArrayOutputStream outBuf = new ByteArrayOutputStream();
         ByteArrayOutputStream errBuf = new ByteArrayOutputStream();
         int exit = executeCapturing(
-                cmd(okRunner(), io, /* root */ true),
-                new String[] {"--sessions-dir", sessionsDir.toString()},
+                cmd(runner, io, /* root */ true),
+                new String[] {
+                    "--sessions-dir", sessionsDir.toString(),
+                    "--devtools-selector", selector.toString()
+                },
                 outBuf,
                 errBuf);
 

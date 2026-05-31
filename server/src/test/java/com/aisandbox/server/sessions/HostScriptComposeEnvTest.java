@@ -280,6 +280,13 @@ class HostScriptComposeEnvTest {
         // No install-mode pins — lib.sh resolves the ledger relative to cwd,
         // which we set to the stage dir via runShell's working-dir argument.
         env.put("AI_SANDBOX_COMPOSE_FILE", stage.resolve("docker-compose.yml").toString());
+        // UC-27 — inject_devtool_spawn_env is now manifest-driven: it sources
+        // devtools.d/<id>/manifest.sh to run each capability's devtool_spawn_env
+        // hook. lib.sh defaults AISB_DEVTOOLS_DIR to <lib.sh dir>/devtools.d, but
+        // we only stage lib.sh (not the manifest tree), so point it at the repo's
+        // devtools.d explicitly. Without this the dind manifest is never found and
+        // no env/override is layered (the UC-26 hardcoded path is gone).
+        env.put("AISB_DEVTOOLS_DIR", REPO_ROOT.resolve("devtools.d").toString());
 
         // One-liner: source lib.sh, inject the env vars, dump the resulting
         // EXTRA_COMPOSE_FILES + DEVTOOL_DIND to a probe file, then call
@@ -360,6 +367,9 @@ class HostScriptComposeEnvTest {
         Map<String, String> env = new HashMap<>();
         env.put("PATH", bin.toString() + ":" + System.getenv("PATH"));
         env.put("AI_SANDBOX_COMPOSE_FILE", stage.resolve("docker-compose.yml").toString());
+        // UC-27 — manifest-driven inject needs the capability manifest tree
+        // (see the dind-alone test for the full rationale).
+        env.put("AISB_DEVTOOLS_DIR", REPO_ROOT.resolve("devtools.d").toString());
         // Simulate the KVM override having been layered by spawn.sh's
         // own /dev/kvm detection branch (UC-22 AC#13). DinD must append to
         // this, not replace it.

@@ -2,11 +2,11 @@
 
 ## Description
 
-A self-contained Docker environment for running [Claude Code](https://docs.claude.com/en/docs/claude-code) as a fully autonomous agent. Claude runs inside an Alpine container with all permission prompts disabled, so it can read, write, and execute freely without interrupting you for approvals. The container is the sandbox — let Claude work, and detach/reattach to its session whenever you want.
+A self-contained Docker environment for running [Claude Code](https://docs.claude.com/en/docs/claude-code) as a fully autonomous agent. Claude runs inside a Linux (Debian/glibc) container with all permission prompts disabled, so it can read, write, and execute freely without interrupting you for approvals. The container is the sandbox — let Claude work, and detach/reattach to its session whenever you want.
 
 You can run more than one of these at a time. Each session is its own Docker Compose project named `ai-sandbox-<N>`, with a tmux window named `main` inside the container. Sessions can share the host workspace and Claude config (default — fast and zero-friction) or run on their own isolated copies (opt-in via flags on `spawn.sh`).
 
-> **Where the workspace lives.** In developer mode the host-side workspace and Claude config live **outside this repo** by default — under `$XDG_STATE_HOME/ai-sandbox` (i.e. `~/.local/state/ai-sandbox`) on Linux/macOS, or `%LOCALAPPDATA%\ai-sandbox` on Windows. This is deliberate: keeping the workspace out of the working tree makes it structurally impossible for a stray `cp -a . workspace` to recurse into a freshly-created `workspace/` and fill your disk. See [Workspace location](#workspace-location) for the override and migration details.
+> **Where the workspace lives.** In developer mode the host-side workspace and Claude config live **outside this repo** by default — under `$XDG_STATE_HOME/ai-sandbox` (i.e. `~/.local/state/ai-sandbox`). This is deliberate: keeping the workspace out of the working tree makes it structurally impossible for a stray `cp -a . workspace` to recurse into a freshly-created `workspace/` and fill your disk. See [Workspace location](#workspace-location) for the override and migration details.
 
 ## How to use
 
@@ -15,8 +15,7 @@ You can run more than one of these at a time. Each session is its own Docker Com
 Run the guided setup walkthrough:
 
 ```bash
-./setup.sh         # Linux / macOS
-.\setup.ps1        # Windows
+./setup.sh         # Linux (the project is Linux-only)
 ```
 
 It steps you through:
@@ -32,66 +31,39 @@ The script is idempotent — re-run it any time to re-authenticate, rebuild, or 
 
 #### Upgrading an existing install
 
-If you cloned this repo before the git-identity step shipped, your `ai-context:latest` image's `entrypoint.sh` does NOT yet apply `secrets/gitconfig`. After re-running `setup.sh` / `setup.ps1` once to capture identity, accept the rebuild prompt at step 3 — the wizard now defaults to Y when `secrets/gitconfig` is present so the new entrypoint logic lands in your image automatically.
+If you cloned this repo before the git-identity step shipped, your `ai-context:latest` image's `entrypoint.sh` does NOT yet apply `secrets/gitconfig`. After re-running `setup.sh` once to capture identity, accept the rebuild prompt at step 3 — the wizard now defaults to Y when `secrets/gitconfig` is present so the new entrypoint logic lands in your image automatically.
 
 After setup completes, attach to Claude:
 
 ```bash
-./attach.sh         # or .\attach.ps1 on Windows
+./attach.sh
 ```
 
 You'll drop straight into your already-authenticated session. None of your runtime state is tracked by git: `secrets/` stays in the repo (gitignored apart from its `.gitkeep`), and the workspace + Claude config live entirely outside the repo by default (see [Workspace location](#workspace-location)). The in-repo `workspace/`, `workspace-*/`, `claude-config/`, `claude-config-*/`, and `.ai-sandbox-counter` paths remain gitignored for backward compatibility and for operators who deliberately opt back in to keeping the workspace in-tree.
 
-### Testing Android apps inside the sandbox (UC22)
+### Testing Android apps inside the sandbox
 
-`setup.sh` / `setup.ps1` Step 3 asks which optional **toolchains** to bake into
-`ai-context:latest`. Today the one optional toolchain is **Android testing**
-(amd64 only). Your selection persists in the gitignored `./.ai-sandbox-toolchains`
-and is passed to `docker compose build`, so rebuilds and re-spawns honour it.
-Deselecting and rebuilding produces a plain image again; operators who never
-select it get the lean base image unchanged.
+Android is one of the opt-in **development tools** (see [Development tools](#development-tools) below) — enable **Android SDK** in the selector (`./setup.sh` Step 6 or `./setup.sh --reconfigure`) and respawn. It is **amd64-only** and **depends on Java** (the selector auto-selects Java for you). UC-27 changed how this works:
 
-When **Android testing** is enabled, the image gains:
+- **No build-time bake.** The Android SDK is no longer baked into `ai-context:latest`. Every session now runs on a **single glibc (Debian) base** (`node:20-bookworm-slim`), and when the Android capability is enabled the toolchain is **provisioned eagerly at spawn** by `aisandbox-android` into the persisted `/workspace/environment-utilities/android/sdk` (cmdline-tools + platform-tools + `platforms;android-36` + `build-tools;36.0.0` + the x86_64 system image + emulator). The glibc base is what lets the emulator's QEMU binary load (under the old Alpine/musl base it died with `posix_fallocate64: symbol not found` — a glibc symbol `gcompat` doesn't export).
+- **PATH is wired automatically.** With Android enabled, a freshly spawned session resolves `adb`, `sdkmanager`, `emulator`, and the `build-tools/<ver>` binaries (e.g. `aapt2`) by bare name in **both** login (`sh -lc`) and non-login (`sh -c`) shells, with `ANDROID_HOME` / `ANDROID_SDK_ROOT` / `JAVA_HOME` set.
 
-- a **glibc base** (Debian, `node:20-bookworm-slim`) for the SDK's glibc-linked
-  native binaries (`aapt2`, `adb`, and especially the **emulator**);
-- **JDK 21** + the **Android SDK** build components (`cmdline-tools`,
-  `platform-tools`, `platforms;android-36`, `build-tools;36.0.0`) — matching
-  `.github/workflows/android-ci.yml` + `gradle/libs.versions.toml`.
-
-**Base-image decision (the gcompat→glibc fallback was triggered).** The
-non-Android image stays on the lean **Alpine** base, byte/functionally unchanged.
-The **Android** image runs on a **glibc (Debian) base** instead. This was
-decided empirically on a Docker + KVM + amd64 host: `aapt2`, `adb`, and `java`
-*do* load under Alpine's `gcompat` shim (the build/lint/test/assemble/bundle lane
-works there), but the emulator's QEMU binary does **not** — it dies with
-`posix_fallocate64: symbol not found`, a glibc large-file-support symbol that
-`gcompat` does not export. Since the emulator lane needs it, the Android variant
-takes the glibc-base fallback the use case prescribes; on glibc no shim is needed
-and the emulator's X11/GL/pulse runtime libraries are installed via `apt`.
-Override the base with `AI_SANDBOX_ANDROID_BASE` (e.g. `ubuntu:24.04`) if you
-prefer to match CI's `ubuntu-latest` exactly.
-
-That makes the full CI build lane work inside the session:
+The full CI build lane works inside the session:
 
 ```bash
 ./gradlew :android:lint :android:test :android:assembleDebug :android:bundleDebug
 ```
 
-The **SDK components** (platform-tools, `platforms;android-36`, `build-tools;36.0.0`)
-are baked into the image, so this lane never downloads them — verified green
-inside the image, producing the debug APK + AAB + the lint XML report. Gradle's
-own Maven/AGP/Compose dependencies still resolve over the network on a cold
-build (and cache afterward); only the Android SDK side is guaranteed offline.
+Because the SDK is provisioned at spawn, this lane runs offline after the first spawn; Gradle's Maven/AGP/Compose dependencies still resolve over the network on a cold build (and cache afterward).
 
 #### Running instrumented tests (the emulator)
 
 Instrumented tests (`:android:connectedAndroidTest`) need a running emulator,
-which needs hardware **KVM**. The heavy x86_64 system image + AVD are **not**
-baked into the image — they're provisioned lazily on first use into
-`/workspace/environment-utilities/` (persisted via the workspace bind mount, so
-the **shared** workspace downloads them once and reuses them across container
-restarts, rebuilds, and re-spawns). From inside a session, drive it with the
+which needs hardware **KVM**. The x86_64 system image + emulator are provisioned
+with the rest of the SDK at spawn into `/workspace/environment-utilities/android/`
+(persisted via the workspace bind mount, so the **shared** workspace downloads
+them once and reuses them across container restarts, rebuilds, and re-spawns).
+The AVD is created on first `start`. From inside a session, drive it with the
 bundled helper:
 
 ```bash
@@ -102,8 +74,9 @@ aisandbox-emulator stop
 ```
 
 **Host KVM prerequisite.** `spawn.sh` automatically passes `--device /dev/kvm`
-into the session when the image carries the Android toolchain **and** the host
-exposes `/dev/kvm`. It also detects the host's `kvm` group GID and adds it as a
+into the session when the **Android capability is enabled** in the ledger **and**
+the host exposes `/dev/kvm` (the android manifest's spawn hook layers
+`docker-compose.kvm.yml`). It also detects the host's `kvm` group GID and adds it as a
 supplementary group on the container (`group_add`), so the in-container user can
 actually *open* `/dev/kvm` — passing the device alone is not enough, because the
 device node is group-owned and the runtime user would otherwise hit `EACCES`.
@@ -123,9 +96,9 @@ affected — `aisandbox-emulator start` reports that acceleration is unavailable
 and refuses to launch (pass `--no-accel` to force very slow software emulation).
 
 **Limitations.** Android testing is **amd64-only** today (arm64 is a documented
-follow-up — x86_64 system images won't boot on arm64). Docker Desktop on
-**Windows/macOS** does not expose `/dev/kvm`, so the emulator path is
-Linux-host-only there; the build + JVM-test lane works on any host.
+follow-up — x86_64 system images won't boot on arm64; the selector shows the
+Android row disabled on non-amd64 hosts). The emulator needs a Linux host that
+exposes `/dev/kvm`; the build + JVM-test lane does not.
 
 **Per-session cache caveat.** The system image + AVD cache lives under the
 session's `/workspace`. Sessions given an **isolated** workspace
@@ -135,20 +108,32 @@ re-download the ~1.5 GB system image on their first emulator use. Sessions on
 the shared `/workspace` (the default) all reuse the one cache. This is the
 accepted trade-off of caching under the workspace bind mount.
 
-### Optional development tools (UC26)
+### Development tools
 
-`setup.sh` / `setup.ps1` Step 6 — **"Select the development tools you want to install"** — is a checklist of opt-in capabilities the sandbox provisions into the per-session containers spawned by `spawn.sh`. Selections persist on the host in the gitignored `./.ai-sandbox-devtools` file (one record per line: `<id>     <apply_at>`), and propagate to **NEW sessions only** — sessions running at the moment of the toggle are left untouched (recycle one via `./clean.sh <N>` + `./spawn.sh` to retrofit it).
+`setup.sh` Step 6 — **"Select the development tools you want to install"** — is a **pure-shell raw-mode cursor checkbox selector** of opt-in capabilities the sandbox provisions into the per-session containers spawned by `spawn.sh`. One capability per line prefixed `[X]`/`[ ]`, with a highlighted cursor: use **↑/↓ (or the mouse wheel)** to move, **Space** to toggle, **Enter** to commit, **q/Esc** to cancel. It is pure shell (`read` + ANSI) — no `whiptail`/`dialog` dependency — so the `.deb` TTY auto-onboard path reaches the identical picker. Selections persist on the host in the gitignored `./.ai-sandbox-devtools` file (`<id>\t<apply_at>` per line, byte-stable), and propagate to **NEW sessions only** — sessions running at the moment of the toggle are left untouched (recycle one via `./clean.sh <N>` + `./spawn.sh` to retrofit it).
 
-The wizard step is reachable two ways:
+The selector is reachable two ways:
 
 - During first-time setup, after the Claude pre-init step and before the first session is spawned.
-- Any time after via `./setup.sh --reconfigure` (POSIX) or `.\setup.ps1 -Reconfigure` (PowerShell). The reconfigure path renders only the checklist with the current selection pre-filled — no other wizard step runs.
+- Any time after via `./setup.sh --reconfigure`. The reconfigure path renders only the selector with the current selection pre-filled — no other wizard step runs. (The Java install-time CLI exposes the same picker as `sudo aisandboxctl reconfigure`, which shells out to the very same selector.)
 
-The step is shaped as a generic numbered-menu checklist, not a single yes/no question, so future capabilities (e.g. an installed Rust toolchain, a Python interpreter + venv tooling) slot in by adding rows to the in-script catalog without restructuring the wizard.
+**Manifest-driven, version-bearing.** Capabilities are auto-discovered shell manifests at `devtools.d/<id>/manifest.sh` — adding one is dropping a directory, no selector/resolver edits. Each manifest's label embeds the **exact version** it will install (sourced from the same constants the install uses, so the label and the install can't drift), e.g. *"Java 21 (Temurin JDK 21.0.5+11)"* and *"Android SDK — platform-tools / build-tools 36.0.0 / android-36 (x86_64 emulator)"*.
 
-#### v1 capabilities
+**Dependencies.** Selecting a capability auto-selects its transitive dependencies (marked in the list); deselecting a capability that another selected one depends on prompts for confirmation and cascade-deselects on `y`. The committed selection is never internally inconsistent.
 
-**`dind` — Enable Docker-in-Docker (rootless)**
+**Eager-at-spawn provisioning + PATH.** Toolchains are installed **at spawn** (not baked into the image), into the persisted `/workspace/environment-utilities/<id>/` cache, before the session is handed over — so the session is ready immediately and pays no first-use install delay. When Java/Android are enabled, their binaries resolve by bare name in **both** login (`sh -lc`) and non-login (`sh -c`) shells, with `JAVA_HOME` / `ANDROID_HOME` / `ANDROID_SDK_ROOT` set. `spawn.sh` waits for an in-container readiness marker before reporting the session ready, and `attach.sh` tolerates the provisioning window.
+
+#### Capabilities
+
+The catalog ships exactly three capabilities — all **default OFF** on a fresh install:
+
+| id | what it installs |
+|---|---|
+| `dind` | rootless Docker-in-Docker daemon |
+| `java` | Temurin JDK 21 (standalone) |
+| `android` | Android SDK (cmdline-tools, platform-tools, build-tools, platform, x86_64 system image, emulator). **Depends on `java`; amd64-only** — shown disabled on other arches. See [Testing Android apps](#testing-android-apps-inside-the-sandbox). |
+
+**`dind` — Docker-in-Docker (rootless)**
 
 Lets code running inside a session start its own `docker` / `docker compose` commands without touching the host's Docker socket.
 
@@ -167,7 +152,7 @@ In developer mode, the host-side workspace and Claude config live **outside this
 1. **Server pin (highest).** When the management server drives a spawn it sets `AI_SANDBOX_WORKSPACE_HOST_PATH` (the per-session bind source) or `AI_SANDBOX_HOST_STATE_ROOT` (the install-mode state root, e.g. `/var/lib/ai-sandbox-server/sessions`). Either one short-circuits everything below — the server owns the path and developer-mode relocation is not consulted. `AI_SANDBOX_WORKSPACE_HOST_PATH` names *one session's* bind-mount source directly; `AI_SANDBOX_DEV_WORKSPACE_ROOT` (below) names the developer-mode *base* under which `workspace/`, `workspace-<N>/`, and `claude-config-<N>/` are created — they operate at different levels and never both apply.
 2. **Explicit operator override.** Set `AI_SANDBOX_DEV_WORKSPACE_ROOT=<dir>` and it is used verbatim as `<root>`. Use `AI_SANDBOX_DEV_WORKSPACE_ROOT=.` to deliberately keep the workspace inside the repo (the recorded in-repo opt-in — `spawn.sh` will warn but proceed).
 3. **Persisted choice.** The first interactive `setup.sh` writes the chosen absolute `<root>` to the gitignored `./.ai-sandbox-workspace-root` (per-machine, mirroring `.ai-sandbox-counter`). `spawn.sh` and `clean.sh` both read this frozen value so they always agree on where sessions live.
-4. **First-run default.** `$XDG_STATE_HOME/ai-sandbox` (i.e. `~/.local/state/ai-sandbox`) on Linux/macOS, `%LOCALAPPDATA%\ai-sandbox` on Windows.
+4. **First-run default.** `$XDG_STATE_HOME/ai-sandbox` (i.e. `~/.local/state/ai-sandbox`).
 
 So the shared workspace is `<root>/workspace`, an isolated session's is `<root>/workspace-<N>`, and per-session Claude configs are `<root>/claude-config-<N>`.
 
@@ -185,8 +170,7 @@ The prompt is shown **once** and the answer is frozen in `./.ai-sandbox-workspac
 ### Spawning additional sessions
 
 ```bash
-./spawn.sh         # Linux / macOS
-.\spawn.ps1        # Windows
+./spawn.sh
 ```
 
 Reads `./.ai-sandbox-counter` (atomically incremented inside a per-repo lock at `./.ai-sandbox-counter.lock/`), then brings up `ai-sandbox-<N>` via `docker compose -p ai-sandbox-<N> up -d` against the existing `docker-compose.yml`. The counter is **monotonic** — it never decreases, never repeats a previously issued value, and is not rolled back if `docker compose up` fails.
@@ -215,8 +199,7 @@ The `secrets/` mount is **always** shared (and always read-only) — one SSH key
 ### Attaching to a session
 
 ```bash
-./attach.sh         # Linux / macOS
-.\attach.ps1        # Windows
+./attach.sh
 ```
 
 Behavior depends on how many `ai-sandbox-*` Compose projects are **running**:
@@ -301,7 +284,7 @@ After that, `./setup.sh` starts everything fresh (rebuilds the image — slower)
 
 ## Remote management — the UC03 mTLS server
 
-Sitting alongside the Bash/PowerShell kit is a Java (21 LTS) Spring Boot
+Sitting alongside the Bash kit is a Java (21 LTS) Spring Boot
 service that exposes the same session operations — **list / spawn / kill
 / inspect** — plus **interactive tmux attach** over WebSocket-over-TLS,
 all on a single mTLS-gated port (default `12410`, bound to all
@@ -654,17 +637,17 @@ The default shared-workspace + shared-claude-config layout trades safety for erg
 
 ## How it works
 
-Claude is launched with `--dangerously-skip-permissions`, which disables every permission prompt — file writes, bash commands, network calls, all run without asking. This is safe *only* because the container itself is the trust boundary: Claude is confined to a non-root user inside Alpine, with no access to your host beyond the explicit bind mounts (`workspace/` or `workspace-<N>/`, `claude-config/` or `claude-config-<N>/`, and the read-only `secrets/` folder).
+Claude is launched with `--dangerously-skip-permissions`, which disables every permission prompt — file writes, bash commands, network calls, all run without asking. This is safe *only* because the container itself is the trust boundary: Claude is confined to a non-root user inside the Linux (Debian/glibc) container, with no access to your host beyond the explicit bind mounts (`workspace/` or `workspace-<N>/`, `claude-config/` or `claude-config-<N>/`, and the read-only `secrets/` folder).
 
 All git operations are expected to go over SSH; no HTTPS-specific configuration (custom CA cert, credential helper) is set up. `gh` is configured to use SSH for `git_protocol`, so `gh repo clone OWNER/REPO` works the same way as a plain `git clone git@github.com:OWNER/REPO.git`. If `secrets/gh-token` is present (created via the setup walkthrough), the entrypoint also runs `gh auth login --with-token` so `gh`'s API operations work — those still go to `api.github.com` over HTTPS via the system CA bundle.
 
-On boot, an entrypoint script copies the mounted SSH key into `~/.ssh/`, fixes its permissions (SSH refuses world-readable keys), writes an SSH config that pins the key to all hosts, then clones the bootstrap project if it isn't already there. With no command passed, it starts a [`tmux`](https://github.com/tmux/tmux) session named `main` running Claude with the project directory as its working directory, and keeps the container alive with `tail -f /dev/null`. That tmux setup is what makes the detach/reattach workflow possible: Claude is never bound to your terminal, so disconnecting your client doesn't kill it. The `attach.sh` / `attach.ps1` scripts enumerate running `ai-sandbox-*` projects via `docker compose ls --format json` (parsed with `jq` on POSIX, `ConvertFrom-Json` on PowerShell) and either auto-attach, prompt, or error based on the count.
+On boot, an entrypoint script copies the mounted SSH key into `~/.ssh/`, fixes its permissions (SSH refuses world-readable keys), writes an SSH config that pins the key to all hosts, then clones the bootstrap project if it isn't already there. With no command passed, it starts a [`tmux`](https://github.com/tmux/tmux) session named `main` running Claude with the project directory as its working directory, and keeps the container alive with `tail -f /dev/null`. That tmux setup is what makes the detach/reattach workflow possible: Claude is never bound to your terminal, so disconnecting your client doesn't kill it. The `attach.sh` script enumerates running `ai-sandbox-*` projects via `docker compose ls --format json` (parsed with `jq`) and either auto-attaches, prompts, or errors based on the count.
 
 The same entrypoint also supports a one-off mode (used by setup step 5): when given a command like `claude --dangerously-skip-permissions`, it runs the bootstrap and then `exec`'s that command instead of starting tmux. This is how the wizard pre-handles `/login`, the trust dialog, and the bypass-permissions warning — the dialogs fire in a disposable container, but Claude's state is written to the bind-mounted `claude-config/`, so the persistent sessions inherit the accepted state.
 
 Anything Claude can reach — your workspace files, the network, the SSH key (and therefore your git account), any credentials checked into a repo you cloned in — it can also modify or exfiltrate. The autonomous mode trades safety prompts for throughput; treat the workspace folder as "the agent could see and change this."
 
-Build-time, the image fetches three things from the network alongside Alpine `apk` packages and the npm install of `@anthropic-ai/claude-code`: the pinned `gitleaks` release tarball, the latest `rtk` release tarball (see below), and the Alpine package index. All three widen the supply-chain surface to the same degree — no checksum verification is currently done for any of them. Treat upstream compromise of those projects as in scope when you reason about what an attacker could land inside the container at build time.
+Build-time, the image fetches three things from the network alongside Debian `apt` packages (plus the GitHub CLI apt repo for `gh`) and the npm install of `@anthropic-ai/claude-code`: the pinned `gitleaks` release tarball, the latest `rtk` release tarball (see below), and the apt package indexes. All three widen the supply-chain surface to the same degree — no checksum verification is currently done for any of them. Treat upstream compromise of those projects as in scope when you reason about what an attacker could land inside the container at build time.
 
 ### Token compression (RTK)
 

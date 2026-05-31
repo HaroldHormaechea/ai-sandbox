@@ -90,9 +90,27 @@ class ReleaseBundleTest {
         assertThat(entries)
                 .contains("host/spawn.sh", "host/clean.sh", "host/attach.sh", "host/lib.sh", "host/setup.sh");
 
-        // AC4 — PowerShell counterparts (shipped, never invoked in v0.0.3).
+        // UC-27 AC#13 — PowerShell support is removed; the project is Linux-only.
+        // The .ps1 mirrors that used to ship under host/ MUST be gone from the
+        // bundle (no `host/*.ps1` entry at all).
         assertThat(entries)
-                .contains("host/spawn.ps1", "host/clean.ps1", "host/attach.ps1", "host/lib.ps1", "host/setup.ps1");
+                .as("UC-27 — the release bundle MUST NOT ship any PowerShell (.ps1) host scripts")
+                .noneMatch(e -> e.startsWith("host/") && e.endsWith(".ps1"));
+
+        // UC-27 AC#1,#2,#14 — the dev-tools selector + the auto-discovered
+        // capability manifest tree ship under host/ so the .deb/zip onboard path
+        // reaches the identical raw-mode selector and spawn.sh can discover the
+        // capabilities. devtools-select.sh is the standalone entry the Java CLI
+        // shells out to; devtools-ui.sh is the raw-mode UI it sources; the
+        // devtools.d/ manifests are the catalog (single source of truth, AC#4).
+        assertThat(entries)
+                .as("UC-27 — selector + manifest tree MUST ship in the bundle")
+                .contains(
+                        "host/devtools-select.sh",
+                        "host/devtools-ui.sh",
+                        "host/devtools.d/dind/manifest.sh",
+                        "host/devtools.d/java/manifest.sh",
+                        "host/devtools.d/android/manifest.sh");
 
         // AC5 — container build context co-located with the scripts.
         assertThat(entries).contains("host/docker-compose.yml", "host/SandboxDockerfile", "host/entrypoint.sh");
@@ -113,7 +131,7 @@ class ReleaseBundleTest {
         Map<String, Integer> modes = readPosixModes(zip);
 
         // UC22 § AC13 — docker-compose.kvm.yml ships beside docker-compose.yml
-        // (data file, mode 0644 like the .ps1 mirrors and SandboxDockerfile).
+        // (data file, mode 0644 like the other compose context + SandboxDockerfile).
         // spawn.sh resolves it as `$(dirname AI_SANDBOX_COMPOSE_FILE)/
         // docker-compose.kvm.yml`; if it is absent the /dev/kvm override
         // silently can't be layered (AC11/AC13 fail) for a zip/.deb/server-
@@ -303,17 +321,16 @@ class ReleaseBundleTest {
         // repo root. No operator-environment-specific paths get baked
         // in by the bundling step; the bytes match the repo originals
         // at the commit being released.
+        // UC-27 — Linux-only: the .ps1 mirrors are gone, so the verbatim-copy
+        // contract now covers only the POSIX host files + the container build
+        // context. The dev-tools selector scripts are byte-identity-checked in
+        // the dedicated UC-27 case below.
         List<String> hostFiles = List.of(
                 "spawn.sh",
                 "clean.sh",
                 "attach.sh",
                 "lib.sh",
                 "setup.sh",
-                "spawn.ps1",
-                "clean.ps1",
-                "attach.ps1",
-                "lib.ps1",
-                "setup.ps1",
                 "docker-compose.yml",
                 "SandboxDockerfile",
                 "entrypoint.sh");
@@ -333,6 +350,46 @@ class ReleaseBundleTest {
                 byte[] onDisk = Files.readAllBytes(original);
                 assertThat(inZip)
                         .as("byte-identity of host/%s vs %s", f, original)
+                        .isEqualTo(onDisk);
+            }
+        }
+    }
+
+    @Test
+    void uc27_bundled_devtools_selector_and_manifests_are_byte_identical_to_repo_originals() throws Exception {
+        Path zip = findZip();
+        assumeTrue(zip != null, "release bundle not built: ./gradlew :server:releaseBundle");
+
+        // UC-27 — the bundling step copies the dev-tools selector + the
+        // auto-discovered capability manifest tree verbatim from the repo root
+        // into host/, exactly as for the other host files. No templating at
+        // build time. devtools-select.sh is the standalone entry the Java CLI
+        // shells out to; devtools-ui.sh is the raw-mode UI; the devtools.d/
+        // manifests are the single-source-of-truth catalog (AC#2,#4).
+        Map<String, Path> bundled = new HashMap<>();
+        bundled.put("host/devtools-select.sh", REPO_ROOT.resolve("devtools-select.sh"));
+        bundled.put("host/devtools-ui.sh", REPO_ROOT.resolve("devtools-ui.sh"));
+        bundled.put("host/devtools.d/dind/manifest.sh", REPO_ROOT.resolve("devtools.d/dind/manifest.sh"));
+        bundled.put("host/devtools.d/java/manifest.sh", REPO_ROOT.resolve("devtools.d/java/manifest.sh"));
+        bundled.put("host/devtools.d/android/manifest.sh", REPO_ROOT.resolve("devtools.d/android/manifest.sh"));
+        bundled.put("host/devtools.d/lib/versions.sh", REPO_ROOT.resolve("devtools.d/lib/versions.sh"));
+        bundled.put("host/devtools.d/lib/provision.sh", REPO_ROOT.resolve("devtools.d/lib/provision.sh"));
+
+        try (ZipFile zf = new ZipFile(zip.toFile())) {
+            for (Map.Entry<String, Path> e : bundled.entrySet()) {
+                ZipEntry ze = zf.getEntry(e.getKey());
+                assertThat(ze).as("entry %s", e.getKey()).isNotNull();
+                byte[] inZip;
+                try (InputStream in = zf.getInputStream(ze)) {
+                    inZip = in.readAllBytes();
+                }
+                Path original = e.getValue();
+                assertThat(Files.exists(original))
+                        .as("repo original at %s", original)
+                        .isTrue();
+                byte[] onDisk = Files.readAllBytes(original);
+                assertThat(inZip)
+                        .as("byte-identity of %s vs %s", e.getKey(), original)
                         .isEqualTo(onDisk);
             }
         }

@@ -293,56 +293,162 @@ ai_sandbox_compose() {
     docker compose "${flags[@]}" "$@"
 }
 
-# ── UC26 — development-tools selection state ────────────────────────────────
+# ── UC27 — manifest-driven development-tools catalog ────────────────────────
 #
-# The operator's "Select the development tools you want to install" choices
-# persist as one whitespace-separated record per line: `<id>     <apply_at>`.
-# `apply_at` is `image-build` or `session-spawn`. Comments and blank lines
-# tolerated. v1's only entry is `dind` at `session-spawn`. Future capabilities
-# (Rust toolchain, Python interpreter, etc.) slot in by adding catalog rows
-# and a matching `apply_at` mechanism; the wizard step itself does not change.
+# Capabilities are auto-discovered, sourced shell manifests at
+# `devtools.d/<id>/manifest.sh` (AC#2). Each manifest declares `ID`, a
+# version-bearing `LABEL`, `DEPENDS_ON` (array of capability ids), an optional
+# `WARNING`, `APPLY_AT` (`session-spawn`), `ARCH` (`any`|`amd64`|…), and two hook
+# functions: `devtool_spawn_env` (host-side env/compose wiring, run by spawn.sh)
+# and `devtool_provision` (in-container install + PATH wiring, run by
+# entrypoint.sh). Adding a capability is dropping a directory here — no edits to
+# the selector, resolver, persistence, or injection code.
+#
+# The operator's selection persists as one record per line: `<id>\t<apply_at>`.
+# Comments and blank lines are tolerated.
 AISB_DEVTOOLS_FILE="${AISB_DEVTOOLS_FILE:-.ai-sandbox-devtools}"
 
-# Static catalog. Each row: `<id>|<apply_at>|<label>|<warning>`. The warning is
-# inlined by the wizard at the moment of selection (AC#3). To add a capability,
-# append a new row here AND the matching apply_at mechanism (a build arg for
-# image-build, a compose override + env injection for session-spawn).
-_aisb_devtool_catalog() {
-    printf '%s\n' \
-        'dind|session-spawn|Enable Docker-in-Docker (rootless; lets sessions run docker / docker compose inside their sandbox container)|Enabling Docker-in-Docker (rootless) lets code running inside a session start its own docker / docker compose commands. The rootless daemon runs as the non-root session user with no host-socket bind, so it does NOT widen the host trust boundary — but it DOES widen what code inside a session can reach (the session can now launch and inspect containers). Project policy is "the container is the trust boundary"; enabling this is a deliberate, opt-in expansion of that boundary.'
+# Resolve devtools.d/ relative to THIS file's own location so discovery works
+# regardless of cwd (developer mode: repo root; install mode: the host bundle
+# dir under /opt/ai-sandbox-server/host/). Override with AISB_DEVTOOLS_DIR.
+if [ -z "${AISB_LIB_DIR:-}" ]; then
+    AISB_LIB_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd)"
+fi
+AISB_DEVTOOLS_DIR="${AISB_DEVTOOLS_DIR:-$AISB_LIB_DIR/devtools.d}"
+
+# aisb_host_arch → normalize `uname -m` to amd64|arm64|<raw>. Used to gate
+# arch-restricted capabilities (Android is amd64-only — AC#11).
+aisb_host_arch() {
+    case "$(uname -m)" in
+        x86_64|amd64)  printf 'amd64' ;;
+        aarch64|arm64) printf 'arm64' ;;
+        *)             uname -m ;;
+    esac
 }
 
-# _aisb_devtool_field ID FIELD_NUM → echo the FIELD_NUM'th `|`-delimited field
-# of ID's catalog row. FIELD_NUM is 1-indexed; 1=id, 2=apply_at, 3=label,
-# 4=warning. Returns non-zero when ID is unknown.
-_aisb_devtool_field() {
-    local id="$1" field="$2" row
-    while IFS= read -r row; do
-        case "$row" in
-            "${id}|"*)
-                printf '%s' "$row" | awk -F'|' -v f="$field" '{print $f}'
-                return 0
-                ;;
-        esac
-    done < <(_aisb_devtool_catalog)
-    return 1
+# _aisb_manifest_path ID → echo the path to ID's manifest.sh; non-zero if absent.
+_aisb_manifest_path() {
+    local p="$AISB_DEVTOOLS_DIR/$1/manifest.sh"
+    [ -f "$p" ] || return 1
+    printf '%s' "$p"
 }
 
-# devtool_label ID → echo the human-readable label for ID; non-zero if unknown.
-devtool_label() { _aisb_devtool_field "$1" 3; }
-
-# devtool_apply_at ID → echo `image-build` or `session-spawn`; non-zero if unknown.
-devtool_apply_at() { _aisb_devtool_field "$1" 2; }
-
-# devtool_warning ID → echo the inline trust-boundary warning; non-zero if unknown.
-devtool_warning() { _aisb_devtool_field "$1" 4; }
-
-# devtool_catalog_ids → emit one ID per line, in catalog order.
+# devtool_catalog_ids → emit one capability ID per line, in byte-stable
+# sorted-glob order. The deterministic order is what makes the persisted ledger
+# reproducible and lets the shell be the single source of truth (AC#4).
 devtool_catalog_ids() {
-    local row
-    while IFS= read -r row; do
-        printf '%s\n' "${row%%|*}"
-    done < <(_aisb_devtool_catalog)
+    local m
+    for m in "$AISB_DEVTOOLS_DIR"/*/manifest.sh; do
+        [ -f "$m" ] || continue
+        basename "$(dirname "$m")"
+    done | LC_ALL=C sort
+}
+
+# _aisb_manifest_field ID VAR → source ID's manifest in a SUBSHELL and echo VAR's
+# value (ID/LABEL/APPLY_AT/ARCH/WARNING). For DEPENDS_ON, emit one element per
+# line. The subshell isolates each manifest's identically-named hook functions
+# so they never collide in the caller. Returns non-zero if the manifest is
+# missing or fails to source.
+_aisb_manifest_field() {
+    local id="$1" var="$2" path
+    path="$(_aisb_manifest_path "$id")" || return 1
+    (
+        ID="" LABEL="" APPLY_AT="" ARCH="" WARNING=""
+        DEPENDS_ON=()
+        # shellcheck disable=SC1090
+        . "$path" || exit 1
+        if [ "$var" = "DEPENDS_ON" ]; then
+            local d
+            for d in ${DEPENDS_ON[@]+"${DEPENDS_ON[@]}"}; do printf '%s\n' "$d"; done
+        else
+            eval "printf '%s' \"\${$var-}\""
+        fi
+    )
+}
+
+# devtool_label ID → version-bearing human label; non-zero if unknown.
+devtool_label() { _aisb_manifest_field "$1" LABEL; }
+
+# devtool_apply_at ID → `session-spawn` (default when unset); non-zero if unknown.
+devtool_apply_at() {
+    local v
+    v="$(_aisb_manifest_field "$1" APPLY_AT)" || return 1
+    printf '%s' "${v:-session-spawn}"
+}
+
+# devtool_warning ID → inline trust-boundary warning (empty when none).
+devtool_warning() { _aisb_manifest_field "$1" WARNING; }
+
+# devtool_arch ID → required arch (`any` default); non-zero if unknown.
+devtool_arch() {
+    local v
+    v="$(_aisb_manifest_field "$1" ARCH)" || return 1
+    printf '%s' "${v:-any}"
+}
+
+# devtool_depends_on ID → emit ID's DIRECT dependency ids, one per line.
+devtool_depends_on() { _aisb_manifest_field "$1" DEPENDS_ON; }
+
+# devtool_is_available ID → 0 if ID can run on this host's arch. ARCH=any (or
+# unset) → always available; otherwise it must equal the host arch. The selector
+# uses this to show, but disable, arch-incompatible rows (AC#11) rather than
+# offering-then-breaking them.
+devtool_is_available() {
+    local arch
+    arch="$(devtool_arch "$1" 2>/dev/null || true)"
+    [ -z "$arch" ] && arch="any"
+    [ "$arch" = "any" ] && return 0
+    [ "$arch" = "$(aisb_host_arch)" ]
+}
+
+# devtool_deps_transitive ID → emit ID's full transitive DEPENDS_ON set (NOT ID
+# itself), each id once, in discovery order. Worklist (no recursion) so it is
+# robust under `set -u`. Used by the selector to auto-select dependencies (AC#5).
+devtool_deps_transitive() {
+    local seen=" " queue=() cur dep
+    while IFS= read -r dep; do [ -n "$dep" ] && queue+=("$dep"); done < <(devtool_depends_on "$1")
+    while [ "${#queue[@]}" -gt 0 ]; do
+        cur="${queue[0]}"
+        queue=("${queue[@]:1}")
+        case "$seen" in *" $cur "*) continue ;; esac
+        seen="$seen$cur "
+        printf '%s\n' "$cur"
+        while IFS= read -r dep; do [ -n "$dep" ] && queue+=("$dep"); done < <(devtool_depends_on "$cur")
+    done
+}
+
+# devtool_dependents_among ID [CANDIDATE...] → among the CANDIDATE ids, emit
+# those that transitively depend on ID (one per line). Used by the selector to
+# cascade-deselect dependents when ID is turned off (AC#5).
+devtool_dependents_among() {
+    local target="$1" cand dep
+    shift
+    for cand in "$@"; do
+        [ "$cand" = "$target" ] && continue
+        while IFS= read -r dep; do
+            if [ "$dep" = "$target" ]; then
+                printf '%s\n' "$cand"
+                break
+            fi
+        done < <(devtool_deps_transitive "$cand")
+    done
+}
+
+# _aisb_append_compose_override FILENAME → append FILENAME to
+# AI_SANDBOX_EXTRA_COMPOSE_FILES, resolved next to the active base compose file
+# when AI_SANDBOX_COMPOSE_FILE is set (install mode) or in cwd (developer mode).
+# Warns and skips if the file is missing. Shared by every manifest's
+# devtool_spawn_env hook so the compose-layering rule lives in one place.
+_aisb_append_compose_override() {
+    local name="$1" path="$1"
+    if [ -n "${AI_SANDBOX_COMPOSE_FILE:-}" ]; then
+        path="$(dirname "$AI_SANDBOX_COMPOSE_FILE")/$name"
+    fi
+    if [ -f "$path" ]; then
+        export AI_SANDBOX_EXTRA_COMPOSE_FILES="${AI_SANDBOX_EXTRA_COMPOSE_FILES:+$AI_SANDBOX_EXTRA_COMPOSE_FILES }$path"
+    else
+        warn "Compose override $path missing — sessions will start without it." >&2
+    fi
 }
 
 # devtool_is_enabled ID → 0 if ID is listed in the devtools file (first column).
@@ -377,93 +483,78 @@ read_enabled_devtools() {
     done < "$AISB_DEVTOOLS_FILE"
 }
 
-# write_enabled_devtools [ID...] → truncate + rewrite the devtools file. Each
-# ID's apply_at is resolved from the catalog so the persisted record carries
-# both columns. Unknown IDs are skipped with a warning. Zero args → empty file.
+# write_enabled_devtools [ID...] → truncate + rewrite the devtools file. The
+# enabled ids are written in catalog (sorted-glob) order — NOT argument order —
+# so the persisted ledger is byte-stable regardless of the selection sequence,
+# which is what lets the shell be the single source of truth (AC#4). Each id's
+# apply_at is resolved from its manifest. Ids with no manifest are dropped (a
+# stale ledger self-heals on rewrite; no migration code — AC#7). Zero enabled →
+# empty file.
 write_enabled_devtools() {
     : > "$AISB_DEVTOOLS_FILE"
-    local id apply_at
-    for id in "$@"; do
-        apply_at="$(devtool_apply_at "$id" || true)"
-        if [ -z "$apply_at" ]; then
-            warn "Unknown devtool id '$id' — skipping." >&2
-            continue
-        fi
-        printf '%s\t%s\n' "$id" "$apply_at" >> "$AISB_DEVTOOLS_FILE"
-    done
+    local want=" $* " id apply_at
+    while IFS= read -r id; do
+        case "$want" in
+            *" $id "*)
+                apply_at="$(devtool_apply_at "$id" 2>/dev/null || true)"
+                [ -n "$apply_at" ] || apply_at="session-spawn"
+                printf '%s\t%s\n' "$id" "$apply_at" >> "$AISB_DEVTOOLS_FILE"
+                ;;
+        esac
+    done < <(devtool_catalog_ids)
 }
 
 # inject_devtool_spawn_env → consult the persisted ledger and, for each enabled
-# capability whose `apply_at` is `session-spawn`, export the env vars / append
-# the compose override files that spawn.sh needs. Idempotent. The injection
-# layer is per-capability so future spawn-time tools (e.g. a heavyweight
-# Python venv mount) compose without touching spawn.sh again.
+# capability, source its manifest and invoke the host-side `devtool_spawn_env`
+# hook (env exports + compose-override appends). Also exports the generic
+# `AI_SANDBOX_DEVTOOLS` list (space-separated enabled ids, catalog order) that
+# the container's entrypoint reads to drive provisioning. Generic — adding a
+# capability needs no edit here (AC#2,#3). Manifests are sourced one at a time
+# into the live shell and the hooks unset between, so the identically-named
+# hooks never collide.
 inject_devtool_spawn_env() {
-    local id
+    local id manifest enabled=()
     while IFS= read -r id; do
-        case "$id" in
-            dind)
-                # Tell entrypoint.sh + the rootless daemon helper to start.
-                export AI_SANDBOX_DEVTOOL_DIND=1
-                # Layer docker-compose.dind.yml over the base.
-                local dind_override="docker-compose.dind.yml"
-                if [ -n "${AI_SANDBOX_COMPOSE_FILE:-}" ]; then
-                    dind_override="$(dirname "$AI_SANDBOX_COMPOSE_FILE")/docker-compose.dind.yml"
-                fi
-                if [ -f "$dind_override" ]; then
-                    export AI_SANDBOX_EXTRA_COMPOSE_FILES="${AI_SANDBOX_EXTRA_COMPOSE_FILES:+$AI_SANDBOX_EXTRA_COMPOSE_FILES }$dind_override"
-                else
-                    warn "DinD enabled but $dind_override missing — sessions will start without the DinD override." >&2
-                fi
-                ;;
-            *) ;; # image-build capabilities (none today) need no spawn-time env.
-        esac
+        [ -n "$id" ] || continue
+        enabled+=("$id")
     done < <(read_enabled_devtools)
-}
 
-# ── UC22 — toolchain selection state ─────────────────────────────────────────
-#
-# The operator's optional-toolchain choices (e.g. "android") persist in a
-# gitignored newline-delimited file at the repo root (cwd of setup.sh). They
-# drive `docker compose build` build args and survive rebuild + re-spawn.
-AISB_TOOLCHAINS_FILE="${AISB_TOOLCHAINS_FILE:-.ai-sandbox-toolchains}"
+    # Export the generic list (catalog order via write-time stability) so the
+    # entrypoint can loop over it. Empty selection → var unset → byte-identical
+    # to today's no-devtools session (AC#12).
+    if [ "${#enabled[@]}" -gt 0 ]; then
+        export AI_SANDBOX_DEVTOOLS="${enabled[*]}"
+    fi
 
-# toolchain_is_enabled ID → 0 if ID is listed in the toolchains file.
-toolchain_is_enabled() {
-    [ -f "$AISB_TOOLCHAINS_FILE" ] || return 1
-    grep -qxF "$1" "$AISB_TOOLCHAINS_FILE"
-}
-
-# write_enabled_toolchains [ID...] → truncate + rewrite the toolchains file.
-# Zero args writes an empty file (base image only).
-write_enabled_toolchains() {
-    : > "$AISB_TOOLCHAINS_FILE"
-    local id
-    for id in "$@"; do
-        printf '%s\n' "$id" >> "$AISB_TOOLCHAINS_FILE"
+    for id in ${enabled[@]+"${enabled[@]}"}; do
+        manifest="$(_aisb_manifest_path "$id" 2>/dev/null)" || {
+            warn "Enabled devtool '$id' has no manifest under $AISB_DEVTOOLS_DIR — skipping." >&2
+            continue
+        }
+        unset -f devtool_spawn_env devtool_provision 2>/dev/null || true
+        ID="" LABEL="" APPLY_AT="" ARCH="" WARNING=""
+        DEPENDS_ON=()
+        # shellcheck disable=SC1090
+        . "$manifest" || { warn "Failed to source manifest for '$id'." >&2; continue; }
+        if declare -F devtool_spawn_env >/dev/null 2>&1; then
+            devtool_spawn_env || warn "spawn-env hook for '$id' returned non-zero." >&2
+        fi
     done
+    unset -f devtool_spawn_env devtool_provision 2>/dev/null || true
 }
 
-# image_supports_android [IMAGE] → 0 if the built image carries the Android
-# toolchain label (stamped by SandboxDockerfile when ANDROID_TESTING=1). This
-# is the runtime source of truth for KVM passthrough — independent of the
-# build-time state file, so it works identically for developer-mode and
-# management-server-spawned sessions.
-image_supports_android() {
-    local img="${1:-ai-context:latest}" val=""
-    val="$(docker image inspect "$img" \
-        --format '{{ index .Config.Labels "com.ai-sandbox.toolchain.android" }}' 2>/dev/null || true)"
-    [ "$val" = "1" ]
-}
-
-# UC22 (AC6 fallback) — glibc base for the Android variant. The emulator's QEMU
-# binary can't load under gcompat on musl (missing posix_fallocate64), so the
-# Android image is built on a glibc (Debian) base. node:20-bookworm-slim is a
-# Debian-bookworm glibc base that already ships a modern Node + npm (Claude Code
-# needs Node 18+; bookworm's apt nodejs is only 18, so we use the node image to
-# keep a current runtime without a NodeSource step). An operator can override
-# via AI_SANDBOX_ANDROID_BASE (e.g. ubuntu:24.04 to match CI's ubuntu-latest).
-AISB_ANDROID_BASE_DEFAULT="${AISB_ANDROID_BASE_DEFAULT:-node:20-bookworm-slim}"
+# ── UC27 — retired: UC-22 toolchain ledger / image-label helpers ─────────────
+#
+# `.ai-sandbox-toolchains`, `toolchain_is_enabled`, `write_enabled_toolchains`,
+# `image_supports_android`, `export_android_build_env`, and
+# `AISB_ANDROID_BASE_DEFAULT` are GONE. Android is no longer a build-time image
+# flavour stamped with a label — it is an opt-in capability configured through
+# the devtools selector and provisioned eagerly at spawn (no migration; a stale
+# `.ai-sandbox-toolchains` file is simply ignored — AC#7,#8). KVM passthrough is
+# now gated on "the `android` capability is enabled AND /dev/kvm is present",
+# handled by the android manifest's devtool_spawn_env (which calls host_kvm_gid
+# below and layers docker-compose.kvm.yml). The single glibc base means there is
+# no base-image flip to choose anymore.
 
 # host_kvm_gid — echo the host's kvm group GID, or "0" if there is no kvm group.
 # Used by spawn.sh to pass /dev/kvm's group as a supplementary group into the
@@ -481,21 +572,6 @@ host_kvm_gid() {
         gid="$(getent group kvm 2>/dev/null | cut -d: -f3 || true)"
     fi
     printf '%s' "${gid:-0}"
-}
-
-# export_android_build_env ENABLED — set the build args `docker compose build`
-# reads for the Android variant. ENABLED is 0/1 (or non-empty/empty). When
-# enabled, exports AI_SANDBOX_ANDROID_BASE (honouring an operator override) so
-# compose flips FROM onto the glibc base; when disabled, leaves it unset so
-# compose's `${AI_SANDBOX_ANDROID_BASE:-alpine:latest}` keeps the lean Alpine
-# image byte-identical to pre-UC22 (AC4). Idempotent; safe to call before any
-# build.
-export_android_build_env() {
-    local enabled="${1:-0}"
-    if [ "$enabled" = "1" ]; then
-        export AI_SANDBOX_TOOLCHAIN_ANDROID=1
-        export AI_SANDBOX_ANDROID_BASE="${AI_SANDBOX_ANDROID_BASE:-$AISB_ANDROID_BASE_DEFAULT}"
-    fi
 }
 
 # ── Dev-mode workspace root (relocate-out-of-tree) ───────────────────────────
@@ -577,8 +653,8 @@ aisb_dev_workspace_root() {
 }
 
 # aisb_write_dev_workspace_root ABS_PATH → persist ABS_PATH to the state file
-# (mirrors write_enabled_toolchains' truncate-and-write style). Caller is
-# responsible for passing an absolute path; we store it verbatim.
+# (truncate-and-write). Caller is responsible for passing an absolute path; we
+# store it verbatim.
 aisb_write_dev_workspace_root() {
     printf '%s\n' "$1" > "$AISB_DEV_WORKSPACE_STATE_FILE"
 }
