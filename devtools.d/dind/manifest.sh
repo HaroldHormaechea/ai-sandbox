@@ -21,7 +21,7 @@ LABEL="Docker-in-Docker (rootless dockerd ${AISB_DIND_DOCKER_VERSION})"
 DEPENDS_ON=()
 APPLY_AT="session-spawn"
 ARCH="any"
-WARNING='Enabling Docker-in-Docker (rootless) lets code running inside a session start its own docker / docker compose commands. The rootless daemon runs as the non-root session user with no host-socket bind, so it does NOT widen the host trust boundary — but it DOES widen what code inside a session can reach (the session can now launch and inspect containers). Project policy is "the container is the trust boundary"; enabling this is a deliberate, opt-in expansion of that boundary.'
+WARNING='Enabling Docker-in-Docker (rootless) lets code running inside a session start its own docker / docker compose commands. The rootless daemon runs as the non-root session user with no host-socket bind, so it does NOT widen the HOST trust boundary. It DOES widen the per-session boundary: the session can launch and inspect containers, and to make the nested rootless daemon start on a hardened kernel the session container is granted CAP_SYS_ADMIN, /dev/net/tun, and unconfined apparmor/seccomp. Project policy is "the container is the trust boundary"; enabling this is a deliberate, opt-in expansion of that boundary.'
 
 # Host-side (spawn.sh): flag the capability for the container and layer the
 # DinD compose override (/dev/fuse + unconfined apparmor/seccomp for rootless

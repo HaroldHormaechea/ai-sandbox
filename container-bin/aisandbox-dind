@@ -133,7 +133,12 @@ cmd_install() {
 
     local tmp
     tmp="$(mktemp -d)"
-    trap 'rm -rf "$tmp"' EXIT
+    # Guard the cleanup against `set -u`: this EXIT trap fires at SCRIPT exit,
+    # which (on the common cache-hit / success path) is AFTER cmd_install has
+    # returned and its `local tmp` has gone out of scope. A bare `"$tmp"` would
+    # then abort the trap with "tmp: unbound variable". `${tmp:-}` + the -n guard
+    # make it a no-op when the local is no longer in scope.
+    trap '[ -n "${tmp:-}" ] && rm -rf "$tmp"' EXIT
     log "Downloading $engine_url …"
     curl -fsSL -o "$tmp/engine.tgz" "$engine_url" || die "Failed to download $engine_url"
     log "Downloading $rootless_url …"
@@ -190,11 +195,16 @@ cmd_start() {
     log "Starting rootless dockerd (logs: $LOG_FILE)..."
     # Run in background; nohup so the daemon survives a `docker compose exec`
     # tmux window that started us. dockerd-rootless.sh expects `dockerd` on
-    # PATH (set above). We pass `--data-root` after `--` so it reaches dockerd.
+    # PATH (set above). We pass `--data-root`/`--exec-root` through to dockerd.
+    #
+    # We do NOT pass `--pidfile "$PID_FILE"` to dockerd: that file is owned by the
+    # `echo "$!"` below, which records the dockerd-rootless.sh WRAPPER pid (what
+    # cmd_stop kills). dockerd's own `--pidfile` would write the inner dockerd pid
+    # to the SAME path, clobbering the wrapper pid in a race — the "--pidfile
+    # double-use" bug. dockerd-rootless.sh does not require a pidfile to run.
     nohup "$BIN_DIR/dockerd-rootless.sh" \
         --data-root "$VAR_DIR/lib-docker" \
         --exec-root "$VAR_DIR/run-docker" \
-        --pidfile "$PID_FILE" \
         >>"$LOG_FILE" 2>&1 &
     echo "$!" > "$PID_FILE"
 
@@ -292,7 +302,8 @@ cmd_selftest() {
 
     local tmpdir
     tmpdir="$(mktemp -d)"
-    trap 'rm -rf "$tmpdir"' EXIT
+    # Same `set -u` EXIT-trap guard as cmd_install (see note there).
+    trap '[ -n "${tmpdir:-}" ] && rm -rf "$tmpdir"' EXIT
     local compose_file="$tmpdir/selftest.yml"
 
     # alpine + tmux — both are tiny, ubiquitous, and `tmux -V` is a clear
