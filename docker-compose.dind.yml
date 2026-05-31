@@ -47,8 +47,34 @@ services:
   claude-sandbox:
     devices:
       - "/dev/fuse:/dev/fuse"
+      # UC-27 fix — rootlesskit's slirp4netns networking creates a TAP device for
+      # the rootless network namespace; without /dev/net/tun passed in, network
+      # setup fails on this host. Pairs with the `iproute2` + `slirp4netns`
+      # packages added to SandboxDockerfile.
+      - "/dev/net/tun:/dev/net/tun"
+    # UC-27 fix — on this hardened kernel the nested rootless daemon needs
+    # CAP_SYS_ADMIN to create/join the user+mount namespaces and mount
+    # fuse-overlayfs (rootlesskit's newuidmap/newgidmap + unshare path). Without
+    # it dockerd-rootless aborts during namespace setup even with uidmap present.
+    # This is an additional, deliberate per-session privilege grant (see the dind
+    # manifest WARNING) — it does NOT mount the host docker socket, so the HOST
+    # trust boundary is unchanged.
+    cap_add:
+      - SYS_ADMIN
     security_opt:
+      # seccomp tightening evaluated: a custom profile was considered, but the
+      # nested rootless dockerd still issues clone/unshare/mount/keyctl syscalls
+      # that the default Docker seccomp profile blocks, so `unconfined` remains
+      # the pragmatic choice for the DinD session (the capability is opt-in and
+      # the warning is surfaced at selection time). apparmor likewise unconfined
+      # because rootless dockerd's nested mounts collide with the default profile.
       - "apparmor:unconfined"
       - "seccomp:unconfined"
+      # UC-27 fix — un-mask /proc on the session container (MaskedPaths=[]). Docker
+      # masks several /proc paths by default; the kernel then refuses to let the
+      # INNER runc mount a fresh /proc over the masked one, so `docker run` fails
+      # with `error mounting "proc" to rootfs ... operation not permitted`. This
+      # un-masks /proc for the DinD session so nested containers can mount it.
+      - "systempaths=unconfined"
     environment:
       AI_SANDBOX_DEVTOOL_DIND: "1"

@@ -47,7 +47,24 @@ RUN set -eu; \
       > /etc/apt/sources.list.d/github-cli.list; \
     apt-get update -qq; \
     apt-get install -y --no-install-recommends \
-      git ripgrep bash tmux gh openssh-client unzip; \
+      git ripgrep bash tmux gh openssh-client unzip \
+      uidmap slirp4netns fuse-overlayfs dbus-user-session iproute2 iptables; \
+    # UC-27 — rootless-Docker prerequisites for the `dind` capability. The
+    # Alpine base provided these via apk (shadow-uidmap / slirp4netns /
+    # fuse-overlayfs); the glibc/Debian flip must install the apt equivalents or
+    # `dockerd-rootless.sh` dies with `newuidmap: executable file not found`:
+    #   uidmap            → newuidmap / newgidmap (the immediate blocker: sub-uid
+    #                       /sub-gid mapping for the rootless userns)
+    #   slirp4netns       → rootless networking (else it falls back to the absent
+    #                       vpnkit and networking fails)
+    #   fuse-overlayfs    → rootless storage driver (avoids the slow vfs fallback)
+    #   dbus-user-session → recommended for the rootless/systemd-user session
+    #   iproute2          → `ip` — required by slirp4netns / rootlesskit to set up
+    #                       the rootless network namespace
+    #   iptables          → rootless dockerd's bridge NAT (it creates the DOCKER
+    #                       NAT chain at "Loading containers"; without it the daemon
+    #                       dies with `iptables not found`). iptables-nft on Debian 12.
+    # Dormant unless the `dind` capability is enabled; harmless otherwise.
     # node:*-bookworm-slim ships Node + npm preinstalled; only install via apt
     # when the base did not (defensive — keeps a plain debian base working).
     if ! command -v node >/dev/null 2>&1; then \
