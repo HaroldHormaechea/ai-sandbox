@@ -779,29 +779,48 @@ class OnboardCommandTest {
 
     @Test
     void tty_run_with_dind_enabled_persists_ledger_into_sessions_dir(@TempDir Path tmp) throws Exception {
-        // End-to-end wiring — onboard pipes its sessions-dir + ConsoleIO
-        // into DevToolsStep and the resulting ledger lands at the right
-        // path. Exercises the AC#7 spawn-time read path: the wizard's
-        // write path = the spawn.sh read path by construction (the same
-        // sessions-dir / .ai-sandbox-devtools).
+        // UC-27 — onboard pipes its sessions-dir + ConsoleIO into DevToolsStep,
+        // which now DELEGATES to the shared shell selector (devtools-select.sh)
+        // via ProcessRunner.runInheritIO. We point --devtools-selector at a fake
+        // selector that the injected runner "runs": it persists `dind` (the
+        // side-effect a real raw-mode commit produces) and exits 0 → APPLIED.
+        // This proves the AC#7 wiring — onboard's write path = the spawn.sh read
+        // path (the same sessions-dir / .ai-sandbox-devtools) — without a TTY.
         Layout layout = layout(tmp);
         layout.seedPkiPresent();
         layout.seedSecretsPresent();
 
+        Path selector = tmp.resolve("devtools-select.sh");
+        Files.writeString(selector, "#!/usr/bin/env bash\n");
+
         FakeProcessRunner runner = permissiveRunner();
+        runner.inheritResponse = argv -> {
+            try {
+                // argv = [bash, <selector>, <ledger>]
+                com.aisandbox.server.cli.secrets.DevToolsConfig.writeEnabled(
+                        Path.of(argv.get(2)), java.util.Set.of("dind"));
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+            return 0;
+        };
         FakeConsoleIO io = new FakeConsoleIO();
         io.tty = true;
-        io.inputLines.add("1"); // toggle dind on
-        io.inputLines.add("y"); // confirm trust-boundary warning
-        io.inputLines.add(""); // commit
 
         ByteArrayOutputStream outBuf = new ByteArrayOutputStream();
         ByteArrayOutputStream errBuf = new ByteArrayOutputStream();
         int exit = executeCapturing(
-                new CommandLine(onboard(runner, io, tmp.resolve("ssh-dir"))), args(layout), outBuf, errBuf);
+                new CommandLine(onboard(runner, io, tmp.resolve("ssh-dir"))),
+                args(layout, "--devtools-selector", selector.toString()),
+                outBuf,
+                errBuf);
 
         assertThat(exit).isZero();
+        // The selector was shelled out with `bash <selector> <ledger>` pointing
+        // at the sessions-dir ledger.
         Path ledger = layout.sessionsDir().resolve(".ai-sandbox-devtools");
+        assertThat(runner.inheritCalls)
+                .anySatisfy(c -> assertThat(c).containsExactly("bash", selector.toString(), ledger.toString()));
         assertThat(ledger).exists();
         assertThat(com.aisandbox.server.cli.secrets.DevToolsConfig.readEnabled(ledger))
                 .containsExactly("dind");
