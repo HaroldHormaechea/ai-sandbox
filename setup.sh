@@ -6,6 +6,10 @@ cd "$(dirname "$0")"
 # Shared helpers (color/format primitives, prompt_field, session enumeration).
 # shellcheck source=lib.sh
 . "$(dirname "$0")/lib.sh"
+# UC-27 — the manifest-driven raw-mode devtools selector (shared with the Java
+# install-time CLI via devtools-select.sh).
+# shellcheck source=devtools-ui.sh
+. "$(dirname "$0")/devtools-ui.sh"
 
 # ── UC26 — --reconfigure: jump straight to the devtools step ─────────────────
 # Parsed at the very top so the flag short-circuits BEFORE the welcome screen
@@ -212,127 +216,14 @@ EOF
     chmod 644 secrets/gitconfig
 }
 
-# ── UC26 — devtools step ─────────────────────────────────────────────────────
-# Renders the "Select the development tools you want to install" checklist,
-# toggles entries by number, prompts for the inline trust-boundary warning when
-# enabling a new spawn-time capability, and persists the result via
-# write_enabled_devtools.
-#
-# Shape is shared between fresh-install (Step 6 of 7) and `--reconfigure` (run
-# under a banner with no surrounding wizard). Caller renders the screen header
-# / reconfigure banner before invoking this function. Honours /skip and /exit
-# the same way as the other wizard steps.
-run_devtools_step() {
-    # Snapshot every catalog ID + each one's current enabled state. Operating
-    # on a snapshot lets numeric input flip a bit without re-reading the file
-    # every keystroke; the file is only rewritten on commit.
-    local ids=() id state_line
-    while IFS= read -r id; do
-        [ -n "$id" ] && ids+=("$id")
-    done < <(devtool_catalog_ids)
-
-    if [ "${#ids[@]}" -eq 0 ]; then
-        warn "No development-tool capabilities are registered in the catalog."
-        return 0
-    fi
-
-    # `selected` is a parallel array of 0/1 flags indexed alongside `ids`.
-    local i=0 selected=()
-    for id in "${ids[@]}"; do
-        if devtool_is_enabled "$id"; then selected[$i]=1; else selected[$i]=0; fi
-        i=$(( i + 1 ))
-    done
-
-    info "Pick optional development tools to provision into the sessions"
-    info "your sandbox spawns. Each entry below is a toggle:"
-    hr
-    info "Type a number to flip an entry, then press Enter to commit."
-    printf "  Type %s/skip%s to leave the current selection unchanged, or %s/exit%s to quit.\n" \
-        "$MAGENTA" "$RESET" "$MAGENTA" "$RESET"
-    hr
-
-    local last_error=""
-    while true; do
-        # Render the checklist.
-        for i in "${!ids[@]}"; do
-            id="${ids[$i]}"
-            local mark=" "
-            [ "${selected[$i]}" = "1" ] && mark="x"
-            printf "    [%s] %d. %s\n" "$mark" "$((i + 1))" "$(devtool_label "$id")"
-        done
-        hr
-        [ -n "$last_error" ] && { warn "$last_error"; last_error=""; }
-        printf "  > "
-        local resp
-        IFS= read -r resp || break
-        case "$resp" in
-            ""|/skip)
-                break
-                ;;
-            /exit)
-                echo "  Exiting setup."
-                exit 0
-                ;;
-            *)
-                if [[ "$resp" =~ ^[0-9]+$ ]] && [ "$resp" -ge 1 ] && [ "$resp" -le "${#ids[@]}" ]; then
-                    local idx=$(( resp - 1 ))
-                    local target_id="${ids[$idx]}"
-                    if [ "${selected[$idx]}" = "0" ]; then
-                        # Enabling a spawn-time capability surfaces the trust-
-                        # boundary warning before commit (AC#3). For image-time
-                        # capabilities (none today) the same hook applies if a
-                        # warning is registered in the catalog.
-                        local warning
-                        warning="$(devtool_warning "$target_id" || true)"
-                        if [ -n "$warning" ]; then
-                            hr
-                            warn "$warning"
-                            hr
-                            printf "  Continue? [y/N]: "
-                            local confirm
-                            IFS= read -r confirm || confirm=""
-                            case "$confirm" in
-                                [yY]|[yY][eE][sS])
-                                    selected[$idx]=1
-                                    ok "Enabled: $(devtool_label "$target_id")"
-                                    ;;
-                                *)
-                                    info "Cancelled. $target_id left disabled."
-                                    ;;
-                            esac
-                        else
-                            selected[$idx]=1
-                            ok "Enabled: $(devtool_label "$target_id")"
-                        fi
-                    else
-                        selected[$idx]=0
-                        ok "Disabled: $(devtool_label "$target_id")"
-                    fi
-                    hr
-                else
-                    last_error="Type a number 1..${#ids[@]}, /skip, or /exit."
-                fi
-                ;;
-        esac
-    done
-
-    # Commit. write_enabled_devtools is idempotent: passing zero IDs writes an
-    # empty file, mirroring write_enabled_toolchains.
-    local final=()
-    for i in "${!ids[@]}"; do
-        [ "${selected[$i]}" = "1" ] && final+=("${ids[$i]}")
-    done
-    write_enabled_devtools ${final[@]+"${final[@]}"}
-
-    hr
-    if [ "${#final[@]}" -eq 0 ]; then
-        ok "Development tools: none enabled (sessions remain identical to the default)."
-    else
-        ok "Development tools persisted: ${final[*]}"
-        info "Changes apply to NEW sessions only — existing sessions are unaffected."
-        info "Recycle a session via ./clean.sh + ./spawn.sh to retrofit it."
-    fi
-}
+# ── UC27 — devtools step ─────────────────────────────────────────────────────
+# The old numbered "type a number then Enter" checklist is gone (AC#1). The
+# interactive selector now lives in devtools-ui.sh (sourced above) as the shared
+# `devtools_run_selector` — a pure-shell raw-mode cursor checkbox list used
+# identically by Step 6 below, the --reconfigure short-circuit, and the Java
+# install-time CLI (which shells out to devtools-select.sh). It persists the
+# selection itself via write_enabled_devtools and restores the terminal on every
+# exit path; a non-TTY invocation refuses cleanly (returns non-zero).
 
 # ── UC26 — --reconfigure short-circuit ───────────────────────────────────────
 # When --reconfigure was on the argv, render ONLY the devtools step under a
@@ -341,7 +232,10 @@ run_devtools_step() {
 if [ "$RECONFIGURE_MODE" -eq 1 ]; then
     clear_screen
     printf "%s%s=== Reconfigure: development tools ===%s\n\n" "$BOLD" "$CYAN" "$RESET"
-    run_devtools_step
+    # The selector pre-fills from the current ledger and persists on commit. A
+    # cancel (rc 130) or no-TTY (rc 3) leaves the selection unchanged — neither
+    # is a setup failure, so don't let `set -e` abort the banner/exit below.
+    devtools_run_selector || true
     hr
     printf "  Re-run any time with %s./setup.sh --reconfigure%s.\n" "$MAGENTA" "$RESET"
     exit 0
@@ -537,63 +431,12 @@ press_enter
 clear_screen
 screen_header 3 7 "Container image"
 
-# ── UC22 — optional toolchain selection ──────────────────────────────────────
-# Data-driven menu of optional toolchains baked into ai-context:latest. The
-# selection persists in ./.ai-sandbox-toolchains (gitignored, via lib.sh) and is
-# passed to `docker compose build` as build args. Today the only optional
-# toolchain is "android"; add a row here + a build arg to offer more without
-# reworking the plumbing (AC16).
-info "Optional toolchains to bake into the image:"
-hr
-
-HOST_ARCH="$(uname -m)"
-case "$HOST_ARCH" in
-    x86_64|amd64) HOST_IS_AMD64=1 ;;
-    *)            HOST_IS_AMD64=0 ;;
-esac
-
-selected_android=0
-toolchain_is_enabled android && selected_android=1
-
-# Android testing — amd64 only (x86_64 system image; arm64 is a documented
-# follow-up, AC15). On non-amd64 hosts we surface the limitation instead of
-# offering a broken option or failing the wizard.
-if [ "$HOST_IS_AMD64" -eq 1 ]; then
-    if [ "$selected_android" -eq 1 ]; then
-        read -r -p "  Include Android testing (JDK 21 + Android SDK + headless emulator)? [Y/n]: " a_resp
-        if [[ "${a_resp:-}" =~ ^[Nn]$ ]]; then selected_android=0; else selected_android=1; fi
-    else
-        read -r -p "  Include Android testing (JDK 21 + Android SDK + headless emulator)? [y/N]: " a_resp
-        if [[ "${a_resp:-}" =~ ^[Yy]$ ]]; then selected_android=1; else selected_android=0; fi
-    fi
-else
-    warn "Android testing is amd64-only — not available on this $HOST_ARCH host (arm64 is a documented follow-up). Skipping."
-    selected_android=0
-fi
-
-# Persist the selection and export build args for `docker compose build`.
-toolchain_selection=()
-[ "$selected_android" -eq 1 ] && toolchain_selection+=("android")
-write_enabled_toolchains ${toolchain_selection[@]+"${toolchain_selection[@]}"}
-export AI_SANDBOX_TOOLCHAIN_ANDROID="$selected_android"
-# UC22 (AC6 fallback) — when Android is selected, also export
-# AI_SANDBOX_ANDROID_BASE so `docker compose build` flips FROM onto the glibc
-# base (the emulator can't load under gcompat). No-op when not selected →
-# Alpine base stays byte-identical to pre-UC22.
-export_android_build_env "$selected_android"
-
-if [ "$selected_android" -eq 1 ]; then
-    ok "Android testing enabled — image will include JDK 21 + Android SDK (build-tools 36.0.0, android-36)."
-    warn "The Android image is larger (~+1.5 GB) and its first build is slower than the base image."
-    # If an Android selection is active but the existing image lacks the
-    # toolchain, a rebuild is required for it to take effect.
-    if docker image inspect ai-context:latest >/dev/null 2>&1 && ! image_supports_android; then
-        warn "The existing ai-context:latest image has NO Android toolchain — rebuild below to bake it in."
-    fi
-else
-    ok "Base image only (no optional toolchains)."
-fi
-hr
+# UC-27 — the UC-22 Android "[Y/n]" toolchain prompt is gone. Android is now an
+# opt-in capability configured ONLY through the unified devtools selector
+# (Step 6 / --reconfigure) and provisioned eagerly at spawn, not baked into the
+# image. The base image is a single glibc (Debian) base for every session
+# (SandboxDockerfile), so there is no build-time libc/toolchain flip to choose
+# here anymore (AC#8,#11,#12).
 
 if docker image inspect ai-context:latest >/dev/null 2>&1; then
     ok "Image ai-context:latest already built"
@@ -713,10 +556,12 @@ if [ "$do_claude_setup" = true ]; then
     ok "First-run setup complete"
 fi
 
-# ── Step 6: Development tools (UC-26) ────────────────────────────────────────
+# ── Step 6: Development tools (UC-27) ────────────────────────────────────────
 clear_screen
 screen_header 6 7 "Select the development tools you want to install"
-run_devtools_step
+# Shared raw-mode selector (devtools-ui.sh). Cancel/no-TTY leaves the selection
+# unchanged and must not abort the wizard under `set -e`.
+devtools_run_selector || true
 press_enter
 
 # ── Step 7: Initialize counter & spawn first session ────────────────────────
