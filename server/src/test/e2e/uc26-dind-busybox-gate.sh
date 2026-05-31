@@ -72,7 +72,14 @@ teardown() {
         -f "$REPO_ROOT/docker-compose.dind.yml" \
         --project-directory "$STATE_ROOT" \
         -p "$PROJECT" down -v --remove-orphans >/dev/null 2>&1 || true
-    rm -rf "$STATE_ROOT" 2>/dev/null || true
+    # `rm -rf` as the non-root user can fail when the spawned container left
+    # root-owned dirs under the state root (docker auto-creates bind-mount
+    # sources like templates/claude-config as root). Fall back to a host-docker
+    # busybox running as root to finish the job.
+    if ! rm -rf "$STATE_ROOT" 2>/dev/null; then
+        docker run --rm -v "$(dirname "$STATE_ROOT")":/t busybox \
+            rm -rf "/t/$(basename "$STATE_ROOT")" >/dev/null 2>&1 || true
+    fi
     if [ "$SKIPPED" -eq 1 ]; then
         printf '\nGATE RESULT: SKIPPED (prerequisite not met)\n'
     elif [ "$PASS" -eq 1 ]; then
