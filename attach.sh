@@ -56,6 +56,24 @@ attach_to_n() {
     # "n: unbound variable". Same gotcha documented in clean.sh's clean_one().
     local n="$1"
     local name="ai-sandbox-${n}"
+    # UC-27 — a freshly-spawned session may still be provisioning capabilities:
+    # the entrypoint launches the tmux `main` session only AFTER eager
+    # provisioning finishes. Tolerate that window so `./attach.sh` right after a
+    # `./spawn.sh` (or a direct attach during boot) doesn't race the bootstrap
+    # and fail with "can't find session main". Wait briefly for `main` to exist;
+    # transient `compose exec` failures during early boot are treated as
+    # not-ready. (spawn.sh already polls the readiness marker, so the normal
+    # spawn→attach flow rarely waits here.) If it never appears within the window
+    # we fall through and let `tmux attach` print its own message.
+    local waited=0
+    while [ "$waited" -lt 60 ]; do
+        if ai_sandbox_compose -p "$name" exec -T claude-sandbox tmux has-session -t main >/dev/null 2>&1; then
+            break
+        fi
+        [ "$waited" -eq 0 ] && info "  Session $n is still starting — waiting for tmux 'main'…" >&2
+        waited=$((waited + 1))
+        sleep 1
+    done
     # AC25: pass -f and --project-directory on every docker compose call
     # for consistency; `compose exec` identifies the project by container
     # labels so the flags are functionally a no-op here. Kept for parity

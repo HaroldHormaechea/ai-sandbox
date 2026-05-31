@@ -221,58 +221,68 @@ if [ "$LABEL_SET" -eq 1 ] && [ -n "$LABEL" ]; then
     info "  label         : $LABEL" >&2
 fi
 
-# UC22 — Android-testing images can boot a headless emulator, which needs
-# hardware KVM. When the built image carries the Android toolchain AND the host
-# exposes /dev/kvm, layer the KVM passthrough override so `aisandbox-emulator`
-# inside the session can run an accelerated AVD (AC11). Both gates must hold;
-# either missing → no override → behaviour identical to a normal session. This
-# also covers management-server-spawned sessions (AC13), since the server
-# invokes this very script with AI_SANDBOX_COMPOSE_FILE set.
-if image_supports_android; then
-    if [ -e /dev/kvm ]; then
-        kvm_override="docker-compose.kvm.yml"
-        if [ -n "${AI_SANDBOX_COMPOSE_FILE:-}" ]; then
-            kvm_override="$(dirname "$AI_SANDBOX_COMPOSE_FILE")/docker-compose.kvm.yml"
-        fi
-        if [ -f "$kvm_override" ]; then
-            # UC22 BUG-1 fix — passing the device alone is not enough: inside the
-            # container /dev/kvm is `crw-rw---- root <kvm-gid>` and the runtime
-            # user (uid1000/gid1000 in dev mode, <uid>:0 for server-spawned) is
-            # NOT in that group, so opening it fails with EACCES and the emulator
-            # refuses to start. Detect the host kvm GID and pass it as a
-            # supplementary group via docker-compose.kvm.yml's group_add. One
-            # change covers BOTH developer-mode and management-server-spawned
-            # sessions (AC13). If the host has no kvm group, fall back to 0 so the
-            # override still parses (the device passthrough is harmless and the
-            # emulator helper will report inaccessibility cleanly, AC12).
-            kvm_gid="$(host_kvm_gid)"
-            export AI_SANDBOX_KVM_GID="$kvm_gid"
-            export AI_SANDBOX_EXTRA_COMPOSE_FILES="${AI_SANDBOX_EXTRA_COMPOSE_FILES:+$AI_SANDBOX_EXTRA_COMPOSE_FILES }$kvm_override"
-            info "  kvm           : /dev/kvm detected → passthrough enabled (gid $kvm_gid, $kvm_override)" >&2
-        else
-            warn "Android image + /dev/kvm present but $kvm_override missing — emulator will be unaccelerated." >&2
-        fi
-    else
-        info "  kvm           : no /dev/kvm on host → emulator slow/unavailable (build+JVM-test lane unaffected)" >&2
-    fi
-fi
-
-# UC26 — read the persisted devtools selection (./.ai-sandbox-devtools or
-# $AI_SANDBOX_HOST_STATE_ROOT/.ai-sandbox-devtools) and inject any spawn-time
-# capabilities (env vars + compose override files) BEFORE `ai_sandbox_compose
-# up`. Persistence is the only source of truth — there's no spawn-time flag —
-# so changes only propagate to NEW sessions (AC#7). With no devtools enabled
-# the call is a no-op and spawned sessions are byte-identical to today's
-# behaviour (AC#6).
+# UC-27 — read the persisted devtools selection (./.ai-sandbox-devtools or
+# $AI_SANDBOX_HOST_STATE_ROOT/.ai-sandbox-devtools) and inject all spawn-time
+# wiring BEFORE `ai_sandbox_compose up`. This is fully generic: inject_devtool_
+# spawn_env sources each enabled capability's manifest and runs its
+# devtool_spawn_env hook, which exports the per-capability env (e.g.
+# AI_SANDBOX_DEVTOOL_DIND=1, AI_SANDBOX_DEVTOOL_ANDROID=1) AND layers the matching
+# compose override. KVM passthrough is now handled by the android manifest's hook
+# (it calls host_kvm_gid + layers docker-compose.kvm.yml when /dev/kvm exists) —
+# the old image-label gate is gone. It also exports AI_SANDBOX_DEVTOOLS (the
+# enabled-id list), passed into the container via docker-compose.yml so the
+# entrypoint provisions each capability eagerly at spawn (AC#3,#12). Persistence
+# is the only source of truth — changes propagate to NEW sessions only (AC#12);
+# an empty selection is a no-op and spawned sessions are byte-identical to today
+# (AC#6,#12). Covers management-server-spawned sessions too (AI_SANDBOX_COMPOSE_FILE
+# resolves the overrides next to the install bundle).
 inject_devtool_spawn_env
-if [ "${AI_SANDBOX_DEVTOOL_DIND:-0}" = "1" ]; then
-    info "  devtools      : DinD enabled (rootless dockerd will start inside the session)" >&2
+if [ -n "${AI_SANDBOX_DEVTOOLS:-}" ]; then
+    info "  devtools      : ${AI_SANDBOX_DEVTOOLS} (provisioned eagerly at spawn)" >&2
+    if [ "${AI_SANDBOX_DEVTOOL_DIND:-0}" = "1" ]; then
+        info "  devtools      : DinD enabled (rootless dockerd will start inside the session)" >&2
+    fi
+    if [ "${AI_SANDBOX_DEVTOOL_ANDROID:-0}" = "1" ]; then
+        if [ -n "${AI_SANDBOX_KVM_GID:-}" ]; then
+            info "  devtools      : Android enabled — /dev/kvm passthrough on (gid ${AI_SANDBOX_KVM_GID}); emulator can boot accelerated" >&2
+        else
+            info "  devtools      : Android enabled — no /dev/kvm on host; emulator will be slow (build+JVM-test lane unaffected)" >&2
+        fi
+    fi
 fi
 
 if ! ai_sandbox_compose -p "$PROJECT" up -d; then
     warn "docker compose up failed for $PROJECT." >&2
     warn "Counter NOT rolled back (monotonic by design); next spawn will use N=$(( N + 1 ))." >&2
     exit 1
+fi
+
+# UC-27 — when capabilities are enabled, wait for the entrypoint to finish eager
+# provisioning before reporting "ready" (so the session is genuinely usable at
+# handover — AC#12). The entrypoint writes /tmp/aisandbox-ready AFTER tmux/claude
+# is up and provisioning has run; we poll it via `compose exec`. Transient exec
+# failures during early boot are expected and treated as not-ready (keep polling
+# to the timeout — challenger note #3). A cold Android SDK pull (~1.5 GB) can take
+# minutes, hence the generous window. With no capabilities this is skipped → the
+# spawn path is byte-identical to today (AC#6,#12).
+if [ -n "${AI_SANDBOX_DEVTOOLS:-}" ]; then
+    info "  devtools      : waiting for in-container provisioning to finish…" >&2
+    ready=0
+    tries=0
+    while [ "$tries" -lt 600 ]; do
+        if ai_sandbox_compose -p "$PROJECT" exec -T claude-sandbox test -f /tmp/aisandbox-ready >/dev/null 2>&1; then
+            ready=1
+            break
+        fi
+        tries=$((tries + 1))
+        sleep 2
+    done
+    if [ "$ready" = "1" ]; then
+        ok "Devtools provisioned; session ready."
+    else
+        warn "Session started but the readiness marker was not seen within ~20 min — provisioning may still be running or may have failed."
+        warn "Check inside the session: ./attach.sh --session $N  then run \`aisandbox-<capability> doctor\`."
+    fi
 fi
 
 ok "$PROJECT is running. Attach with: ./attach.sh --session $N"

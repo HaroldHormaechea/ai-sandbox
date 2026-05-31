@@ -18,10 +18,6 @@ templates/claude-config/*
 .ai-sandbox-counter
 .ai-sandbox-counter.lock/
 
-# UC22 — operator's optional-toolchain selection (drives `docker compose build`
-# build args). Machine-local; never committed.
-.ai-sandbox-toolchains
-
 # UC26 — operator's "Select the development tools you want to install" choices
 # (e.g. `dind` for Docker-in-Docker). Machine-local; never committed. Read by
 # spawn.sh / spawn.ps1 to inject spawn-time env vars + compose override files.

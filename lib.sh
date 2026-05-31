@@ -543,49 +543,18 @@ inject_devtool_spawn_env() {
     unset -f devtool_spawn_env devtool_provision 2>/dev/null || true
 }
 
-# ── UC22 — toolchain selection state ─────────────────────────────────────────
+# ── UC27 — retired: UC-22 toolchain ledger / image-label helpers ─────────────
 #
-# The operator's optional-toolchain choices (e.g. "android") persist in a
-# gitignored newline-delimited file at the repo root (cwd of setup.sh). They
-# drive `docker compose build` build args and survive rebuild + re-spawn.
-AISB_TOOLCHAINS_FILE="${AISB_TOOLCHAINS_FILE:-.ai-sandbox-toolchains}"
-
-# toolchain_is_enabled ID → 0 if ID is listed in the toolchains file.
-toolchain_is_enabled() {
-    [ -f "$AISB_TOOLCHAINS_FILE" ] || return 1
-    grep -qxF "$1" "$AISB_TOOLCHAINS_FILE"
-}
-
-# write_enabled_toolchains [ID...] → truncate + rewrite the toolchains file.
-# Zero args writes an empty file (base image only).
-write_enabled_toolchains() {
-    : > "$AISB_TOOLCHAINS_FILE"
-    local id
-    for id in "$@"; do
-        printf '%s\n' "$id" >> "$AISB_TOOLCHAINS_FILE"
-    done
-}
-
-# image_supports_android [IMAGE] → 0 if the built image carries the Android
-# toolchain label (stamped by SandboxDockerfile when ANDROID_TESTING=1). This
-# is the runtime source of truth for KVM passthrough — independent of the
-# build-time state file, so it works identically for developer-mode and
-# management-server-spawned sessions.
-image_supports_android() {
-    local img="${1:-ai-context:latest}" val=""
-    val="$(docker image inspect "$img" \
-        --format '{{ index .Config.Labels "com.ai-sandbox.toolchain.android" }}' 2>/dev/null || true)"
-    [ "$val" = "1" ]
-}
-
-# UC22 (AC6 fallback) — glibc base for the Android variant. The emulator's QEMU
-# binary can't load under gcompat on musl (missing posix_fallocate64), so the
-# Android image is built on a glibc (Debian) base. node:20-bookworm-slim is a
-# Debian-bookworm glibc base that already ships a modern Node + npm (Claude Code
-# needs Node 18+; bookworm's apt nodejs is only 18, so we use the node image to
-# keep a current runtime without a NodeSource step). An operator can override
-# via AI_SANDBOX_ANDROID_BASE (e.g. ubuntu:24.04 to match CI's ubuntu-latest).
-AISB_ANDROID_BASE_DEFAULT="${AISB_ANDROID_BASE_DEFAULT:-node:20-bookworm-slim}"
+# `.ai-sandbox-toolchains`, `toolchain_is_enabled`, `write_enabled_toolchains`,
+# `image_supports_android`, `export_android_build_env`, and
+# `AISB_ANDROID_BASE_DEFAULT` are GONE. Android is no longer a build-time image
+# flavour stamped with a label — it is an opt-in capability configured through
+# the devtools selector and provisioned eagerly at spawn (no migration; a stale
+# `.ai-sandbox-toolchains` file is simply ignored — AC#7,#8). KVM passthrough is
+# now gated on "the `android` capability is enabled AND /dev/kvm is present",
+# handled by the android manifest's devtool_spawn_env (which calls host_kvm_gid
+# below and layers docker-compose.kvm.yml). The single glibc base means there is
+# no base-image flip to choose anymore.
 
 # host_kvm_gid — echo the host's kvm group GID, or "0" if there is no kvm group.
 # Used by spawn.sh to pass /dev/kvm's group as a supplementary group into the
@@ -603,21 +572,6 @@ host_kvm_gid() {
         gid="$(getent group kvm 2>/dev/null | cut -d: -f3 || true)"
     fi
     printf '%s' "${gid:-0}"
-}
-
-# export_android_build_env ENABLED — set the build args `docker compose build`
-# reads for the Android variant. ENABLED is 0/1 (or non-empty/empty). When
-# enabled, exports AI_SANDBOX_ANDROID_BASE (honouring an operator override) so
-# compose flips FROM onto the glibc base; when disabled, leaves it unset so
-# compose's `${AI_SANDBOX_ANDROID_BASE:-alpine:latest}` keeps the lean Alpine
-# image byte-identical to pre-UC22 (AC4). Idempotent; safe to call before any
-# build.
-export_android_build_env() {
-    local enabled="${1:-0}"
-    if [ "$enabled" = "1" ]; then
-        export AI_SANDBOX_TOOLCHAIN_ANDROID=1
-        export AI_SANDBOX_ANDROID_BASE="${AI_SANDBOX_ANDROID_BASE:-$AISB_ANDROID_BASE_DEFAULT}"
-    fi
 }
 
 # ── Dev-mode workspace root (relocate-out-of-tree) ───────────────────────────
@@ -699,8 +653,8 @@ aisb_dev_workspace_root() {
 }
 
 # aisb_write_dev_workspace_root ABS_PATH → persist ABS_PATH to the state file
-# (mirrors write_enabled_toolchains' truncate-and-write style). Caller is
-# responsible for passing an absolute path; we store it verbatim.
+# (truncate-and-write). Caller is responsible for passing an absolute path; we
+# store it verbatim.
 aisb_write_dev_workspace_root() {
     printf '%s\n' "$1" > "$AISB_DEV_WORKSPACE_STATE_FILE"
 }
