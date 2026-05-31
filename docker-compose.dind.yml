@@ -9,8 +9,9 @@
 # What this override DOES vs. does NOT do:
 #
 #   ✓ Enables a rootless Docker daemon to run INSIDE the session container,
-#     accessible via /run/user/<uid>/docker.sock. The session can therefore
-#     run `docker info`, `docker compose up`, `docker run`, etc. (AC#5).
+#     accessible via a per-user docker.sock in the session's XDG_RUNTIME_DIR.
+#     The session can therefore run `docker info`, `docker compose up`,
+#     `docker run`, etc. (AC#5).
 #   ✓ Composes additively with docker-compose.kvm.yml (UC-22): both can be on
 #     at once. The base image, base mounts, and user mapping all come from
 #     docker-compose.yml; this file only adds DinD-specific bits.
@@ -34,11 +35,14 @@
 #                      boundary widening the wizard step warns about at the
 #                      moment of selection (UC-26 AC#3 + AC#10).
 #
-# XDG_RUNTIME_DIR is created by `aisandbox-dind start` inside the container at
-# /run/user/$(id -u), so it is intentionally NOT declared here as a tmpfs —
-# Docker Compose's interpolation cannot evaluate `$(id -u)` at compose-parse
-# time, and per-spawn uid varies (the management server passes an arbitrary
-# host uid through `user:` in docker-compose.yml).
+# XDG_RUNTIME_DIR is resolved + created at run time by `aisandbox-dind start`
+# inside the container: it prefers /run/user/$(id -u) when that dir is usable
+# and falls back to a $HOME-based runtime dir in a bare (no-logind) session
+# where /run/user is root-owned and not writable by the session user. Either
+# way it is intentionally NOT declared here as a tmpfs — Docker Compose's
+# interpolation cannot evaluate `$(id -u)` at compose-parse time, and per-spawn
+# uid varies (the management server passes an arbitrary host uid through
+# `user:` in docker-compose.yml).
 services:
   claude-sandbox:
     devices:

@@ -69,13 +69,44 @@ DOCKER_VERSION="${AISB_DIND_DOCKER_VERSION:-27.3.1}"
 # automatically inherits DOCKER_HOST and PATH additions. The marker block is
 # idempotent — replaced wholesale on every successful start.
 PROFILE_SNIPPET="$HOME/.profile.aisandbox-dind"
-SOCK_DIR="/run/user/$(id -u)"
-SOCK_PATH="$SOCK_DIR/docker.sock"
+# SOCK_DIR (the XDG_RUNTIME_DIR holding docker.sock) and SOCK_PATH are resolved
+# at run time by resolve_runtime_dir() — the usable location depends on whether
+# /run/user/<uid> exists and is writable in THIS container, which is not known
+# at parse time. They start empty and are populated by every command that needs
+# the daemon socket.
+SOCK_DIR=""
+SOCK_PATH=""
 LOG_FILE="$CACHE_ROOT/dockerd-rootless.log"
 PID_FILE="$CACHE_ROOT/dockerd-rootless.pid"
 
 log() { printf '  [aisandbox-dind] %s\n' "$*" >&2; }
 die() { printf '  [aisandbox-dind] ERROR: %s\n' "$*" >&2; exit 1; }
+
+# Resolve a usable XDG_RUNTIME_DIR for the rootless daemon and its socket, and
+# populate SOCK_DIR / SOCK_PATH.
+#
+# The conventional location is /run/user/<uid>, created by systemd-logind for
+# an interactive login. A bare ai-sandbox session has no logind: /run/user
+# either does not exist or is root-owned and NOT writable by the non-root
+# session user, so `mkdir -p /run/user/<uid>` fails with EACCES and (under
+# `set -e`) would abort start before dockerd ever launches. When /run/user/<uid>
+# is not usable we fall back to a user-writable runtime dir under $HOME. We
+# prefer /run/user/<uid> whenever it IS usable so real-logind hosts keep the
+# conventional path. The choice is deterministic for a given container, so
+# `doctor` / `selftest` resolve the same socket `start` did.
+resolve_runtime_dir() {
+    local uid candidate
+    uid="$(id -u)"
+    candidate="/run/user/$uid"
+    if mkdir -p "$candidate" 2>/dev/null && [ -w "$candidate" ]; then
+        SOCK_DIR="$candidate"
+    else
+        SOCK_DIR="$HOME/.docker/run"
+        mkdir -p "$SOCK_DIR"
+    fi
+    chmod 0700 "$SOCK_DIR" 2>/dev/null || true
+    SOCK_PATH="$SOCK_DIR/docker.sock"
+}
 
 # ── install ──────────────────────────────────────────────────────────────────
 cmd_install() {
@@ -129,12 +160,14 @@ cmd_start() {
         die "rootless Docker is not installed yet. Run \`aisandbox-dind install\` first (entrypoint should do this automatically)."
     fi
 
-    # XDG_RUNTIME_DIR must exist and be private to the runtime user. The mode
-    # 0700 is what systemd / pam_systemd would set for an interactive login,
-    # and what rootlesskit expects. Re-creating it is harmless on every start.
-    mkdir -p "$SOCK_DIR"
-    chmod 0700 "$SOCK_DIR" 2>/dev/null || true
+    # XDG_RUNTIME_DIR must exist and be private (0700) to the runtime user, as
+    # rootlesskit expects. resolve_runtime_dir prefers /run/user/<uid> and falls
+    # back to a $HOME-based dir in a bare (no-logind) container where /run/user
+    # is not writable by the session user — without this, the old unconditional
+    # `mkdir -p /run/user/<uid>` aborted start with EACCES before dockerd ran.
+    resolve_runtime_dir
     export XDG_RUNTIME_DIR="$SOCK_DIR"
+    log "XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR (socket: $SOCK_PATH)"
 
     # PATH so rootless extras (rootlesskit, slirp4netns, fuse-overlayfs) and
     # the engine binaries are discoverable by dockerd-rootless.sh's child
@@ -228,6 +261,10 @@ cmd_stop() {
 # ── doctor ───────────────────────────────────────────────────────────────────
 cmd_doctor() {
     require_enabled
+    # Resolve the same runtime dir start would use, so the socket / runtime-dir
+    # presence checks below reflect the real location (which may be the
+    # $HOME-based fallback in a bare container).
+    resolve_runtime_dir
     log "cache root        : $CACHE_ROOT"
     log "Docker version    : $(cat "$VERSION_FILE" 2>/dev/null || echo 'not installed yet')"
     log "XDG_RUNTIME_DIR   : $SOCK_DIR ($([ -d "$SOCK_DIR" ] && echo present || echo MISSING))"
@@ -245,6 +282,8 @@ cmd_doctor() {
 # ── selftest (AC#9 verification (c)+(d)) ─────────────────────────────────────
 cmd_selftest() {
     require_enabled
+    # Resolve the same socket path start used (may be the $HOME-based fallback).
+    resolve_runtime_dir
     if [ ! -S "$SOCK_PATH" ]; then
         die "rootless dockerd is not running. Start it first: \`aisandbox-dind start\`."
     fi
