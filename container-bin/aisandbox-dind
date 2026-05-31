@@ -185,10 +185,18 @@ cmd_start() {
     # via DOCKERD_ROOTLESS_OPT_*-style env var or appended after `--`.
     export DOCKERD_ROOTLESS_OPT="${DOCKERD_ROOTLESS_OPT:-}"
 
+    # Write the env snippet NOW — BEFORE launching/waiting on the daemon. It is
+    # purely static (PATH += $BIN_DIR, DOCKER_HOST=unix://$SOCK_PATH,
+    # XDG_RUNTIME_DIR) and must NOT be gated on the readiness probe: on a cold
+    # host the daemon can take 60-90s to answer, and if we only wrote the snippet
+    # after a successful probe, a slow (but ultimately fine) start would leave
+    # `docker`/`DOCKER_HOST` off the session's PATH. Writing it up front means a
+    # normal `sh -lc`/`sh -c` resolves `docker` regardless of probe timing.
+    write_profile_snippet
+
     # Already running?
     if [ -S "$SOCK_PATH" ] && DOCKER_HOST="unix://$SOCK_PATH" "$BIN_DIR/docker" info >/dev/null 2>&1; then
         log "rootless dockerd is already running ($SOCK_PATH)."
-        write_profile_snippet
         return 0
     fi
 
@@ -208,30 +216,34 @@ cmd_start() {
         >>"$LOG_FILE" 2>&1 &
     echo "$!" > "$PID_FILE"
 
-    # Wait for the socket. dockerd-rootless takes a few seconds to set up the
-    # userns + rootlesskit network namespace + fuse-overlayfs mount. 30s is
-    # plenty on a warm cache; first-ever start might need slightly more if
-    # rootlesskit has to set up cgroups.
+    # Wait for the socket. On a COLD host first start, rootlesskit must set up the
+    # userns + network namespace (slirp4netns) + fuse-overlayfs mount + containerd
+    # + the iptables NAT chain, which can take 60-90s — the old 30s cap gave up
+    # while the daemon was still legitimately coming up. Wait ~90s (180 × 0.5s),
+    # and treat a timeout as warn-and-continue (NOT fatal): the env snippet is
+    # already written, the daemon usually finishes shortly after, and the entrypoint
+    # provisioning loop is warn-and-continue by design. The live G1 gate is what
+    # asserts the daemon actually serves.
     local tries=0
     while [ ! -S "$SOCK_PATH" ]; do
         tries=$((tries + 1))
-        if [ "$tries" -gt 60 ]; then
-            log "rootless dockerd did not produce $SOCK_PATH within 30s."
-            log "Last 20 lines of $LOG_FILE:"
+        if [ "$tries" -gt 180 ]; then
+            log "rootless dockerd did not produce $SOCK_PATH within ~90s — continuing anyway."
+            log "It may still be coming up; check \`aisandbox-dind doctor\` / $LOG_FILE. Last 20 lines:"
             tail -n 20 "$LOG_FILE" >&2 || true
-            die "rootless dockerd failed to start"
+            return 0
         fi
         sleep 0.5
     done
 
     export DOCKER_HOST="unix://$SOCK_PATH"
     if ! "$BIN_DIR/docker" info >/dev/null 2>&1; then
-        log "Socket appeared but \`docker info\` failed. Last 20 lines of $LOG_FILE:"
+        log "Socket appeared but \`docker info\` not yet responsive — continuing anyway (daemon may still be initializing). Last 20 lines of $LOG_FILE:"
         tail -n 20 "$LOG_FILE" >&2 || true
-        die "rootless dockerd is not responsive"
+        return 0
     fi
     log "rootless dockerd is up. DOCKER_HOST=$DOCKER_HOST"
-    write_profile_snippet
+    # (env snippet already written up-front, above — idempotent, no need to repeat)
 }
 
 # Persist DOCKER_HOST + PATH so a fresh tmux window / shell inherits them.

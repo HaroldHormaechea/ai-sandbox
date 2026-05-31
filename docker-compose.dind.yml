@@ -70,5 +70,11 @@ services:
       # because rootless dockerd's nested mounts collide with the default profile.
       - "apparmor:unconfined"
       - "seccomp:unconfined"
+      # UC-27 fix — un-mask /proc on the session container (MaskedPaths=[]). Docker
+      # masks several /proc paths by default; the kernel then refuses to let the
+      # INNER runc mount a fresh /proc over the masked one, so `docker run` fails
+      # with `error mounting "proc" to rootfs ... operation not permitted`. This
+      # un-masks /proc for the DinD session so nested containers can mount it.
+      - "systempaths=unconfined"
     environment:
       AI_SANDBOX_DEVTOOL_DIND: "1"
