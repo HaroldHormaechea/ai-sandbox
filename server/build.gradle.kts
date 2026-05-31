@@ -315,7 +315,8 @@ tasks.named("assemble") {
 //
 // UC05 § A — single point of bundling. The release zip is self-contained:
 // jars + OAS + reference config + systemd unit + the entire UC02 host-
-// script set (POSIX + PowerShell) + the container build context. Operators
+// script set (POSIX shell; UC-27 — Linux-only, no PowerShell) + the
+// container build context. Operators
 // unzip to /opt/ai-sandbox-server/ and never need to clone the repo.
 //
 // Determinism (AC9): preserveFileTimestamps=false zeroes out mtimes inside
@@ -386,13 +387,8 @@ val releaseBundle by tasks.registering(Zip::class) {
         filePermissions { unix("rwxr-xr-x") }
     }
     from(rootProject.file("devtools.d")) { into("host/devtools.d") }
-    // UC05 § AC4 — PowerShell counterparts; not exec'd by v0.0.3 systemd
-    // installer, kept byte-identical for a future Windows installer.
-    from(rootProject.file("spawn.ps1")) { into("host") }
-    from(rootProject.file("clean.ps1")) { into("host") }
-    from(rootProject.file("attach.ps1")) { into("host") }
-    from(rootProject.file("lib.ps1")) { into("host") }
-    from(rootProject.file("setup.ps1")) { into("host") }
+    // UC-27 — PowerShell support removed; the project is Linux-only. The .ps1
+    // mirrors are gone (no Windows installer is in scope).
     // UC05 § AC5,AC6 — container build context. SandboxDockerfile sources
     // entrypoint.sh from the same dir; docker-compose.yml references
     // SandboxDockerfile by relative path; co-locating in host/ preserves
@@ -533,7 +529,7 @@ val prepDebStaging by tasks.registering(Copy::class) {
     }
 
     // /opt/ai-sandbox-server/host/* — POSIX shell scripts at 0755,
-    // PowerShell counterparts + the compose context at 0644.
+    // the compose context at 0644. (UC-27 — Linux-only; no .ps1 mirrors.)
     // UC-27 — devtools-select.sh / devtools-ui.sh are the shared raw-mode
     // selector (the Java CLI shells out to host/devtools-select.sh).
     val hostExecutables = listOf(
@@ -552,7 +548,6 @@ val prepDebStaging by tasks.registering(Copy::class) {
         filePermissions { unix("rw-r--r--") }
     }
     val hostData = listOf(
-        "spawn.ps1", "clean.ps1", "attach.ps1", "lib.ps1", "setup.ps1",
         // UC22 § AC13 — docker-compose.kvm.yml must ship beside
         // docker-compose.yml so spawn.sh can layer the /dev/kvm override for
         // .deb-installed / server-spawned sessions; mode 0644 like the other
