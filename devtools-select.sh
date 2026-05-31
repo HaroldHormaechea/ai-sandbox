@@ -18,6 +18,16 @@
 #   1   no capabilities registered / internal error
 set -uo pipefail
 
+# Optional positional arg: the ledger path. The Java install-time CLI
+# (OnboardCommand / ReconfigureCommand) passes the session/host ledger path here
+# via `bash devtools-select.sh <ledger>` (so it need not set env on the child).
+# setup.sh sources devtools-ui.sh directly and never runs this script. Falls back
+# to $AISB_DEVTOOLS_FILE / the lib.sh default when absent. Must be set BEFORE
+# lib.sh is sourced (lib.sh reads AISB_DEVTOOLS_FILE at source time).
+if [ "$#" -ge 1 ] && [ -n "${1:-}" ]; then
+    export AISB_DEVTOOLS_FILE="$1"
+fi
+
 HERE="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]:-$0}")" && pwd)"
 
 # shellcheck source=lib.sh

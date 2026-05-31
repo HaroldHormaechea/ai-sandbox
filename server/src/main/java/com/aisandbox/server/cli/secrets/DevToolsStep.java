@@ -4,194 +4,114 @@ import com.aisandbox.server.cli.Ownership;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.attribute.PosixFilePermissions;
 import java.util.ArrayList;
-import java.util.LinkedHashSet;
 import java.util.List;
-import java.util.Set;
 
 /**
- * UC-26 — install-time step that captures the operator's "Select the
+ * UC-27 — install-time step that captures the operator's "Select the
  * development tools you want to install" selections.
  *
- * <p>Java parallel of {@code setup.sh}'s {@code run_devtools_step}: renders a
- * plain numbered checklist of opt-in capabilities (see {@link DevToolsConfig#CATALOG}),
- * lets the operator toggle entries by number, prompts for the inline
- * trust-boundary confirmation when ENABLING a new spawn-time capability, and
- * persists the result via {@link DevToolsConfig#writeEnabled(Path, Set)}.
+ * <p>This is now a thin DELEGATION wrapper. The interactive picker lives in one
+ * place — the pure-shell raw-mode selector {@code devtools-select.sh} (which
+ * sources {@code lib.sh} + {@code devtools-ui.sh}). Both {@code ./setup.sh} and
+ * this Java install-time path run the IDENTICAL selector, so the {@code .deb}
+ * TTY auto-onboard captures dev-tool selections through the same raw-mode UI as
+ * a host {@code ./setup.sh} run (AC#1,#14). The Java side holds no capability
+ * catalog (AC#4) — the shell selector persists the ledger itself.
  *
- * <p>Reuse vector — this step is appended to {@code OnboardCommand}'s pipeline
- * (so the {@code .deb} auto-onboard captures dev-tool selections too) and is
- * the body of {@code aisandboxctl reconfigure}'s interactive path.
+ * <h2>Why {@code runInheritIO}</h2>
  *
- * <h2>Non-interactive deferral</h2>
+ * The selector is a raw-mode cursor UI (it puts the terminal into
+ * {@code -icanon}, reads single bytes, draws ANSI). It MUST inherit the
+ * controlling terminal's stdin/stdout/stderr — {@link ProcessRunner#runAndCapture}
+ * pipes them and would break the raw-mode TTY. Degrade-to-DEFERRED keys off the
+ * child's exit code; there is no timeout (the operator may take their time).
  *
- * When {@link ConsoleIO#hasTty()} is false and no override flag was supplied,
- * the step does NOT prompt — it just leaves the ledger untouched and reports
- * "deferred" upstream. The interactive checklist is operator-driven and has
- * no scriptable "skip every prompt" mode beyond that.
+ * <h2>Outcome contract (unchanged)</h2>
  *
- * <h2>Why not a {@code @Service}</h2>
+ * APPLIED / DEFERRED / SKIPPED, so the caller's done/deferred summary is
+ * unchanged from the UC-26 numbered-checklist version.
  *
- * UC06 § AC25 install-time CLI exemption applies (documented in
- * {@code PROJECT_BRIEF.md} {@code ## Profiles}). The step does file I/O and
- * console prompting; it is not a Service in the
- * Controller/Facade/Service/Repository sense. Testability comes from
- * constructor-injected {@link ConsoleIO} and {@link ProcessRunner} seams.
+ * <p>UC06 § AC25 install-time CLI exemption applies.
  */
 public final class DevToolsStep {
 
     private final ConsoleIO io;
+    private final ProcessRunner runner;
 
     /**
-     * @param io console seam — production = {@link ConsoleIO.Default};
-     *     tests inject a fake that pretends to have a TTY and feeds canned
-     *     input lines.
-     * @param runner reserved for future capabilities that need to shell out
-     *     (e.g. probing for an installed Rust toolchain). v1's DinD entry is
-     *     a no-op at config time — the daemon is provisioned at session
-     *     start by {@code aisandbox-dind install} — so the runner is held
-     *     here for the API contract only.
+     * @param io console seam — used for the not-found / deferred messages.
+     * @param runner process seam — production = {@link ProcessRunner.Default};
+     *     tests inject a fake that records the argv vector (and returns a canned
+     *     exit code) instead of actually launching the selector.
      */
-    @SuppressWarnings("unused")
     public DevToolsStep(ConsoleIO io, ProcessRunner runner) {
         this.io = io;
+        this.runner = runner;
     }
 
-    /** Outcome of {@link #run(Path, boolean, boolean, Ownership)}. */
+    /** Outcome of {@link #run(Path, Path, boolean, boolean, Ownership)}. */
     public enum Outcome {
-        /** The operator made changes (or accepted current state via Enter / /skip). */
+        /** The operator committed a selection (selector exited 0). */
         APPLIED,
-        /** Non-interactive, no flag-driven override — step did not run. */
+        /** Non-interactive / cancelled / selector unavailable — ledger untouched. */
         DEFERRED,
         /** {@code --no-devtools} was set; step intentionally skipped. */
         SKIPPED,
     }
 
     /**
-     * Run the step.
+     * Run the step by delegating to the shared shell selector.
      *
-     * @param ledgerPath path to {@code .ai-sandbox-devtools}.
-     * @param noDevtools {@code --no-devtools} opt-out — when {@code true},
-     *     the step short-circuits and returns {@link Outcome#SKIPPED}. The
-     *     ledger is left untouched (so the existing selection persists).
-     * @param hasTty cached {@link ConsoleIO#hasTty()} from the caller; we
-     *     accept it as a param so the call site can apply other policies
-     *     (e.g. debconf-driven flows) without re-probing.
-     * @param ownership pre-resolved owner/group for the ledger file, or
-     *     {@code null} when running as a normal user.
+     * @param ledgerPath path to {@code .ai-sandbox-devtools}; passed to the
+     *     selector as its argument so it reads/writes the right file.
+     * @param selectorScript absolute path to {@code devtools-select.sh} in the
+     *     bundled {@code host/} dir.
+     * @param noDevtools {@code --no-devtools} opt-out → {@link Outcome#SKIPPED},
+     *     ledger untouched.
+     * @param hasTty cached {@link ConsoleIO#hasTty()} from the caller. The
+     *     selector itself also refuses a non-TTY, but we short-circuit to
+     *     {@link Outcome#DEFERRED} before spawning so a headless install never
+     *     launches the child at all.
+     * @param ownership pre-resolved owner/group for the ledger, or {@code null}.
      * @return the outcome — drives the caller's done/deferred summary.
      */
-    public Outcome run(Path ledgerPath, boolean noDevtools, boolean hasTty, Ownership ownership) throws IOException {
+    public Outcome run(Path ledgerPath, Path selectorScript, boolean noDevtools, boolean hasTty, Ownership ownership)
+            throws IOException {
         if (noDevtools) {
             return Outcome.SKIPPED;
         }
         if (!hasTty) {
-            // Non-interactive + no flag-driven override → defer. The caller
-            // emits a "re-run later from a TTY" line in the deferred summary.
+            // Non-interactive → defer (the caller prints a "re-run from a TTY"
+            // line). The raw-mode selector cannot run without a terminal.
             return Outcome.DEFERRED;
         }
-        if (DevToolsConfig.CATALOG.isEmpty()) {
-            // Defensive: empty catalog → nothing to ask.
-            io.println("  No development-tool capabilities are registered.");
+        if (selectorScript == null || !Files.isRegularFile(selectorScript)) {
+            io.println("  Dev-tools selector not found at " + selectorScript
+                    + " — skipping. Run ./setup.sh on the host to configure dev tools.");
+            return Outcome.DEFERRED;
+        }
+
+        int rc;
+        try {
+            // bash <selector> <ledger> — the selector exports AISB_DEVTOOLS_FILE
+            // from arg 1, renders the raw-mode picker, and persists on commit.
+            rc = runner.runInheritIO(List.of("bash", selectorScript.toString(), ledgerPath.toString()));
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            return Outcome.DEFERRED;
+        }
+
+        // Exit codes (devtools-select.sh): 0 committed; 130 cancelled; 3 no-TTY;
+        // 1 internal. Anything non-zero leaves the ledger unchanged → DEFERRED
+        // (degrade-to-DEFERRED on cancel/failure). Only a clean commit is APPLIED.
+        if (rc == 0) {
+            if (ownership != null && Files.isRegularFile(ledgerPath)) {
+                ownership.chown(ledgerPath);
+            }
             return Outcome.APPLIED;
         }
-
-        Set<String> enabled = new LinkedHashSet<>(DevToolsConfig.readEnabled(ledgerPath));
-
-        io.println("");
-        io.println("  Select the development tools you want to install");
-        io.println("  ---------------------------------------------------");
-        io.println("  Each entry below is a toggle. Type a number to flip it.");
-        io.println("  Press Enter on an empty line to commit, /skip to leave");
-        io.println("  the current selection unchanged, or /exit to abort.");
-        io.println("");
-
-        List<DevToolsConfig.Capability> catalog = DevToolsConfig.CATALOG;
-
-        while (true) {
-            for (int i = 0; i < catalog.size(); i++) {
-                DevToolsConfig.Capability c = catalog.get(i);
-                String mark = enabled.contains(c.id()) ? "x" : " ";
-                io.println(String.format("    [%s] %d. %s", mark, i + 1, c.label()));
-            }
-            io.println("");
-            io.print("  > ");
-            String resp = io.readLine();
-            if (resp == null) {
-                // EOF mid-prompt — treat as commit-current.
-                break;
-            }
-            resp = resp.strip();
-            if (resp.isEmpty() || "/skip".equals(resp)) {
-                break;
-            }
-            if ("/exit".equals(resp)) {
-                io.println("  Exiting development-tools step.");
-                return Outcome.APPLIED;
-            }
-            Integer idx = parseIndex(resp, catalog.size());
-            if (idx == null) {
-                io.println("  Type a number 1.." + catalog.size() + ", /skip, or /exit.");
-                continue;
-            }
-            DevToolsConfig.Capability target = catalog.get(idx);
-            if (enabled.contains(target.id())) {
-                enabled.remove(target.id());
-                io.println("  Disabled: " + target.label());
-            } else {
-                // Enabling → surface the trust-boundary warning before commit.
-                String warning = target.warning();
-                if (warning != null && !warning.isBlank()) {
-                    io.println("");
-                    io.println("  ! " + warning);
-                    io.println("");
-                    io.print("  Continue? [y/N]: ");
-                    String confirm = io.readLine();
-                    if (confirm == null || !confirm.strip().toLowerCase().matches("y|yes")) {
-                        io.println("  Cancelled. " + target.id() + " left disabled.");
-                        continue;
-                    }
-                }
-                enabled.add(target.id());
-                io.println("  Enabled: " + target.label());
-            }
-        }
-
-        DevToolsConfig.writeEnabled(ledgerPath, enabled);
-
-        // Best-effort mode + ownership — the ledger holds no secret material,
-        // but matching the rest of the install-time files (mode 0644 / owned
-        // by ai-sandbox-server) keeps it consistent.
-        try {
-            Files.setPosixFilePermissions(ledgerPath, PosixFilePermissions.fromString("rw-r--r--"));
-        } catch (UnsupportedOperationException ignored) {
-            // Non-POSIX filesystem (Windows) — nothing to do.
-        }
-        if (ownership != null) {
-            ownership.chown(ledgerPath);
-        }
-
-        if (enabled.isEmpty()) {
-            io.println("  Development tools: none enabled (sessions remain identical to the default).");
-        } else {
-            io.println("  Development tools persisted: " + String.join(", ", enabled));
-            io.println("  Changes apply to NEW sessions only — existing sessions are unaffected.");
-        }
-        return Outcome.APPLIED;
-    }
-
-    /** Parse a 1..size index from a user-typed string; {@code null} if invalid. */
-    private static Integer parseIndex(String s, int size) {
-        try {
-            int n = Integer.parseInt(s);
-            if (n >= 1 && n <= size) {
-                return n - 1;
-            }
-        } catch (NumberFormatException ignored) {
-            // fall through
-        }
-        return null;
+        return Outcome.DEFERRED;
     }
 
     /** Helper for callers (Reconfigure --doctor) that just need the enabled-ids set. */

@@ -370,6 +370,22 @@ val releaseBundle by tasks.registering(Zip::class) {
         into("host")
         filePermissions { unix("rwxr-xr-x") }
     }
+    // UC-27 — the shared raw-mode devtools selector. devtools-select.sh is the
+    // standalone entry the Java install-time CLI shells out to
+    // (<install-dir>/host/devtools-select.sh); it sources lib.sh + devtools-ui.sh
+    // from the same host/ dir. devtools.d/ holds the auto-discovered capability
+    // manifests — both the selector AND the container build context need them
+    // (SandboxDockerfile does `COPY devtools.d/`, and the bundled build context
+    // is host/).
+    from(rootProject.file("devtools-select.sh")) {
+        into("host")
+        filePermissions { unix("rwxr-xr-x") }
+    }
+    from(rootProject.file("devtools-ui.sh")) {
+        into("host")
+        filePermissions { unix("rwxr-xr-x") }
+    }
+    from(rootProject.file("devtools.d")) { into("host/devtools.d") }
     // UC05 § AC4 — PowerShell counterparts; not exec'd by v0.0.3 systemd
     // installer, kept byte-identical for a future Windows installer.
     from(rootProject.file("spawn.ps1")) { into("host") }
@@ -518,12 +534,22 @@ val prepDebStaging by tasks.registering(Copy::class) {
 
     // /opt/ai-sandbox-server/host/* — POSIX shell scripts at 0755,
     // PowerShell counterparts + the compose context at 0644.
-    val hostExecutables = listOf("spawn.sh", "clean.sh", "attach.sh", "lib.sh", "setup.sh", "entrypoint.sh")
+    // UC-27 — devtools-select.sh / devtools-ui.sh are the shared raw-mode
+    // selector (the Java CLI shells out to host/devtools-select.sh).
+    val hostExecutables = listOf(
+        "spawn.sh", "clean.sh", "attach.sh", "lib.sh", "setup.sh", "entrypoint.sh",
+        "devtools-select.sh", "devtools-ui.sh")
     hostExecutables.forEach { name ->
         from(rootProject.file(name)) {
             into("opt/ai-sandbox-server/host")
             filePermissions { unix("rwxr-xr-x") }
         }
+    }
+    // UC-27 — devtools.d/ capability manifests. Needed both by the selector and
+    // by the container build context (SandboxDockerfile does `COPY devtools.d/`).
+    from(rootProject.file("devtools.d")) {
+        into("opt/ai-sandbox-server/host/devtools.d")
+        filePermissions { unix("rw-r--r--") }
     }
     val hostData = listOf(
         "spawn.ps1", "clean.ps1", "attach.ps1", "lib.ps1", "setup.ps1",
