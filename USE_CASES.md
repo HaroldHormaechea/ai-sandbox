@@ -36,5 +36,5 @@ Statuses:
 | 24 | [use-cases/24-android-terminal-multi-window-leak-fix.md](use-cases/24-android-terminal-multi-window-leak-fix.md) | Android terminal — fix "all tmux windows shown" regression (only main pane + agent switcher) | pending | 2026-05-30 |
 | 25 | [use-cases/25-android-terminal-split-pane.md](use-cases/25-android-terminal-split-pane.md) | Android terminal — split-pane support (UC04-3c) [tentative, pending review] | pending | 2026-05-30 |
 | 26 | [use-cases/26-server-setup-devtools-step-dind.md](use-cases/26-server-setup-devtools-step-dind.md) | Server setup — "Select the development tools you want to install" step with rootless Docker-in-Docker | done | 2026-05-31 |
-| 27 | [use-cases/27-devtools-capability-selector.md](use-cases/27-devtools-capability-selector.md) | Server setup — manifest-driven, launch-adapted dev-tools capability selector (Linux-only) | pending | 2026-05-31 |
+| 27 | [use-cases/27-devtools-capability-selector.md](use-cases/27-devtools-capability-selector.md) | Server setup — manifest-driven, launch-adapted dev-tools capability selector (Linux-only) | done | 2026-05-31 |
 
