@@ -57,6 +57,29 @@ the wiring between the wizard and the spawn-time injection.
   `alpine:latest` image; subsequent runs reuse the cache).
 - ~500 MB of free disk under `./workspace/environment-utilities/dind/`
   for the rootless-docker tarball cache.
+- **Unprivileged user namespaces must be permitted by the host kernel.**
+  Rootless `dockerd` (via `rootlesskit`) creates a nested user namespace
+  inside the session container. On Ubuntu 23.10+ / 24.04+ / 26.04 the
+  default `kernel.apparmor_restrict_unprivileged_userns=1` AppArmor policy
+  **blocks** this for unprivileged processes — and it is enforced at the
+  host kernel level, so the container's `seccomp:unconfined` +
+  `apparmor:unconfined` (set by `docker-compose.dind.yml`) do **not**
+  lift it. Verify and, if needed, relax it on the host **before** running
+  the gate:
+
+  ```bash
+  cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns   # 1 = restricted
+  # If 1, EITHER (operator decision, needs root):
+  sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0   # host-wide, transient
+  #   …or attach an AppArmor profile that grants `userns,` to the session
+  #   container. A quick smoke test that userns works at all:
+  #   `unshare -Urm true`  → exit 0 means OK; "Permission denied" means blocked.
+  ```
+
+  Without this, `aisandbox-dind start` fails with
+  `rootlesskit … failed to start the child: fork/exec /proc/self/exe:
+  operation not permitted`. This is a **host configuration prerequisite**,
+  not a defect in the DinD plumbing.
 
 ## Steps
 
@@ -176,6 +199,41 @@ docker compose -p ai-sandbox-3 exec -T claude-sandbox docker volume ls --format 
 If any of these list a `aisandbox-dind-*` / `selftest-*` artifact, the
 teardown is leaky — file an issue.
 
+### 6b. Stronger runtime gate — busybox file round-trip (committed script)
+
+Beyond the `tmux -V` selftest, a committed end-to-end gate proves a
+container running **inside** the in-session rootless daemon can write a
+file that round-trips back out to the session container's filesystem —
+a stricter AC#5/AC#7/AC#9 proof than "a daemon answers". The script
+drives the **real supported path** end-to-end (real `lib.sh`
+`write_enabled_devtools` ledger writer → real `./spawn.sh` →
+image-baked `aisandbox-dind` → busybox `docker run`), on a throwaway
+high-numbered project (`ai-sandbox-91` by default) under a temp state
+root so it never collides with a live session:
+
+```bash
+server/src/test/e2e/uc26-dind-busybox-gate.sh
+# exit 0 = PASS · 1 = FAIL · 77 = SKIP (prereq missing, e.g. no /dev/fuse)
+```
+
+What it asserts:
+
+1. The ledger is written via the production writer and reports `dind`.
+2. `./spawn.sh` layers `docker-compose.dind.yml` — the spawned container
+   has `/dev/fuse` passed through and `AI_SANDBOX_DEVTOOL_DIND=1`
+   (AC#5/#7 spawn-side wiring).
+3. Inside the session, a `busybox` container in the rootless daemon does
+   `printf <sentinel> > /data/probe.txt` on a bind-mounted path.
+4. The session container reads `/workspace/dind-probe/probe.txt` back and
+   asserts it equals the sentinel **byte-for-byte** (the round-trip).
+5. A teardown trap brings the project down (`-v`) and removes the temp
+   state — idempotent and re-runnable.
+
+The script is intentionally inert to Gradle (it lives under
+`server/src/test/e2e/`, which `compileTestJava` / `processTestResources`
+do not consume) — it is an operator/CI-on-a-real-host artifact, run
+directly with `bash`.
+
 ### 7. Disabled-session control (AC#6 sanity)
 
 Recycle the wizard to disable DinD, spawn a control session, and prove
@@ -235,3 +293,33 @@ release-prep checklist alongside the verifier's initials and the date.
 - A future revision may move the (c) / (d) legs into a Testcontainers-
   based integration test gated on a `RUN_DIND_ITS=1` env var so the
   contract can be CI-enforced on a daily cron without slowing every PR.
+
+## Findings — 2026-05-31 live gate run (this host)
+
+Recorded when the busybox round-trip gate (§6b) was first executed on the
+dev host (Ubuntu 26.04 LTS, Docker 29.5.0, x86_64). The gate could **not**
+be marked green; two distinct blockers surfaced, captured here verbatim:
+
+1. **Defect (pending developer fix) — `aisandbox-dind start` cannot create
+   `XDG_RUNTIME_DIR` in a logind-less container.** `cmd_start` runs
+   `mkdir -p /run/user/$(id -u)` as the non-root session user, but
+   `/run/user/` does not exist and is root-owned (a bare container has no
+   `systemd-logind` to create it), so the command fails with
+   `mkdir: can't create directory '/run/user/': Permission denied` and
+   `set -e` aborts **before** the daemon is launched (no socket, no
+   `dockerd-rootless.log`). This is host-independent and blocks the DinD
+   runtime path on every host. Suggested fix: fall back to a user-writable
+   `XDG_RUNTIME_DIR` (e.g. `$HOME/.docker/run`, mode 0700) when
+   `/run/user/<uid>` is not creatable, and point `DOCKER_HOST` /
+   `--exec-root` at it accordingly.
+
+2. **Host prerequisite (not a defect) — unprivileged userns blocked.** With
+   the above worked around manually, `rootlesskit` then failed with
+   `failed to start the child: fork/exec /proc/self/exe: operation not
+   permitted`. Root cause: `kernel.apparmor_restrict_unprivileged_userns=1`
+   (Ubuntu 24.04+/26.04 default). `unshare -Urm true` inside the session
+   returns `/proc/self/setgroups: Permission denied`, confirming the
+   kernel-level block. Relaxing it needs root (`sysctl -w …=0` or an
+   AppArmor `userns,` profile); see the Prerequisites section. On this host
+   passwordless sudo is unavailable, so the gate is **blocked, not failed**
+   — recorded rather than skipped.
