@@ -667,6 +667,12 @@ val debPackage by tasks.registering {
                     // +x bit without broadening the *.sh pattern. Same
                     // include/exclude pattern as usr/bin/aisandboxctl above.
                     "include"("name" to "**/container-bin/aisandbox-emulator")
+                    // UC-26 — the in-container DinD helper is exec'd by
+                    // entrypoint.sh (install/start) and by `reconfigure --doctor`;
+                    // it has no .sh suffix, so a named-file include keeps its +x
+                    // bit in the .deb (jdeb defaults every file to 0644). Mirrors
+                    // aisandbox-emulator above.
+                    "include"("name" to "**/container-bin/aisandbox-dind")
                     "mapper"(
                         "type" to "perm",
                         "user" to "root",
@@ -683,6 +689,9 @@ val debPackage by tasks.registering {
                     "exclude"("name" to "**/git-hooks/pre-commit")
                     "exclude"("name" to "usr/bin/aisandboxctl")
                     "exclude"("name" to "**/container-bin/aisandbox-emulator")
+                    // UC-26 — keep aisandbox-dind out of the 0644 block (it is
+                    // 0755 via Block 1's named-file include above).
+                    "exclude"("name" to "**/container-bin/aisandbox-dind")
                     "mapper"(
                         "type" to "perm",
                         "user" to "root",
