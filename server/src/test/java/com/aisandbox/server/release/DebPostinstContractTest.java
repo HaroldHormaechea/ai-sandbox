@@ -541,17 +541,17 @@ class DebPostinstContractTest {
         // copy-edit only breaks the test when the command itself drifts.
         int occurrences = count(text, "sudo aisandboxctl reconfigure");
         assertThat(occurrences)
-                .as(
-                        "UC-26 — `sudo aisandboxctl reconfigure` reminder MUST appear in each of the three onboard-"
-                                + "related Next-steps branches (interactive, non-interactive, deferred) so an operator"
-                                + " who installed the .deb pre-UC-26 discovers the new dev-tools affordance.")
+                .as("UC-26 — `sudo aisandboxctl reconfigure` reminder MUST appear in each of the three onboard-"
+                        + "related Next-steps branches (interactive, non-interactive, deferred) so an operator"
+                        + " who installed the .deb pre-UC-26 discovers the new dev-tools affordance.")
                 .isGreaterThanOrEqualTo(3);
 
         // The reminder line MUST also mention "Docker-in-Docker" (or
         // "DinD") so the operator knows what the affordance actually does
         // — not just "go run a command, trust me". Match either spelling.
         assertThat(text)
-                .as("UC-26 — the reconfigure-reminder line MUST name the v1 capability so the operator knows what it gates")
+                .as(
+                        "UC-26 — the reconfigure-reminder line MUST name the v1 capability so the operator knows what it gates")
                 .containsPattern("Docker-in-Docker|DinD");
     }
 

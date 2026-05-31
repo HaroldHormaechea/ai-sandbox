@@ -38,19 +38,34 @@ import picocli.CommandLine;
  * {@link ReconfigureCommand#setConsoleIO}, mirroring the other CLI tests
  * in this package. No real {@code docker} invocations happen.
  *
- * <p><b>Note on root-check parity.</b> The proposal asked for "root-check
- * parity with {@code OnboardCommand}". The current implementation of
- * {@link ReconfigureCommand} does not expose a {@code setRootCheck} seam
- * and does not perform a root probe before writing the ledger; the QA
- * findings (relayed to the team lead) cover that gap.
+ * <p><b>Root-check parity (fix-back Round 1).</b> {@link ReconfigureCommand}
+ * now mirrors {@code OnboardCommand}: a {@code setRootCheck(BooleanSupplier)}
+ * seam gates the interactive ledger-writing picker behind a root probe
+ * ({@code isPosix() && !rootCheck} ⇒ exit 2 + "must run as root"), while the
+ * read-only {@code --doctor} path returns <i>before</i> the guard so a
+ * non-root operator in the {@code docker} group can still run diagnostics.
+ * Because this host runs as a non-root user, the default real {@code isRoot()}
+ * probe would now trip the guard for every bare-path test, so {@link #cmd}
+ * stubs the probe to {@code true} (simulating root) — exactly as
+ * {@code OnboardCommandTest.onboard()} does. The dedicated guard behaviour is
+ * exercised by the {@code root_check_*} cases below, which override the seam.
  */
 class ReconfigureCommandTest {
 
-    /** Build a {@link CommandLine} with the test seams pre-wired. */
+    /**
+     * Build a {@link CommandLine} with the test seams pre-wired, simulating a
+     * root invocation (the common case for the bare ledger-writing picker).
+     */
     private static CommandLine cmd(FakeProcessRunner runner, FakeConsoleIO io) {
+        return cmd(runner, io, /* root */ true);
+    }
+
+    /** Build a {@link CommandLine} with the root-probe seam stubbed to {@code root}. */
+    private static CommandLine cmd(FakeProcessRunner runner, FakeConsoleIO io, boolean root) {
         ReconfigureCommand c = new ReconfigureCommand();
         c.setProcessRunner(runner);
         c.setConsoleIO(io);
+        c.setRootCheck(() -> root);
         return new CommandLine(c);
     }
 
@@ -217,6 +232,109 @@ class ReconfigureCommandTest {
         assertThat(sessionsDir.resolve(".ai-sandbox-devtools")).doesNotExist();
     }
 
+    // ── Root check (fix-back Round 1, parity with OnboardCommand) ────
+
+    @Test
+    void non_root_interactive_picker_exits_2_and_does_not_write_ledger(@TempDir Path tmp) throws Exception {
+        // Fix-back #2 — the interactive picker writes the ledger under
+        // <sessions-dir> (/var/lib/ai-sandbox-server/sessions in install
+        // mode, owned by ai-sandbox-server mode 0750). A non-root operator's
+        // Files.write would otherwise surface as a raw EACCES NIO exception;
+        // the guard MUST instead print the friendly "must run as root" line
+        // and exit 2 BEFORE the picker runs — so no ledger is written and no
+        // checklist is even rendered. Mirrors OnboardCommandTest's
+        // root_check_blocks_when_uid_not_zero.
+        Path sessionsDir = tmp.resolve("sessions");
+        Files.createDirectories(sessionsDir);
+
+        FakeConsoleIO io = new FakeConsoleIO();
+        io.tty = true;
+        // Script picker input that MUST NOT be consumed (the guard fires first).
+        io.inputLines.add("1");
+        io.inputLines.add("y");
+        io.inputLines.add("");
+
+        ByteArrayOutputStream outBuf = new ByteArrayOutputStream();
+        ByteArrayOutputStream errBuf = new ByteArrayOutputStream();
+        int exit = executeCapturing(
+                cmd(okRunner(), io, /* root */ false),
+                new String[] {"--sessions-dir", sessionsDir.toString()},
+                outBuf,
+                errBuf);
+
+        assertThat(exit).isEqualTo(2);
+        // The friendly message lands on stderr (System.err, not ConsoleIO).
+        assertThat(errBuf.toString()).contains("must run as root").contains("sudo");
+        // Ledger untouched — the write path never executed.
+        assertThat(sessionsDir.resolve(".ai-sandbox-devtools")).doesNotExist();
+        // The picker never ran: no checklist rendered, scripted input untouched.
+        assertThat(io.printed).isEmpty();
+        assertThat(io.inputLines).hasSize(3);
+    }
+
+    @Test
+    void root_interactive_picker_proceeds_and_writes_ledger(@TempDir Path tmp) throws Exception {
+        // Fix-back #2 — the complement: with the root probe stubbed true the
+        // guard is skipped and the picker runs to completion, persisting the
+        // ledger. (Same wiring the bare-path tests rely on via cmd().)
+        Path sessionsDir = tmp.resolve("sessions");
+        Files.createDirectories(sessionsDir);
+
+        FakeConsoleIO io = new FakeConsoleIO();
+        io.tty = true;
+        io.inputLines.add("1"); // toggle dind on
+        io.inputLines.add("y"); // confirm the trust-boundary warning
+        io.inputLines.add(""); // commit
+
+        ByteArrayOutputStream outBuf = new ByteArrayOutputStream();
+        ByteArrayOutputStream errBuf = new ByteArrayOutputStream();
+        int exit = executeCapturing(
+                cmd(okRunner(), io, /* root */ true),
+                new String[] {"--sessions-dir", sessionsDir.toString()},
+                outBuf,
+                errBuf);
+
+        assertThat(exit).isZero();
+        assertThat(errBuf.toString()).doesNotContain("must run as root");
+        Path ledger = sessionsDir.resolve(".ai-sandbox-devtools");
+        assertThat(ledger).exists();
+        assertThat(DevToolsConfig.readEnabled(ledger)).containsExactly("dind");
+    }
+
+    @Test
+    void non_root_doctor_path_is_not_gated_by_root_check(@TempDir Path tmp) throws Exception {
+        // Fix-back #2 — DEVIATION (justified): --doctor is read-only (it only
+        // shells `docker compose exec … aisandbox-dind doctor`), and a
+        // non-root operator in the docker group can legitimately run it. So
+        // the guard must NOT gate --doctor: a non-root invocation runs the
+        // diagnostic and returns its exit code, never the root-rejection 2.
+        Path sessionsDir = tmp.resolve("sessions");
+        Files.createDirectories(sessionsDir);
+        Path ledger = sessionsDir.resolve(".ai-sandbox-devtools");
+        Set<String> seeded = new LinkedHashSet<>();
+        seeded.add("dind");
+        DevToolsConfig.writeEnabled(ledger, seeded);
+
+        FakeProcessRunner runner = okRunner();
+        FakeConsoleIO io = new FakeConsoleIO();
+
+        ByteArrayOutputStream outBuf = new ByteArrayOutputStream();
+        ByteArrayOutputStream errBuf = new ByteArrayOutputStream();
+        int exit = executeCapturing(
+                cmd(runner, io, /* root */ false),
+                new String[] {"--sessions-dir", sessionsDir.toString(), "--doctor", "--session", "1"},
+                outBuf,
+                errBuf);
+
+        // Read-only path runs despite non-root: exit 0 (runner is permissive),
+        // never the root-rejection exit 2, and no "must run as root" message.
+        assertThat(exit).isZero();
+        assertThat(errBuf.toString()).doesNotContain("must run as root");
+        // The diagnostic actually shelled out (proves we passed the guard).
+        assertThat(runner.captureCalls).hasSize(1);
+        assertThat(runner.captureCalls.get(0)).contains("aisandbox-dind", "doctor");
+    }
+
     // ── --doctor path ───────────────────────────────────────────────
 
     @Test
@@ -323,10 +441,7 @@ class ReconfigureCommandTest {
         ByteArrayOutputStream outBuf = new ByteArrayOutputStream();
         ByteArrayOutputStream errBuf = new ByteArrayOutputStream();
         int exit = executeCapturing(
-                cmd(runner, io),
-                new String[] {"--sessions-dir", sessionsDir.toString(), "--doctor"},
-                outBuf,
-                errBuf);
+                cmd(runner, io), new String[] {"--sessions-dir", sessionsDir.toString(), "--doctor"}, outBuf, errBuf);
 
         assertThat(exit).isEqualTo(5);
         // The output reflects both projects.
@@ -356,10 +471,7 @@ class ReconfigureCommandTest {
         ByteArrayOutputStream outBuf = new ByteArrayOutputStream();
         ByteArrayOutputStream errBuf = new ByteArrayOutputStream();
         int exit = executeCapturing(
-                cmd(runner, io),
-                new String[] {"--sessions-dir", sessionsDir.toString(), "--doctor"},
-                outBuf,
-                errBuf);
+                cmd(runner, io), new String[] {"--sessions-dir", sessionsDir.toString(), "--doctor"}, outBuf, errBuf);
 
         assertThat(exit).isZero();
         assertThat(io.allOutput()).contains("No ai-sandbox-*");

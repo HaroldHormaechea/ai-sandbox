@@ -153,7 +153,8 @@ class DevToolsStepTest {
     // ── Disable existing — no warning fires ──────────────────────────
 
     @Test
-    void disabling_an_existing_enabled_capability_emits_no_trust_boundary_warning(@TempDir Path tmp) throws IOException {
+    void disabling_an_existing_enabled_capability_emits_no_trust_boundary_warning(@TempDir Path tmp)
+            throws IOException {
         // Pre-seed the ledger so dind starts ENABLED; toggling it off
         // must NOT re-fire the warning (warnings are for boundary-widening
         // events, not boundary-narrowing ones).
@@ -202,8 +203,8 @@ class DevToolsStepTest {
         // The rendered checklist row for dind MUST carry the [x] marker
         // (rather than [ ]), which is how AC#4's "current state pre-
         // selected" presents to the operator.
-        boolean preSelectedRow = io.printed.stream()
-                .anyMatch(line -> line.contains("[x]") && line.contains("Docker-in-Docker"));
+        boolean preSelectedRow =
+                io.printed.stream().anyMatch(line -> line.contains("[x]") && line.contains("Docker-in-Docker"));
         assertThat(preSelectedRow)
                 .as("AC#4 — re-run MUST render the dind row with [x] when the ledger already enables it")
                 .isTrue();
@@ -325,9 +326,7 @@ class DevToolsStepTest {
         DevToolsStep.Outcome outcome = step(io).run(ledger, false, true, null);
 
         assertThat(outcome).isEqualTo(DevToolsStep.Outcome.APPLIED);
-        assertThat(ledger)
-                .as("/exit MUST NOT create a ledger file")
-                .doesNotExist();
+        assertThat(ledger).as("/exit MUST NOT create a ledger file").doesNotExist();
         assertThat(io.allOutput()).contains("Exiting");
     }
 

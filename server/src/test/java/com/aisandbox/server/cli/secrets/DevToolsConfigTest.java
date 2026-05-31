@@ -151,7 +151,8 @@ class DevToolsConfigTest {
         // `rust` / `python` MUST still read a newer ledger without
         // erroring; it just sees the subset of capabilities it knows.
         Path ledger = tmp.resolve(".ai-sandbox-devtools");
-        Files.writeString(ledger, "dind\tsession-spawn\nrust\timage-build\npython\timage-build\n", StandardCharsets.UTF_8);
+        Files.writeString(
+                ledger, "dind\tsession-spawn\nrust\timage-build\npython\timage-build\n", StandardCharsets.UTF_8);
 
         Set<String> enabled = DevToolsConfig.readEnabled(ledger);
         assertThat(enabled).containsExactly("dind");
@@ -252,7 +253,8 @@ class DevToolsConfigTest {
         // not-yet-created sessions dir on a fresh install; writeEnabled
         // mkdir -p's the parent to keep the write atomic from the
         // caller's POV.
-        Path nested = tmp.resolve("var").resolve("lib").resolve("ai-sandbox-server").resolve("sessions");
+        Path nested =
+                tmp.resolve("var").resolve("lib").resolve("ai-sandbox-server").resolve("sessions");
         Path ledger = nested.resolve(".ai-sandbox-devtools");
         assertThat(nested).doesNotExist();
 

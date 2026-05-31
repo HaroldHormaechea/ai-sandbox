@@ -290,7 +290,8 @@ class HostScriptComposeEnvTest {
                 env,
                 "source './lib.sh' && inject_devtool_spawn_env && "
                         + "printf 'EXTRA=%s\\nDIND=%s\\n' "
-                        + "\"${AI_SANDBOX_EXTRA_COMPOSE_FILES:-}\" \"${AI_SANDBOX_DEVTOOL_DIND:-0}\" > '" + probe + "' && "
+                        + "\"${AI_SANDBOX_EXTRA_COMPOSE_FILES:-}\" \"${AI_SANDBOX_DEVTOOL_DIND:-0}\" > '" + probe
+                        + "' && "
                         + "ai_sandbox_compose -p ai-sandbox-1 up -d");
         assertThat(rc).isZero();
 
@@ -362,7 +363,9 @@ class HostScriptComposeEnvTest {
         // Simulate the KVM override having been layered by spawn.sh's
         // own /dev/kvm detection branch (UC-22 AC#13). DinD must append to
         // this, not replace it.
-        env.put("AI_SANDBOX_EXTRA_COMPOSE_FILES", stage.resolve("docker-compose.kvm.yml").toString());
+        env.put(
+                "AI_SANDBOX_EXTRA_COMPOSE_FILES",
+                stage.resolve("docker-compose.kvm.yml").toString());
 
         Path probe = tmp.resolve("probe.env");
         int rc = runShell(
@@ -370,7 +373,8 @@ class HostScriptComposeEnvTest {
                 env,
                 "source './lib.sh' && inject_devtool_spawn_env && "
                         + "printf 'EXTRA=%s\\nDIND=%s\\n' "
-                        + "\"${AI_SANDBOX_EXTRA_COMPOSE_FILES:-}\" \"${AI_SANDBOX_DEVTOOL_DIND:-0}\" > '" + probe + "' && "
+                        + "\"${AI_SANDBOX_EXTRA_COMPOSE_FILES:-}\" \"${AI_SANDBOX_DEVTOOL_DIND:-0}\" > '" + probe
+                        + "' && "
                         + "ai_sandbox_compose -p ai-sandbox-1 up -d");
         assertThat(rc).isZero();
 
@@ -425,7 +429,8 @@ class HostScriptComposeEnvTest {
                 env,
                 "source './lib.sh' && inject_devtool_spawn_env && "
                         + "printf 'EXTRA=%s\\nDIND=%s\\n' "
-                        + "\"${AI_SANDBOX_EXTRA_COMPOSE_FILES:-}\" \"${AI_SANDBOX_DEVTOOL_DIND:-0}\" > '" + probe + "' && "
+                        + "\"${AI_SANDBOX_EXTRA_COMPOSE_FILES:-}\" \"${AI_SANDBOX_DEVTOOL_DIND:-0}\" > '" + probe
+                        + "' && "
                         + "ai_sandbox_compose -p ai-sandbox-5 up -d");
         assertThat(rc).isZero();
 

@@ -183,7 +183,9 @@ class ReleaseBundleTest {
                 .contains("host/docker-compose.dind.yml");
         Integer dindComposeMode = modes.get("host/docker-compose.dind.yml");
         assertThat(dindComposeMode).as("mode of host/docker-compose.dind.yml").isNotNull();
-        assertThat(dindComposeMode & 0777).as("mode of host/docker-compose.dind.yml").isEqualTo(0644);
+        assertThat(dindComposeMode & 0777)
+                .as("mode of host/docker-compose.dind.yml")
+                .isEqualTo(0644);
 
         // host/container-bin/aisandbox-dind — exec helper, mode 0755.
         assertThat(entries)
@@ -194,7 +196,8 @@ class ReleaseBundleTest {
                 .as("mode of host/container-bin/aisandbox-dind")
                 .isNotNull();
         assertThat(dindHelperMode & 0777)
-                .as("mode of host/container-bin/aisandbox-dind — must be exec for the SandboxDockerfile COPY to land it +x")
+                .as(
+                        "mode of host/container-bin/aisandbox-dind — must be exec for the SandboxDockerfile COPY to land it +x")
                 .isEqualTo(0755);
     }
 
