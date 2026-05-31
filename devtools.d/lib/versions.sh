@@ -15,6 +15,14 @@
 # with the upstream changelog at https://docs.docker.com/engine/security/rootless/.
 AISB_DIND_DOCKER_VERSION="${AISB_DIND_DOCKER_VERSION:-27.3.1}"
 
+# Docker Compose v2 CLI plugin version fetched by aisandbox-dind from the
+# docker/compose GitHub releases. The static rootless tarball above ships the
+# engine + `docker` CLI but NOT the compose plugin, so it is fetched separately
+# and installed into the docker cli-plugins dir. Keep this compatible with
+# AISB_DIND_DOCKER_VERSION's engine era (27.3.1 → Compose v2.29.x). No leading
+# 'v' — aisandbox-dind prepends it when building the download URL.
+AISB_DOCKER_COMPOSE_VERSION="${AISB_DOCKER_COMPOSE_VERSION:-2.29.7}"
+
 # ── Java (Temurin JDK) ───────────────────────────────────────────────────────
 AISB_JAVA_FLAVOR="${AISB_JAVA_FLAVOR:-Temurin JDK}"
 AISB_JAVA_MAJOR="${AISB_JAVA_MAJOR:-21}"

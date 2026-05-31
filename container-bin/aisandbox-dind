@@ -55,6 +55,21 @@ CACHE_ROOT="${AISB_DIND_CACHE:-/workspace/environment-utilities/dind}"
 BIN_DIR="$CACHE_ROOT/bin"
 VAR_DIR="$CACHE_ROOT/var"
 VERSION_FILE="$CACHE_ROOT/.docker-version"
+# Compose v2 plugin is cached here (persisted under /workspace, like the engine)
+# and symlinked into the ephemeral $HOME docker cli-plugins dir on every start,
+# so `docker compose` resolves on a clean spawn AND on a re-spawn into a cached
+# workspace (where $HOME is fresh but this cache persists).
+COMPOSE_PLUGIN_CACHE="$CACHE_ROOT/cli-plugins/docker-compose"
+
+# Pull pinned version constants from the shared catalog so the label the
+# operator sees and the toolchain that actually lands can never drift. In the
+# container image the file lands at /opt/ai-sandbox/devtools.d/lib/versions.sh
+# (see SandboxDockerfile `COPY devtools.d/ /opt/ai-sandbox/devtools.d/`). If it
+# is absent (e.g. running this script outside the image) the inline env-var
+# defaults below still apply, so the script degrades gracefully.
+# shellcheck source=../devtools.d/lib/versions.sh disable=SC1091
+[ -r /opt/ai-sandbox/devtools.d/lib/versions.sh ] \
+    && . /opt/ai-sandbox/devtools.d/lib/versions.sh
 
 # Pinned rootless-Docker version. Bumping is a normal patch; keep an eye on
 # the upstream changelog at https://docs.docker.com/engine/security/rootless/.
@@ -63,6 +78,12 @@ VERSION_FILE="$CACHE_ROOT/.docker-version"
 # extras helper (dockerd-rootless.sh, rootlesskit, slirp4netns,
 # fuse-overlayfs).
 DOCKER_VERSION="${AISB_DIND_DOCKER_VERSION:-27.3.1}"
+
+# Docker Compose v2 CLI plugin version. The rootless static bundle above ships
+# the engine + `docker` CLI but NOT the compose plugin, so we fetch it from the
+# docker/compose GitHub releases and drop it into the docker cli-plugins dir
+# (see cmd_install / link_compose_plugin). Sourced from versions.sh when present.
+DOCKER_COMPOSE_VERSION="${AISB_DOCKER_COMPOSE_VERSION:-2.29.7}"
 
 # State persisted to a profile.d snippet inside ~/.profile (sourced by login
 # shells) so an operator opening a fresh `tmux` window inside the session
@@ -109,9 +130,58 @@ resolve_runtime_dir() {
 }
 
 # ── install ──────────────────────────────────────────────────────────────────
+# Fetch the Docker Compose v2 CLI plugin into the persisted cache. Idempotent
+# (skips when the cached binary already matches DOCKER_COMPOSE_VERSION) and
+# arch-aware, mirroring the engine download. Called from cmd_install BEFORE the
+# engine cache-hit early-return, so a re-spawn into a cached workspace still
+# ensures the plugin is present even when the engine itself is already cached.
+install_compose_plugin() {
+    local plugin_dir version_file arch url
+    plugin_dir="$(dirname "$COMPOSE_PLUGIN_CACHE")"
+    version_file="$plugin_dir/.compose-version"
+    mkdir -p "$plugin_dir"
+
+    if [ -x "$COMPOSE_PLUGIN_CACHE" ] \
+        && [ -f "$version_file" ] \
+        && [ "$(cat "$version_file" 2>/dev/null)" = "$DOCKER_COMPOSE_VERSION" ]; then
+        log "Docker Compose v2 plugin $DOCKER_COMPOSE_VERSION already cached."
+        return 0
+    fi
+
+    case "$(uname -m)" in
+        x86_64|amd64) arch="x86_64" ;;
+        aarch64|arm64) arch="aarch64" ;;
+        *) die "Unsupported architecture: $(uname -m). docker compose plugin ships for x86_64 / aarch64." ;;
+    esac
+
+    url="https://github.com/docker/compose/releases/download/v${DOCKER_COMPOSE_VERSION}/docker-compose-linux-${arch}"
+    log "Downloading Docker Compose v2 plugin $DOCKER_COMPOSE_VERSION ($arch) from $url …"
+    curl -fsSL -o "$COMPOSE_PLUGIN_CACHE.tmp" "$url" || die "Failed to download $url"
+    chmod 0755 "$COMPOSE_PLUGIN_CACHE.tmp"
+    mv -f "$COMPOSE_PLUGIN_CACHE.tmp" "$COMPOSE_PLUGIN_CACHE"
+    printf '%s\n' "$DOCKER_COMPOSE_VERSION" > "$version_file"
+    log "Docker Compose v2 plugin $DOCKER_COMPOSE_VERSION provisioned."
+}
+
+# Symlink the cached compose plugin into the docker CLI's default user
+# cli-plugins dir ($HOME/.docker/cli-plugins). $HOME is ephemeral per container,
+# so we re-link on every start; the plugin binary itself lives in the persisted
+# /workspace cache. Placing it at the DEFAULT location means `docker compose`
+# resolves in any shell (login `sh -lc` or non-login `sh -c`) with no extra env.
+link_compose_plugin() {
+    [ -x "$COMPOSE_PLUGIN_CACHE" ] || return 0
+    local dest_dir="$HOME/.docker/cli-plugins"
+    mkdir -p "$dest_dir"
+    ln -sf "$COMPOSE_PLUGIN_CACHE" "$dest_dir/docker-compose"
+}
+
 cmd_install() {
     require_enabled
     mkdir -p "$BIN_DIR" "$VAR_DIR"
+
+    # Compose plugin first — independent of the engine cache state, so it lands
+    # even when the engine early-return below short-circuits on a re-spawn.
+    install_compose_plugin
 
     if [ -x "$BIN_DIR/dockerd-rootless.sh" ] \
         && [ -f "$VERSION_FILE" ] \
@@ -165,6 +235,10 @@ cmd_start() {
         die "rootless Docker is not installed yet. Run \`aisandbox-dind install\` first (entrypoint should do this automatically)."
     fi
 
+    # Re-link the cached compose plugin into this container's ephemeral $HOME so
+    # `docker compose` resolves even on a re-spawn (fresh $HOME, persisted cache).
+    link_compose_plugin
+
     # XDG_RUNTIME_DIR must exist and be private (0700) to the runtime user, as
     # rootlesskit expects. resolve_runtime_dir prefers /run/user/<uid> and falls
     # back to a $HOME-based dir in a bare (no-logind) container where /run/user
@@ -200,6 +274,20 @@ cmd_start() {
         return 0
     fi
 
+    # exec-root holds EPHEMERAL per-daemon runtime state — containerd's runtime
+    # dir, its `containerd.pid`, and the runtime sockets. It MUST NOT live on the
+    # persisted /workspace cache: the workspace survives container teardown by
+    # design (it is the image cache), so a re-spawn into a cached workspace would
+    # find a stale `containerd.pid` (a pid from a dead prior container) under the
+    # old persisted exec-root and abort with "containerd is still running pid=…"
+    # → "failed to start containerd: timeout". Pinning exec-root under
+    # XDG_RUNTIME_DIR (itself ephemeral per container — /run/user/<uid> tmpfs, or
+    # the $HOME fallback on the ephemeral container fs) gives the daemon a clean
+    # runtime dir on every spawn. --data-root stays on the workspace cache so
+    # pulled image layers persist across respawns (the legit cache).
+    local exec_root="$SOCK_DIR/docker-exec"
+    mkdir -p "$exec_root"
+
     log "Starting rootless dockerd (logs: $LOG_FILE)..."
     # Run in background; nohup so the daemon survives a `docker compose exec`
     # tmux window that started us. dockerd-rootless.sh expects `dockerd` on
@@ -212,7 +300,7 @@ cmd_start() {
     # double-use" bug. dockerd-rootless.sh does not require a pidfile to run.
     nohup "$BIN_DIR/dockerd-rootless.sh" \
         --data-root "$VAR_DIR/lib-docker" \
-        --exec-root "$VAR_DIR/run-docker" \
+        --exec-root "$exec_root" \
         >>"$LOG_FILE" 2>&1 &
     echo "$!" > "$PID_FILE"
 
@@ -311,6 +399,9 @@ cmd_selftest() {
     fi
     export DOCKER_HOST="unix://$SOCK_PATH"
     export PATH="$BIN_DIR:$PATH"
+    # Ensure `docker compose` resolves even if selftest runs in a context where
+    # cmd_start's link did not (defensive — start normally links it already).
+    link_compose_plugin
 
     local tmpdir
     tmpdir="$(mktemp -d)"
