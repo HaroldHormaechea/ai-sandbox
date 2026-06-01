@@ -40,11 +40,18 @@ _dtui_term_setup() {
     _DTUI_STTY_SAVE="$(stty -g 2>/dev/null || true)"
     stty -echo -icanon min 1 time 0 2>/dev/null || true
     printf '\033[?25l'                 # hide cursor
+    printf '\033[?7l'                  # disable auto-wrap: a row wider than the
+                                       # terminal is clipped at the margin instead
+                                       # of spilling onto a 2nd physical row, so
+                                       # the in-place redraw's "1 logical line ==
+                                       # 1 physical row" cursor-up math stays exact
+                                       # at any width (else long rows duplicate).
     printf '\033[?1000h\033[?1006h'    # enable mouse (button + SGR) → wheel events
 }
 # Restore on EVERY exit path (commit, cancel, EOF, Ctrl-C, error). Idempotent.
 _dtui_term_restore() {
     printf '\033[?1006l\033[?1000l'    # disable mouse
+    printf '\033[?7h'                  # restore auto-wrap (paired with ?7l in setup)
     printf '\033[?25h'                 # show cursor
     if [ -n "${_DTUI_STTY_SAVE:-}" ]; then
         stty "$_DTUI_STTY_SAVE" 2>/dev/null || stty sane 2>/dev/null || true
