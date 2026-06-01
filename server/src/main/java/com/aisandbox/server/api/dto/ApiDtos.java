@@ -27,7 +27,11 @@ public final class ApiDtos {
             int n,
             @Schema(description = "Free-form label echoed from com.ai-sandbox.label") String label,
             @Schema(description = "Tmux window title, or '(idle)' / '(unavailable)'") String tmuxTitle,
-            @Schema(description = "running | starting | stopped (UC04 AC37 extended set).") String state,
+            @Schema(
+                            description = "running | starting | provisioning | stopped. provisioning (UC-27) = the"
+                                    + " container is up but still installing its spawn-time toolchains,"
+                                    + " shown as 'Installing prerequisites' client-side.")
+                    String state,
             long uptimeSec,
             int activeStreams,
             Instant startedAt) {}

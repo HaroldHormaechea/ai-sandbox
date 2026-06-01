@@ -25,8 +25,9 @@ import com.aisandbox.android.ui.theme.SurfaceLow
 import com.aisandbox.android.ui.theme.Warning
 
 /**
- * UC04 § Components — three-state status pill driven by the server's
- * `running | starting | stopped` value set (AC37). Visual rules:
+ * UC04 § Components — status pill driven by the server's
+ * `running | starting | provisioning | stopped` value set (AC37 + UC-27).
+ * Visual rules:
  *
  * <ul>
  *   <li><b>running</b>: filled chip in success-green territory; solid
@@ -35,18 +36,30 @@ import com.aisandbox.android.ui.theme.Warning
  *       dot. AC9 also outlines the avatar in 2 dp warning-amber on
  *       optimistic insertion — that's a separate component decision in
  *       [SessionAvatar].</li>
+ *   <li><b>provisioning</b> (UC-27): the container is up but still
+ *       installing its spawn-time toolchains. Reuses the `starting`
+ *       amber/hollow-dot treatment; labelled "installing…".</li>
  *   <li><b>stopped</b>: gray subdued chip.</li>
  * </ul>
  *
- * Renders the supplied [text] in {@code labelSmall} (mono if the caller
- * needs it — pass a styled `text`).
+ * The displayed label is mapped from the wire token ("installing…" for
+ * `provisioning`, otherwise the token verbatim); unknown tokens render
+ * raw so a future server state still shows something meaningful.
  */
 @Composable
 fun StatusPill(state: String, modifier: Modifier = Modifier) {
     val palette = when (state) {
         "running" -> Palette(bg = Success.copy(alpha = 0.18f), fg = Success, dot = Success, dotFilled = true)
-        "starting" -> Palette(bg = Warning.copy(alpha = 0.18f), fg = Warning, dot = Warning, dotFilled = false)
+        "starting", "provisioning" ->
+            Palette(bg = Warning.copy(alpha = 0.18f), fg = Warning, dot = Warning, dotFilled = false)
         else -> Palette(bg = SurfaceLow, fg = OnSurfaceMuted, dot = OutlineVariant, dotFilled = true)
+    }
+    val label = when (state) {
+        "running" -> "running"
+        "starting" -> "starting"
+        "provisioning" -> "installing…"
+        "stopped" -> "stopped"
+        else -> state
     }
     Box(
         modifier = modifier
@@ -65,7 +78,7 @@ fun StatusPill(state: String, modifier: Modifier = Modifier) {
                     ),
             )
             Text(
-                text = state,
+                text = label,
                 style = MaterialTheme.typography.labelSmall,
                 color = palette.fg,
             )

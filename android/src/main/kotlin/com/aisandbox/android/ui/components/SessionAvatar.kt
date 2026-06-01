@@ -25,9 +25,10 @@ import com.aisandbox.android.ui.theme.Warning
  *   <li>Large (terminal toolbar) — 48 dp.</li>
  * </ul>
  *
- * AC9 — when the session is in the `starting` state, the avatar takes a
- * 2 dp warning-amber outline. The default fill is accent-container so
- * the avatar reads as "mine" against the dark surface.
+ * AC9 — when the session is in the `starting` state (or the UC-27
+ * `provisioning` state, which shares the same in-flight visual treatment),
+ * the avatar takes a 2 dp warning-amber outline. The default fill is
+ * accent-container so the avatar reads as "mine" against the dark surface.
  */
 @Composable
 fun SessionAvatar(
@@ -36,7 +37,7 @@ fun SessionAvatar(
     modifier: Modifier = Modifier,
     sizeDp: Int = 40,
 ) {
-    val showStartingOutline = state == "starting"
+    val showStartingOutline = state == "starting" || state == "provisioning"
     Box(
         modifier = modifier
             .size(sizeDp.dp)

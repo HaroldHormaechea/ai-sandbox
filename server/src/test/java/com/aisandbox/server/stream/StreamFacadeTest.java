@@ -183,6 +183,26 @@ class StreamFacadeTest {
         });
     }
 
+    /**
+     * UC-27 — a session in the {@code provisioning} state (Docker-running but
+     * still installing its spawn-time toolchains, marker absent) is NOT yet
+     * attachable: tmux {@code main} is not up, so authorizeOpen must reject
+     * with {@code NotRunning} (mapped to 409 session_not_running), carrying the
+     * {@code provisioning} state token so the client can show "installing…".
+     */
+    @Test
+    void attach_to_provisioning_returns_NotRunning() throws Exception {
+        SessionRegistryService sr = mock(SessionRegistryService.class);
+        when(sr.list()).thenReturn(List.of(recordWithState(1, "provisioning")));
+
+        StreamFacade f = build(sr, new StreamRegistryService(props(10, 100)));
+        AuthorizeResult r = f.authorizeOpen(1, identity());
+        assertThat(r).isInstanceOfSatisfying(StreamFacade.NotRunning.class, nr -> {
+            assertThat(nr.n()).isEqualTo(1);
+            assertThat(nr.state()).isEqualTo("provisioning");
+        });
+    }
+
     // ── UC-21 AC#13 — enumerate targets ─────────────────────────────────────
 
     @Test
