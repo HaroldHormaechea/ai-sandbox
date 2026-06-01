@@ -99,10 +99,27 @@ cmd_install() {
     [ -x "$SDKM" ] || die "sdkmanager not found at $SDKM after cmdline-tools install."
 
     log "Accepting licenses + installing platform-tools, build-tools;$BUILD_TOOLS, platforms;$PLATFORM, $SYS_IMAGE, emulator (one-time, ~1.5 GB)…"
-    yes | "$SDKM" --sdk_root="$SDK_ROOT" --licenses >/dev/null 2>&1 || true
-    "$SDKM" --sdk_root="$SDK_ROOT" \
-        "platform-tools" "build-tools;$BUILD_TOOLS" "platforms;$PLATFORM" "$SYS_IMAGE" "emulator" \
-        || die "sdkmanager package install failed."
+    # License pre-acceptance sweep. `yes |` feeds the interactive prompt; the pipe
+    # to a successful sdkmanager makes `yes` die on SIGPIPE (exit 141), so the
+    # PIPELINE status is unreliable — read sdkmanager's REAL status from
+    # PIPESTATUS[1] (element 0 is `yes`). Non-fatal: inline acceptance during the
+    # package install below is the real gate. The PIPESTATUS read MUST be the very
+    # next command after the pipeline (any command resets PIPESTATUS).
+    set +e
+    yes | "$SDKM" --sdk_root="$SDK_ROOT" --licenses >/dev/null 2>&1
+    lic_rc=${PIPESTATUS[1]}
+    set -e
+    [ "$lic_rc" -eq 0 ] || log "WARNING: license pre-acceptance sweep failed (exit $lic_rc); relying on inline acceptance during package install."
+
+    # Package install. `yes |` is REQUIRED here: without it sdkmanager re-prompts
+    # `Accept? (y/N):` on the TTY and blocks forever before tmux/claude launches.
+    # Same PIPESTATUS[1] discipline as above (do NOT trust the pipeline status —
+    # `yes` exiting 141 on SIGPIPE would mask a successful install), but FATAL.
+    set +e
+    yes | "$SDKM" --sdk_root="$SDK_ROOT" "platform-tools" "build-tools;$BUILD_TOOLS" "platforms;$PLATFORM" "$SYS_IMAGE" "emulator"
+    rc=${PIPESTATUS[1]}
+    set -e
+    [ "$rc" -eq 0 ] || die "sdkmanager package install failed (exit $rc)."
 
     touch "$MARKER_FILE"
     write_env
