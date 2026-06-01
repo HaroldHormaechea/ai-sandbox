@@ -79,9 +79,7 @@ class DockerEnumerationServiceTest {
         // sessions; stub it present (exit 0) so they stay `running`. 3-arg
         // overload (no env override), mirroring readyMarkerPresent(...).
         when(exec.run(
-                        argThat(argv -> argv != null
-                                && argv.contains("test")
-                                && argv.contains("/tmp/aisandbox-ready")),
+                        argThat(argv -> argv != null && argv.contains("test") && argv.contains("/tmp/aisandbox-ready")),
                         any(),
                         any()))
                 .thenReturn(new ProcessExecutor.Result(0, "", ""));
@@ -123,9 +121,7 @@ class DockerEnumerationServiceTest {
         when(exec.run(argThat(argv -> argv != null && argv.contains("inspect")), any(), any()))
                 .thenReturn(new ProcessExecutor.Result(0, "|running|true", ""));
         when(exec.run(
-                        argThat(argv -> argv != null
-                                && argv.contains("test")
-                                && argv.contains("/tmp/aisandbox-ready")),
+                        argThat(argv -> argv != null && argv.contains("test") && argv.contains("/tmp/aisandbox-ready")),
                         any(),
                         any()))
                 .thenReturn(new ProcessExecutor.Result(0, "", ""));
@@ -166,9 +162,7 @@ class DockerEnumerationServiceTest {
         when(exec.run(argThat(argv -> argv != null && argv.contains("inspect")), any(), any()))
                 .thenReturn(new ProcessExecutor.Result(0, "<no value>|running|true", ""));
         when(exec.run(
-                        argThat(argv -> argv != null
-                                && argv.contains("test")
-                                && argv.contains("/tmp/aisandbox-ready")),
+                        argThat(argv -> argv != null && argv.contains("test") && argv.contains("/tmp/aisandbox-ready")),
                         any(),
                         any()))
                 .thenReturn(new ProcessExecutor.Result(0, "", ""));
@@ -271,9 +265,7 @@ class DockerEnumerationServiceTest {
                 .thenReturn(new ProcessExecutor.Result(0, "lbl|running|true", ""));
         // Ready marker PRESENT — `test -f` exits 0.
         when(exec.run(
-                        argThat(argv -> argv != null
-                                && argv.contains("test")
-                                && argv.contains("/tmp/aisandbox-ready")),
+                        argThat(argv -> argv != null && argv.contains("test") && argv.contains("/tmp/aisandbox-ready")),
                         any(),
                         any()))
                 .thenReturn(new ProcessExecutor.Result(0, "", ""));
@@ -286,9 +278,7 @@ class DockerEnumerationServiceTest {
         // The readiness probe was actually issued for the running session.
         verify(exec, times(1))
                 .run(
-                        argThat(argv -> argv != null
-                                && argv.contains("test")
-                                && argv.contains("/tmp/aisandbox-ready")),
+                        argThat(argv -> argv != null && argv.contains("test") && argv.contains("/tmp/aisandbox-ready")),
                         any(),
                         any());
         // And the argv mirrors spawn.sh:273 — compose -p <project> exec -T test -f.
@@ -328,9 +318,7 @@ class DockerEnumerationServiceTest {
                 .thenReturn(new ProcessExecutor.Result(0, "amber-label|running|true", ""));
         // Ready marker ABSENT — `test -f` exits 1.
         when(exec.run(
-                        argThat(argv -> argv != null
-                                && argv.contains("test")
-                                && argv.contains("/tmp/aisandbox-ready")),
+                        argThat(argv -> argv != null && argv.contains("test") && argv.contains("/tmp/aisandbox-ready")),
                         any(),
                         any()))
                 .thenReturn(new ProcessExecutor.Result(1, "", ""));
@@ -366,9 +354,7 @@ class DockerEnumerationServiceTest {
                 .thenReturn(new ProcessExecutor.Result(0, "lbl|running|true", ""));
         // Ready-marker probe blows up transiently.
         when(exec.run(
-                        argThat(argv -> argv != null
-                                && argv.contains("test")
-                                && argv.contains("/tmp/aisandbox-ready")),
+                        argThat(argv -> argv != null && argv.contains("test") && argv.contains("/tmp/aisandbox-ready")),
                         any(),
                         any()))
                 .thenThrow(new java.io.IOException("docker daemon busy"));
@@ -414,9 +400,8 @@ class DockerEnumerationServiceTest {
             // Ready marker present so the `running` row stays `running`
             // (harmless for the non-running statuses — never probed).
             when(exec.run(
-                            argThat(argv -> argv != null
-                                    && argv.contains("test")
-                                    && argv.contains("/tmp/aisandbox-ready")),
+                            argThat(argv ->
+                                    argv != null && argv.contains("test") && argv.contains("/tmp/aisandbox-ready")),
                             any(),
                             any()))
                     .thenReturn(new ProcessExecutor.Result(0, "", ""));
@@ -445,9 +430,7 @@ class DockerEnumerationServiceTest {
         when(exec.run(argThat(argv -> argv != null && argv.contains("inspect")), any(), any()))
                 .thenReturn(new ProcessExecutor.Result(0, "lbl|running|true", ""));
         when(exec.run(
-                        argThat(argv -> argv != null
-                                && argv.contains("test")
-                                && argv.contains("/tmp/aisandbox-ready")),
+                        argThat(argv -> argv != null && argv.contains("test") && argv.contains("/tmp/aisandbox-ready")),
                         any(),
                         any()))
                 .thenReturn(new ProcessExecutor.Result(0, "", ""));
@@ -513,9 +496,7 @@ class DockerEnumerationServiceTest {
         when(exec.run(argThat(argv -> argv != null && argv.contains("inspect")), any(), any()))
                 .thenReturn(new ProcessExecutor.Result(0, "lbl|running|true", ""));
         when(exec.run(
-                        argThat(argv -> argv != null
-                                && argv.contains("test")
-                                && argv.contains("/tmp/aisandbox-ready")),
+                        argThat(argv -> argv != null && argv.contains("test") && argv.contains("/tmp/aisandbox-ready")),
                         any(),
                         any()))
                 .thenReturn(new ProcessExecutor.Result(0, "", ""));
@@ -630,9 +611,7 @@ class DockerEnumerationServiceTest {
         when(exec.run(argThat(argv -> argv != null && argv.contains("inspect")), any(), any()))
                 .thenReturn(new ProcessExecutor.Result(0, "the-label|running|true", ""));
         when(exec.run(
-                        argThat(argv -> argv != null
-                                && argv.contains("test")
-                                && argv.contains("/tmp/aisandbox-ready")),
+                        argThat(argv -> argv != null && argv.contains("test") && argv.contains("/tmp/aisandbox-ready")),
                         any(),
                         any()))
                 .thenReturn(new ProcessExecutor.Result(0, "", ""));
@@ -742,9 +721,7 @@ class DockerEnumerationServiceTest {
         when(exec.run(argThat(argv -> argv != null && argv.contains("inspect")), any(), any()))
                 .thenReturn(new ProcessExecutor.Result(0, "lbl|running|true", ""));
         when(exec.run(
-                        argThat(argv -> argv != null
-                                && argv.contains("test")
-                                && argv.contains("/tmp/aisandbox-ready")),
+                        argThat(argv -> argv != null && argv.contains("test") && argv.contains("/tmp/aisandbox-ready")),
                         any(),
                         any()))
                 .thenReturn(new ProcessExecutor.Result(0, "", ""));

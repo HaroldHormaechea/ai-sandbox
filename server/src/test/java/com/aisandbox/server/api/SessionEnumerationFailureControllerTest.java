@@ -301,9 +301,7 @@ class SessionEnumerationFailureControllerTest {
         // -p X exec -T claude-sandbox test -f /tmp/aisandbox-ready` (3-arg
         // overload) → exit=0 (marker present) so the row reports `running`.
         when(executor.run(
-                        argThat(argv -> argv != null
-                                && argv.contains("test")
-                                && argv.contains("/tmp/aisandbox-ready")),
+                        argThat(argv -> argv != null && argv.contains("test") && argv.contains("/tmp/aisandbox-ready")),
                         any(),
                         any()))
                 .thenReturn(new ProcessExecutor.Result(0, "", ""));
@@ -387,9 +385,7 @@ class SessionEnumerationFailureControllerTest {
 
         // UC-27 readiness-marker probe — marker present (exit 0) → `running`.
         when(executor.run(
-                        argThat(argv -> argv != null
-                                && argv.contains("test")
-                                && argv.contains("/tmp/aisandbox-ready")),
+                        argThat(argv -> argv != null && argv.contains("test") && argv.contains("/tmp/aisandbox-ready")),
                         any(),
                         any()))
                 .thenReturn(new ProcessExecutor.Result(0, "", ""));
