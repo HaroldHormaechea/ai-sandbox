@@ -297,6 +297,17 @@ class SessionEnumerationFailureControllerTest {
         when(executor.run(argThat(argv -> argv != null && argv.contains("inspect")), any(), any()))
                 .thenReturn(new ProcessExecutor.Result(0, "uc15-test|running|true", ""));
 
+        // UC-27 readiness-marker probe (per running project): `docker compose
+        // -p X exec -T claude-sandbox test -f /tmp/aisandbox-ready` (3-arg
+        // overload) → exit=0 (marker present) so the row reports `running`.
+        when(executor.run(
+                        argThat(argv -> argv != null
+                                && argv.contains("test")
+                                && argv.contains("/tmp/aisandbox-ready")),
+                        any(),
+                        any()))
+                .thenReturn(new ProcessExecutor.Result(0, "", ""));
+
         // Fifth argv (per running project): `docker compose -p X exec ... tmux display-message`
         // (3-arg overload) → exit=0 + a non-idle title.
         when(executor.run(argThat(argv -> argv != null && argv.contains("display-message")), any(), any()))
@@ -373,6 +384,15 @@ class SessionEnumerationFailureControllerTest {
 
         when(executor.run(argThat(argv -> argv != null && argv.contains("inspect")), any(), any()))
                 .thenReturn(new ProcessExecutor.Result(0, "modern-label|running|true", ""));
+
+        // UC-27 readiness-marker probe — marker present (exit 0) → `running`.
+        when(executor.run(
+                        argThat(argv -> argv != null
+                                && argv.contains("test")
+                                && argv.contains("/tmp/aisandbox-ready")),
+                        any(),
+                        any()))
+                .thenReturn(new ProcessExecutor.Result(0, "", ""));
 
         when(executor.run(argThat(argv -> argv != null && argv.contains("display-message")), any(), any()))
                 .thenReturn(new ProcessExecutor.Result(0, "doing-thing", ""));

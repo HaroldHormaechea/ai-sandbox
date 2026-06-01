@@ -159,6 +159,42 @@ class SessionsApiTest {
     }
 
     @Test
+    fun provisioningStateBody_roundTrips() = runTest {
+        val (server, profile) = startPinnedServer()
+        try {
+            // UC-27 — the server can now report `provisioning` (container up,
+            // toolchains installing). It must decode verbatim. A second row
+            // carries an unknown state token + an unknown field to pin the
+            // `ignoreUnknownKeys` + lenient-token tolerance (StatusPill renders
+            // an unknown token raw rather than throwing).
+            server.enqueue(
+                MockResponse().setResponseCode(200).setBody(
+                    """
+                    [
+                      {"n":4,"label":"installing","tmuxTitle":"(unavailable)","state":"provisioning","uptimeSec":3,"activeStreams":0,"startedAt":null},
+                      {"n":6,"label":"future","tmuxTitle":"","state":"some_future_state","uptimeSec":0,"activeStreams":0,"startedAt":null,"unknownField":"x"}
+                    ]
+                    """.trimIndent(),
+                ),
+            )
+
+            val result = apiFor(profile).list()
+
+            assertThat(result).isInstanceOf(ApiResult.Success::class.java)
+            val success = result as ApiResult.Success
+            assertThat(success.value.map { it.n }).containsExactly(4, 6)
+            // UC-27 — provisioning round-trips as the known token.
+            assertThat(success.value[0].state).isEqualTo("provisioning")
+            assertThat(success.value[0].label).isEqualTo("installing")
+            // ignoreUnknownKeys tolerance: unknown state token + unknown field
+            // still decode without throwing.
+            assertThat(success.value[1].state).isEqualTo("some_future_state")
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
     fun problemJsonError_mapsToHttpFailureWithCode() = runTest {
         val (server, profile) = startPinnedServer()
         try {

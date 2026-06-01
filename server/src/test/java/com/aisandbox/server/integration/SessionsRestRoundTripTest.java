@@ -367,6 +367,13 @@ class SessionsRestRoundTripTest {
         // docker inspect --format '…|…|…' cid  (3-arg overload)
         when(executor.run(argThat(SessionsRestRoundTripTest::isInspectArgv), any(), any()))
                 .thenReturn(new ProcessExecutor.Result(0, "it-roundtrip|running|true", ""));
+        // UC-27 — docker compose -p … exec -T claude-sandbox test -f
+        // /tmp/aisandbox-ready  (3-arg overload). enumerate() now probes the
+        // readiness marker for running sessions; stub it present (exit 0) so
+        // the session reports `running` rather than `provisioning`. Without
+        // this stub the @Primary mock returns null → NPE → HTTP 500.
+        when(executor.run(argThat(SessionsRestRoundTripTest::isReadyMarkerArgv), any(), any()))
+                .thenReturn(new ProcessExecutor.Result(0, "", ""));
         // docker compose -p … exec … tmux display-message …  (3-arg overload)
         when(executor.run(argThat(SessionsRestRoundTripTest::isDisplayMessageArgv), any(), any()))
                 .thenReturn(new ProcessExecutor.Result(0, "doing-thing", ""));
@@ -400,6 +407,10 @@ class SessionsRestRoundTripTest {
 
     private static boolean isInspectArgv(List<String> argv) {
         return argv != null && argv.contains("inspect");
+    }
+
+    private static boolean isReadyMarkerArgv(List<String> argv) {
+        return argv != null && argv.contains("test") && argv.contains("/tmp/aisandbox-ready");
     }
 
     private static boolean isDisplayMessageArgv(List<String> argv) {

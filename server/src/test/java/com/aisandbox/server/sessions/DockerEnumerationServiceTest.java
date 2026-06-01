@@ -75,6 +75,16 @@ class DockerEnumerationServiceTest {
         // Single combined inspect: label|status|running per UC04 § B4 — 3-arg.
         when(exec.run(argThat(argv -> argv != null && argv.contains("inspect")), any(), any()))
                 .thenReturn(new ProcessExecutor.Result(0, "my-label|running|true", ""));
+        // UC-27 — enumerate() now probes the readiness marker for running
+        // sessions; stub it present (exit 0) so they stay `running`. 3-arg
+        // overload (no env override), mirroring readyMarkerPresent(...).
+        when(exec.run(
+                        argThat(argv -> argv != null
+                                && argv.contains("test")
+                                && argv.contains("/tmp/aisandbox-ready")),
+                        any(),
+                        any()))
+                .thenReturn(new ProcessExecutor.Result(0, "", ""));
         when(exec.run(argThat(argv -> argv != null && argv.contains("display-message")), any(), any()))
                 .thenReturn(new ProcessExecutor.Result(0, "claude", ""));
 
@@ -112,6 +122,13 @@ class DockerEnumerationServiceTest {
         // Empty label, status=running, running=true.
         when(exec.run(argThat(argv -> argv != null && argv.contains("inspect")), any(), any()))
                 .thenReturn(new ProcessExecutor.Result(0, "|running|true", ""));
+        when(exec.run(
+                        argThat(argv -> argv != null
+                                && argv.contains("test")
+                                && argv.contains("/tmp/aisandbox-ready")),
+                        any(),
+                        any()))
+                .thenReturn(new ProcessExecutor.Result(0, "", ""));
         when(exec.run(argThat(argv -> argv != null && argv.contains("display-message")), any(), any()))
                 .thenReturn(new ProcessExecutor.Result(0, "doing-thing", ""));
 
@@ -148,6 +165,13 @@ class DockerEnumerationServiceTest {
         // Combined inspect: label `<no value>` (mapped to ""), running.
         when(exec.run(argThat(argv -> argv != null && argv.contains("inspect")), any(), any()))
                 .thenReturn(new ProcessExecutor.Result(0, "<no value>|running|true", ""));
+        when(exec.run(
+                        argThat(argv -> argv != null
+                                && argv.contains("test")
+                                && argv.contains("/tmp/aisandbox-ready")),
+                        any(),
+                        any()))
+                .thenReturn(new ProcessExecutor.Result(0, "", ""));
         when(exec.run(argThat(argv -> argv != null && argv.contains("display-message")), any(), any()))
                 .thenReturn(new ProcessExecutor.Result(0, "bash", ""));
 
@@ -224,6 +248,137 @@ class DockerEnumerationServiceTest {
         verify(exec, never()).run(argThat(argv -> argv != null && argv.contains("display-message")), any(), any());
     }
 
+    // ── UC-27 — provisioning state (Docker-running + ready-marker probe) ─────
+
+    /**
+     * UC-27 — a Docker-{@code running} session whose {@code /tmp/aisandbox-ready}
+     * marker is present is a fully-up session: the state stays {@code running}
+     * and the tmux window title is fetched. Also pins that enumerate() actually
+     * issues the marker probe (the {@code test -f /tmp/aisandbox-ready} exec).
+     */
+    @Test
+    void running_with_ready_marker_present_keeps_running_and_fetches_title() throws Exception {
+        ProcessExecutor exec = mock(ProcessExecutor.class);
+        when(exec.run(
+                        argThat(argv -> argv != null && argv.size() >= 3 && "ls".equals(argv.get(2))),
+                        any(),
+                        any(),
+                        any()))
+                .thenReturn(new ProcessExecutor.Result(0, "[{\"Name\":\"ai-sandbox-3\"}]", ""));
+        when(exec.run(argThat(argv -> argv != null && argv.contains("ps")), any(), any(), any()))
+                .thenReturn(new ProcessExecutor.Result(0, "cid\n", ""));
+        when(exec.run(argThat(argv -> argv != null && argv.contains("inspect")), any(), any()))
+                .thenReturn(new ProcessExecutor.Result(0, "lbl|running|true", ""));
+        // Ready marker PRESENT — `test -f` exits 0.
+        when(exec.run(
+                        argThat(argv -> argv != null
+                                && argv.contains("test")
+                                && argv.contains("/tmp/aisandbox-ready")),
+                        any(),
+                        any()))
+                .thenReturn(new ProcessExecutor.Result(0, "", ""));
+        when(exec.run(argThat(argv -> argv != null && argv.contains("display-message")), any(), any()))
+                .thenReturn(new ProcessExecutor.Result(0, "doing-thing", ""));
+
+        SessionRecord r = new DockerEnumerationService(exec).enumerate().get(0);
+        assertThat(r.state()).isEqualTo("running");
+        assertThat(r.tmuxTitle()).isEqualTo("doing-thing");
+        // The readiness probe was actually issued for the running session.
+        verify(exec, times(1))
+                .run(
+                        argThat(argv -> argv != null
+                                && argv.contains("test")
+                                && argv.contains("/tmp/aisandbox-ready")),
+                        any(),
+                        any());
+        // And the argv mirrors spawn.sh:273 — compose -p <project> exec -T test -f.
+        verify(exec)
+                .run(
+                        argThat(argv -> argv != null
+                                && argv.contains("compose")
+                                && argv.contains("-p")
+                                && argv.contains("exec")
+                                && argv.contains("-T")
+                                && argv.contains("claude-sandbox")
+                                && argv.contains("test")
+                                && argv.contains("-f")
+                                && argv.contains("/tmp/aisandbox-ready")),
+                        any(),
+                        any());
+    }
+
+    /**
+     * UC-27 — a Docker-{@code running} session whose ready marker is ABSENT
+     * (the {@code test -f} probe exits non-zero) is still installing its
+     * spawn-time toolchains: the state is downgraded to {@code provisioning},
+     * the tmux title is NOT fetched, and the title is {@code (unavailable)}.
+     */
+    @Test
+    void running_with_ready_marker_absent_downgrades_to_provisioning_and_skips_title() throws Exception {
+        ProcessExecutor exec = mock(ProcessExecutor.class);
+        when(exec.run(
+                        argThat(argv -> argv != null && argv.size() >= 3 && "ls".equals(argv.get(2))),
+                        any(),
+                        any(),
+                        any()))
+                .thenReturn(new ProcessExecutor.Result(0, "[{\"Name\":\"ai-sandbox-8\"}]", ""));
+        when(exec.run(argThat(argv -> argv != null && argv.contains("ps")), any(), any(), any()))
+                .thenReturn(new ProcessExecutor.Result(0, "cid\n", ""));
+        when(exec.run(argThat(argv -> argv != null && argv.contains("inspect")), any(), any()))
+                .thenReturn(new ProcessExecutor.Result(0, "amber-label|running|true", ""));
+        // Ready marker ABSENT — `test -f` exits 1.
+        when(exec.run(
+                        argThat(argv -> argv != null
+                                && argv.contains("test")
+                                && argv.contains("/tmp/aisandbox-ready")),
+                        any(),
+                        any()))
+                .thenReturn(new ProcessExecutor.Result(1, "", ""));
+
+        SessionRecord r = new DockerEnumerationService(exec).enumerate().get(0);
+        assertThat(r.n()).isEqualTo(8);
+        assertThat(r.label()).isEqualTo("amber-label");
+        assertThat(r.state()).isEqualTo("provisioning");
+        assertThat(r.tmuxTitle()).isEqualTo("(unavailable)");
+        // tmux title probe MUST be skipped for a provisioning session.
+        verify(exec, never()).run(argThat(argv -> argv != null && argv.contains("display-message")), any(), any());
+    }
+
+    /**
+     * UC-27 — a transient failure of the readiness probe itself (the exec
+     * throws {@link IOException}: daemon hiccup, container not yet exec-able)
+     * is treated conservatively as "not ready": the session is reported
+     * {@code provisioning}, never optimistically {@code running}, and the
+     * title probe is skipped.
+     */
+    @Test
+    void ready_marker_probe_ioexception_downgrades_to_provisioning() throws Exception {
+        ProcessExecutor exec = mock(ProcessExecutor.class);
+        when(exec.run(
+                        argThat(argv -> argv != null && argv.size() >= 3 && "ls".equals(argv.get(2))),
+                        any(),
+                        any(),
+                        any()))
+                .thenReturn(new ProcessExecutor.Result(0, "[{\"Name\":\"ai-sandbox-11\"}]", ""));
+        when(exec.run(argThat(argv -> argv != null && argv.contains("ps")), any(), any(), any()))
+                .thenReturn(new ProcessExecutor.Result(0, "cid\n", ""));
+        when(exec.run(argThat(argv -> argv != null && argv.contains("inspect")), any(), any()))
+                .thenReturn(new ProcessExecutor.Result(0, "lbl|running|true", ""));
+        // Ready-marker probe blows up transiently.
+        when(exec.run(
+                        argThat(argv -> argv != null
+                                && argv.contains("test")
+                                && argv.contains("/tmp/aisandbox-ready")),
+                        any(),
+                        any()))
+                .thenThrow(new java.io.IOException("docker daemon busy"));
+
+        SessionRecord r = new DockerEnumerationService(exec).enumerate().get(0);
+        assertThat(r.state()).isEqualTo("provisioning");
+        assertThat(r.tmuxTitle()).isEqualTo("(unavailable)");
+        verify(exec, never()).run(argThat(argv -> argv != null && argv.contains("display-message")), any(), any());
+    }
+
     @Test
     void state_mapping_table_uc04_ac37() throws Exception {
         // Drive the package-private mapper through enumerate() — for
@@ -256,6 +411,15 @@ class DockerEnumerationServiceTest {
             boolean runningBool = "running".equals(dockerStatus);
             when(exec.run(argThat(argv -> argv != null && argv.contains("inspect")), any(), any()))
                     .thenReturn(new ProcessExecutor.Result(0, "|" + dockerStatus + "|" + runningBool, ""));
+            // Ready marker present so the `running` row stays `running`
+            // (harmless for the non-running statuses — never probed).
+            when(exec.run(
+                            argThat(argv -> argv != null
+                                    && argv.contains("test")
+                                    && argv.contains("/tmp/aisandbox-ready")),
+                            any(),
+                            any()))
+                    .thenReturn(new ProcessExecutor.Result(0, "", ""));
             when(exec.run(argThat(argv -> argv != null && argv.contains("display-message")), any(), any()))
                     .thenReturn(new ProcessExecutor.Result(0, "doing-thing", ""));
 
@@ -280,6 +444,13 @@ class DockerEnumerationServiceTest {
                 .thenReturn(new ProcessExecutor.Result(0, "cid\n", ""));
         when(exec.run(argThat(argv -> argv != null && argv.contains("inspect")), any(), any()))
                 .thenReturn(new ProcessExecutor.Result(0, "lbl|running|true", ""));
+        when(exec.run(
+                        argThat(argv -> argv != null
+                                && argv.contains("test")
+                                && argv.contains("/tmp/aisandbox-ready")),
+                        any(),
+                        any()))
+                .thenReturn(new ProcessExecutor.Result(0, "", ""));
         when(exec.run(argThat(argv -> argv != null && argv.contains("display-message")), any(), any()))
                 .thenReturn(new ProcessExecutor.Result(0, "doing-thing", ""));
 
@@ -341,6 +512,13 @@ class DockerEnumerationServiceTest {
                 .thenReturn(new ProcessExecutor.Result(0, "cid\n", ""));
         when(exec.run(argThat(argv -> argv != null && argv.contains("inspect")), any(), any()))
                 .thenReturn(new ProcessExecutor.Result(0, "lbl|running|true", ""));
+        when(exec.run(
+                        argThat(argv -> argv != null
+                                && argv.contains("test")
+                                && argv.contains("/tmp/aisandbox-ready")),
+                        any(),
+                        any()))
+                .thenReturn(new ProcessExecutor.Result(0, "", ""));
         when(exec.run(argThat(argv -> argv != null && argv.contains("display-message")), any(), any()))
                 .thenReturn(new ProcessExecutor.Result(0, "doing-thing", ""));
 
@@ -451,6 +629,13 @@ class DockerEnumerationServiceTest {
 
         when(exec.run(argThat(argv -> argv != null && argv.contains("inspect")), any(), any()))
                 .thenReturn(new ProcessExecutor.Result(0, "the-label|running|true", ""));
+        when(exec.run(
+                        argThat(argv -> argv != null
+                                && argv.contains("test")
+                                && argv.contains("/tmp/aisandbox-ready")),
+                        any(),
+                        any()))
+                .thenReturn(new ProcessExecutor.Result(0, "", ""));
         when(exec.run(argThat(argv -> argv != null && argv.contains("display-message")), any(), any()))
                 .thenReturn(new ProcessExecutor.Result(0, "doing-thing", ""));
 
@@ -556,6 +741,13 @@ class DockerEnumerationServiceTest {
                 .thenReturn(new ProcessExecutor.Result(0, "cid\n", ""));
         when(exec.run(argThat(argv -> argv != null && argv.contains("inspect")), any(), any()))
                 .thenReturn(new ProcessExecutor.Result(0, "lbl|running|true", ""));
+        when(exec.run(
+                        argThat(argv -> argv != null
+                                && argv.contains("test")
+                                && argv.contains("/tmp/aisandbox-ready")),
+                        any(),
+                        any()))
+                .thenReturn(new ProcessExecutor.Result(0, "", ""));
         when(exec.run(argThat(argv -> argv != null && argv.contains("display-message")), any(), any()))
                 .thenReturn(new ProcessExecutor.Result(0, "doing-thing", ""));
 

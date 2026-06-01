@@ -53,6 +53,24 @@ class SessionsUiStateTest {
     }
 
     @Test
+    fun `filter RUNNING also matches provisioning (UC-27)`() {
+        // UC-27: a container that is up but still installing its spawn-time
+        // toolchains is grouped under the "Running" chip (alongside running +
+        // starting) so it doesn't vanish from the list while provisioning.
+        assertThat(SessionsFilter.RUNNING.matches("provisioning")).isTrue
+    }
+
+    @Test
+    fun `filter STOPPED excludes provisioning`() {
+        assertThat(SessionsFilter.STOPPED.matches("provisioning")).isFalse
+    }
+
+    @Test
+    fun `filter ALL matches provisioning`() {
+        assertThat(SessionsFilter.ALL.matches("provisioning")).isTrue
+    }
+
+    @Test
     fun `countAll counts every row regardless of state`() {
         val s = SessionsUiState(
             sessions = listOf(
@@ -93,6 +111,48 @@ class SessionsUiStateTest {
             )
         )
         assertThat(s.countStopped).isEqualTo(2)
+    }
+
+    @Test
+    fun `countRunning includes provisioning (UC-27)`() {
+        // UC-27: the "Running" badge counts confirmed-running AND provisioning
+        // (container up, toolchains installing) — but NOT starting or stopped.
+        val s = SessionsUiState(
+            sessions = listOf(
+                row(1, "running"),
+                row(2, "provisioning"),
+                row(3, "starting"),
+                row(4, "stopped"),
+            )
+        )
+        assertThat(s.countRunning).isEqualTo(2)
+    }
+
+    @Test
+    fun `countStopped unaffected by provisioning`() {
+        val s = SessionsUiState(
+            sessions = listOf(
+                row(1, "provisioning"),
+                row(2, "stopped"),
+                row(3, "stopped"),
+            )
+        )
+        assertThat(s.countStopped).isEqualTo(2)
+    }
+
+    @Test
+    fun `visible RUNNING filter includes provisioning rows sorted by N`() {
+        val s = SessionsUiState(
+            sessions = listOf(
+                row(3, "provisioning"),
+                row(1, "running"),
+                row(2, "stopped"),
+                row(5, "starting"),
+            ),
+            filter = SessionsFilter.RUNNING,
+        )
+        // provisioning(3) + running(1) + starting(5) under RUNNING; stopped(2) out.
+        assertThat(s.visible.map { it.n }).containsExactly(1, 3, 5)
     }
 
     @Test
