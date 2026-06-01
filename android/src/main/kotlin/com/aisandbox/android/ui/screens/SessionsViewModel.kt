@@ -99,7 +99,10 @@ data class SessionsUiState(
     val countRunning: Int
         get() = sessions.count {
             val s = effectiveState(it)
-            s == "running" || s == "provisioning" || s == "starting" || s == "terminating"
+            // UC-28 adds `terminating`; `starting` is intentionally EXCLUDED —
+            // the UC-04/UC-27 badge contract counts running only (not starting),
+            // even though the RUNNING filter view still buckets starting in.
+            s == "running" || s == "provisioning" || s == "terminating"
         }
     val countStopped: Int get() = sessions.count { effectiveState(it) == "stopped" }
 }
