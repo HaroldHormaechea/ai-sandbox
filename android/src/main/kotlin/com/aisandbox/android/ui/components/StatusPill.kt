@@ -1,5 +1,10 @@
 package com.aisandbox.android.ui.components
 
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -12,10 +17,13 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.unit.dp
+import com.aisandbox.android.ui.theme.ErrorTone
 import com.aisandbox.android.ui.theme.OnSurfaceMuted
 import com.aisandbox.android.ui.theme.OnSurfaceVariant
 import com.aisandbox.android.ui.theme.Outline
@@ -39,6 +47,11 @@ import com.aisandbox.android.ui.theme.Warning
  *   <li><b>provisioning</b> (UC-27): the container is up but still
  *       installing its spawn-time toolchains. Reuses the `starting`
  *       amber/hollow-dot treatment; labelled "installing…".</li>
+ *   <li><b>terminating</b> (UC-28): the session's teardown is in flight.
+ *       Destructive-red treatment on the named theme `error` token
+ *       ([ErrorTone]); the leading dot pulses (indeterminate "spinner-dot")
+ *       to signal an in-progress destructive operation. Labelled
+ *       "terminating".</li>
  *   <li><b>stopped</b>: gray subdued chip.</li>
  * </ul>
  *
@@ -52,14 +65,38 @@ fun StatusPill(state: String, modifier: Modifier = Modifier) {
         "running" -> Palette(bg = Success.copy(alpha = 0.18f), fg = Success, dot = Success, dotFilled = true)
         "starting", "provisioning" ->
             Palette(bg = Warning.copy(alpha = 0.18f), fg = Warning, dot = Warning, dotFilled = false)
+        "terminating" ->
+            // UC-28 — destructive-red on the named `--error` theme token; the
+            // dot pulses (see `pulse = true`) instead of adding a full
+            // CircularProgressIndicator, staying within the existing dot
+            // vocabulary.
+            Palette(bg = ErrorTone.copy(alpha = 0.18f), fg = ErrorTone, dot = ErrorTone, dotFilled = true, pulse = true)
         else -> Palette(bg = SurfaceLow, fg = OnSurfaceMuted, dot = OutlineVariant, dotFilled = true)
     }
     val label = when (state) {
         "running" -> "running"
         "starting" -> "starting"
         "provisioning" -> "installing…"
+        "terminating" -> "terminating"
         "stopped" -> "stopped"
         else -> state
+    }
+    // UC-28 — indeterminate pulse for the terminating dot. rememberInfiniteTransition
+    // animates the dot's alpha; non-terminating pills hold a static 1f.
+    val dotAlpha = if (palette.pulse) {
+        val transition = rememberInfiniteTransition(label = "terminating-pulse")
+        val animated by transition.animateFloat(
+            initialValue = 1f,
+            targetValue = 0.3f,
+            animationSpec = infiniteRepeatable(
+                animation = tween(durationMillis = 650),
+                repeatMode = RepeatMode.Reverse,
+            ),
+            label = "terminating-dot-alpha",
+        )
+        animated
+    } else {
+        1f
     }
     Box(
         modifier = modifier
@@ -71,6 +108,7 @@ fun StatusPill(state: String, modifier: Modifier = Modifier) {
             Box(
                 modifier = Modifier
                     .size(8.dp)
+                    .alpha(dotAlpha)
                     .clip(CircleShape)
                     .then(
                         if (palette.dotFilled) Modifier.background(palette.dot)
@@ -131,4 +169,10 @@ fun AttachedBadge(count: Int, modifier: Modifier = Modifier) {
     }
 }
 
-private data class Palette(val bg: androidx.compose.ui.graphics.Color, val fg: androidx.compose.ui.graphics.Color, val dot: androidx.compose.ui.graphics.Color, val dotFilled: Boolean)
+private data class Palette(
+    val bg: androidx.compose.ui.graphics.Color,
+    val fg: androidx.compose.ui.graphics.Color,
+    val dot: androidx.compose.ui.graphics.Color,
+    val dotFilled: Boolean,
+    val pulse: Boolean = false,
+)

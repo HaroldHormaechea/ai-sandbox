@@ -5,6 +5,7 @@ import com.aisandbox.android.net.ApiResult
 import com.aisandbox.android.net.ServerProfile
 import com.aisandbox.android.net.SessionSummary
 import com.aisandbox.android.net.SessionsApi
+import com.aisandbox.android.net.TerminatingSessionsStore
 import com.aisandbox.android.net.TlsFailureTranslation
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -40,7 +41,26 @@ class SessionsCoordinator(
     private val scope: CoroutineScope,
     private val profileSupplier: suspend () -> ServerProfile?,
     private val apiFactory: (ServerProfile) -> SessionsApi,
+    // UC-28 — defaulted to a fresh store so pre-UC-28 unit tests that
+    // construct the coordinator without it keep compiling (tests that
+    // exercise terminating transitions inject one they control). Production
+    // (SessionsViewModel) always passes the process-scoped shared store.
+    private val terminatingSessions: TerminatingSessionsStore = TerminatingSessionsStore(),
 ) {
+
+    init {
+        // UC-28 — mirror the process-scoped optimistic-terminating set into
+        // SessionsUiState on every change, so the single StateFlow the screen
+        // collects carries it (preserving the one-StateFlow render contract).
+        // The set is also reconciled in refresh() Success; this collector just
+        // keeps the UI value in lock-step with the holder (e.g. when a
+        // profile-switch clearAll() fires from AppContainer).
+        scope.launch {
+            terminatingSessions.flow.collect { set ->
+                state.value = state.value.copy(terminating = set)
+            }
+        }
+    }
 
     fun refresh() {
         scope.launch {
@@ -59,10 +79,29 @@ class SessionsCoordinator(
             state.value = state.value.copy(profile = profile)
             when (val r = apiFactory(profile).list()) {
                 is ApiResult.Success -> {
+                    // UC-28 — race-safe reconcile of the optimistic-terminating
+                    // set against the fresh server list (per-session ± n; an
+                    // in-flight refresh never spuriously resurrects a pill).
+                    // KEEP an optimistic `n` only while it is still present AND
+                    // the server still reports a non-resolving status
+                    // (running / provisioning / starting — possibly stale, so
+                    // do NOT resurrect). CLEAR it when:
+                    //   • the row is absent  → teardown completed (AC7);
+                    //   • the server reports `terminating` → hand off to the
+                    //     server token (the union still keeps the pill);
+                    //   • the server reports `stopped`     → resolved.
+                    val freshByN = r.value.associateBy { it.n }
+                    val current = terminatingSessions.flow.value
+                    val keep = current.filter { n ->
+                        val row = freshByN[n]
+                        row != null && row.state != "terminating" && row.state != "stopped"
+                    }.toSet()
+                    (current - keep).forEach { terminatingSessions.clear(it) }
                     state.value = state.value.copy(
                         loading = false,
                         sessions = r.value,
                         profile = profile,
+                        terminating = keep,
                     )
                 }
                 is ApiResult.HttpFailure -> {
@@ -138,17 +177,27 @@ class SessionsCoordinator(
                 state.value = state.value.copy(lastError = "no_profile")
                 return@launch
             }
+            // UC-28 — optimistic terminating BEFORE the call resolves (AC2):
+            // the pill appears the instant the operator confirms, and the
+            // re-delete guard (swipe + terminal menu) engages immediately.
+            terminatingSessions.mark(n)
             try {
                 when (val r = apiFactory(profile).delete(n, force)) {
                     is ApiResult.Success -> refresh()
                     is ApiResult.HttpFailure -> {
                         // The headline AC5 path: a non-204 (404 / 500 / …) is
                         // no longer a silent no-op — surface code + status.
+                        // UC-28 AC8 — an explicit failure exits terminating so
+                        // the row reverts to its real server status.
+                        terminatingSessions.clear(n)
                         Log.w(TAG, "Delete $n failed: ${r.code} (${r.status}) ${r.detail}")
                         state.value = state.value.copy(lastError = "${r.code} (${r.status})")
                     }
                 }
             } catch (t: Throwable) {
+                // UC-28 AC8 — a transport throw also exits terminating (the
+                // delete did not land); revert to the real status + surface.
+                terminatingSessions.clear(n)
                 // MANDATORY — delete() previously had no try/catch, so a
                 // transport throw (connection drop, TLS) escaped uncaught on
                 // viewModelScope (crash risk). The AiSandboxHttpClient

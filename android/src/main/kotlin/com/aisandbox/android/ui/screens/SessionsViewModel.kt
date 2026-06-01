@@ -47,6 +47,7 @@ class SessionsViewModel(application: Application) : AndroidViewModel(application
         scope = viewModelScope,
         profileSupplier = { container.profileStore.current() },
         apiFactory = { profile -> container.sessionsApi(container.httpClient(profile)) },
+        terminatingSessions = container.terminatingSessions,
     )
 
     init {
@@ -72,24 +73,50 @@ data class SessionsUiState(
     val filter: SessionsFilter = SessionsFilter.ALL,
     val profile: ServerProfile? = null,
     val lastError: String? = null,
+    /**
+     * UC-28 — session numbers the operator has optimistically marked as
+     * terminating (delete confirmed, not yet resolved). Mirrored from the
+     * process-scoped [com.aisandbox.android.net.TerminatingSessionsStore] by
+     * [SessionsCoordinator] so the single-StateFlow render contract holds.
+     */
+    val terminating: Set<Int> = emptySet(),
 ) {
-    /** The list filtered + sorted by N for display. */
-    val visible: List<SessionSummary>
-        get() = sessions.filter { filter.matches(it.state) }.sortedBy { it.n }
+    /**
+     * UC-28 — the effective state for display: the UNION of the client-side
+     * optimistic flag (`row.n in terminating`) and the server-reported
+     * `terminating` status. Either alone shows the "awaiting termination"
+     * pill; everything else passes the real server state through.
+     */
+    fun effectiveState(row: SessionSummary): String =
+        if (row.n in terminating || row.state == "terminating") "terminating" else row.state
 
-    /** Counts for the chip badges. */
+    /** The list filtered + sorted by N for display (filter sees the effective state). */
+    val visible: List<SessionSummary>
+        get() = sessions.filter { filter.matches(effectiveState(it)) }.sortedBy { it.n }
+
+    /** Counts for the chip badges — computed on the effective state (UC-28). */
     val countAll: Int get() = sessions.size
-    val countRunning: Int get() = sessions.count { it.state == "running" || it.state == "provisioning" }
-    val countStopped: Int get() = sessions.count { it.state == "stopped" }
+    val countRunning: Int
+        get() = sessions.count {
+            val s = effectiveState(it)
+            s == "running" || s == "provisioning" || s == "starting" || s == "terminating"
+        }
+    val countStopped: Int get() = sessions.count { effectiveState(it) == "stopped" }
 }
 
 /** Filter chip selection. */
 enum class SessionsFilter {
     ALL, RUNNING, STOPPED;
 
+    /**
+     * Bucket the (effective) state. UC-28 buckets `terminating` with RUNNING:
+     * a session being torn down is still "active" from the operator's view and
+     * must remain visible (with its pill) under the Running chip until the
+     * teardown resolves.
+     */
     fun matches(state: String): Boolean = when (this) {
         ALL -> true
-        RUNNING -> state == "running" || state == "starting" || state == "provisioning"
+        RUNNING -> state == "running" || state == "starting" || state == "provisioning" || state == "terminating"
         STOPPED -> state == "stopped"
     }
 }

@@ -12,9 +12,12 @@ import com.aisandbox.android.terminal.service.TerminalForegroundService
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
 /**
@@ -66,6 +69,23 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
     private val _currentSummary = MutableStateFlow<SessionSummary?>(null)
     val currentSummary: StateFlow<SessionSummary?> = _currentSummary.asStateFlow()
 
+    /**
+     * UC-28 — true while this session is terminating, from the UNION of the
+     * client-side optimistic flag (the process-scoped store, shared with the
+     * sessions list and surviving back-navigation) and the server-reported
+     * `terminating` status on the current summary. Drives the hamburger
+     * "Delete session" item's `enabled = !isTerminating` guard (AC5) so a
+     * teardown-in-progress session cannot be re-deleted (force included).
+     */
+    val terminating: StateFlow<Boolean> =
+        combine(container.terminatingSessions.flow, _currentSummary) { set, summary ->
+            val n = sessionN
+            (n >= 0 && set.contains(n)) || summary?.state == "terminating"
+        }.stateIn(viewModelScope, SharingStarted.Eagerly, false)
+
+    /** UC-28 — in-flight re-entrancy guard so a second confirm can't stack a delete. */
+    private var deleting = false
+
     /** Resolve the controller for [sessionN] and (idempotently) start its loop. */
     fun attach(sessionN: Int) {
         if (this.sessionN == sessionN && controller != null) {
@@ -82,6 +102,19 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
         viewModelScope.launch { c.targets.collect { _targets.value = it } }
         viewModelScope.launch { c.selectedTargetId.collect { _selectedTargetId.value = it } }
         viewModelScope.launch { refreshSummary(sessionN) }
+    }
+
+    /**
+     * UC-28 — re-fetch the current session's summary when the hamburger menu
+     * opens. This closes the one-shot-attach staleness window: a session that
+     * went `terminating` (or vanished) on the server after the screen attached
+     * — e.g. a delete from another client, or a cold resume — is reflected in
+     * the Delete-item guard the moment the operator opens the menu.
+     */
+    fun onMenuOpened() {
+        val n = sessionN
+        if (n < 0) return
+        viewModelScope.launch { refreshSummary(n) }
     }
 
     private suspend fun refreshSummary(n: Int) {
@@ -134,21 +167,45 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
      */
     fun deleteSession(force: Boolean, onResult: (Boolean) -> Unit) {
         val n = sessionN
+        // UC-28 — re-entrancy guard: ignore a second confirm while a delete is
+        // already in flight (also blocks the force path — same dialog, AC5).
+        if (deleting) return
+        if (terminating.value) {
+            // Already terminating (server token or optimistic flag) — the menu
+            // item is disabled, but short-circuit defensively too.
+            onResult(false)
+            return
+        }
+        deleting = true
         viewModelScope.launch {
             val profile = container.profileStore.current()
             if (profile == null) {
+                deleting = false
                 onResult(false)
                 return@launch
             }
-            val api = container.sessionsApi(container.httpClient(profile))
-            val ok = api.delete(n, force) is ApiResult.Success
-            if (ok) {
-                controller?.close("deleted")
-                controller = null
-                sessionN = -1
-                stopForegroundService()
+            // UC-28 AC2 — optimistic terminating before the call resolves; the
+            // shared store carries it back to the sessions list on nav-back.
+            container.terminatingSessions.mark(n)
+            try {
+                val api = container.sessionsApi(container.httpClient(profile))
+                val ok = api.delete(n, force) is ApiResult.Success
+                if (ok) {
+                    controller?.close("deleted")
+                    controller = null
+                    sessionN = -1
+                    stopForegroundService()
+                } else {
+                    // UC-28 AC8 — failure exits terminating; revert to real status.
+                    container.terminatingSessions.clear(n)
+                }
+                onResult(ok)
+            } catch (t: Throwable) {
+                container.terminatingSessions.clear(n)
+                onResult(false)
+            } finally {
+                deleting = false
             }
-            onResult(ok)
         }
     }
 

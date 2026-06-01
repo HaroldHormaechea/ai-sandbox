@@ -133,10 +133,13 @@ data class SessionSummary(
     val label: String = "",
     val tmuxTitle: String = "",
     /**
-     * running | starting | provisioning | stopped (UC04 AC37 + UC-27).
+     * running | starting | provisioning | terminating | stopped
+     * (UC04 AC37 + UC-27 + UC-28).
      * provisioning = container up but still installing spawn-time toolchains
-     * (shown as "installing…"). Decoded leniently — `ignoreUnknownKeys` and
-     * the StatusPill fallback tolerate any future token.
+     * (shown as "installing…"); terminating (UC-28) = teardown in flight
+     * (destructive-red "terminating" pill, blocks re-delete). Decoded
+     * leniently — `ignoreUnknownKeys` and the StatusPill fallback tolerate any
+     * future token.
      */
     val state: String = "running",
     val uptimeSec: Long = 0L,
