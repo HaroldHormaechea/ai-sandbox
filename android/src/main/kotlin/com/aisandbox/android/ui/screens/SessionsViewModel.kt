@@ -79,7 +79,7 @@ data class SessionsUiState(
 
     /** Counts for the chip badges. */
     val countAll: Int get() = sessions.size
-    val countRunning: Int get() = sessions.count { it.state == "running" }
+    val countRunning: Int get() = sessions.count { it.state == "running" || it.state == "provisioning" }
     val countStopped: Int get() = sessions.count { it.state == "stopped" }
 }
 
@@ -89,7 +89,7 @@ enum class SessionsFilter {
 
     fun matches(state: String): Boolean = when (this) {
         ALL -> true
-        RUNNING -> state == "running" || state == "starting"
+        RUNNING -> state == "running" || state == "starting" || state == "provisioning"
         STOPPED -> state == "stopped"
     }
 }

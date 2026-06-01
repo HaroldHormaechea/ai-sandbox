@@ -132,7 +132,12 @@ data class SessionSummary(
     val n: Int,
     val label: String = "",
     val tmuxTitle: String = "",
-    /** running | starting | stopped (UC04 AC37 extended set). */
+    /**
+     * running | starting | provisioning | stopped (UC04 AC37 + UC-27).
+     * provisioning = container up but still installing spawn-time toolchains
+     * (shown as "installing…"). Decoded leniently — `ignoreUnknownKeys` and
+     * the StatusPill fallback tolerate any future token.
+     */
     val state: String = "running",
     val uptimeSec: Long = 0L,
     val activeStreams: Int = 0,
