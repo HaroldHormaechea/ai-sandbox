@@ -74,9 +74,14 @@ class SessionFacadeTest {
         AuditLogger audit = mock(AuditLogger.class);
         when(exec.spawn(any(), any())).thenReturn(new ProcessExecutor.Result(0, "ai-sandbox-9 ready", ""));
 
-        SessionFacade facade =
-                new SessionFacade(
-                        registry, exec, new SpawnMutex(), new PerSessionMutexRegistry(), audit, new TerminatingSessions(), props());
+        SessionFacade facade = new SessionFacade(
+                registry,
+                exec,
+                new SpawnMutex(),
+                new PerSessionMutexRegistry(),
+                audit,
+                new TerminatingSessions(),
+                props());
 
         int n = facade.spawnSession(new SpawnCommand("foo", WorkspaceMode.SHARED, ClaudeConfigMode.SHARED));
 
@@ -93,9 +98,14 @@ class SessionFacadeTest {
         when(exec.spawn(any(), any())).thenReturn(new ProcessExecutor.Result(7, "ai-sandbox-4 emerging", "boom"));
         when(exec.clean(anyInt(), any())).thenReturn(new ProcessExecutor.Result(0, "", ""));
 
-        SessionFacade facade =
-                new SessionFacade(
-                        registry, exec, new SpawnMutex(), new PerSessionMutexRegistry(), audit, new TerminatingSessions(), props());
+        SessionFacade facade = new SessionFacade(
+                registry,
+                exec,
+                new SpawnMutex(),
+                new PerSessionMutexRegistry(),
+                audit,
+                new TerminatingSessions(),
+                props());
 
         assertThatThrownBy(() ->
                         facade.spawnSession(new SpawnCommand(null, WorkspaceMode.SHARED, ClaudeConfigMode.SHARED)))
@@ -114,9 +124,14 @@ class SessionFacadeTest {
         AuditLogger audit = mock(AuditLogger.class);
         when(exec.spawn(any(), any())).thenReturn(new ProcessExecutor.Result(1, "", "early failure"));
 
-        SessionFacade facade =
-                new SessionFacade(
-                        registry, exec, new SpawnMutex(), new PerSessionMutexRegistry(), audit, new TerminatingSessions(), props());
+        SessionFacade facade = new SessionFacade(
+                registry,
+                exec,
+                new SpawnMutex(),
+                new PerSessionMutexRegistry(),
+                audit,
+                new TerminatingSessions(),
+                props());
 
         assertThatThrownBy(() ->
                         facade.spawnSession(new SpawnCommand(null, WorkspaceMode.SHARED, ClaudeConfigMode.SHARED)))
@@ -138,9 +153,14 @@ class SessionFacadeTest {
         when(registry.exists(3)).thenReturn(true);
         when(exec.clean(anyInt(), any())).thenReturn(new ProcessExecutor.Result(0, "", ""));
 
-        SessionFacade facade =
-                new SessionFacade(
-                        registry, exec, new SpawnMutex(), new PerSessionMutexRegistry(), audit, new TerminatingSessions(), props());
+        SessionFacade facade = new SessionFacade(
+                registry,
+                exec,
+                new SpawnMutex(),
+                new PerSessionMutexRegistry(),
+                audit,
+                new TerminatingSessions(),
+                props());
         assertThat(facade.deleteSession(3, false)).isTrue();
         verify(registry).exists(3);
         verify(exec).clean(eq(3), any());
@@ -153,9 +173,14 @@ class SessionFacadeTest {
         AuditLogger audit = mock(AuditLogger.class);
         when(exec.clean(anyInt(), any())).thenReturn(new ProcessExecutor.Result(2, "", "fail"));
 
-        SessionFacade facade =
-                new SessionFacade(
-                        registry, exec, new SpawnMutex(), new PerSessionMutexRegistry(), audit, new TerminatingSessions(), props());
+        SessionFacade facade = new SessionFacade(
+                registry,
+                exec,
+                new SpawnMutex(),
+                new PerSessionMutexRegistry(),
+                audit,
+                new TerminatingSessions(),
+                props());
         assertThat(facade.deleteSession(3, true)).isFalse();
     }
 
@@ -175,9 +200,14 @@ class SessionFacadeTest {
         AuditLogger audit = mock(AuditLogger.class);
         when(registry.exists(42)).thenReturn(false);
 
-        SessionFacade facade =
-                new SessionFacade(
-                        registry, exec, new SpawnMutex(), new PerSessionMutexRegistry(), audit, new TerminatingSessions(), props());
+        SessionFacade facade = new SessionFacade(
+                registry,
+                exec,
+                new SpawnMutex(),
+                new PerSessionMutexRegistry(),
+                audit,
+                new TerminatingSessions(),
+                props());
 
         assertThatThrownBy(() -> facade.deleteSession(42, false))
                 .isInstanceOf(NoSuchElementException.class)
@@ -201,9 +231,14 @@ class SessionFacadeTest {
         AuditLogger audit = mock(AuditLogger.class);
         when(registry.exists(3)).thenThrow(new IOException("docker enumeration unavailable"));
 
-        SessionFacade facade =
-                new SessionFacade(
-                        registry, exec, new SpawnMutex(), new PerSessionMutexRegistry(), audit, new TerminatingSessions(), props());
+        SessionFacade facade = new SessionFacade(
+                registry,
+                exec,
+                new SpawnMutex(),
+                new PerSessionMutexRegistry(),
+                audit,
+                new TerminatingSessions(),
+                props());
 
         assertThatThrownBy(() -> facade.deleteSession(3, false))
                 .isInstanceOf(IOException.class)
@@ -226,9 +261,14 @@ class SessionFacadeTest {
         AuditLogger audit = mock(AuditLogger.class);
         when(exec.clean(anyInt(), any())).thenReturn(new ProcessExecutor.Result(0, "", ""));
 
-        SessionFacade facade =
-                new SessionFacade(
-                        registry, exec, new SpawnMutex(), new PerSessionMutexRegistry(), audit, new TerminatingSessions(), props());
+        SessionFacade facade = new SessionFacade(
+                registry,
+                exec,
+                new SpawnMutex(),
+                new PerSessionMutexRegistry(),
+                audit,
+                new TerminatingSessions(),
+                props());
 
         assertThat(facade.deleteSession(5, true)).isTrue();
         verify(registry, never()).exists(anyInt());

@@ -519,6 +519,12 @@ class SessionsCoordinatorTest {
                 profileSupplier = { fx.profile },
                 apiFactory = apiFactory(),
             )
+            // Snapshot the work-scope children that exist right after construction:
+            // UC-28's init {} block launches a permanent StateFlow mirror-collector
+            // (terminatingSessions.flow.collect) that never completes. Joining ALL
+            // children would block forever on it, so we join only the NEW child(ren)
+            // spawned by delete() below.
+            val preExisting = workScope.coroutineContext.job.children.toSet()
 
             coordinator.delete(1, force = false)
 
@@ -526,9 +532,10 @@ class SessionsCoordinatorTest {
             withTimeout(15_000) {
                 while (events.none { it is NetworkEvent.HandshakeError }) delay(50)
             }
-            // Join the single work-scope child so delete()'s catch has finished.
+            // Join only the delete() child so its catch has finished — NOT the
+            // long-lived init mirror-collector captured in `preExisting`.
             withTimeout(15_000) {
-                workScope.coroutineContext.job.children.forEach { it.join() }
+                (workScope.coroutineContext.job.children.toSet() - preExisting).forEach { it.join() }
             }
 
             assertThat(uncaught.get())
