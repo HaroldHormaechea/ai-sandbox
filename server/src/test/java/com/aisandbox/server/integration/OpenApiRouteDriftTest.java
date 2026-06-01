@@ -49,6 +49,27 @@ class OpenApiRouteDriftTest {
         }
     }
 
+    /**
+     * UC-28 AC1 / AC12 — the committed OAS must carry the new {@code terminating}
+     * status token AND the full status enum {@code running | starting |
+     * provisioning | terminating | stopped}, so {@code server-ci.yml}'s
+     * OpenAPI-drift check passes and Android decodes the documented value set.
+     */
+    @Test
+    void committed_openapi_yaml_includes_terminating_status_enum() throws IOException {
+        Path oas = locateOas();
+        String body = Files.readString(oas);
+        assertThat(body)
+                .as("committed OAS must declare the UC-28 terminating status token")
+                .contains("terminating");
+        // The full status value set must be present (order-independent assertion).
+        for (String token : new String[] {"running", "starting", "provisioning", "terminating", "stopped"}) {
+            assertThat(body)
+                    .as("session status enum value %s in committed OAS", token)
+                    .contains(token);
+        }
+    }
+
     private static Path locateOas() {
         Path direct = Path.of("openapi.yaml");
         if (Files.isRegularFile(direct)) {

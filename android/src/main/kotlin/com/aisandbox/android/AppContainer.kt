@@ -7,7 +7,15 @@ import com.aisandbox.android.net.ServerProfile
 import com.aisandbox.android.net.ServerProfileStore
 import com.aisandbox.android.net.SessionsApi
 import com.aisandbox.android.net.StreamClient
+import com.aisandbox.android.net.TerminatingSessionsStore
 import com.aisandbox.android.terminal.TerminalStreamController
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.launchIn
+import kotlinx.coroutines.flow.onEach
 
 /**
  * Hand-rolled service locator. UC04 AC29 forbids analytics / telemetry
@@ -28,6 +36,34 @@ class AppContainer(applicationContext: Context) {
     val identity: KeyStoreIdentityManager = KeyStoreIdentityManager()
 
     val profileStore: ServerProfileStore = ServerProfileStore(appContext)
+
+    /**
+     * UC-28 — process-scoped optimistic-terminating set, shared by the
+     * sessions list and the terminal screen so the "awaiting termination"
+     * pill + delete-guard survive back-navigation between them.
+     */
+    val terminatingSessions: TerminatingSessionsStore = TerminatingSessionsStore()
+
+    /**
+     * Process-lifetime scope for container-internal observers (UC-28 only,
+     * today). Never cancelled — it lives exactly as long as the singleton
+     * [AppContainer], which lives as long as the process.
+     */
+    private val containerScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
+    init {
+        // UC-28 — clear every optimistic terminating flag whenever the active
+        // server profile switches (re-enrollment replaces the identity, or a
+        // wipe clears it). drop(1) skips the first emission (the cold-start
+        // value, which is not a "switch"); distinctUntilChanged ignores
+        // re-emissions of the same profile. A stale `n` from server A must
+        // never linger onto server B's session list.
+        profileStore.profile
+            .distinctUntilChanged()
+            .drop(1)
+            .onEach { terminatingSessions.clearAll() }
+            .launchIn(containerScope)
+    }
 
     /**
      * Build a per-profile HTTP client. Cheap; callers can call this each

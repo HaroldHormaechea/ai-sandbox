@@ -7,6 +7,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -21,9 +22,11 @@ import com.aisandbox.server.sessions.facade.internal.SpawnMutex;
 import com.aisandbox.server.sessions.service.ProcessExecutor;
 import com.aisandbox.server.sessions.service.ScriptExecutorService;
 import com.aisandbox.server.sessions.service.SessionRegistryService;
+import com.aisandbox.server.sessions.service.TerminatingSessions;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.util.NoSuchElementException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -71,8 +74,14 @@ class SessionFacadeTest {
         AuditLogger audit = mock(AuditLogger.class);
         when(exec.spawn(any(), any())).thenReturn(new ProcessExecutor.Result(0, "ai-sandbox-9 ready", ""));
 
-        SessionFacade facade =
-                new SessionFacade(registry, exec, new SpawnMutex(), new PerSessionMutexRegistry(), audit, props());
+        SessionFacade facade = new SessionFacade(
+                registry,
+                exec,
+                new SpawnMutex(),
+                new PerSessionMutexRegistry(),
+                audit,
+                new TerminatingSessions(),
+                props());
 
         int n = facade.spawnSession(new SpawnCommand("foo", WorkspaceMode.SHARED, ClaudeConfigMode.SHARED));
 
@@ -89,8 +98,14 @@ class SessionFacadeTest {
         when(exec.spawn(any(), any())).thenReturn(new ProcessExecutor.Result(7, "ai-sandbox-4 emerging", "boom"));
         when(exec.clean(anyInt(), any())).thenReturn(new ProcessExecutor.Result(0, "", ""));
 
-        SessionFacade facade =
-                new SessionFacade(registry, exec, new SpawnMutex(), new PerSessionMutexRegistry(), audit, props());
+        SessionFacade facade = new SessionFacade(
+                registry,
+                exec,
+                new SpawnMutex(),
+                new PerSessionMutexRegistry(),
+                audit,
+                new TerminatingSessions(),
+                props());
 
         assertThatThrownBy(() ->
                         facade.spawnSession(new SpawnCommand(null, WorkspaceMode.SHARED, ClaudeConfigMode.SHARED)))
@@ -109,8 +124,14 @@ class SessionFacadeTest {
         AuditLogger audit = mock(AuditLogger.class);
         when(exec.spawn(any(), any())).thenReturn(new ProcessExecutor.Result(1, "", "early failure"));
 
-        SessionFacade facade =
-                new SessionFacade(registry, exec, new SpawnMutex(), new PerSessionMutexRegistry(), audit, props());
+        SessionFacade facade = new SessionFacade(
+                registry,
+                exec,
+                new SpawnMutex(),
+                new PerSessionMutexRegistry(),
+                audit,
+                new TerminatingSessions(),
+                props());
 
         assertThatThrownBy(() ->
                         facade.spawnSession(new SpawnCommand(null, WorkspaceMode.SHARED, ClaudeConfigMode.SHARED)))
@@ -132,8 +153,14 @@ class SessionFacadeTest {
         when(registry.exists(3)).thenReturn(true);
         when(exec.clean(anyInt(), any())).thenReturn(new ProcessExecutor.Result(0, "", ""));
 
-        SessionFacade facade =
-                new SessionFacade(registry, exec, new SpawnMutex(), new PerSessionMutexRegistry(), audit, props());
+        SessionFacade facade = new SessionFacade(
+                registry,
+                exec,
+                new SpawnMutex(),
+                new PerSessionMutexRegistry(),
+                audit,
+                new TerminatingSessions(),
+                props());
         assertThat(facade.deleteSession(3, false)).isTrue();
         verify(registry).exists(3);
         verify(exec).clean(eq(3), any());
@@ -146,8 +173,14 @@ class SessionFacadeTest {
         AuditLogger audit = mock(AuditLogger.class);
         when(exec.clean(anyInt(), any())).thenReturn(new ProcessExecutor.Result(2, "", "fail"));
 
-        SessionFacade facade =
-                new SessionFacade(registry, exec, new SpawnMutex(), new PerSessionMutexRegistry(), audit, props());
+        SessionFacade facade = new SessionFacade(
+                registry,
+                exec,
+                new SpawnMutex(),
+                new PerSessionMutexRegistry(),
+                audit,
+                new TerminatingSessions(),
+                props());
         assertThat(facade.deleteSession(3, true)).isFalse();
     }
 
@@ -167,8 +200,14 @@ class SessionFacadeTest {
         AuditLogger audit = mock(AuditLogger.class);
         when(registry.exists(42)).thenReturn(false);
 
-        SessionFacade facade =
-                new SessionFacade(registry, exec, new SpawnMutex(), new PerSessionMutexRegistry(), audit, props());
+        SessionFacade facade = new SessionFacade(
+                registry,
+                exec,
+                new SpawnMutex(),
+                new PerSessionMutexRegistry(),
+                audit,
+                new TerminatingSessions(),
+                props());
 
         assertThatThrownBy(() -> facade.deleteSession(42, false))
                 .isInstanceOf(NoSuchElementException.class)
@@ -192,8 +231,14 @@ class SessionFacadeTest {
         AuditLogger audit = mock(AuditLogger.class);
         when(registry.exists(3)).thenThrow(new IOException("docker enumeration unavailable"));
 
-        SessionFacade facade =
-                new SessionFacade(registry, exec, new SpawnMutex(), new PerSessionMutexRegistry(), audit, props());
+        SessionFacade facade = new SessionFacade(
+                registry,
+                exec,
+                new SpawnMutex(),
+                new PerSessionMutexRegistry(),
+                audit,
+                new TerminatingSessions(),
+                props());
 
         assertThatThrownBy(() -> facade.deleteSession(3, false))
                 .isInstanceOf(IOException.class)
@@ -216,11 +261,110 @@ class SessionFacadeTest {
         AuditLogger audit = mock(AuditLogger.class);
         when(exec.clean(anyInt(), any())).thenReturn(new ProcessExecutor.Result(0, "", ""));
 
-        SessionFacade facade =
-                new SessionFacade(registry, exec, new SpawnMutex(), new PerSessionMutexRegistry(), audit, props());
+        SessionFacade facade = new SessionFacade(
+                registry,
+                exec,
+                new SpawnMutex(),
+                new PerSessionMutexRegistry(),
+                audit,
+                new TerminatingSessions(),
+                props());
 
         assertThat(facade.deleteSession(5, true)).isTrue();
         verify(registry, never()).exists(anyInt());
         verify(exec).clean(eq(5), any());
+    }
+
+    // ── UC-28 — in-flight-delete registry: mark before clean, clear in finally ─
+
+    /**
+     * UC-28 AC7 — the session is flagged {@code terminating} BEFORE
+     * {@code clean.sh} runs (so a concurrent {@code GET /v1/sessions} poll
+     * observes {@code terminating} for the whole teardown window) and the flag
+     * is cleared after a SUCCESSFUL teardown. The cache is invalidated twice —
+     * once when the flag is set (so the next poll re-enumerates and sees
+     * {@code terminating}) and once in the {@code finally} (so the row vanishes
+     * once {@code clean.sh} succeeded).
+     */
+    @Test
+    void delete_marks_terminating_before_clean_and_clears_after_success() throws Exception {
+        SessionRegistryService registry = mock(SessionRegistryService.class);
+        ScriptExecutorService exec = mock(ScriptExecutorService.class);
+        AuditLogger audit = mock(AuditLogger.class);
+        TerminatingSessions terminating = new TerminatingSessions();
+        when(registry.exists(3)).thenReturn(true);
+
+        // Capture whether the session was already flagged terminating at the
+        // exact moment clean.sh is invoked — proving the mark precedes clean.
+        AtomicBoolean flaggedDuringClean = new AtomicBoolean(false);
+        when(exec.clean(eq(3), any())).thenAnswer(inv -> {
+            flaggedDuringClean.set(terminating.isTerminating(3));
+            return new ProcessExecutor.Result(0, "", "");
+        });
+
+        SessionFacade facade = new SessionFacade(
+                registry, exec, new SpawnMutex(), new PerSessionMutexRegistry(), audit, terminating, props());
+
+        assertThat(facade.deleteSession(3, false)).isTrue();
+
+        assertThat(flaggedDuringClean)
+                .as("the session MUST be flagged terminating BEFORE clean.sh runs (AC2/AC9)")
+                .isTrue();
+        assertThat(terminating.isTerminating(3))
+                .as("a successful teardown clears the terminating flag in finally (AC7)")
+                .isFalse();
+        // Once at mark-time, once in finally.
+        verify(registry, times(2)).invalidate();
+    }
+
+    /**
+     * UC-28 AC8 — a teardown that FAILS ({@code clean.sh} exits non-zero) still
+     * clears the terminating flag in the {@code finally} so the row reverts to
+     * its real server-reported status rather than wedging on {@code terminating}
+     * forever.
+     */
+    @Test
+    void delete_clears_terminating_in_finally_on_clean_nonzero() throws Exception {
+        SessionRegistryService registry = mock(SessionRegistryService.class);
+        ScriptExecutorService exec = mock(ScriptExecutorService.class);
+        AuditLogger audit = mock(AuditLogger.class);
+        TerminatingSessions terminating = new TerminatingSessions();
+        when(exec.clean(eq(4), any())).thenReturn(new ProcessExecutor.Result(2, "", "compose down failed"));
+
+        SessionFacade facade = new SessionFacade(
+                registry, exec, new SpawnMutex(), new PerSessionMutexRegistry(), audit, terminating, props());
+
+        // force=true to skip the existence gate and run clean unconditionally.
+        assertThat(facade.deleteSession(4, true)).isFalse();
+        assertThat(terminating.isTerminating(4))
+                .as("a FAILED teardown must still clear terminating (AC8) — no wedged pill")
+                .isFalse();
+        verify(registry, times(2)).invalidate();
+    }
+
+    /**
+     * UC-28 AC8 — even when {@code clean.sh} THROWS (transport / IO error mid
+     * teardown), the terminating flag is cleared in the {@code finally} and the
+     * IOException propagates (so the controller maps it to a 5xx). A thrown
+     * teardown must not leave the session pinned terminating.
+     */
+    @Test
+    void delete_clears_terminating_in_finally_when_clean_throws() throws Exception {
+        SessionRegistryService registry = mock(SessionRegistryService.class);
+        ScriptExecutorService exec = mock(ScriptExecutorService.class);
+        AuditLogger audit = mock(AuditLogger.class);
+        TerminatingSessions terminating = new TerminatingSessions();
+        when(exec.clean(eq(6), any())).thenThrow(new IOException("docker daemon gone mid-teardown"));
+
+        SessionFacade facade = new SessionFacade(
+                registry, exec, new SpawnMutex(), new PerSessionMutexRegistry(), audit, terminating, props());
+
+        assertThatThrownBy(() -> facade.deleteSession(6, true))
+                .isInstanceOf(IOException.class)
+                .hasMessageContaining("docker daemon gone mid-teardown");
+        assertThat(terminating.isTerminating(6))
+                .as("a THROWN teardown must still clear terminating in finally (AC8)")
+                .isFalse();
+        verify(registry, times(2)).invalidate();
     }
 }

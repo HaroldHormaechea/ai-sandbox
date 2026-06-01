@@ -147,6 +147,9 @@ fun TerminalScreen(
     var menuOpen by remember { mutableStateOf(false) }
     var showDeleteDialog by remember { mutableStateOf(false) }
     val summary by viewModel.currentSummary.collectAsState()
+    // UC-28 — block the Delete action while this session is terminating (union
+    // of the optimistic flag and the server's `terminating` token).
+    val isTerminating by viewModel.terminating.collectAsState()
 
     val scrollBehavior = TopAppBarDefaults.pinnedScrollBehavior()
 
@@ -192,7 +195,13 @@ fun TerminalScreen(
                 actions = {
                     // AC#5 — hamburger menu with Delete session + Disconnect.
                     Box {
-                        IconButton(onClick = { menuOpen = true }) {
+                        IconButton(onClick = {
+                            menuOpen = true
+                            // UC-28 — re-fetch the summary on open so the guard
+                            // reflects a cross-client / cold-resume terminating
+                            // status (closes the one-shot-attach staleness).
+                            viewModel.onMenuOpened()
+                        }) {
                             Icon(
                                 imageVector = Icons.Outlined.MoreVert,
                                 contentDescription = stringResource(R.string.terminal_more),
@@ -204,7 +213,12 @@ fun TerminalScreen(
                         ) {
                             DropdownMenuItem(
                                 text = { Text(stringResource(R.string.terminal_menu_delete)) },
+                                // UC-28 AC5 — disabled while terminating; the
+                                // click also short-circuits defensively (blocks
+                                // the force path — it goes through the same dialog).
+                                enabled = !isTerminating,
                                 onClick = {
+                                    if (isTerminating) return@DropdownMenuItem
                                     menuOpen = false
                                     showDeleteDialog = true
                                 },

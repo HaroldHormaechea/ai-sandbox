@@ -15,14 +15,18 @@ paths:
     get:
       tags:
       - session-controller
+      summary: List all ai-sandbox sessions.
       operationId: list
       responses:
         "200":
-          description: OK
+          description: "All enumerated sessions (running, starting, provisioning,\
+            \ terminating, stopped)."
           content:
             '*/*':
               schema:
-                type: object
+                type: array
+                items:
+                  $ref: "#/components/schemas/SessionSummary"
     post:
       tags:
       - session-controller
@@ -113,6 +117,7 @@ paths:
     get:
       tags:
       - session-controller
+      summary: Get detail for a single session by N.
       operationId: detail
       parameters:
       - name: "n"
@@ -123,11 +128,15 @@ paths:
           format: int32
       responses:
         "200":
-          description: OK
+          description: Session detail.
           content:
             '*/*':
               schema:
-                type: object
+                $ref: "#/components/schemas/SessionDetailDto"
+        "404":
+          description: No session with that N.
+          content:
+            application/problem+json: {}
     delete:
       tags:
       - session-controller
@@ -242,6 +251,56 @@ components:
       required:
       - certPem
       - name
+    SessionSummary:
+      type: object
+      description: A summary row returned by GET /v1/sessions.
+      properties:
+        "n":
+          type: integer
+          format: int32
+        label:
+          type: string
+          description: Free-form label echoed from com.ai-sandbox.label
+        tmuxTitle:
+          type: string
+          description: "Tmux window title, or '(idle)' / '(unavailable)'"
+        state:
+          type: string
+          description: "running | starting | provisioning | terminating | stopped.\
+            \ provisioning (UC-27) = the container is up but still installing its\
+            \ spawn-time toolchains, shown as 'Installing prerequisites' client-side.\
+            \ terminating (UC-28) = the session's teardown (clean.sh / docker compose\
+            \ down) is in progress; shown with a destructive-red 'awaiting termination'\
+            \ pill client-side and blocks further delete attempts."
+          enum:
+          - running
+          - starting
+          - provisioning
+          - terminating
+          - stopped
+        uptimeSec:
+          type: integer
+          format: int64
+        activeStreams:
+          type: integer
+          format: int32
+        startedAt:
+          type: string
+          format: date-time
+    SessionDetailDto:
+      type: object
+      description: "Detail returned by GET /v1/sessions/{n}."
+      properties:
+        summary:
+          $ref: "#/components/schemas/SessionSummary"
+        workspaceHostPath:
+          type: string
+        claudeConfigHostPath:
+          type: string
+        connectedClients:
+          type: array
+          items:
+            type: string
     ClientSummary:
       type: object
       description: Item in GET /v1/clients.

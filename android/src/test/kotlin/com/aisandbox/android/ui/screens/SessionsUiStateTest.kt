@@ -182,6 +182,102 @@ class SessionsUiStateTest {
         assertThat(s.visible.map { it.n }).containsExactly(2)
     }
 
+    // ── UC-28 — terminating state: filter bucketing, effectiveState union, counts ──
+
+    @Test
+    fun `filter RUNNING matches terminating (UC-28)`() {
+        // A session being torn down is still "active" from the operator's view
+        // and stays under the Running chip until the teardown resolves.
+        assertThat(SessionsFilter.RUNNING.matches("terminating")).isTrue
+    }
+
+    @Test
+    fun `filter STOPPED excludes terminating (UC-28)`() {
+        assertThat(SessionsFilter.STOPPED.matches("terminating")).isFalse
+    }
+
+    @Test
+    fun `filter ALL matches terminating (UC-28)`() {
+        assertThat(SessionsFilter.ALL.matches("terminating")).isTrue
+    }
+
+    @Test
+    fun `effectiveState is terminating when the row is optimistically flagged (UC-28 AC2)`() {
+        // Client-side optimistic half: the server still reports running, but the
+        // operator just confirmed a delete → the union yields terminating.
+        val s = SessionsUiState(
+            sessions = listOf(row(1, "running")),
+            terminating = setOf(1),
+        )
+        assertThat(s.effectiveState(row(1, "running"))).isEqualTo("terminating")
+    }
+
+    @Test
+    fun `effectiveState is terminating when the server reports terminating (UC-28 AC3)`() {
+        // Server-reported half: no optimistic flag, but the wire token wins.
+        val s = SessionsUiState(sessions = listOf(row(1, "terminating")))
+        assertThat(s.effectiveState(row(1, "terminating"))).isEqualTo("terminating")
+    }
+
+    @Test
+    fun `effectiveState passes unknown and normal tokens through (UC-28 AC10)`() {
+        // Neither flagged nor server-terminating → the real state passes through,
+        // including an unknown future token (rendered raw/neutral by StatusPill).
+        val s = SessionsUiState(sessions = listOf(row(1, "running")), terminating = setOf(2))
+        assertThat(s.effectiveState(row(1, "running"))).isEqualTo("running")
+        assertThat(s.effectiveState(row(3, "frobnicate"))).isEqualTo("frobnicate")
+    }
+
+    @Test
+    fun `countRunning includes terminating rows (UC-28)`() {
+        // terminating buckets with RUNNING, so a teardown-in-progress row counts
+        // toward the Running badge (server-reported here).
+        val s = SessionsUiState(
+            sessions = listOf(
+                row(1, "running"),
+                row(2, "terminating"),
+                row(3, "stopped"),
+            ),
+        )
+        assertThat(s.countRunning).isEqualTo(2)
+        assertThat(s.countStopped).isEqualTo(1)
+    }
+
+    @Test
+    fun `countRunning counts an optimistically-flagged row as terminating (UC-28)`() {
+        // The optimistic flag flips a server-running row into the terminating
+        // bucket via effectiveState — it still counts under Running.
+        val s = SessionsUiState(
+            sessions = listOf(row(1, "running"), row(2, "running")),
+            terminating = setOf(1),
+        )
+        assertThat(s.countRunning).isEqualTo(2)
+    }
+
+    @Test
+    fun `visible RUNNING keeps a server-terminating row visible (UC-28 AC3)`() {
+        val s = SessionsUiState(
+            sessions = listOf(
+                row(1, "running"),
+                row(2, "terminating"),
+                row(3, "stopped"),
+            ),
+            filter = SessionsFilter.RUNNING,
+        )
+        // The terminating row must NOT vanish under RUNNING (it stays visible
+        // with its pill until the teardown resolves).
+        assertThat(s.visible.map { it.n }).containsExactly(1, 2)
+    }
+
+    @Test
+    fun `visible STOPPED hides a terminating row (UC-28)`() {
+        val s = SessionsUiState(
+            sessions = listOf(row(1, "terminating"), row(2, "stopped")),
+            filter = SessionsFilter.STOPPED,
+        )
+        assertThat(s.visible.map { it.n }).containsExactly(2)
+    }
+
     @Test
     fun `optimistic insertion appears before rollback`() {
         // Models the AC9 optimistic-spawn behaviour at the data layer:

@@ -12,6 +12,7 @@ import static org.mockito.Mockito.when;
 import com.aisandbox.server.sessions.dto.SessionRecord;
 import com.aisandbox.server.sessions.service.DockerEnumerationService;
 import com.aisandbox.server.sessions.service.ProcessExecutor;
+import com.aisandbox.server.sessions.service.TerminatingSessions;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.mockito.invocation.InvocationOnMock;
@@ -375,6 +376,9 @@ class DockerEnumerationServiceTest {
         table.put("running", "running");
         table.put("created", "starting");
         table.put("restarting", "starting");
+        // UC-28 — the transient Docker `removing` state (reported while
+        // `docker compose down` tears the container down) maps to terminating.
+        table.put("removing", "terminating");
         table.put("exited", "stopped");
         table.put("dead", "stopped");
         table.put("paused", "stopped");
@@ -451,6 +455,121 @@ class DockerEnumerationServiceTest {
                                                 && s.contains(".State.Running"))),
                         any(),
                         any());
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // UC-28 — in-flight-delete registry override
+    // ──────────────────────────────────────────────────────────────────────
+
+    /**
+     * UC-28 AC1/AC3/AC9 — a session flagged in the {@link TerminatingSessions}
+     * registry is reported {@code terminating} regardless of its Docker
+     * {@code .State.Status}. Here the container still inspects as
+     * {@code running} with its ready-marker present (so without the override it
+     * would be {@code running}), yet the registry flag wins: the state is
+     * {@code terminating}, the title is {@code (unavailable)}, and the tmux
+     * title probe is SKIPPED (the session is being torn down — no point asking
+     * tmux). This is the deterministic signal the brief preferred over the brief
+     * /racy raw {@code removing} window.
+     */
+    @Test
+    void registry_flagged_session_reports_terminating_over_running() throws Exception {
+        ProcessExecutor exec = mock(ProcessExecutor.class);
+        when(exec.run(
+                        argThat(argv -> argv != null && argv.size() >= 3 && "ls".equals(argv.get(2))),
+                        any(),
+                        any(),
+                        any()))
+                .thenReturn(new ProcessExecutor.Result(0, "[{\"Name\":\"ai-sandbox-5\"}]", ""));
+        when(exec.run(argThat(argv -> argv != null && argv.contains("ps")), any(), any(), any()))
+                .thenReturn(new ProcessExecutor.Result(0, "live-cid\n", ""));
+        // Docker says the container is fully running …
+        when(exec.run(argThat(argv -> argv != null && argv.contains("inspect")), any(), any()))
+                .thenReturn(new ProcessExecutor.Result(0, "my-label|running|true", ""));
+        when(exec.run(
+                        argThat(argv -> argv != null && argv.contains("test") && argv.contains("/tmp/aisandbox-ready")),
+                        any(),
+                        any()))
+                .thenReturn(new ProcessExecutor.Result(0, "", ""));
+        when(exec.run(argThat(argv -> argv != null && argv.contains("display-message")), any(), any()))
+                .thenReturn(new ProcessExecutor.Result(0, "doing-thing", ""));
+
+        // … but a delete is in flight for N=5.
+        TerminatingSessions terminating = new TerminatingSessions();
+        terminating.markTerminating(5);
+
+        DockerEnumerationService svc = new DockerEnumerationService(exec, terminating);
+        SessionRecord r = svc.enumerate().get(0);
+
+        assertThat(r.n()).isEqualTo(5);
+        assertThat(r.state())
+                .as("the in-flight-delete registry flag wins over the Docker `running` status (AC1/AC3/AC9)")
+                .isEqualTo("terminating");
+        assertThat(r.tmuxTitle()).isEqualTo("(unavailable)");
+        // The tmux title probe MUST be skipped for a terminating session.
+        verify(exec, never()).run(argThat(argv -> argv != null && argv.contains("display-message")), any(), any());
+    }
+
+    /**
+     * UC-28 — an in-flight delete still wins even when the container has
+     * ALREADY vanished mid-{@code down} (no container id). A flagged N with no
+     * cid reads {@code terminating}, not {@code stopped}, for the duration of
+     * the teardown window — so the optimistic pill never flips to gray before
+     * the row disappears.
+     */
+    @Test
+    void registry_flagged_session_with_no_container_reports_terminating_not_stopped() throws Exception {
+        ProcessExecutor exec = mock(ProcessExecutor.class);
+        when(exec.run(
+                        argThat(argv -> argv != null && argv.size() >= 3 && "ls".equals(argv.get(2))),
+                        any(),
+                        any(),
+                        any()))
+                .thenReturn(new ProcessExecutor.Result(0, "[{\"Name\":\"ai-sandbox-9\"}]", ""));
+        // ps returns empty → no container id (container already gone mid-down).
+        when(exec.run(argThat(argv -> argv != null && argv.contains("ps")), any(), any(), any()))
+                .thenReturn(new ProcessExecutor.Result(0, "\n", ""));
+
+        TerminatingSessions terminating = new TerminatingSessions();
+        terminating.markTerminating(9);
+
+        DockerEnumerationService svc = new DockerEnumerationService(exec, terminating);
+        SessionRecord r = svc.enumerate().get(0);
+
+        assertThat(r.n()).isEqualTo(9);
+        assertThat(r.state())
+                .as("a flagged session whose container is already gone reads terminating, not stopped (AC3)")
+                .isEqualTo("terminating");
+        assertThat(r.tmuxTitle()).isEqualTo("(unavailable)");
+    }
+
+    /**
+     * UC-28 — an UNFLAGGED session whose container inspects as {@code removing}
+     * (the transient Docker teardown state) still surfaces as {@code terminating}
+     * via {@link DockerEnumerationService#mapState(String)} alone — covering the
+     * mapping path independent of the registry override (e.g. a teardown started
+     * by another client / out-of-band).
+     */
+    @Test
+    void unflagged_removing_container_maps_to_terminating() throws Exception {
+        ProcessExecutor exec = mock(ProcessExecutor.class);
+        when(exec.run(
+                        argThat(argv -> argv != null && argv.size() >= 3 && "ls".equals(argv.get(2))),
+                        any(),
+                        any(),
+                        any()))
+                .thenReturn(new ProcessExecutor.Result(0, "[{\"Name\":\"ai-sandbox-2\"}]", ""));
+        when(exec.run(argThat(argv -> argv != null && argv.contains("ps")), any(), any(), any()))
+                .thenReturn(new ProcessExecutor.Result(0, "rm-cid\n", ""));
+        when(exec.run(argThat(argv -> argv != null && argv.contains("inspect")), any(), any()))
+                .thenReturn(new ProcessExecutor.Result(0, "lbl|removing|false", ""));
+
+        // 1-arg ctor → empty registry; the `removing` mapping is the only signal.
+        SessionRecord r = new DockerEnumerationService(exec).enumerate().get(0);
+        assertThat(r.state()).isEqualTo("terminating");
+        assertThat(r.tmuxTitle()).isEqualTo("(unavailable)");
+        // tmux title probe skipped for the non-running mapped state.
+        verify(exec, never()).run(argThat(argv -> argv != null && argv.contains("display-message")), any(), any());
     }
 
     // ──────────────────────────────────────────────────────────────────────

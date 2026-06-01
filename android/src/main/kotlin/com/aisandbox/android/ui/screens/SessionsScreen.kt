@@ -221,13 +221,22 @@ internal fun SessionsBody(
             item { EmptyState(filter = state.filter) }
         } else {
             items(items = state.visible, key = { it.n }) { row ->
+                // UC-28 — effective state is the union of the optimistic flag
+                // and the server's `terminating` token (see SessionsUiState).
+                val effectiveState = state.effectiveState(row)
+                val isTerminating = effectiveState == "terminating"
                 // Pitfall 5 — scope the dismiss state per-N inside key(row.n)
                 // so an in-flight list refresh can't carry a stale anchor onto
                 // a different row or resurrect a just-deleted one.
                 key(row.n) {
                     val dismissState = rememberSwipeToDismissBoxState(
                         confirmValueChange = { value ->
-                            if (value == SwipeToDismissBoxValue.EndToStart) {
+                            // UC-28 AC4 — while this row is terminating, the
+                            // swipe-to-delete gesture is a defensive no-op: it
+                            // never opens a second confirmation. Combined with
+                            // enableDismissFromEndToStart = !isTerminating below
+                            // (per-row → siblings stay deletable, AC6).
+                            if (!isTerminating && value == SwipeToDismissBoxValue.EndToStart) {
                                 // Pitfall 1 / AC2 — open the dialog and VETO the
                                 // settle (return false) so the row never
                                 // auto-dismisses; deletion happens only on an
@@ -250,12 +259,12 @@ internal fun SessionsBody(
                     SwipeToDismissBox(
                         state = dismissState,
                         enableDismissFromStartToEnd = false,
-                        enableDismissFromEndToStart = true,
+                        enableDismissFromEndToStart = !isTerminating,
                         backgroundContent = {
                             SwipeDeleteBackground(progress = dismissState.progress)
                         },
                     ) {
-                        SessionRow(row = row, onTap = { onOpen(row.n) })
+                        SessionRow(row = row, effectiveState = effectiveState, onTap = { onOpen(row.n) })
                     }
                 }
             }
@@ -346,6 +355,9 @@ private fun EmptyState(filter: SessionsFilter) {
 @Composable
 private fun SessionRow(
     row: SessionSummary,
+    // UC-28 — the effective (union) state; drives the avatar + pill so the
+    // optimistic terminating treatment shows before the server confirms.
+    effectiveState: String = row.state,
     onTap: () -> Unit,
 ) {
     Box(
@@ -361,7 +373,7 @@ private fun SessionRow(
             .padding(12.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            SessionAvatar(n = row.n, state = row.state, sizeDp = 48)
+            SessionAvatar(n = row.n, state = effectiveState, sizeDp = 48)
             Spacer(Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(
@@ -385,7 +397,7 @@ private fun SessionRow(
                 }
             }
             Column(horizontalAlignment = Alignment.End) {
-                StatusPill(state = row.state)
+                StatusPill(state = effectiveState)
                 if (row.activeStreams > 0) {
                     Spacer(Modifier.height(6.dp))
                     AttachedBadge(count = row.activeStreams)
