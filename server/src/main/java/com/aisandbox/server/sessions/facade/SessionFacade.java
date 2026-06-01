@@ -11,6 +11,7 @@ import com.aisandbox.server.sessions.facade.internal.SpawnMutex;
 import com.aisandbox.server.sessions.service.ProcessExecutor;
 import com.aisandbox.server.sessions.service.ScriptExecutorService;
 import com.aisandbox.server.sessions.service.SessionRegistryService;
+import com.aisandbox.server.sessions.service.TerminatingSessions;
 import java.io.IOException;
 import java.time.Duration;
 import java.util.List;
@@ -38,6 +39,7 @@ public class SessionFacade {
     private final SpawnMutex spawnMutex;
     private final PerSessionMutexRegistry perN;
     private final AuditLogger audit;
+    private final TerminatingSessions terminating;
     private final Duration spawnTimeout;
 
     public SessionFacade(
@@ -46,12 +48,14 @@ public class SessionFacade {
             SpawnMutex spawnMutex,
             PerSessionMutexRegistry perN,
             AuditLogger audit,
+            TerminatingSessions terminating,
             ServerProperties props) {
         this.registry = registry;
         this.executor = executor;
         this.spawnMutex = spawnMutex;
         this.perN = perN;
         this.audit = audit;
+        this.terminating = terminating;
         this.spawnTimeout = Duration.ofSeconds(props.limits().spawnTimeoutSeconds());
     }
 
@@ -148,18 +152,34 @@ public class SessionFacade {
             if (!force && !registry.exists(n)) {
                 throw new NoSuchElementException("session " + n + " not found");
             }
-            ProcessExecutor.Result r = executor.clean(n, spawnTimeout);
-            audit.logEvent(
-                    AuditAction.SESSION_KILL,
-                    r.exitCode() == 0 ? "ok" : "fail",
-                    "n",
-                    n,
-                    "force",
-                    force,
-                    "exitCode",
-                    r.exitCode());
+            // UC-28: mark the session terminating BEFORE clean.sh runs and
+            // invalidate the cache so a concurrent GET /v1/sessions poll
+            // observes `terminating` for the whole teardown window (the raw
+            // Docker `removing` state is too brief/racy to rely on alone).
+            terminating.markTerminating(n);
             registry.invalidate();
-            return r.exitCode() == 0;
+            try {
+                ProcessExecutor.Result r = executor.clean(n, spawnTimeout);
+                audit.logEvent(
+                        AuditAction.SESSION_KILL,
+                        r.exitCode() == 0 ? "ok" : "fail",
+                        "n",
+                        n,
+                        "force",
+                        force,
+                        "exitCode",
+                        r.exitCode());
+                return r.exitCode() == 0;
+            } finally {
+                // UC-28: clear the flag and invalidate AGAIN even if clean()
+                // threw — otherwise the 1s registry cache could keep serving
+                // `terminating` after the flag is gone, and a failed teardown
+                // must revert to the session's real status (UC-28 AC8). Both
+                // run unconditionally; success → the row vanishes from the
+                // next enumeration, failure → it reverts to its real state.
+                terminating.clear(n);
+                registry.invalidate();
+            }
         } finally {
             l.unlock();
             perN.evict(n);

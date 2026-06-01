@@ -28,9 +28,13 @@ public final class ApiDtos {
             @Schema(description = "Free-form label echoed from com.ai-sandbox.label") String label,
             @Schema(description = "Tmux window title, or '(idle)' / '(unavailable)'") String tmuxTitle,
             @Schema(
-                            description = "running | starting | provisioning | stopped. provisioning (UC-27) = the"
-                                    + " container is up but still installing its spawn-time toolchains,"
-                                    + " shown as 'Installing prerequisites' client-side.")
+                            description = "running | starting | provisioning | terminating | stopped."
+                                    + " provisioning (UC-27) = the container is up but still installing its"
+                                    + " spawn-time toolchains, shown as 'Installing prerequisites' client-side."
+                                    + " terminating (UC-28) = the session's teardown (clean.sh / docker compose"
+                                    + " down) is in progress; shown with a destructive-red 'awaiting termination'"
+                                    + " pill client-side and blocks further delete attempts.",
+                            allowableValues = {"running", "starting", "provisioning", "terminating", "stopped"})
                     String state,
             long uptimeSec,
             int activeStreams,

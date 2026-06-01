@@ -7,7 +7,9 @@ import com.aisandbox.server.api.mapper.ApiMappers;
 import com.aisandbox.server.sessions.dto.SpawnCommand;
 import com.aisandbox.server.sessions.facade.SessionFacade;
 import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.media.ArraySchema;
 import io.swagger.v3.oas.annotations.media.Content;
+import io.swagger.v3.oas.annotations.media.Schema;
 import io.swagger.v3.oas.annotations.responses.ApiResponse;
 import io.swagger.v3.oas.annotations.responses.ApiResponses;
 import java.io.IOException;
@@ -40,6 +42,11 @@ public class SessionController {
         this.facade = facade;
     }
 
+    @Operation(summary = "List all ai-sandbox sessions.")
+    @ApiResponse(
+            responseCode = "200",
+            description = "All enumerated sessions (running, starting, provisioning, terminating, stopped).",
+            content = @Content(array = @ArraySchema(schema = @Schema(implementation = ApiDtos.SessionSummary.class))))
     @GetMapping
     public ResponseEntity<?> list() throws IOException {
         return ResponseEntity.ok(ApiMappers.toSummaries(facade.listSessions()));
@@ -59,6 +66,17 @@ public class SessionController {
         return ResponseEntity.status(HttpStatus.CREATED).body(new SpawnedDto(n));
     }
 
+    @Operation(summary = "Get detail for a single session by N.")
+    @ApiResponses({
+        @ApiResponse(
+                responseCode = "200",
+                description = "Session detail.",
+                content = @Content(schema = @Schema(implementation = ApiDtos.SessionDetailDto.class))),
+        @ApiResponse(
+                responseCode = "404",
+                description = "No session with that N.",
+                content = @Content(mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE)),
+    })
     @GetMapping("/{n}")
     public ResponseEntity<?> detail(@PathVariable int n) throws IOException {
         return facade.getSession(n)

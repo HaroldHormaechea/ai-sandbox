@@ -14,6 +14,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 /**
@@ -72,6 +73,7 @@ public class DockerEnumerationService {
     private static final ObjectMapper JSON = new ObjectMapper();
 
     private final ProcessExecutor executor;
+    private final TerminatingSessions terminating;
 
     /**
      * UC-15 sticky flag for {@code docker compose ls --all} support on this
@@ -95,8 +97,24 @@ public class DockerEnumerationService {
      */
     private volatile Boolean composeListAllSupported;
 
-    public DockerEnumerationService(ProcessExecutor executor) {
+    @Autowired
+    public DockerEnumerationService(ProcessExecutor executor, TerminatingSessions terminating) {
         this.executor = executor;
+        this.terminating = terminating;
+    }
+
+    /**
+     * UC-28 back-compat 1-arg constructor for QA-owned test fixtures built
+     * before this use case added the {@link TerminatingSessions} dependency.
+     * Substitutes a fresh, empty registry so enumeration behaves exactly as
+     * before (no session is ever reported {@code terminating}). Production
+     * wiring always uses the 2-arg ctor via {@link Autowired}; this overload
+     * exists only so existing test code keeps compiling. Tests that exercise
+     * the terminating override should use the 2-arg ctor with a registry they
+     * control.
+     */
+    public DockerEnumerationService(ProcessExecutor executor) {
+        this(executor, new TerminatingSessions());
     }
 
     public List<SessionRecord> enumerate() throws IOException {
@@ -178,7 +196,11 @@ public class DockerEnumerationService {
                 // Project enumerated but no container — likely transient
                 // mid-compose-up. Mark stopped so the Android UI shows it
                 // under the Stopped chip rather than silently dropping it.
-                out.add(new SessionRecord(n, "", "(unavailable)", "stopped", 0L, 0, Instant.EPOCH));
+                // UC-28: an in-flight delete still wins — a container that has
+                // already gone away mid-`down` must read `terminating`, not
+                // `stopped`, for the duration of the teardown.
+                String noCidState = terminating.isTerminating(n) ? "terminating" : "stopped";
+                out.add(new SessionRecord(n, "", "(unavailable)", noCidState, 0L, 0, Instant.EPOCH));
                 continue;
             }
             InspectResult inspect = inspectCombined(cid, timeout);
@@ -193,9 +215,22 @@ public class DockerEnumerationService {
             if ("running".equals(state) && !readyMarkerPresent(project, timeout)) {
                 state = "provisioning";
             }
-            String title = "running".equals(state) ? tmuxTitle(project, timeout) : "(unavailable)";
-            out.add(new SessionRecord(
-                    n, inspect.label() == null ? "" : inspect.label(), title, state, 0L, 0, Instant.EPOCH));
+            // UC-28: FINAL override — an in-flight delete (registered by
+            // SessionFacade.deleteSession for the duration of clean.sh) wins
+            // over running/provisioning/starting/stopped so the server never
+            // resurrects a `running` pill mid-teardown. Skip the tmux title
+            // probe — the session is being torn down. The `removing` Docker
+            // state maps here too via mapState, but the registry flag is the
+            // deterministic source (the `removing` window is brief and racy).
+            String label = inspect.label() == null ? "" : inspect.label();
+            String title;
+            if (terminating.isTerminating(n)) {
+                state = "terminating";
+                title = "(unavailable)";
+            } else {
+                title = "running".equals(state) ? tmuxTitle(project, timeout) : "(unavailable)";
+            }
+            out.add(new SessionRecord(n, label, title, state, 0L, 0, Instant.EPOCH));
         }
         out.sort((a, b) -> Integer.compare(a.n(), b.n()));
         return out;
@@ -288,17 +323,33 @@ public class DockerEnumerationService {
     }
 
     /**
-     * Map raw {@code docker inspect .State.Status} to the UC04 AC37
-     * three-state model {@code running | starting | stopped}. Anything
-     * unknown becomes {@code stopped} — defensive: if Docker introduces
-     * a new state we don't want the Android UI to wedge on an unmapped
-     * value.
+     * Map raw {@code docker inspect .State.Status} to the wire-token model
+     * {@code running | starting | terminating | stopped}. Anything unknown
+     * becomes {@code stopped} — defensive: if Docker introduces a new state
+     * we don't want the Android UI to wedge on an unmapped value.
+     *
+     * <p>State table:
+     * <ul>
+     *   <li>{@code running} → {@code "running"}</li>
+     *   <li>{@code created} / {@code restarting} → {@code "starting"}</li>
+     *   <li>{@code removing} → {@code "terminating"} (UC-28 — the transient
+     *       state Docker reports while {@code docker compose down} tears the
+     *       container down). NOTE: {@code exited} is deliberately NOT mapped
+     *       to {@code terminating} — a legitimately stopped container is also
+     *       {@code exited}; the authoritative terminating signal is the
+     *       in-flight-delete registry layered on by {@link #enumerate()}.</li>
+     *   <li>{@code exited} / {@code dead} / {@code paused} → {@code "stopped"}</li>
+     *   <li>anything else → {@code "stopped"}</li>
+     * </ul>
      *
      * <p>The UC-27 {@code provisioning} state is NOT produced here: a
      * Docker-{@code running} container whose {@code /tmp/aisandbox-ready}
      * marker is still absent is downgraded to {@code provisioning} by
-     * {@link #enumerate()} after this mapping, via the readiness probe. This
-     * method intentionally stays a pure status→wire-token mapping.
+     * {@link #enumerate()} after this mapping, via the readiness probe.
+     * Likewise the UC-28 {@code terminating} override for an in-flight delete
+     * is applied by {@link #enumerate()} via {@link TerminatingSessions} and
+     * wins over this mapping. This method intentionally stays a pure
+     * status→wire-token mapping.
      */
     static String mapState(String dockerStatus) {
         if (dockerStatus == null || dockerStatus.isEmpty()) {
@@ -307,6 +358,7 @@ public class DockerEnumerationService {
         return switch (dockerStatus) {
             case "running" -> "running";
             case "created", "restarting" -> "starting";
+            case "removing" -> "terminating";
             case "exited", "dead", "paused" -> "stopped";
             default -> "stopped";
         };
