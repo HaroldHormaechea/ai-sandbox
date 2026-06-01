@@ -37,16 +37,25 @@ import org.springframework.stereotype.Service;
  *       {@code --format='{{label}}|{{.State.Status}}|{{.State.Running}}'}
  *       parsed on {@code |} — one process per session instead of one
  *       per attribute.</li>
- *   <li>For {@code running} sessions only:
+ *   <li>For Docker-{@code running} sessions: a readiness probe
+ *       ({@code docker compose -p <Name> exec -T claude-sandbox test -f
+ *       /tmp/aisandbox-ready}, mirroring spawn.sh:273). If the marker is
+ *       absent the session is still installing its spawn-time toolchains, so
+ *       the state is downgraded to {@code provisioning} and the title probe is
+ *       skipped. Only a marker-confirmed {@code running} session runs
  *       {@code docker compose -p <Name> exec -T claude-sandbox tmux
- *       display-message ...} → window title. Skipped for {@code
- *       starting}/{@code stopped} since exec on a non-running container
- *       errors and inflates enumeration latency.</li>
+ *       display-message ...} for its window title. Skipped for {@code
+ *       starting}/{@code provisioning}/{@code stopped} since exec on a
+ *       not-yet-ready container errors and inflates enumeration latency.</li>
  * </ol>
  *
- * <p>State mapping per UC04 § B4:
+ * <p>State mapping per UC04 § B4 (plus the UC-27 {@code provisioning} state,
+ * layered on by the readiness probe — {@link #mapState(String)} itself never
+ * returns it):
  * <ul>
- *   <li>{@code running}                  → {@code "running"}</li>
+ *   <li>{@code running} + ready marker present → {@code "running"}</li>
+ *   <li>{@code running} + ready marker absent  → {@code "provisioning"}
+ *       ("Installing prerequisites" client-side)</li>
  *   <li>{@code created} / {@code restarting} → {@code "starting"}</li>
  *   <li>{@code exited} / {@code dead} / {@code paused} → {@code "stopped"}</li>
  *   <li>anything else / no container     → {@code "stopped"}</li>
@@ -174,6 +183,16 @@ public class DockerEnumerationService {
             }
             InspectResult inspect = inspectCombined(cid, timeout);
             String state = mapState(inspect.status());
+            // UC — a container that is `running` at the Docker level may still be
+            // installing its spawn-time capability toolchains (UC-27 eager
+            // provisioning) before tmux `main` and Claude are up. spawn.sh polls
+            // /tmp/aisandbox-ready (written by entrypoint.sh AFTER tmux/claude are
+            // up). Mirror that here: if the marker is absent, surface `provisioning`
+            // ("Installing prerequisites" client-side) instead of `running`, and
+            // skip the tmux title probe — `main` isn't up yet, so it would error.
+            if ("running".equals(state) && !readyMarkerPresent(project, timeout)) {
+                state = "provisioning";
+            }
             String title = "running".equals(state) ? tmuxTitle(project, timeout) : "(unavailable)";
             out.add(new SessionRecord(
                     n, inspect.label() == null ? "" : inspect.label(), title, state, 0L, 0, Instant.EPOCH));
@@ -274,6 +293,12 @@ public class DockerEnumerationService {
      * unknown becomes {@code stopped} — defensive: if Docker introduces
      * a new state we don't want the Android UI to wedge on an unmapped
      * value.
+     *
+     * <p>The UC-27 {@code provisioning} state is NOT produced here: a
+     * Docker-{@code running} container whose {@code /tmp/aisandbox-ready}
+     * marker is still absent is downgraded to {@code provisioning} by
+     * {@link #enumerate()} after this mapping, via the readiness probe. This
+     * method intentionally stays a pure status→wire-token mapping.
      */
     static String mapState(String dockerStatus) {
         if (dockerStatus == null || dockerStatus.isEmpty()) {
@@ -415,6 +440,47 @@ public class DockerEnumerationService {
             };
         } catch (IOException io) {
             return "(unavailable)";
+        }
+    }
+
+    /**
+     * Probe the spawn-time readiness marker
+     * {@code /tmp/aisandbox-ready} inside a {@code running} session.
+     * The container entrypoint writes the marker AFTER its UC-27 capability
+     * provisioning and the tmux {@code main} session are up; {@code spawn.sh}
+     * polls the same file (spawn.sh:273) so attach tolerates the provisioning
+     * window. Uses the {@code docker compose -p <project> exec -T
+     * claude-sandbox test -f /tmp/aisandbox-ready} argv, mirroring spawn.sh.
+     *
+     * <p>Conservative by design: ANY failure to confirm the marker (exec
+     * error, non-zero exit because the file is absent, container not yet
+     * exec-able, timeout) is treated as <em>not ready</em>. The caller then
+     * reports {@code provisioning} rather than {@code running}, matching
+     * spawn.sh's "keep waiting until the marker exists" semantics — a session
+     * is never optimistically called ready.
+     *
+     * @return {@code true} only when {@code test -f} exits 0 (marker present).
+     */
+    private boolean readyMarkerPresent(String project, Duration timeout) {
+        try {
+            ProcessExecutor.Result r = executor.run(
+                    List.of(
+                            "docker",
+                            "compose",
+                            "-p",
+                            project,
+                            "exec",
+                            "-T",
+                            "claude-sandbox",
+                            "test",
+                            "-f",
+                            "/tmp/aisandbox-ready"),
+                    null,
+                    timeout);
+            return r.exitCode() == 0;
+        } catch (IOException io) {
+            LOG.debug("readyMarkerPresent({}): {}", project, io.toString());
+            return false;
         }
     }
 }
