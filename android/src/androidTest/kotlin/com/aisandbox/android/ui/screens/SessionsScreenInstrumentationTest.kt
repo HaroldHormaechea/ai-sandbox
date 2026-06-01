@@ -295,6 +295,117 @@ class SessionsScreenInstrumentationTest {
         assertNull("long-press must NOT trigger the delete path (swipe is the sole affordance)", deletedN)
     }
 
+    // ── UC-28 — terminating pill + per-row swipe guard ───────────────────────
+
+    /** One optimistically-terminating row (n=1) + one normal running sibling (n=2). */
+    private val optimisticTerminatingState = SessionsUiState(
+        sessions = listOf(
+            SessionSummary(n = 1, label = "alpha", state = "running"),
+            SessionSummary(n = 2, label = "beta", state = "running"),
+        ),
+        filter = SessionsFilter.ALL,
+        terminating = setOf(1), // client-side optimistic flag on n=1
+    )
+
+    /** A server-reported terminating row (no optimistic flag). */
+    private val serverTerminatingState = SessionsUiState(
+        sessions = listOf(
+            SessionSummary(n = 1, label = "alpha", state = "terminating"),
+        ),
+        filter = SessionsFilter.ALL,
+    )
+
+    /**
+     * UC-28 AC2 — the moment a delete is confirmed (modelled here by the
+     * optimistic flag on n=1) the row shows the "terminating" pill in place of
+     * its prior running pill, BEFORE any server refresh.
+     */
+    @Test
+    fun optimistic_terminating_row_shows_terminating_pill() {
+        composeTestRule.setContent {
+            AiSandboxTheme {
+                SessionsBody(
+                    padding = PaddingValues(),
+                    state = optimisticTerminatingState,
+                    onSelectFilter = {},
+                    onOpen = {},
+                    onConfirmDelete = { _, _ -> },
+                )
+            }
+        }
+        // The StatusPill renders the lowercase "terminating" label for n=1.
+        composeTestRule.onNodeWithText("terminating").assertIsDisplayed()
+    }
+
+    /**
+     * UC-28 AC3 — a server-reported `terminating` row likewise shows the
+     * terminating pill (the other half of the union, no optimistic flag).
+     */
+    @Test
+    fun server_reported_terminating_row_shows_terminating_pill() {
+        composeTestRule.setContent {
+            AiSandboxTheme {
+                SessionsBody(
+                    padding = PaddingValues(),
+                    state = serverTerminatingState,
+                    onSelectFilter = {},
+                    onOpen = {},
+                    onConfirmDelete = { _, _ -> },
+                )
+            }
+        }
+        composeTestRule.onNodeWithText("terminating").assertIsDisplayed()
+    }
+
+    /**
+     * UC-28 AC4 — while a row is terminating, the swipe-to-dismiss gesture is
+     * disabled for it and cannot raise a second delete confirmation.
+     */
+    @Test
+    fun swipe_on_a_terminating_row_does_not_open_the_confirm_dialog() {
+        var deletedN: Int? = null
+        composeTestRule.setContent {
+            AiSandboxTheme {
+                SessionsBody(
+                    padding = PaddingValues(),
+                    state = optimisticTerminatingState,
+                    onSelectFilter = {},
+                    onOpen = {},
+                    onConfirmDelete = { n, _ -> deletedN = n },
+                )
+            }
+        }
+
+        composeTestRule.onNodeWithTag("session-card-1").performTouchInput { swipeLeft() }
+
+        // No confirm dialog for the terminating row, and no delete fired.
+        composeTestRule.onNodeWithText(ctx.getString(R.string.delete_title, 1)).assertDoesNotExist()
+        assertNull("a terminating row must not raise a second delete (AC4)", deletedN)
+    }
+
+    /**
+     * UC-28 AC6 — blocking is per-row: a non-terminating SIBLING of a
+     * terminating row still swipes to open its own confirm dialog.
+     */
+    @Test
+    fun sibling_of_a_terminating_row_still_swipes_to_delete() {
+        composeTestRule.setContent {
+            AiSandboxTheme {
+                SessionsBody(
+                    padding = PaddingValues(),
+                    state = optimisticTerminatingState,
+                    onSelectFilter = {},
+                    onOpen = {},
+                    onConfirmDelete = { _, _ -> },
+                )
+            }
+        }
+
+        // n=2 is NOT terminating → swipe still opens its confirm dialog.
+        composeTestRule.onNodeWithTag("session-card-2").performTouchInput { swipeLeft() }
+        composeTestRule.onNodeWithText(ctx.getString(R.string.delete_title, 2)).assertIsDisplayed()
+    }
+
     @Test
     fun filter_chip_fires_independently_of_cards() {
         var selectedFilter: SessionsFilter? = null

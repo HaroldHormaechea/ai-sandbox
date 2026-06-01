@@ -5,6 +5,7 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.runtime.Composable
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -195,6 +196,62 @@ class TerminalScreenInstrumentationTest {
         // breaks AC#5 surfaces on-device.
         assertEquals("Delete session", ctx.getString(R.string.terminal_menu_delete))
         assertEquals("Disconnect", ctx.getString(R.string.terminal_menu_disconnect))
+    }
+
+    // ── UC-28 AC5 — terminal-screen Delete blocked while terminating ──────────
+    //
+    // The real dropdown is inside the full TerminalScreen (needs the
+    // Application/AppContainer/ViewModel graph), so these pin the EXACT guard
+    // wiring the screen uses on the Delete item:
+    //   • enabled = !isTerminating  (the item is disabled while terminating)
+    //   • onClick { if (isTerminating) return@DropdownMenuItem … }  (defensive
+    //     short-circuit even if a tap slips through)
+    // where `isTerminating` is the union of the shared optimistic store and the
+    // server `terminating` token (TerminalViewModel.terminating).
+    //
+    // HONESTY CAVEAT (coverage summary): the `isTerminating` UNION computation
+    // itself is covered by the JVM SessionsUiState `effectiveState` tests and
+    // the shared-store SessionsCoordinator transition tests; the optimistic flag
+    // surviving back-navigation is the process-scoped TerminatingSessionsStore's
+    // contract. A future seam extraction of the terminal menu would let this
+    // drive the real composable instead of pinning the wiring.
+
+    @Composable
+    private fun GuardedDeleteItem(isTerminating: Boolean, onDelete: () -> Unit) {
+        androidx.compose.material3.DropdownMenuItem(
+            text = { androidx.compose.material3.Text(ctx.getString(R.string.terminal_menu_delete)) },
+            enabled = !isTerminating,
+            onClick = {
+                if (isTerminating) return@DropdownMenuItem
+                onDelete()
+            },
+        )
+    }
+
+    /** AC5 — while terminating, tapping the Delete item must NOT fire a delete. */
+    @Test
+    fun terminal_delete_item_is_blocked_while_terminating() {
+        var deleteFired = false
+        composeTestRule.setContent {
+            AiSandboxTheme { GuardedDeleteItem(isTerminating = true, onDelete = { deleteFired = true }) }
+        }
+
+        composeTestRule.onNodeWithText(ctx.getString(R.string.terminal_menu_delete)).performClick()
+
+        assertTrue("a terminating session's terminal Delete must not fire (AC5)", !deleteFired)
+    }
+
+    /** No-regression — when NOT terminating, the Delete item fires normally. */
+    @Test
+    fun terminal_delete_item_fires_when_not_terminating() {
+        var deleteFired = false
+        composeTestRule.setContent {
+            AiSandboxTheme { GuardedDeleteItem(isTerminating = false, onDelete = { deleteFired = true }) }
+        }
+
+        composeTestRule.onNodeWithText(ctx.getString(R.string.terminal_menu_delete)).performClick()
+
+        assertTrue("a non-terminating session's terminal Delete must fire", deleteFired)
     }
 
     // ══ UC-23 — IME-inset / keyboard-occlusion layout contract (AC#1–#4, #6, #8) ══
