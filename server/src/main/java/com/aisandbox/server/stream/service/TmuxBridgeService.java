@@ -92,32 +92,12 @@ public class TmuxBridgeService {
         String project = "ai-sandbox-" + n;
         String session = "client-" + streamId;
         String socket = (target == null ? null : target.socketPath());
-        String baseSession = (target == null || target.baseSession() == null) ? "main" : target.baseSession();
 
-        // Step 1 — create the per-client session linked to the base session.
-        ProcessExecutor.Result r1 = exec.run(
-                tmuxExec(project, socket, "new-session", "-d", "-s", session, "-t", baseSession),
-                null,
-                STARTUP_TIMEOUT);
-        if (r1.exitCode() != 0) {
-            throw new IOException("tmux new-session failed: " + r1.stderr());
-        }
-        // Step 2 — enable mouse mode (best-effort).
-        ProcessExecutor.Result r2 =
-                exec.run(tmuxExec(project, socket, "set-option", "-t", session, "mouse", "on"), null, STARTUP_TIMEOUT);
-        if (r2.exitCode() != 0) {
-            LOG.warn("tmux set-option mouse on failed (continuing): {}", r2.stderr());
-        }
-        // Step 2b — focus + zoom the requested pane (agent-team target). The
-        // operations are scoped to the per-client session so they don't disturb
-        // the orchestrator's own view of the shared window.
-        if (target != null && target.hasPane()) {
-            String windowSpec = session + ":" + target.window();
-            String paneSpec = windowSpec + "." + target.pane();
-            runBestEffort(tmuxExec(project, socket, "select-window", "-t", windowSpec));
-            runBestEffort(tmuxExec(project, socket, "select-pane", "-t", paneSpec));
-            runBestEffort(tmuxExec(project, socket, "resize-pane", "-Z", "-t", paneSpec));
-        }
+        // Steps 1–2c — create + configure the per-client tmux session. Extracted
+        // so it is unit-testable with a mocked ProcessExecutor (mirrors
+        // SwarmEnumerationService); start() only adds the PTY attach below.
+        prepareClientSession(project, socket, session, target);
+
         // Step 3 — PTY attach.
         // pty4j's setEnvironment REPLACES the child environment, so we must
         // inherit the JVM env (notably $PATH, matching ProcessExecutor's
@@ -142,6 +122,96 @@ public class TmuxBridgeService {
             throw io;
         }
         return new Bridge(project, session, socket, proc, exec);
+    }
+
+    /**
+     * Pre-PTY tmux setup for the per-client session: create it linked to the
+     * target's base session, enable mouse mode, hide the per-client status
+     * chrome, and idempotently zoom the requested pane. Package-visible and
+     * {@code exec}-driven so it can be unit-tested with a mocked
+     * {@link ProcessExecutor} (mirrors {@link SwarmEnumerationService}).
+     *
+     * @throws IOException if the per-client session cannot be created (step 1);
+     *     the remaining steps are best-effort and never abort the bridge.
+     */
+    void prepareClientSession(String project, String socket, String session, BridgeTarget target) throws IOException {
+        String baseSession = (target == null || target.baseSession() == null) ? "main" : target.baseSession();
+
+        // Step 1 — create the per-client session linked to the base session.
+        ProcessExecutor.Result r1 = exec.run(
+                tmuxExec(project, socket, "new-session", "-d", "-s", session, "-t", baseSession),
+                null,
+                STARTUP_TIMEOUT);
+        if (r1.exitCode() != 0) {
+            throw new IOException("tmux new-session failed: " + r1.stderr());
+        }
+        // Step 2 — enable mouse mode (best-effort).
+        ProcessExecutor.Result r2 =
+                exec.run(tmuxExec(project, socket, "set-option", "-t", session, "mouse", "on"), null, STARTUP_TIMEOUT);
+        if (r2.exitCode() != 0) {
+            LOG.warn("tmux set-option mouse on failed (continuing): {}", r2.stderr());
+        }
+        // Step 2c — hide the per-client status line for ALL targets (best-effort).
+        // tmux's status line renders the window list to the client (the visible
+        // "all windows shown" chrome the user reported). The option is scoped to
+        // the per-client session via {@code -t <session>}, so other clients of the
+        // shared base session keep their own status setting.
+        runBestEffort(tmuxExec(project, socket, "set-option", "-t", session, "status", "off"));
+        // Step 2b — focus + idempotently zoom the requested pane (agent-team
+        // target). {@code resize-pane -Z} is a TOGGLE, so running it
+        // unconditionally on an already-zoomed pane (a re-bridge / reconnect /
+        // second client) toggles zoom OFF and exposes the unzoomed multi-pane
+        // split — the regression this fix targets. We therefore zoom only when the
+        // window is not already zoomed and actually has more than one pane.
+        // Operations are scoped to the per-client session so they don't disturb
+        // the orchestrator's own view of the shared window.
+        if (target != null && target.hasPane()) {
+            String windowSpec = session + ":" + target.window();
+            String paneSpec = windowSpec + "." + target.pane();
+            runBestEffort(tmuxExec(project, socket, "select-window", "-t", windowSpec));
+            runBestEffort(tmuxExec(project, socket, "select-pane", "-t", paneSpec));
+            if (zoomNeeded(project, socket, paneSpec)) {
+                runBestEffort(tmuxExec(project, socket, "resize-pane", "-Z", "-t", paneSpec));
+            }
+        }
+    }
+
+    /**
+     * Whether {@code paneSpec}'s window should be zoomed: true only for a
+     * multi-pane window that is not already zoomed. Reads {@code #{window_panes}}
+     * and {@code #{window_zoomed_flag}} via {@code display-message}. On any read
+     * failure it falls back to {@code true}, preserving the pre-fix
+     * "always attempt the zoom" behaviour rather than risk leaving a split view.
+     */
+    private boolean zoomNeeded(String project, String socket, String paneSpec) {
+        String out = displayMessage(project, socket, paneSpec, "#{window_panes} #{window_zoomed_flag}");
+        if (out == null) {
+            return true; // can't determine state — fall back to attempting the zoom
+        }
+        String[] parts = out.trim().split("\\s+");
+        if (parts.length < 2) {
+            return true;
+        }
+        boolean singlePane = "1".equals(parts[0]);
+        boolean alreadyZoomed = "1".equals(parts[1]);
+        return !singlePane && !alreadyZoomed;
+    }
+
+    /**
+     * Run {@code display-message -p -t <target> <format>} and return trimmed
+     * stdout, or {@code null} on a non-zero exit or {@link IOException}.
+     */
+    private String displayMessage(String project, String socket, String target, String format) {
+        try {
+            ProcessExecutor.Result r = exec.run(
+                    tmuxExec(project, socket, "display-message", "-p", "-t", target, format), null, STARTUP_TIMEOUT);
+            if (r.exitCode() != 0) {
+                return null;
+            }
+            return r.stdout();
+        } catch (IOException io) {
+            return null;
+        }
     }
 
     private void runBestEffort(List<String> argv) {
