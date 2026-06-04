@@ -39,3 +39,4 @@ Statuses:
 | 27 | [use-cases/27-devtools-capability-selector.md](use-cases/27-devtools-capability-selector.md) | Server setup — manifest-driven, launch-adapted dev-tools capability selector (Linux-only) | done | 2026-05-31 |
 | 28 | [use-cases/28-android-terminating-state-block-redelete.md](use-cases/28-android-terminating-state-block-redelete.md) | "awaiting termination" feedback state + block re-delete while terminating | done | 2026-06-01 |
 | 29 | [use-cases/29-readme-overview-delegate-rewrite.md](use-cases/29-readme-overview-delegate-rewrite.md) | Rewrite the three READMEs into a purpose-first overview with delegated installation | done | 2026-06-04 |
+| 30 | [use-cases/30-server-side-capability-install-scripts.md](use-cases/30-server-side-capability-install-scripts.md) | Server-side per-capability install scripts in `setup.sh` (idempotent, hard-gated) + dind subuid provisioning | pending | 2026-06-04 |
