@@ -20,120 +20,101 @@ session lifecycle and attach to live tmux sessions from a remote workstation.
 
 ## Prerequisites
 
-- Host **OpenJDK 21+** at install time (`openjdk-21-jdk-headless` on Ubuntu).
-- The same **Docker engine + Compose plugin** the UC02 host scripts use
-  (`docker.io` + `docker-compose-plugin`).
-- **`curl` + `unzip`** for the download + unpack steps below. Usually already
-  present on Ubuntu Server, but not guaranteed on minimal images.
-- A dedicated runtime user `ai-sandbox-server` in the `docker` group —
-  **`pki init` creates it for you** (step 2 below); you do not create it by
-  hand.
+- A **Docker engine + Compose v2 plugin** on the host — the server drives
+  Docker to spawn sessions. `docker.io` is pulled in as a package dependency;
+  add `docker-compose-plugin` too if it isn't already present.
+- Everything else the server needs at runtime — **OpenJDK 21** (JRE),
+  `openssh-client`, and `debconf` — is declared in the package's `Depends`
+  and resolved automatically when you install the `.deb` with `apt`:
 
-The release zip is **self-contained** (UC05): drop it on a clean Ubuntu Server
-VM with only the above installed, then run `pki init`.
+  ```bash
+  sudo apt install ./ai-sandbox-server_<version>_amd64.deb
+  ```
 
-One-line install of the prerequisites on a fresh Ubuntu Server VM:
+- A dedicated runtime user `ai-sandbox-server` in the `docker` group — the
+  package install creates it for you (as does `pki init` / `onboard`); you do
+  not create it by hand.
 
-```bash
-sudo apt update && sudo apt install -y \
-    openjdk-21-jdk-headless docker.io docker-compose-plugin curl unzip
-```
+The `.deb` is the documented install path: drop it on a clean Ubuntu Server
+VM with a Docker engine present, `apt install` resolves the rest, then run
+`aisandboxctl onboard`.
 
-## What's in the bundle
+## What's installed
 
-The release zip bundles the UC02 host scripts (`spawn.sh` / `clean.sh` /
-`attach.sh` / `lib.sh` / `setup.sh`) and the container build context
-(`docker-compose.yml`, `SandboxDockerfile`, `entrypoint.sh`). No `git clone`
-is required; the server is path-locked to `/opt/ai-sandbox-server/`
-(read-only), `/etc/ai-sandbox-server/` (RO), `/var/lib/ai-sandbox-server/`
-(RW), `/var/log/ai-sandbox-server/` (RW). The one intentional exception to the
+`apt install ./ai-sandbox-server_<version>_amd64.deb` lays down
+`/opt/ai-sandbox-server/lib/` (the two fat jars), `/opt/ai-sandbox-server/host/`
+(the internal orchestration helpers the server invokes plus the container build
+context), `/usr/bin/aisandboxctl` (the CLI wrapper, already on `PATH`), and the
+systemd unit at `/lib/systemd/system/ai-sandbox-server.service`. No `git clone`
+is required.
+
+The server is path-locked to `/opt/ai-sandbox-server/` (read-only),
+`/etc/ai-sandbox-server/` (RO), `/var/lib/ai-sandbox-server/` (RW),
+`/var/log/ai-sandbox-server/` (RW). The one intentional exception to the
 `/etc/ai-sandbox-server/` RO rule is `/etc/ai-sandbox-server/clients/`, the
 allowlist directory the service writes to during `POST /v1/enrollment`
 (UC04 / UC11 § AC1). The systemd unit carves it out via `ReadWritePaths=` so
 the service can land freshly-minted client certs without losing the broader RO
 sandbox on cert / key / config files.
 
-After `unzip ai-sandbox-server-X.Y.Z.zip -d /opt/ai-sandbox-server/` the
-layout is:
+The `/opt/ai-sandbox-server/` payload:
 
 ```
 /opt/ai-sandbox-server/
 ├── lib/
 │   ├── aisandbox-server.jar       # Spring Boot server (manifest carries Implementation-Version)
 │   └── aisandboxctl.jar           # PKI / allowlist CLI
-├── bin/
-│   └── aisandboxctl               # POSIX shell wrapper around aisandboxctl.jar — symlink onto PATH (see Install § step 1b)
-├── host/                          # UC02 host-script bundle (frozen at release)
-│   ├── spawn.sh   clean.sh   attach.sh   lib.sh   setup.sh
+├── host/                          # internal orchestration helpers + container build context (frozen at release)
 │   ├── docker-compose.yml
 │   ├── SandboxDockerfile
 │   └── entrypoint.sh
-├── systemd/
-│   └── ai-sandbox-server.service
 ├── README.md
 ├── openapi.yaml                   # springdoc-generated OAS, committed in repo
 ├── STREAM_PROTOCOL.md
 └── sample-config.yaml             # annotated reference of every tunable knob
 ```
 
-**A note on `setup.sh`.** It is bundled for byte parity with the repo, but it
-**must not** be run against the install dir. The wizard expects a writable
-working directory and would fail / corrupt `/opt/ai-sandbox-server/host/` on
-attempt. The systemd installer never invokes it.
+The `host/` tree is **frozen at server-release time** and read-only at runtime
+under the unit's hardening: fixes to the orchestration layer or the container
+build context ship through the **next `server-v*` tag**, not by hand-editing
+files under `/opt/ai-sandbox-server/host/` (hand-edits either fail or get
+reverted on the next upgrade).
+
+> The legacy release zip still ships on each `server-v*` release, but the
+> `.deb` is the documented install path. The zip carries the same `/opt`
+> payload plus a `bin/aisandboxctl` wrapper you symlink onto `PATH` yourself.
 
 ## Install
 
 ```bash
-# 0. Resolve the latest server-v* tag and download the release zip.
+# 0. Resolve the latest server-v* tag and download the .deb.
 #    The repo's GitHub Releases lives at
 #    https://github.com/HaroldHormaechea/ai-sandbox/releases — pin a specific
 #    tag if you need reproducibility.
 TAG="$(curl -fsSL https://api.github.com/repos/HaroldHormaechea/ai-sandbox/releases \
     | grep -oE '"tag_name":\s*"server-v[^"]+"' | head -1 | cut -d'"' -f4)"
 VER="${TAG#server-v}"
-curl -fsSL -o /tmp/ai-sandbox-server.zip \
-    "https://github.com/HaroldHormaechea/ai-sandbox/releases/download/${TAG}/ai-sandbox-server-${VER}.zip"
+curl -fsSL -o /tmp/ai-sandbox-server.deb \
+    "https://github.com/HaroldHormaechea/ai-sandbox/releases/download/${TAG}/ai-sandbox-server_${VER}_amd64.deb"
 
-# 1. Unpack the release zip.
-sudo install -d /opt/ai-sandbox-server
-sudo unzip /tmp/ai-sandbox-server.zip -d /opt/ai-sandbox-server
+# 1. Install. apt resolves the package Depends (JRE, docker, openssh-client,
+#    debconf). The post-install hook daemon-reloads systemd, creates the
+#    ai-sandbox-server system user + operator-managed directory tree, and —
+#    from a terminal — offers to run onboarding for you. It does NOT enable or
+#    start the unit; that is step 4 below.
+#    (Alternative: `sudo dpkg -i /tmp/ai-sandbox-server.deb` followed by
+#    `sudo apt-get -f install` to pull the dependencies.)
+sudo apt install /tmp/ai-sandbox-server.deb
 
-# 1b. Symlink the CLI wrapper onto PATH (zip-install only).
-#     The .deb install path drops /usr/bin/aisandboxctl automatically;
-#     the zip-install path leaves the wrapper at /opt/ai-sandbox-server/
-#     bin/aisandboxctl (where it lands when you unzip) and asks the
-#     operator to symlink it onto PATH. Either /usr/local/bin (the
-#     POSIX convention for operator-installed binaries) or any other
-#     directory on the service-user's PATH works.
-#
-#     Pre-v0.0.9 upgraders: if you had previously hand-rolled this
-#     symlink against /opt/ai-sandbox-server/lib/aisandboxctl.jar via
-#     a wrapper script of your own, point the symlink at the bundled
-#     wrapper instead and remove the old shim — `sudo ln -sf
-#     /opt/ai-sandbox-server/bin/aisandboxctl /usr/local/bin/aisandboxctl`.
-sudo ln -s /opt/ai-sandbox-server/bin/aisandboxctl /usr/local/bin/aisandboxctl
+# 2. Onboard — provisions the PKI + directory tree, the self-signed server
+#    cert + key, the SSH key, git identity, an optional gh token, and (from a
+#    terminal) a Claude pre-init snapshot. Already done if you accepted the
+#    post-install invite; run it now otherwise. Granular equivalents:
+#    `aisandboxctl pki init` then `aisandboxctl secrets seed`.
+#    Re-run with `--force` to refresh creds. See "Out-of-box onboarding" below.
+sudo aisandboxctl onboard
 
-# 2. One-shot per-host setup — creates the ai-sandbox-server system user
-#    (in the docker group), every operator-managed directory under
-#    /etc/ai-sandbox-server/, /var/lib/ai-sandbox-server/sessions/,
-#    /var/log/ai-sandbox-server/, mints the self-signed server cert + key,
-#    and writes /etc/ai-sandbox-server/config.yaml with install-layout
-#    defaults baked in.
-#
-#    Idempotent only with --force; refuses to overwrite by default.
-sudo aisandboxctl pki init
-
-# 3. Walk through the container's pre-flight state: SSH key for git,
-#    git author identity, gh PAT, Claude pre-init. Every step has a
-#    CLI flag so the same command can run unassisted under Ansible /
-#    cloud-init — add `--no-gh` and/or `--no-claude-preinit` to opt
-#    out of optional steps. Re-run with `--force` to refresh creds
-#    when they expire. (`aisandboxctl onboard` composes pki init +
-#    secrets seed behind one per-component check — see "Out-of-box
-#    onboarding" below; `secrets seed` alone is shown here.)
-sudo aisandboxctl secrets seed
-
-# 4. Authorize at least one client. The server starts fine on an empty
+# 3. Authorize at least one client. The server starts fine on an empty
 #    allowlist, but with clientAuth=OPTIONAL the mTLS enforcement filter
 #    refuses every request (401) until a valid client cert is present —
 #    so the service is up but unusable until you authorize someone. Mint
@@ -143,10 +124,7 @@ sudo aisandboxctl secrets seed
 #    clients are added the same way.
 sudo aisandboxctl client mint bootstrap --pem --out /tmp/bootstrap
 
-# 5. systemd unit.
-sudo install -m 0644 /opt/ai-sandbox-server/systemd/ai-sandbox-server.service \
-    /etc/systemd/system/ai-sandbox-server.service
-sudo systemctl daemon-reload
+# 4. Enable + start the unit.
 sudo systemctl enable --now ai-sandbox-server
 ```
 
@@ -166,7 +144,7 @@ The unit refuses to start (with a journald-logged reason) when any of:
 
 - server key / cert unreadable
 - Docker socket unreachable
-- bundled host scripts missing or non-executable under
+- bundled orchestration helpers missing or non-executable under
   `/opt/ai-sandbox-server/host/`
 - audit-log directory missing or not writable
 
@@ -267,7 +245,7 @@ owns the 0600 `git-key`. This is the OpenShift "arbitrary-uid" recipe:
 - `/etc/passwd` is group-0-writable and `entrypoint.sh` appends a passwd line
   for its own uid on boot (idempotent), so `ssh` / `git` / `gh` resolve the
   user even when it has no pre-existing entry.
-- `spawn.sh` pre-creates the per-session bind-mount source dirs
+- The server pre-creates the per-session bind-mount source dirs
   (`workspace*/`, `claude-config*/`) as the server user **before** `compose
   up`, so Docker never auto-creates them `root`-owned.
 
@@ -352,29 +330,27 @@ sudo rm -rf /var/lib/ai-sandbox-server/sessions/{workspace-*,claude-config-*}
 #    rebuilds it.
 
 # 5. Recreate any already-spawned sessions so they pick up the new `user:`
-#    (DELETE then POST /v1/sessions via the API, or clean.sh + spawn.sh on
-#    the host). Sessions launched before the upgrade keep running as the old
-#    uid until they are recreated.
+#    (DELETE then POST /v1/sessions via the API). Sessions launched before the
+#    upgrade keep running as the old uid until they are recreated.
 ```
 
 ## Upgrade (v0.0.2 → v0.0.3 and onwards)
 
-A v0.0.2 → v0.0.3 upgrade is a **clean cutover**. No backwards-compat
-shim is provided; you are expected to stop the service, swap the jars,
-and restart:
+An upgrade is an `apt` reinstall of the newer `.deb`:
 
 ```bash
-sudo systemctl stop ai-sandbox-server
-sudo rm -rf /opt/ai-sandbox-server/lib /opt/ai-sandbox-server/host
-sudo unzip ai-sandbox-server-X.Y.Z.zip -d /opt/ai-sandbox-server
-sudo systemctl daemon-reload   # only if the systemd/ unit changed
+sudo apt install ./ai-sandbox-server_X.Y.Z_amd64.deb
 sudo systemctl restart ai-sandbox-server
 ```
 
+The package replaces the jars under `/opt/` and the systemd unit under
+`/lib/systemd/system/`, and its post-install hook runs `systemctl
+daemon-reload` for you. Restart the unit to pick up the new server.
+
 Your operator-managed state (`/etc/ai-sandbox-server/{pki,clients,secrets,config.yaml}`
 and `/var/lib/ai-sandbox-server/{sessions,enrollment}/`) is preserved
-across the swap — only the install dir under `/opt/` is replaced. The
-system user created by the original `pki init` keeps the same uid/gid.
+across the upgrade — only the install dir under `/opt/` is replaced. The
+system user created by the original install keeps the same uid/gid.
 
 ### v0.0.6 → v0.0.7 — enrollment directory location moved
 
@@ -403,16 +379,6 @@ so the new `/var/lib/ai-sandbox-server/enrollment/` location is already
 writable, and the enrollment-time write of `/etc/ai-sandbox-server/clients/<name>.crt`
 also goes through (the UC11 fix — earlier v0.0.11 unit files masked the
 clients/ subdir as RO and the redemption path returned HTTP 500).
-
-## Frozen UC02 host scripts
-
-The `host/` bundle is **frozen at server-release time**. If you run into
-a bug in `spawn.sh` / `clean.sh` / `attach.sh` / `lib.sh` / `setup.sh`
-or in the container build context, it ships through the **next server
-release tag** (`server-vX.Y.Z`), not by hand-editing files under
-`/opt/ai-sandbox-server/host/`. The install dir is read-only at runtime
-under the systemd unit's `ReadOnlyPaths` hardening; hand-edits would
-either fail or get silently reverted on the next upgrade.
 
 ## Client lifecycle
 
@@ -541,12 +507,11 @@ Full schema in [STREAM_PROTOCOL.md](STREAM_PROTOCOL.md).
   enforces this lives outside the workflow file; see the repository admin's
   branch-protection rules. Until that gate is in place, the job exists as a
   required-passing CI signal but does not gate merges.
-- **Foot-guns inherited from UC02.** The monotonic session counter is not
-  rolled back on spawn failure; the next spawn uses N+1. The shared
-  `workspace` / `claude-config` layout is the default — mind concurrent file
-  edits and git pushes from sibling sessions, exactly as via the local shell
-  scripts. See the repo-root [`README.md`](../README.md) § "Known foot-guns"
-  for the full list.
+- **Foot-guns inherited from the orchestration layer.** The monotonic session
+  counter is not rolled back on spawn failure; the next spawn uses N+1. The
+  shared `workspace` / `claude-config` layout is the default — mind concurrent
+  file edits and git pushes from sibling sessions. See the repo-root
+  [`README.md`](../README.md) § "Known foot-guns" for the full list.
 
 ## Build (developer)
 
@@ -555,6 +520,7 @@ Full schema in [STREAM_PROTOCOL.md](STREAM_PROTOCOL.md).
 ./gradlew :server:spotlessApply   # auto-format the source tree
 ./gradlew :server:generateOpenApiDocs  # regenerate the committed OAS
 ./gradlew :server:releaseBundle   # build/release/ai-sandbox-server-*.zip
+./gradlew :server:debPackage      # build/distributions/ai-sandbox-server_<v>_amd64.deb
 ```
 
 Two fat jars come out of `:server:build`:

@@ -216,9 +216,9 @@ install."
   `build-tools;36.0.0` (or whatever the brief currently pins). Set
   `ANDROID_HOME` or drop a `local.properties` next to `settings.gradle.kts`
   with `sdk.dir=…`. **Or** build inside an ai-sandbox session with the
-  Android toolchain selected at `setup.sh` Step 6 (or `setup.sh --reconfigure`)
-  — it provisions exactly that SDK at spawn and ships `aisandbox-emulator` for
-  instrumented tests on a headless AVD. Every session now runs on a single
+  Android toolchain enabled (`sudo aisandboxctl reconfigure`) — it provisions
+  exactly that SDK at spawn and ships `aisandbox-emulator` for instrumented
+  tests on a headless AVD. Every session now runs on a single
   **glibc (Debian) base** (`node:20-bookworm-slim`); under the older Alpine
   base `aapt2`/`adb`/`java` loaded fine via `gcompat`, but the emulator's QEMU
   binary did not (it needs glibc's `posix_fallocate64`, which `gcompat` does
@@ -227,8 +227,8 @@ install."
   and `use-cases/22-onboarding-toolchain-android-testing.md`.
 - **Instrumented tests need a KVM-capable amd64 Linux host.**
   `:android:connectedAndroidTest` runs against the headless emulator that
-  `aisandbox-emulator start` boots; that needs `/dev/kvm` — `spawn.sh`
-  auto-passes the device AND adds the host `kvm` group GID as a supplementary
+  `aisandbox-emulator start` boots; that needs `/dev/kvm` — the orchestration
+  layer passes the device AND adds the host `kvm` group GID as a supplementary
   group so the in-container user can open it (passing the device alone fails
   with `EACCES`). Without KVM the build + JVM-test lane still works — only the
   emulator degrades. Android testing is amd64-only today (arm64 is a
