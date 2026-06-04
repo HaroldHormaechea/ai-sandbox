@@ -2,11 +2,20 @@
 
 ## Description
 
-A self-contained Docker environment for running [Claude Code](https://docs.claude.com/en/docs/claude-code) as a fully autonomous agent. Claude runs inside a Linux (Debian/glibc) container with all permission prompts disabled, so it can read, write, and execute freely without interrupting you for approvals. The container is the sandbox — let Claude work, and detach/reattach to its session whenever you want.
+**ai-sandbox spawns sandboxed, free-running [Claude Code](https://docs.claude.com/en/docs/claude-code) sessions in disposable Linux containers to autonomously develop applications.** Each session runs Claude as a fully autonomous agent inside a Linux (Debian/glibc) container launched with `--dangerously-skip-permissions`, so it can read, write, and execute freely — no approval prompts — while the container itself is the trust boundary. Let Claude work, and detach/reattach to its session whenever you want.
+
 
 You can run more than one of these at a time. Each session is its own Docker Compose project named `ai-sandbox-<N>`, with a tmux window named `main` inside the container. Sessions can share the host workspace and Claude config (default — fast and zero-friction) or run on their own isolated copies (opt-in via flags on `spawn.sh`).
 
 > **Where the workspace lives.** In developer mode the host-side workspace and Claude config live **outside this repo** by default — under `$XDG_STATE_HOME/ai-sandbox` (i.e. `~/.local/state/ai-sandbox`). This is deliberate: keeping the workspace out of the working tree makes it structurally impossible for a stray `cp -a . workspace` to recurse into a freshly-created `workspace/` and fill your disk. See [Workspace location](#workspace-location) for the override and migration details.
+
+## The three tiers
+
+ai-sandbox is three cooperating layers. The container + orchestration layer is the core and is documented in full below; the management server and Android client are optional and each owns its own authoritative README.
+
+- **Container + orchestration layer** — the Bash kit (`setup.sh` / `spawn.sh` / `attach.sh` / `clean.sh`) plus the `ai-context:latest` image and `docker-compose.yml` that spawn, attach to, and tear down disposable `ai-sandbox-<N>` sessions on a Linux host. This is the tier you install first; its full operation is documented in [How to use](#how-to-use) below.
+- **Management server** (`server/`) — an optional Java 21 / Spring Boot service that exposes the same session operations (list / spawn / kill / inspect) plus interactive tmux attach over a single mTLS-gated port, so you can drive sessions from a remote workstation. Quick-start [below](#management-server-quick-start); full install + operation in [`server/README.md`](server/README.md).
+- **Android client** (`android/`) — an optional native Kotlin/Compose phone app that talks to the management server over mTLS (sideload-only, two devices, no telemetry). Quick-start [below](#android-client-quick-start); full build + enroll detail in [`android/README.md`](android/README.md).
 
 ## How to use
 
@@ -22,7 +31,7 @@ It steps you through:
 
 1. **SSH key** — copies your private key to `secrets/git-key` (or confirms it's already there). Used for git clone/push.
 2. **Git identity** — sets the `user.name` / `user.email` recorded on every commit Claude makes. Detects defaults from your host `git config --global` (and the SSH key's `.pub` comment as a secondary hint), prompts to confirm or override, writes `secrets/gitconfig`. The container applies it at boot via `git config --global include.path`, so it survives `clean.sh` and image rebuilds (the file lives on the host).
-3. **Container image** — first asks which optional **toolchains** to bake into the image (see [Testing Android apps inside the sandbox](#testing-android-apps-inside-the-sandbox-uc22)), then builds `ai-context:latest` if needed.
+3. **Container image** — builds the `ai-context:latest` image if needed. Optional toolchains (Java, the Android SDK, Docker-in-Docker) are selected separately under [Development tools](#development-tools) and **provisioned at spawn, not baked into the image**; see also [Testing Android apps inside the sandbox](#testing-android-apps-inside-the-sandbox).
 4. **`gh` login (optional)** — launches a disposable container that runs `gh auth login` and writes the resulting token to `secrets/gh-token`. Skip if you don't need `gh issue` / `gh pr` etc.
 5. **Claude first-run** — launches Claude in a disposable container so you can do `/login`, accept the "trust this folder" prompt, and acknowledge the bypass-permissions warning. The state lives in the resolved `<root>/claude-config/` (see [Workspace location](#workspace-location)) and persists, so the long-running daemon never asks again. Before this step the wizard resolves `<root>` and, if it finds a populated in-repo workspace from before relocation, prompts once to migrate or keep it (the answer is persisted to `./.ai-sandbox-workspace-root`).
 6. **First session** — initializes the gitignored `./.ai-sandbox-counter` (it holds the *last issued* N, so it starts at `0` and the first spawn produces `ai-sandbox-1`), takes down any leftover legacy unnumbered `ai-sandbox` container, and brings up `ai-sandbox-1` via `./spawn.sh --non-interactive`. Because `<root>` was already persisted in step 5, this non-interactive spawn never refuses. Idempotent — re-running setup when an `ai-sandbox-*` project already exists logs "skipping spawn" and continues.
@@ -282,351 +291,60 @@ rm -f secrets/git-key secrets/gh-token secrets/gitconfig
 
 After that, `./setup.sh` starts everything fresh (rebuilds the image — slower).
 
-## Remote management — the UC03 mTLS server
+## Management server (quick-start)
 
-Sitting alongside the Bash kit is a Java (21 LTS) Spring Boot
-service that exposes the same session operations — **list / spawn / kill
-/ inspect** — plus **interactive tmux attach** over WebSocket-over-TLS,
-all on a single mTLS-gated port (default `12410`, bound to all
-interfaces). It lives under [`server/`](server/) with its own Gradle
-build and ships as two fat jars.
+Alongside the Bash kit is an optional Java (21 LTS) Spring Boot service that exposes the same session operations — **list / spawn / kill / inspect** — plus **interactive tmux attach** over WebSocket-over-TLS, all on a single mTLS-gated port (default `12410`, bound to all interfaces). It lives under [`server/`](server/) with its own Gradle build and ships as a self-contained release zip.
 
-### Prerequisites
-
-- Host **OpenJDK 21+** at install time.
-- Same Docker engine the UC02 scripts already use.
-- A dedicated POSIX user `ai-sandbox-server` in the `docker` group.
-
-### Install
+Minimal install on a Linux host — **the full procedure, prerequisites, the `onboard` wizard, the at-rest security model, session-uid alignment, client lifecycle, endpoints, foot-guns, upgrade notes, and the developer build all live in [`server/README.md`](server/README.md)**:
 
 ```bash
-# Create the runtime user.
-sudo useradd -r -s /usr/sbin/nologin -G docker ai-sandbox-server
-
-# Unpack the release zip (jars + OAS + sample config + systemd unit).
-sudo install -d -m 0755 /opt/ai-sandbox-server /opt/ai-sandbox-server/lib
-sudo install -d -m 0750 -o ai-sandbox-server -g ai-sandbox-server /var/log/ai-sandbox-server
-sudo unzip ai-sandbox-server-*.zip -d /opt/ai-sandbox-server
-
-# Symlink the CLI wrapper onto PATH.
-# Zip-install only — the .deb auto-installs /usr/bin/aisandboxctl.
+# Download the latest server-v* release zip and unpack it.
+TAG="$(curl -fsSL https://api.github.com/repos/HaroldHormaechea/ai-sandbox/releases \
+    | grep -oE '"tag_name":\s*"server-v[^"]+"' | head -1 | cut -d'"' -f4)"
+VER="${TAG#server-v}"
+curl -fsSL -o /tmp/ai-sandbox-server.zip \
+    "https://github.com/HaroldHormaechea/ai-sandbox/releases/download/${TAG}/ai-sandbox-server-${VER}.zip"
+sudo install -d /opt/ai-sandbox-server
+sudo unzip /tmp/ai-sandbox-server.zip -d /opt/ai-sandbox-server
 sudo ln -s /opt/ai-sandbox-server/bin/aisandboxctl /usr/local/bin/aisandboxctl
 
-# Generate server cert + key + empty allowlist + sample config.
+# Provision PKI + runtime user, seed container pre-flight state, authorize a client.
 sudo aisandboxctl pki init
-
-# Walk through the container's pre-flight state: SSH key for git, git
-# author identity, gh PAT, Claude pre-init. Every step has a CLI flag
-# so the same command can run unassisted under Ansible / cloud-init —
-# add `--no-gh` and/or `--no-claude-preinit` to opt out of optional
-# steps. Re-run with `--force` to refresh credentials when they expire.
-sudo aisandboxctl secrets seed
-
-# Authorize a client (recommended), then start the service. The server
-# starts on an empty allowlist but refuses every request until a client
-# cert is present; you can also enroll one later via `client invite`.
+sudo aisandboxctl secrets seed        # or `aisandboxctl onboard` for the all-in-one wizard
 sudo aisandboxctl client mint alice --out /tmp/alice/
+
+# Install + start the systemd unit.
 sudo install -m 0644 /opt/ai-sandbox-server/systemd/ai-sandbox-server.service \
     /etc/systemd/system/ai-sandbox-server.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now ai-sandbox-server
 ```
 
-The unit refuses to start if any of the following is wrong: server key/cert
-unreadable, Docker socket unreachable, UC02 scripts missing or non-executable,
-audit-log directory missing or not writable. An *empty* allowlist is not a
-startup failure — the server starts and logs a warning, then refuses every
-request (401) until you authorize a client (`client mint` or `client invite`).
+The service starts on an empty allowlist but refuses every request (401) until a client cert is authorized — mint one as above, or enroll a device later with `aisandboxctl client invite`. Trust-surface analysis of the single mTLS-exempt path (`POST /v1/enrollment`) lives in [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md) § "Enrollment trust boundary". See [`server/README.md`](server/README.md) for everything else.
 
-#### Out-of-box onboarding: the `aisandboxctl onboard` wizard
+## Android client (quick-start)
 
-`aisandboxctl onboard` is a single, re-runnable wizard that gets a fresh
-install to "spawned sessions just work". It composes `pki init` and
-`secrets seed` behind one **per-component check**: it provisions the PKI +
-directory tree, the SSH key, git identity, an optional gh token, and (from a
-terminal) a Claude pre-init snapshot — but **only for the pieces that are
-still missing**. Already-present artifacts are left untouched unless you pass
-`--force`, so re-running is safe and idempotent.
+An optional native Android client (Kotlin + Jetpack Compose, Material 3 Expressive, `minSdk = 29`) drives the management server from a phone over mTLS. It lives under [`android/`](android/) and ships as a signed APK + AAB on every `android-vX.Y.Z` tag. Distribution is **sideload-only** — **two users, two devices**, never the Play Store; AC29 forbids any analytics / telemetry / crash-reporter SDK.
+
+Build → sideload → enroll, in brief — **full build, signing, architecture, and foot-guns are in [`android/README.md`](android/README.md)**:
 
 ```bash
-# Interactive — prompts only for what's missing; builds the session image
-# lazily the first time a Docker-using step (gh web login / Claude OAuth) runs.
-sudo aisandboxctl onboard
+# 1. Build a signed release APK from the repo root (debug builds can't be sideloaded
+#    over a partner's existing install — see android/README.md "Signing").
+./gradlew :android:assembleRelease
 
-# Unattended (Ansible / cloud-init) — every value supplied, nothing prompts.
-# Either opt out of the Claude step (--no-claude-preinit) and capture it from a
-# terminal later, or seed it zero-touch from a previously-captured claude-config
-# template (see "Two Claude capture paths" below — NOT a raw ~/.claude/ dir):
-sudo aisandboxctl onboard \
-    --git-key /home/operator/.ssh/id_ed25519 \
-    --git-name "Alice Operator" --git-email alice@example.com \
-    --gh-token-file /tmp/gh-token \
-    --claude-config-source /path/to/prebuilt-claude-config
-```
+# 2. Sideload it onto the device.
+adb install -r android/build/outputs/apk/release/*.apk
 
-**Two Claude capture paths.** The Claude pre-init snapshot — the state that
-lets a spawned session start past Claude's first-run setup (theme,
-completed-onboarding flag, signed-in account) — can be captured two ways:
-
-- **Interactive device-flow login** (default): a one-time `claude` login in a
-  throwaway container. Needs a terminal and a browser.
-- **Zero-touch `--claude-config-source <dir>`**: copies a previously-captured
-  **claude-config template** — the directory an interactive `aisandboxctl
-  onboard` / `secrets seed` produces, with `.claude.json` **and**
-  `.credentials.json` at its root — for headless / automated provisioning.
-  This is **not** a raw `~/.claude/` directory: `~/.claude.json` (which holds
-  the completed-onboarding flag + signed-in account) lives *outside*
-  `~/.claude/`, so a bare copy omits it. To hand-assemble a source dir, copy
-  your `~/.claude/` contents **and** your `~/.claude.json` (as `.claude.json`)
-  into it. A source missing this state now **fails loud** (rather than silently
-  seeding a session that still prompts); pass `--no-claude-preinit` if you
-  deliberately want no Claude state.
-
-Both produce a template that fully suppresses the in-container first-run
-wizard, and both also enable Claude Code's **agent-teams + tmux teammate
-backend** in each spawned session's `~/.claude/settings.json`
-(`env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` plus `teammateMode: "tmux"`).
-
-On a **`.deb` install** onboarding adapts to whether a terminal is present:
-
-- **From a terminal** — works under both `sudo dpkg -i *.deb` and `sudo apt
-  install ./*.deb` — the post-install step offers a `[Y/n]` invite and, on
-  yes, runs the **full interactive wizard**: the Claude device-flow login and
-  the container-image build included, so sessions spawned afterward start at
-  Claude's normal prompt. Any answers already collected by debconf (git
-  name/email, SSH key path, gh token) prefill the wizard. Decline, and the
-  install finishes with a single command to onboard later. The invite waits up
-  to 30 seconds for an answer; if none arrives it defers like a headless
-  install (printing the same onboard-later step), so an unattended `dpkg` can
-  never stall on the prompt.
-- **Headless / unattended** — noninteractive frontend, piped fds, or
-  `ssh host 'sudo dpkg -i …'` — the install **never hangs or fails**: if
-  onboarding was preseeded via debconf it runs non-interactively (skipping the
-  TTY-only Claude login and the slow image build); otherwise it defers cleanly
-  and prints exactly one next step. For a zero-touch Claude snapshot on a
-  headless host, run `sudo aisandboxctl onboard --claude-config-source <dir>`
-  afterward.
-
-The captured gh token is wiped from the debconf database immediately after
-install and never appears on the process table. Onboarding is idempotent: a
-re-install with a Claude snapshot already captured does **not** re-prompt, and
-an upgrade whose snapshot predates this release prints a one-line
-`onboard --force` hint. Re-run `sudo aisandboxctl onboard --force` any time to
-refresh credentials or re-capture the Claude snapshot.
-
-#### Session uid alignment
-
-Session containers run as the **management server's runtime uid**, not the
-image's baked-in `claude` user (uid 1000). The server injects
-`AI_SANDBOX_RUN_AS_USER=<uid>:0` into `docker-compose.yml`'s `user:` field,
-where `<uid>` is the numeric owner of the secrets dir — the same uid that
-owns the 0600 `git-key`. This is the OpenShift "arbitrary-uid" recipe:
-
-- The image's `$HOME` (`/home/claude`) and `/workspace` are owned by **group
-  0** and made group-writable at build time, so a container running as
-  `<uid>:0` can create `~/.ssh`, `~/.claude/*`, `~/.config/rtk`, etc.
-- `/etc/passwd` is group-0-writable and `entrypoint.sh` appends a passwd line
-  for its own uid on boot (idempotent), so `ssh` / `git` / `gh` resolve the
-  user even when it has no pre-existing entry.
-- `spawn.sh` pre-creates the per-session bind-mount source dirs
-  (`workspace*/`, `claude-config*/`) as the server user **before** `compose
-  up`, so Docker never auto-creates them `root`-owned.
-
-The net effect: a session can write its mounted `~/.claude`, read the 0600
-`git-key`, clone/commit over SSH, and inherit the Claude pre-init template —
-with no post-install `chown` or secret-copying. Developer-mode runs leave
-`AI_SANDBOX_RUN_AS_USER` unset, so `user:` falls back to the image's `claude`
-user — byte-identical to the pre-UC-17 behaviour.
-
-#### What `secrets seed` captures, where, and the at-rest security model
-
-| Step | Output | Mode | At-rest content |
-|------|--------|------|----------------|
-| SSH key | `/etc/ai-sandbox-server/secrets/git-key` | 0600 | **Decrypted** copy of the operator's private key — passphrase is stripped at install time so `entrypoint.sh` can hand the key to `gh` / `git` without an interactive prompt. The operator's source key on disk is never modified. |
-| Git identity | `/etc/ai-sandbox-server/secrets/gitconfig` | 0600 | Plain INI with `user.name` + `user.email`. Bind-mounted RO into containers; `entrypoint.sh` wires it via `git config --global include.path`. |
-| gh PAT | `/etc/ai-sandbox-server/secrets/gh-token` | 0600 | Single-line plaintext token captured by `gh auth login --web` inside an ephemeral container, written to the bind-mounted secrets dir. Skipped with `--no-gh`. |
-| Claude pre-init | `/etc/ai-sandbox-server/templates/claude-config/` | 0750 | Snapshot of `~/.claude/` after one interactive OAuth session in an ephemeral container. RO bind-mounted into every spawned session at `/etc/claude-template/`; `entrypoint.sh` copies it into `~/.claude/` once per session (gated by `.seeded`). Skipped with `--no-claude-preinit`. |
-
-All four outputs are owned by `ai-sandbox-server:ai-sandbox-server`. The whole tree lives under `/etc/ai-sandbox-server/` (mode 0750), so non-root users cannot read it; root and the management server's runtime user can. A subsequent operator can run `claude /login` inside any spawned session to override the seeded template for that session's lifetime — respawns lose the override (sessions are ephemeral).
-
-**Unassisted install example** (Ansible-style, all flags supplied so nothing prompts):
-
-```bash
-sudo aisandboxctl secrets seed \
-    --git-key /home/operator/.ssh/id_ed25519 \
-    --git-name "Alice Operator" --git-email alice@example.com \
-    --gh-token-file /tmp/gh-token \
-    --no-claude-preinit   # or --claude-config-source <captured-claude-config-dir>
-```
-
-##### Alternative for non-wizard deployments
-
-The pre-UC06 manual-drop flow still works: after `pki init`, drop `git-key`, `gitconfig`, and optionally `gh-token` into `/etc/ai-sandbox-server/secrets/` by hand (mode 0600, owned `ai-sandbox-server`). Leave `/etc/ai-sandbox-server/templates/claude-config/` empty (or absent) and sessions will skip the Claude pre-init copy. Operators on this path lose the unattended-install story `secrets seed` provides but retain full control over how secrets land on disk.
-
-##### Cleaning up an already-broken install (pre-UC-17)
-
-UC-17 ships **fresh-install + new-session** behaviour only — it performs **no
-migration** of installs that predate it (e.g. a server whose tree is owned by
-the old uid, or that has root-owned per-session dirs Docker auto-created when
-a bind-mount source was missing). This is experimental; no
-backwards-compatibility is promised. Repair a broken install by hand:
-
-```bash
-# 1. Re-run onboarding to repair/refresh the server-owned tree + secrets.
-sudo aisandboxctl onboard --force
-
-# 2. Re-assert ownership of the operator-managed tree to the runtime user.
-sudo chown -R ai-sandbox-server:ai-sandbox-server \
-    /etc/ai-sandbox-server /var/lib/ai-sandbox-server
-
-# 3. Remove root-owned per-session dirs Docker auto-created before the fix.
-sudo rm -rf /var/lib/ai-sandbox-server/sessions/{workspace-*,claude-config-*}
-
-# 4. Rebuild / re-pull ai-context:latest so it carries the UC-17 Dockerfile
-#    changes ($HOME group-0-writable, /etc/passwd self-registration). The
-#    first interactive `aisandboxctl onboard` (or a `docker compose build`)
-#    rebuilds it.
-
-# 5. Recreate any already-spawned sessions so they pick up the new `user:`
-#    (DELETE then POST /v1/sessions via the API, or clean.sh + spawn.sh on
-#    the host). Sessions launched before the upgrade keep running as the old
-#    uid until they are recreated.
-```
-
-### Client lifecycle
-
-```bash
-# PKCS#12 bundle (passphrase prompted at the TTY) — default.
-aisandboxctl client mint alice --out /tmp/alice/
-
-# PEM trio instead (alice.crt + alice.key + server.crt).
-aisandboxctl client mint alice --pem --out /tmp/alice/
-
-# Revoke. In-flight connections from that cert are torn down within ≤ 1s.
-aisandboxctl client revoke alice
-
-# List currently-allowed certs.
-aisandboxctl client list
-```
-
-Mint always copies the public client cert into the allowlist folder
-(`/etc/ai-sandbox-server/clients/`); the server's filesystem watcher
-picks the change up within 250 ms.
-
-### Endpoints
-
-All mTLS-gated **except** `POST /v1/enrollment` (UC04), which exists so
-the Android client can bootstrap mTLS in the first place. The
-enrollment endpoint is single-use-token-gated + per-IP rate-limited;
-trust-surface analysis lives in [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md)
-§ "Enrollment trust boundary".
-
-| Verb   | Path                              | Notes |
-|--------|-----------------------------------|-------|
-| GET    | `/v1/sessions`                    | Session list (running + starting + stopped, UC04 AC37). |
-| POST   | `/v1/sessions`                    | Spawn (sync, 60 s timeout). |
-| GET    | `/v1/sessions/{n}`                | Session detail. |
-| DELETE | `/v1/sessions/{n}[?force=true]`   | Clean a session. |
-| POST   | `/v1/enrollment`                  | **mTLS-exempt.** Single-use-token bootstrap; returns a P12 bundle (UC04). |
-| GET    | `/v1/healthz`                     | 200 only when Docker, scripts, TLS are healthy. |
-| GET    | `/v1/clients`                     | Allowlist listing. |
-| POST   | `/v1/clients`                     | Add a cert. |
-| DELETE | `/v1/clients/{cnOrFingerprint}`   | Remove a cert. |
-| GET    | `/v1/openapi.yaml`                | springdoc-generated OAS (also committed at `server/openapi.yaml`; CI fails on drift). |
-| GET    | `/v1/swagger-ui`                  | Swagger UI (strict CSP). |
-| WSS    | `/v1/sessions/{n}/stream`         | Subprotocol `ai-sandbox.v1`. Schema in [`server/STREAM_PROTOCOL.md`](server/STREAM_PROTOCOL.md). |
-
-### Foot-guns
-
-- Binding to all interfaces by default means a misconfigured firewall
-  could expose port 12410 to the public internet. Host-level firewalling
-  is recommended even though mTLS is the gate.
-- Plain-PEM server private key at mode 0600 is the at-rest protection.
-  Future upgrade path (passphrase-protected key + systemd
-  `EnvironmentFile=`) is documented in
-  [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md).
-- Docker socket access (via the `docker` group) is the privilege boundary
-  that mTLS protects. Anyone with a valid client cert can spawn / kill /
-  stream into containers and, via container escape, root the host.
-- The same foot-guns inherited from UC02 (shared workspace / claude-config
-  races, git push races) apply when sessions are driven through the
-  management server, exactly as they do via the local shell scripts.
-
-### Build (developer)
-
-```bash
-./gradlew :server:build           # compile + spotlessCheck + bootJar + ctl jar
-./gradlew :server:generateOpenApiDocs  # regenerate the committed OAS
-./gradlew :server:releaseBundle   # build/release/ai-sandbox-server-*.zip
-```
-
-## Android client — the UC04 phone app
-
-A native Android client (Kotlin + Jetpack Compose, Material 3 Expressive,
-`minSdk = 29`, sideload-only distribution) talks to the UC03 server.
-Lives under [`android/`](android/) and ships as a signed APK + AAB on
-every `android-vX.Y.Z` tag. **Two users, two devices** — this is not a
-public app and never will be on the Play Store; AC29 forbids any
-analytics / telemetry / crash-reporter SDK.
-
-Per-device enrollment is QR-based:
-
-> The host portion of `--server-url` MUST appear in `server.crt`'s SAN
-> list (UC10 § AC6/AC7) — the command refuses with exit 2 otherwise.
-> Re-issue with `aisandboxctl pki init --force --san <tag>:<host>` if
-> needed.
-
-```bash
-# On the server host — issue a single-use 10-minute token + show its QR.
-aisandboxctl client invite alice-phone \
+# 3. On the server host, issue a single-use invite QR for the device.
+sudo -u ai-sandbox-server aisandboxctl client invite alice-phone \
     --server-url https://your-host:12410 \
     --pki-dir /etc/ai-sandbox-server/pki
-# The ASCII QR prints to stdout. Scan from the app's onboarding screen.
-
-# Or emit a 512x512 PNG for sharing over a side channel:
-aisandboxctl client invite alice-phone \
-    --server-url https://your-host:12410 \
-    --pki-dir /etc/ai-sandbox-server/pki \
-    --out /tmp/alice-phone-invite.png
-
-# For CI / scripted use, `--json` emits machine-clean JSON on stdout
-# (single line, no QR, no trailer); the operator-facing trailer goes to
-# stderr. With `--json --out <path>`, the same JSON is also written to
-# the file (NOT a PNG — `--json` suppresses QR generation entirely).
-aisandboxctl client invite alice-phone \
-    --server-url https://your-host:12410 \
-    --pki-dir /etc/ai-sandbox-server/pki \
-    --json > /tmp/invite.json
 ```
 
-The Android client scans the QR, POSTs the token to
-`POST /v1/enrollment` (the single mTLS-exempt path on the server),
-imports the returned PKCS#12 bundle into the Android KeyStore as
-**non-exportable**, and uses that key as the sole TLS client identity
-for every subsequent call. Re-scanning a QR replaces the existing
-identity (one server profile at a time per device).
+Scan the QR from the app's onboarding screen: it redeems the token via the server's mTLS-exempt `POST /v1/enrollment`, imports the returned PKCS#12 bundle into the Android KeyStore as **non-exportable**, and uses that key as its sole TLS client identity thereafter. Re-scanning replaces the identity (one server profile per device). See [`android/README.md`](android/README.md) for the full operator + developer guide, [`design/android-ui/`](design/android-ui/) for the visual spec, and [`server/README.md`](server/README.md#enroll-a-device--aisandboxctl-client-invite) for the `client invite` flags.
 
-See [`android/README.md`](android/README.md) for operator + developer
-quickstart, [`design/android-ui/`](design/android-ui/) for the visual
-specification, and [`docs/THREAT_MODEL.md`](docs/THREAT_MODEL.md)
-§ "Enrollment trust boundary" for the trust-surface analysis of the
-mTLS-exempt path.
-
-### Android build (developer)
-
-```bash
-./gradlew :android:lint :android:test           # JVM-only checks
-./gradlew :android:assembleDebug :android:bundleDebug   # debug APK + AAB
-./gradlew :android:assembleRelease :android:bundleRelease  # release artefacts (needs signing config)
-```
-
-Signing config reads the env vars `KEYSTORE_FILE` / `KEYSTORE_PASSWORD`
-/ `KEY_ALIAS` / `KEY_PASSWORD`, or falls back to `~/.gradle/keystore.jks`
-when those are unset and the file exists. CI (`android-release.yml`)
-decodes the keystore from a base64-encoded GitHub secret to tmpfs at
-build time.
-
-### Known foot-guns
+## Known foot-guns
 
 The default shared-workspace + shared-claude-config layout trades safety for ergonomics. Nothing in the code prevents the following — be aware:
 
