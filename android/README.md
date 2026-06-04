@@ -1,9 +1,49 @@
 # ai-sandbox-android
 
 The Android client (UC04) for the ai-sandbox kit. Talks to the
-[UC03 management server](../README.md#remote-management--the-uc03-mtls-server)
+[management server](../README.md#management-server-quick-start)
 over mTLS. Sideload-only — there is no Play Store release and there
-never will be.
+never will be. **Two users, two devices** — this is not a public app;
+AC29 forbids any analytics / telemetry / crash-reporter SDK.
+
+This README is **self-sufficient**: it covers building, sideloading, and
+enrolling the app end to end. The repo-root [`README.md`](../README.md) keeps
+only a one-paragraph overview + minimal quick-start and points here.
+
+## Install (build → sideload → enroll)
+
+The operator path from source to an enrolled device is three steps:
+
+1. **Build the APK.** From the repo root, produce a signed release APK (see
+   [Signing](#signing) for the keystore config; a debug build works for local
+   smoke-testing but cannot be sideloaded over a partner's existing build):
+
+   ```bash
+   ./gradlew :android:assembleRelease     # signed release APK under android/build/outputs/apk/release/
+   ```
+
+   Or build inside an ai-sandbox session with the Android toolchain selected —
+   see [Foot-guns](#foot-guns) for the in-sandbox build path.
+
+2. **Sideload it.** Transfer the APK to the device and install it
+   (`adb install -r <apk>`, or open the file on the phone). There is no Play
+   Store listing — distribution is sideload-only, to the two known devices.
+
+3. **Enroll the device.** On the **server host**, issue a single-use invite QR
+   for this device (full command + flags in
+   [`../server/README.md`](../server/README.md#enroll-a-device--aisandboxctl-client-invite)):
+
+   ```bash
+   sudo -u ai-sandbox-server aisandboxctl client invite alice-phone \
+       --server-url https://your-host:12410 \
+       --pki-dir /etc/ai-sandbox-server/pki
+   ```
+
+   Open the app, scan the QR from the onboarding screen, and it redeems the
+   token via `POST /v1/enrollment`, importing a non-exportable client identity
+   into the Android KeyStore. Re-scanning a QR replaces the existing identity
+   (one server profile per device). From then on the app goes straight to the
+   sessions list on launch.
 
 ## What this app does
 
@@ -176,15 +216,15 @@ install."
   `build-tools;36.0.0` (or whatever the brief currently pins). Set
   `ANDROID_HOME` or drop a `local.properties` next to `settings.gradle.kts`
   with `sdk.dir=…`. **Or** build inside an ai-sandbox session with the
-  Android toolchain selected at `setup.sh` Step 3 — it bakes exactly that
-  SDK and ships `aisandbox-emulator` for instrumented tests on a headless
-  AVD. The Android sandbox image runs on a **glibc (Debian) base**, not the
-  lean Alpine base the non-Android image uses: `aapt2`/`adb`/`java` load fine
-  under Alpine's `gcompat`, but the emulator's QEMU binary does not (it needs
-  glibc's `posix_fallocate64`, which `gcompat` does not export), so the
-  Android variant takes the gcompat→glibc fallback. See the repo README →
-  "Testing Android apps inside the sandbox (UC22)" and
-  `use-cases/22-onboarding-toolchain-android-testing.md`.
+  Android toolchain selected at `setup.sh` Step 6 (or `setup.sh --reconfigure`)
+  — it provisions exactly that SDK at spawn and ships `aisandbox-emulator` for
+  instrumented tests on a headless AVD. Every session now runs on a single
+  **glibc (Debian) base** (`node:20-bookworm-slim`); under the older Alpine
+  base `aapt2`/`adb`/`java` loaded fine via `gcompat`, but the emulator's QEMU
+  binary did not (it needs glibc's `posix_fallocate64`, which `gcompat` does
+  not export) — the glibc base is what lets the emulator run. See the repo
+  README → [Testing Android apps inside the sandbox](../README.md#testing-android-apps-inside-the-sandbox)
+  and `use-cases/22-onboarding-toolchain-android-testing.md`.
 - **Instrumented tests need a KVM-capable amd64 Linux host.**
   `:android:connectedAndroidTest` runs against the headless emulator that
   `aisandbox-emulator start` boots; that needs `/dev/kvm` — `spawn.sh`
