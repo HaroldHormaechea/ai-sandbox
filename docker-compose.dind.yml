@@ -76,5 +76,20 @@ services:
       # with `error mounting "proc" to rootfs ... operation not permitted`. This
       # un-masks /proc for the DinD session so nested containers can mount it.
       - "systempaths=unconfined"
+    # UC-30 — delegate subuid/subgid ranges to the session's runtime user. The
+    # image bakes only `claude:100000:65536`, so a server-spawned session running
+    # as an arbitrary uid (self-registered in /etc/passwd as `sandbox`) finds NO
+    # subuid range and rootless dockerd aborts with
+    #   "failed to setup UID/GID map: No subuid ranges found for user … (sandbox)".
+    # These read-only binds MASK the baked /etc/subuid + /etc/subgid with host
+    # files that carry BOTH the `claude` and `sandbox` delegations (written +
+    # kept idempotent by the dind manifest's devtool_server_install / spawn-time
+    # guard). The host paths default to ./secrets/dind/ and are overridable so
+    # the install-mode management server can point them at its state root. /etc
+    # is read-only in-session with no sudo, so this delegation CANNOT be done at
+    # runtime — it must arrive via this bind from a host file prepared at setup.
+    volumes:
+      - "${AI_SANDBOX_DIND_SUBUID_HOST_PATH:-./secrets/dind/subuid}:/etc/subuid:ro"
+      - "${AI_SANDBOX_DIND_SUBGID_HOST_PATH:-./secrets/dind/subgid}:/etc/subgid:ro"
     environment:
       AI_SANDBOX_DEVTOOL_DIND: "1"

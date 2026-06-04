@@ -380,6 +380,25 @@ cmd_doctor() {
     log "XDG_RUNTIME_DIR   : $SOCK_DIR ($([ -d "$SOCK_DIR" ] && echo present || echo MISSING))"
     log "socket            : $SOCK_PATH ($([ -S "$SOCK_PATH" ] && echo present || echo MISSING))"
     log "/dev/fuse         : $([ -e /dev/fuse ] && echo 'present + accessible' || echo 'ABSENT — fuse-overlayfs unavailable')"
+    # UC-30 — report the subuid/subgid delegation for THIS session's runtime user.
+    # Rootless dockerd looks up /etc/subuid (and /etc/subgid) by the user's NAME
+    # first, falling back to its uid; a server-spawned session self-registers its
+    # arbitrary uid in /etc/passwd as `sandbox`, so match either the resolved name
+    # or the numeric uid. The host file is delegated by setup's dind
+    # devtool_server_install and bind-mounted over /etc/subuid (see UC-30).
+    _aisb_doctor_subid() {
+        local map="$1" uid name line
+        uid="$(id -u)"
+        name="$(id -un 2>/dev/null || echo '')"
+        if [ -r "$map" ]; then
+            line="$(grep -E "^(${name:-__no_name__}|${uid}):" "$map" 2>/dev/null | head -1 || true)"
+            [ -n "$line" ] && printf 'present (%s)' "$line" || printf 'MISSING — no range for %s/%s in %s' "${name:-?}" "$uid" "$map"
+        else
+            printf 'unreadable (%s)' "$map"
+        fi
+    }
+    log "subuid range      : $(_aisb_doctor_subid /etc/subuid)"
+    log "subgid range      : $(_aisb_doctor_subid /etc/subgid)"
     log "fuse-overlayfs    : $("$BIN_DIR/fuse-overlayfs" --version 2>&1 | head -1 || echo 'MISSING / loader error')"
     log "dockerd           : $("$BIN_DIR/dockerd" --version 2>&1 | head -1 || echo 'MISSING')"
     if [ -S "$SOCK_PATH" ]; then

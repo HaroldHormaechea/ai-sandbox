@@ -52,7 +52,7 @@ provision_capability() {
         provision_capability "$dep"
     done
     # Source for real and run the provision hook.
-    unset -f devtool_spawn_env devtool_provision 2>/dev/null || true
+    unset -f devtool_spawn_env devtool_provision devtool_server_install 2>/dev/null || true
     ID=""; LABEL=""; APPLY_AT=""; ARCH=""; WARNING=""; DEPENDS_ON=()
     # shellcheck disable=SC1090
     . "$manifest"
@@ -61,7 +61,7 @@ provision_capability() {
         echo "Provisioning devtool capability: $id ..." >&2
         devtool_provision || echo "WARNING: provisioning '$id' failed; continuing (offline policy). The capability's binaries may be unavailable this session." >&2
     fi
-    unset -f devtool_spawn_env devtool_provision 2>/dev/null || true
+    unset -f devtool_spawn_env devtool_provision devtool_server_install 2>/dev/null || true
 }
 
 # load_devtool_env — source every provisioned capability's env snippet into THIS

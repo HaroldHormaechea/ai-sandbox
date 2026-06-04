@@ -531,7 +531,7 @@ inject_devtool_spawn_env() {
             warn "Enabled devtool '$id' has no manifest under $AISB_DEVTOOLS_DIR — skipping." >&2
             continue
         }
-        unset -f devtool_spawn_env devtool_provision 2>/dev/null || true
+        unset -f devtool_spawn_env devtool_provision devtool_server_install 2>/dev/null || true
         ID="" LABEL="" APPLY_AT="" ARCH="" WARNING=""
         DEPENDS_ON=()
         # shellcheck disable=SC1090
@@ -540,7 +540,72 @@ inject_devtool_spawn_env() {
             devtool_spawn_env || warn "spawn-env hook for '$id' returned non-zero." >&2
         fi
     done
-    unset -f devtool_spawn_env devtool_provision 2>/dev/null || true
+    unset -f devtool_spawn_env devtool_provision devtool_server_install 2>/dev/null || true
+}
+
+# run_devtool_server_install → UC-30 server-side install stage. Consult the
+# persisted ledger and, for each enabled capability that defines the optional
+# `devtool_server_install` hook, run it IN THE LIVE SHELL (so it can mutate host
+# files and register post-req notes) in the privileged setup context, BEFORE any
+# in-container devtool_provision. Mirrors inject_devtool_spawn_env: generic, no
+# per-id case — adding a capability needs no edit here (AC#1/#2).
+#
+# Hard-gate semantics (AC#4): a hook returning non-zero does NOT abort setup or
+# the other capabilities' installs. The failing id + its reason are collected, an
+# inline ✗ is printed, the loop CONTINUES, and AFTER the loop the ledger is
+# rewritten with the failed ids REMOVED (faithful "mark unavailable") via
+# write_enabled_devtools. Post-req notes (AC#5) accumulate in
+# AISB_SERVER_INSTALL_NOTES; the disabled set lands in AISB_SERVER_INSTALL_DISABLED
+# (one "id<TAB>reason" record per element). setup.sh reads both globals at
+# end-of-run. Always returns 0 — never lets `set -e` abort the wizard.
+run_devtool_server_install() {
+    # Live-shell globals consumed by setup.sh at end-of-run. Reset each run so a
+    # --reconfigure pass does not inherit a previous invocation's notes.
+    AISB_SERVER_INSTALL_NOTES=()
+    AISB_SERVER_INSTALL_DISABLED=()
+
+    local id manifest enabled=() kept=() any_disabled=0
+    while IFS= read -r id; do
+        [ -n "$id" ] || continue
+        enabled+=("$id")
+    done < <(read_enabled_devtools)
+
+    for id in ${enabled[@]+"${enabled[@]}"}; do
+        manifest="$(_aisb_manifest_path "$id" 2>/dev/null)" || {
+            warn "Enabled devtool '$id' has no manifest under $AISB_DEVTOOLS_DIR — skipping." >&2
+            kept+=("$id")
+            continue
+        }
+        unset -f devtool_spawn_env devtool_provision devtool_server_install 2>/dev/null || true
+        ID="" LABEL="" APPLY_AT="" ARCH="" WARNING=""
+        DEPENDS_ON=()
+        _AISB_SI_REASON=""
+        # shellcheck disable=SC1090
+        . "$manifest" || { warn "Failed to source manifest for '$id'." >&2; kept+=("$id"); continue; }
+        # No hook → capability behaves exactly as today (AC#1). Keep it enabled.
+        if ! declare -F devtool_server_install >/dev/null 2>&1; then
+            kept+=("$id")
+            continue
+        fi
+        if devtool_server_install; then
+            ok "server-install: $id"
+            kept+=("$id")
+        else
+            local reason="${_AISB_SI_REASON:-no reason reported by the hook}"
+            printf "  %s✗%s server-install: %s — %s\n" \
+                "$AISB_RED" "$AISB_RESET" "$id" "$reason" >&2
+            AISB_SERVER_INSTALL_DISABLED+=("$id"$'\t'"$reason")
+            any_disabled=1
+        fi
+    done
+    unset -f devtool_spawn_env devtool_provision devtool_server_install 2>/dev/null || true
+
+    # Hard-gate (AC#4): rewrite the ledger with the failed ids removed, but only
+    # when something actually failed (avoid a needless rewrite on the clean path).
+    if [ "$any_disabled" -eq 1 ]; then
+        write_enabled_devtools ${kept[@]+"${kept[@]}"}
+    fi
+    return 0
 }
 
 # ── UC27 — retired: UC-22 toolchain ledger / image-label helpers ─────────────
