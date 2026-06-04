@@ -225,6 +225,36 @@ EOF
 # selection itself via write_enabled_devtools and restores the terminal on every
 # exit path; a non-TTY invocation refuses cleanly (returns non-zero).
 
+# ── UC30 — server-side install summary ───────────────────────────────────────
+# Print the aggregated output of the server-side install stage at the END of a
+# setup run: (a) consolidated post-requisite notices any hook registered (AC#5),
+# and (b) a distinct warn-styled "DISABLED capabilities" block when one or more
+# hooks hard-gated (AC#4), with re-enable guidance. Reads the globals populated
+# by lib.sh's run_devtool_server_install. Safe to call when both are empty.
+print_server_install_summary() {
+    if [ "${#AISB_SERVER_INSTALL_NOTES[@]}" -gt 0 ]; then
+        hr
+        printf "  %s%sPost-setup steps:%s\n" "$BOLD" "$CYAN" "$RESET"
+        local _note
+        for _note in "${AISB_SERVER_INSTALL_NOTES[@]}"; do
+            printf "    • %s\n" "$_note"
+        done
+    fi
+    if [ "${#AISB_SERVER_INSTALL_DISABLED[@]}" -gt 0 ]; then
+        hr
+        printf "  %s%s! DISABLED capabilities%s — a server-side install step failed:\n" \
+            "$BOLD" "$YELLOW" "$RESET"
+        local _rec _id _reason
+        for _rec in "${AISB_SERVER_INSTALL_DISABLED[@]}"; do
+            _id="${_rec%%$'\t'*}"
+            _reason="${_rec#*$'\t'}"
+            printf "    %s✗%s %s — %s\n" "$RED" "$RESET" "$_id" "$_reason"
+        done
+        printf "    Fix the cause above, then re-enable with %s./setup.sh --reconfigure%s.\n" \
+            "$MAGENTA" "$RESET"
+    fi
+}
+
 # ── UC26 — --reconfigure short-circuit ───────────────────────────────────────
 # When --reconfigure was on the argv, render ONLY the devtools step under a
 # distinct banner, then exit. Skips welcome, SSH key, git identity, image
@@ -236,6 +266,10 @@ if [ "$RECONFIGURE_MODE" -eq 1 ]; then
     # cancel (rc 130) or no-TTY (rc 3) leaves the selection unchanged — neither
     # is a setup failure, so don't let `set -e` abort the banner/exit below.
     devtools_run_selector || true
+    # UC-30 — run the server-side install stage for the (possibly updated)
+    # selection, then surface notes + any hard-gated capabilities before exit.
+    run_devtool_server_install
+    print_server_install_summary
     hr
     printf "  Re-run any time with %s./setup.sh --reconfigure%s.\n" "$MAGENTA" "$RESET"
     exit 0
@@ -562,6 +596,13 @@ screen_header 6 7 "Select the development tools you want to install"
 # Shared raw-mode selector (devtools-ui.sh). Cancel/no-TTY leaves the selection
 # unchanged and must not abort the wizard under `set -e`.
 devtools_run_selector || true
+# UC-30 — server-side install stage: a new THIRD stage that runs each selected
+# capability's optional devtool_server_install hook in this privileged setup
+# context (writable host /etc-equivalent files), BEFORE the first session spawns
+# its in-container devtool_provision. Hard-gated failures rewrite the ledger so a
+# disabled capability is NOT spawned at Step 7; notes + the disabled block are
+# printed at end-of-run by print_server_install_summary. Always returns 0.
+run_devtool_server_install
 press_enter
 
 # ── Step 7: Initialize counter & spawn first session ────────────────────────
@@ -609,4 +650,7 @@ printf "  Attach to Claude:        %s./attach.sh%s\n"  "$MAGENTA" "$RESET"
 printf "  Spawn another session:   %s./spawn.sh%s\n"   "$MAGENTA" "$RESET"
 printf "  Clean a session:         %s./clean.sh%s\n"   "$MAGENTA" "$RESET"
 printf "  Re-run this setup:       %s./setup.sh%s   (idempotent — safe any time)\n" "$MAGENTA" "$RESET"
+# UC-30 — aggregated post-requisite notices + any hard-gated (DISABLED)
+# capabilities from the server-side install stage, printed at the very end.
+print_server_install_summary
 hr
