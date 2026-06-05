@@ -292,6 +292,8 @@ private fun TerminalBody(
 ) {
     val targets by viewModel.targets.collectAsState()
     val selectedTargetId by viewModel.selectedTargetId.collectAsState()
+    // UC-36 (AC#7) — conversational vs raw/char keyboard mode, persisted.
+    val conversational by viewModel.conversationalKeyboard.collectAsState()
 
     // UC-23 — the body wrapper owns the Scaffold's system-bar insets via
     // padding(padding) and *consumes* them via consumeWindowInsets(padding) so
@@ -329,7 +331,11 @@ private fun TerminalBody(
             // The real terminal surface (Termux TerminalView via AndroidView).
             // It fills the requiredHeight-pinned slot supplied by the layout.
             terminal = {
-                TerminalSurface(controller = controller, modifier = Modifier.fillMaxSize())
+                TerminalSurface(
+                    controller = controller,
+                    conversational = conversational,
+                    modifier = Modifier.fillMaxSize(),
+                )
             },
             // AC15 / AC3 modifier bar — docked above the keyboard by the layout.
             modifierBar = {
@@ -453,6 +459,13 @@ internal fun TerminalScaffoldLayout(
  */
 private fun dispatchKey(event: KeyEvent, viewModel: TerminalViewModel) {
     val bytes = KeyEncoding.bytesFor(event) ?: return
+    // UC-36 (AC#5) — a ModifierBar control byte (Ctrl/Esc/arrow/Tab/Enter/…) is
+    // out-of-band relative to a word still composing in the IME. Flush the
+    // composing region to the PTY FIRST so the typed word is committed + echoed
+    // before this control byte, keeping the stream ordered. No-op when nothing is
+    // composing. Only reached for events that actually emit bytes (arm/disarm
+    // modifier toggles returned null above and never get here).
+    viewModel.flushComposingText()
     val payload = if (event is KeyEvent.Function ||
         event is KeyEvent.ArrowUp || event is KeyEvent.ArrowDown ||
         event is KeyEvent.ArrowLeft || event is KeyEvent.ArrowRight

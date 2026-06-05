@@ -32,6 +32,7 @@ import com.termux.view.TerminalViewClient
 @Composable
 fun TerminalSurface(
     controller: TerminalStreamController,
+    conversational: Boolean,
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
@@ -43,12 +44,24 @@ fun TerminalSurface(
             TerminalView(ctx, null).apply {
                 isFocusable = true
                 isFocusableInTouchMode = true
-                setTerminalViewClient(AiSandboxTerminalViewClient(ctx, this, textSizePx))
+                setTerminalViewClient(AiSandboxTerminalViewClient(ctx, this, textSizePx, conversational))
                 setTextSize(textSizePx)
                 attachSession(controller.wsSession.session)
                 controller.wsSession.bindView(this)
                 // Take focus so the IME / hardware keyboard targets the terminal.
                 requestFocus()
+            }
+        },
+        // UC-36 (AC#7) — when the conversational toggle flips mid-session, push the
+        // new value into the client and force the IME to re-query the inputType via
+        // restartInput(). Guarded so a redundant recomposition doesn't restart the
+        // IME (which would dismiss any in-flight composing region).
+        update = { view ->
+            val client = view.mClient as? AiSandboxTerminalViewClient
+            if (client != null && client.conversational != conversational) {
+                client.conversational = conversational
+                val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+                imm?.restartInput(view)
             }
         },
         onRelease = { view -> controller.wsSession.unbindView(view) },
@@ -66,6 +79,9 @@ private class AiSandboxTerminalViewClient(
     private val context: Context,
     private val view: TerminalView,
     private val textSizePx: Int,
+    // UC-36 — mutable so TerminalSurface.update() can flip the mode mid-session
+    // (followed by InputMethodManager.restartInput to re-query the inputType).
+    var conversational: Boolean,
 ) : TerminalViewClient {
 
     override fun onScale(scale: Float): Float {
@@ -82,7 +98,10 @@ private class AiSandboxTerminalViewClient(
 
     override fun shouldBackButtonBeMappedToEscape(): Boolean = false
 
-    override fun shouldEnforceCharBasedInput(): Boolean = true
+    // UC-36 — conversational mode (words + prediction) is the inverse of the
+    // char-based / no-suggestions input the vendored TerminalView enforces when
+    // this returns true. Default-true `conversational` ⇒ default-false here.
+    override fun shouldEnforceCharBasedInput(): Boolean = !conversational
 
     override fun shouldUseCtrlSpaceWorkaround(): Boolean = false
 

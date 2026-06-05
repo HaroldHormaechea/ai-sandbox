@@ -86,6 +86,9 @@
     <string name="settings_section_identity">Client identity</string>
     <string name="settings_section_websocket">WebSocket</string>
     <string name="settings_section_diagnostics">Diagnostics</string>
+    <string name="settings_section_keyboard">Keyboard</string>
+    <string name="settings_keyboard_conversational">Conversational keyboard</string>
+    <string name="settings_keyboard_conversational_subtitle">Word prediction, suggestions, and autocomplete while you type — best for talking to an agent. Turn off for raw character-by-character input (best for heavy CLI control). Autocorrect stays off in both modes so commands aren\'t altered.</string>
     <string name="settings_server_url">URL</string>
     <string name="settings_server_pin">Pin (SHA-256)</string>
     <string name="settings_copy">Copy</string>

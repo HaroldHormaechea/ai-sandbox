@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.aisandbox.android.AiSandboxApplication
 import com.aisandbox.android.net.ApiResult
 import com.aisandbox.android.net.SessionSummary
+import com.aisandbox.android.terminal.KeyboardSettingsStore
 import com.aisandbox.android.terminal.StreamTarget
 import com.aisandbox.android.terminal.TerminalStreamController
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -59,6 +60,18 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
 
     private val _selectedTargetId = MutableStateFlow(TerminalStreamController.MAIN_TARGET_ID)
     val selectedTargetId: StateFlow<String> = _selectedTargetId.asStateFlow()
+
+    /**
+     * UC-36 (AC#7) — the persisted conversational-keyboard toggle. The screen
+     * feeds this into [com.aisandbox.android.ui.components.TerminalSurface], which
+     * sets the TerminalView's InputConnection `inputType` (words+prediction when
+     * true; raw/char when false) and calls `restartInput` when it flips
+     * mid-session. Backed by the process-scoped [KeyboardSettingsStore] so the
+     * choice survives back-navigation and process death.
+     */
+    val conversationalKeyboard: StateFlow<Boolean> =
+        container.keyboardSettings.conversational
+            .stateIn(viewModelScope, SharingStarted.Eagerly, KeyboardSettingsStore.DEFAULT_CONVERSATIONAL)
 
     /**
      * The current session's summary, used by the hamburger Delete action's
@@ -131,6 +144,20 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
     /** Send PTY stdin bytes (the modifier bar dispatches through here — AC#3). */
     fun sendStdin(bytes: ByteArray) {
         controller?.sendStdin(bytes)
+    }
+
+    /**
+     * UC-36 (AC#5) — flush a pending IME composing word to the PTY. Called by the
+     * ModifierBar dispatch path BEFORE its control byte so a half-typed word is
+     * committed + echoed in order. No-op when nothing is composing.
+     */
+    fun flushComposingText() {
+        controller?.flushComposingText()
+    }
+
+    /** UC-36 (AC#7) — persist the conversational-keyboard toggle. */
+    fun setConversationalKeyboard(enabled: Boolean) {
+        viewModelScope.launch { container.keyboardSettings.setConversational(enabled) }
     }
 
     /** AC#4 — forward a resize when the rendered geometry changes. */
