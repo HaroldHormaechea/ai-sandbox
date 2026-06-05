@@ -139,6 +139,87 @@ class TerminalStreamControllerTest {
         assertThat(controller.selectedTargetId.value).isEqualTo("main")
     }
 
+    // ── UC-24 AC#2/#12 — periodic re-enumeration tracks spawn/despawn ─────────
+    //
+    // The controller fires `sendEnumerate()` every ENUMERATE_INTERVAL_MS while
+    // Open (verified by review + the live emulator smoke). Each resulting
+    // `targets` frame is applied here by REPLACING `_targets` wholesale, so a
+    // teammate pane that appeared since the last enumerate shows up and one that
+    // despawned drops its tile — no stale-tile accumulation, no merge bookkeeping.
+    // These pin that replacement contract deterministically (the substance of
+    // "tiles appear/disappear as panes/agents spawn/despawn") without driving the
+    // reconnect-loop coroutines (no kotlinx-coroutines-test on the unit lane).
+
+    @Test
+    fun `a spawned pane appears in the switcher on the next enumerate frame`() {
+        // First enumerate — only main + one teammate.
+        onControlFrame(
+            """{"type":"targets","targets":[
+                 {"id":"main","kind":"main","title":"main"},
+                 {"id":"swarm:main:0.1","kind":"swarm","agentName":"alice"}
+               ],"selectedId":"main"}""",
+        )
+        assertThat(controller.targets.value.map { it.id }).containsExactly("main", "swarm:main:0.1")
+
+        // A second teammate pane spawned — the next enumerate frame surfaces it.
+        onControlFrame(
+            """{"type":"targets","targets":[
+                 {"id":"main","kind":"main","title":"main"},
+                 {"id":"swarm:main:0.1","kind":"swarm","agentName":"alice"},
+                 {"id":"swarm:main:0.2","kind":"swarm","agentName":"bob"}
+               ],"selectedId":"main"}""",
+        )
+        assertThat(controller.targets.value.map { it.id }).containsExactly("main", "swarm:main:0.1", "swarm:main:0.2")
+    }
+
+    @Test
+    fun `a despawned pane drops its tile on the next enumerate frame`() {
+        onControlFrame(
+            """{"type":"targets","targets":[
+                 {"id":"main","kind":"main","title":"main"},
+                 {"id":"swarm:main:0.1","kind":"swarm","agentName":"alice"},
+                 {"id":"swarm:main:0.2","kind":"swarm","agentName":"bob"}
+               ],"selectedId":"main"}""",
+        )
+        assertThat(controller.targets.value).hasSize(3)
+
+        // bob's pane despawned — the next enumerate frame no longer lists it, and
+        // the wholesale replacement drops the stale tile (no accumulation).
+        onControlFrame(
+            """{"type":"targets","targets":[
+                 {"id":"main","kind":"main","title":"main"},
+                 {"id":"swarm:main:0.1","kind":"swarm","agentName":"alice"}
+               ],"selectedId":"main"}""",
+        )
+        assertThat(controller.targets.value.map { it.id }).containsExactly("main", "swarm:main:0.1")
+        assertThat(controller.targets.value).noneMatch { it.id == "swarm:main:0.2" }
+    }
+
+    @Test
+    fun `default-socket main-pane tiles parse with their disambiguated titles`() {
+        // Mirrors the UC-24 server tile shape: ids are swarm:main:<w>.<p> and two
+        // same-type unnamed teammates carry distinct ·<w>.<p> titles.
+        onControlFrame(
+            """{"type":"targets","targets":[
+                 {"id":"main","kind":"main","title":"main"},
+                 {"id":"swarm:main:0.1","kind":"swarm","title":"general-purpose ·0.1","agentType":"general-purpose"},
+                 {"id":"swarm:main:0.2","kind":"swarm","title":"general-purpose ·0.2","agentType":"general-purpose"}
+               ],"selectedId":"main"}""",
+        )
+        val targets = controller.targets.value
+        assertThat(targets.map { it.title })
+            .containsExactly("main", "general-purpose ·0.1", "general-purpose ·0.2")
+        assertThat(targets[1].title).isNotEqualTo(targets[2].title)
+        assertThat(targets[1].agentName).isNull()
+    }
+
+    @Test
+    fun `the re-enumeration cadence is the UC-24 3s interval`() {
+        // Pins the AC#12 mid-stream re-enumeration cadence so a future change to
+        // the loop's tempo is a conscious, reviewed edit.
+        assertThat(TerminalStreamController.ENUMERATE_INTERVAL_MS).isEqualTo(3_000L)
+    }
+
     // ── AC#11 — selectTarget: optimistic + routes + no reconnect ──────────────
 
     @Test
