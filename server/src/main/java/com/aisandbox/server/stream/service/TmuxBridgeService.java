@@ -45,6 +45,24 @@ import org.springframework.stereotype.Service;
  * (the "all tmux windows shown" regression) — without a handler/facade change —
  * while staying a strict no-op for a genuine single-pane window.
  *
+ * <p>UC-33 closes the <b>mid-stream</b> gap left by UC-24: when subagents spawn
+ * <i>while a client is already attached</i>, Claude Code splits the (shared)
+ * window and the previously-applied zoom goes stale, painting a transient split.
+ * Two server measures re-assert the zoom immediately, without waiting for the
+ * client's 3s enumerate poll:
+ * <ul>
+ *   <li>For the MAIN target the origin pane's stable {@code #{pane_id}} is
+ *       captured at bridge time and PINNED — the initial zoom and the hook below
+ *       re-zoom that exact pane, never whichever teammate pane became active
+ *       after a split (so we do not pin by the volatile literal index 0).</li>
+ *   <li>A best-effort {@code window-layout-changed} tmux hook (Step 2e) runs an
+ *       in-container, debounced, {@code flock}-serialized snippet that re-applies
+ *       the {@code zoomNeeded} guard ({@code >1 pane && !zoomed}) the instant the
+ *       layout changes. Agent/swarm targets are deliberately NOT pinned — the
+ *       hook zooms the active pane and the client's discrete re-select restores
+ *       the exact teammate. See {@link #buildLayoutChangedHookCommand}.</li>
+ * </ul>
+ *
  * <p>This service does NOT manage WebSocket I/O directly — that's the
  * facade's job. It exposes start / size / write / read / close primitives.
  */
@@ -171,13 +189,28 @@ public class TmuxBridgeService {
         // we leave focus on the per-client session's active pane and zoom that
         // below — so the zoom is generalized to EVERY target, not only paned ones.
         // {@code zoomSpec} is the tmux target the generalized zoom queries + zooms.
+        //
+        // UC-33: for the MAIN target we additionally capture the origin pane's
+        // stable {@code #{pane_id}} ({@code mainPaneId}) so the initial zoom and
+        // the Step 2e hook can PIN that exact pane after a mid-stream split, rather
+        // than re-zooming "the active pane" (which may have become a teammate pane).
+        // We pin by the durable {@code %N} pane id, never the volatile index 0.
+        // Agent/swarm targets are NOT pinned ({@code mainPaneId} stays null): the
+        // hook zooms the active pane and the client's discrete re-select frame
+        // restores the exact teammate via its {@code paneSpec}.
         String zoomSpec = session;
+        String mainPaneId = null;
         if (target != null && target.hasPane()) {
             String windowSpec = session + ":" + target.window();
             String paneSpec = windowSpec + "." + target.pane();
             runBestEffort(tmuxExec(project, socket, "select-window", "-t", windowSpec));
             runBestEffort(tmuxExec(project, socket, "select-pane", "-t", paneSpec));
             zoomSpec = paneSpec;
+        } else {
+            String pid = displayMessage(project, socket, session, "#{pane_id}");
+            if (pid != null && !pid.trim().isEmpty()) {
+                mainPaneId = pid.trim();
+            }
         }
         // Step 2d — generalized single-pane zoom for ALL targets (incl. main).
         // When the per-client session's active window has more than one pane and
@@ -191,9 +224,91 @@ public class TmuxBridgeService {
         // stays a strict no-op for a genuine single-pane window (no regression).
         // Operations are scoped to the per-client session so they don't disturb the
         // orchestrator's own view of the shared window.
-        if (zoomNeeded(project, socket, zoomSpec)) {
-            runBestEffort(tmuxExec(project, socket, "resize-pane", "-Z", "-t", zoomSpec));
+        //
+        // UC-33: when a {@code mainPaneId} was captured (MAIN target) we PIN it —
+        // select that exact pane first, then guard+zoom it — so the zoom can never
+        // land on a teammate pane that happened to be active. The {@code zoomNeeded}
+        // guard reads the same window state for the pinned pane, so the no-op
+        // semantics are unchanged.
+        String initialZoomSpec = (mainPaneId != null) ? mainPaneId : zoomSpec;
+        if (mainPaneId != null) {
+            runBestEffort(tmuxExec(project, socket, "select-pane", "-t", mainPaneId));
         }
+        if (zoomNeeded(project, socket, initialZoomSpec)) {
+            runBestEffort(tmuxExec(project, socket, "resize-pane", "-Z", "-t", initialZoomSpec));
+        }
+        // Step 2e — install the window-layout-changed hook so a mid-stream pane
+        // split re-pins/re-zooms the selected view IMMEDIATELY (tighter than the
+        // client's 3s enumerate poll). Best-effort: a hook-set failure never aborts
+        // the bridge. The snippet is in-container, debounced, guarded by the same
+        // {@code >1 pane && !zoomed} rule, and flock-serialized — see
+        // {@link #buildLayoutChangedHookCommand}.
+        runBestEffort(tmuxExec(
+                project,
+                socket,
+                "set-hook",
+                "-t",
+                session,
+                "window-layout-changed",
+                buildLayoutChangedHookCommand(socket, session, mainPaneId)));
+    }
+
+    /**
+     * Build the {@code window-layout-changed} hook body (the {@code run-shell -b
+     * "…"} command string tmux stores) that re-asserts the per-client zoom the
+     * instant a mid-stream split changes the shared window's layout — UC-33
+     * Part B. Package-visible so QA can assert the exact SHIPPED string.
+     *
+     * <p>The snippet runs IN-CONTAINER via {@code run-shell} (a bare {@code tmux}
+     * on the same server — NOT {@code docker compose exec}, since the hook already
+     * fires inside the container). It is:
+     * <ul>
+     *   <li><b>debounced</b> — {@code sleep 0.2} so the state is read AFTER the
+     *       layout churn settles, not mid-transition;</li>
+     *   <li><b>guarded</b> — the {@code zoomNeeded}-equivalent {@code >1 pane &&
+     *       !zoomed} check, so the toggle {@code resize-pane -Z} can never
+     *       un-zoom an already-correct view (AC#4 / AC#5);</li>
+     *   <li><b>serialized</b> — wrapped in a non-blocking {@code flock -n} on a
+     *       per-session lock so concurrent fires don't race (AC#1's sub-frame
+     *       guarantee depends on this; a fire that can't take the lock exits 0).</li>
+     * </ul>
+     *
+     * <p>When {@code mainPaneId} is non-null (MAIN target) the snippet PINS that
+     * exact pane: it re-selects {@code mainPaneId} when some other pane became
+     * active, then zooms it if the window is split and unzoomed. When it is null
+     * (agent/swarm target) the snippet zooms the active pane of the per-client
+     * session — agents are deliberately NOT pinned; the client's discrete
+     * re-select restores the exact teammate.
+     *
+     * <p><b>tmux format escaping:</b> every {@code #{…}} is written {@code ##{…}}
+     * so the tmux double-quoted hook body is NOT format-expanded when the hook
+     * fires — the {@code ##} collapses to a single {@code #} and the literal
+     * {@code #{…}} reaches the inner {@code tmux display-message}, which reads the
+     * SETTLED values after the debounce. The {@code flock} uses an FD-redirect
+     * subshell ({@code ( … ) 9>lock}) rather than a nested {@code sh -c} so the
+     * body needs no inner shell quoting that would collide with the tmux quotes.
+     */
+    static String buildLayoutChangedHookCommand(String socket, String session, String mainPaneId) {
+        String tmux = (socket != null && !socket.isBlank()) ? "tmux -S " + socket : "tmux";
+        String lock = "/tmp/pin-" + session + ".lock";
+        String body;
+        if (mainPaneId != null && !mainPaneId.isBlank()) {
+            String pane = mainPaneId.trim();
+            body = "( flock -n 9 || exit 0; sleep 0.2; "
+                    + "sel=$(" + tmux + " display-message -p -t " + session + " '##{pane_id}'); "
+                    + "[ x$sel = x" + pane + " ] || " + tmux + " select-pane -t " + pane + "; "
+                    + "set -- $(" + tmux + " display-message -p -t " + pane
+                    + " '##{window_panes} ##{window_zoomed_flag}'); "
+                    + "[ $1 -gt 1 ] && [ $2 = 0 ] && " + tmux + " resize-pane -Z -t " + pane
+                    + " ) 9>" + lock;
+        } else {
+            body = "( flock -n 9 || exit 0; sleep 0.2; "
+                    + "set -- $(" + tmux + " display-message -p -t " + session
+                    + " '##{window_panes} ##{window_zoomed_flag}'); "
+                    + "[ $1 -gt 1 ] && [ $2 = 0 ] && " + tmux + " resize-pane -Z -t " + session
+                    + " ) 9>" + lock;
+        }
+        return "run-shell -b \"" + body + "\"";
     }
 
     /**
