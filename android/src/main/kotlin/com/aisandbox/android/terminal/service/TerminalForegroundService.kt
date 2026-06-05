@@ -12,31 +12,54 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.getSystemService
 import com.aisandbox.android.MainActivity
 import com.aisandbox.android.R
+import com.aisandbox.android.requireContainer
+import com.aisandbox.android.terminal.TerminalStreamController
+import com.aisandbox.android.ui.screens.TerminalState
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.launch
 
 /**
  * dataSync foreground service that keeps the terminal WebSocket alive
  * across lock-screen + task-switch (UC04 AC21, UC04-4 design).
  *
  * <p>The service does NOT own the WebSocket — that lives in the
- * Activity's [com.aisandbox.android.ui.screens.TerminalViewModel].
- * Its single job is to keep the process at foreground priority while
- * the operator is attached, so Android's low-memory-killer leaves the
- * WS alone.
+ * process-scoped [TerminalStreamController] held by
+ * [com.aisandbox.android.AppContainer]. Its single job is to keep the
+ * process at foreground priority while the operator is attached, so
+ * Android's low-memory-killer leaves the WS alone.
  *
- * <p>Lifecycle:
+ * <p><b>UC-34 / UC-35 — self-managing lifecycle.</b> The only foreground-service
+ * lifecycle operations that are legal from the background are
+ * {@code stopForeground()} / {@code stopSelf()} / {@code NotificationManager.notify()}
+ * issued from <i>inside</i> the running service; <i>starting</i> an FGS is legal
+ * only from a foreground context. So the UI only ever <b>starts</b> this service
+ * (from a foreground {@code Open} transition, gated by {@code repeatOnLifecycle}),
+ * and the running service self-manages everything else:
  *
  * <ul>
- *   <li>{@link com.aisandbox.android.ui.screens.TerminalScreen} starts
- *       the service with [ACTION_START] + the session N + connection
- *       metadata when the WS reaches {@code Open}.</li>
- *   <li>The service calls {@link #startForeground} with the AC21-AC22
- *       ongoing notification (UC04-4 layout).</li>
- *   <li>The screen sends {@link ACTION_UPDATE} on metadata changes
- *       (cols × rows, idle seconds).</li>
- *   <li>The screen — or the notification's "Disconnect" action — sends
- *       {@link ACTION_STOP}. The service calls {@link #stopForeground}
- *       and {@link #stopSelf}.</li>
+ *   <li>On {@link #ACTION_START} it binds to the session's controller and
+ *       observes {@code controller.state}; when the state leaves the active set
+ *       ({@code Open} / {@code Connecting} / {@code Reconnecting}) — i.e. it
+ *       reaches {@code Idle} / {@code GaveUp} / {@code Revoked} / {@code Failed}
+ *       — it self-stops via {@link #stopForegroundAndSelf}. This replaces the
+ *       old background {@code startService(ACTION_STOP)} teardown that crashed
+ *       on Android 8+ (UC-34).</li>
+ *   <li>It also observes {@code controller.size} and re-posts the notification
+ *       with fresh cols × rows via {@link NotificationManager#notify} — a
+ *       background-legal update path (no {@code startService}).</li>
+ *   <li>The notification's "Disconnect" action ({@link #ACTION_STOP}) closes the
+ *       bound controller and self-stops.</li>
  * </ul>
+ *
+ * <p>Because the UI never issues a background {@code start*Service} /
+ * {@code stopService}, neither the teardown edge (UC-34) nor a reconnect that
+ * lands while backgrounded (UC-35) can throw
+ * {@code BackgroundServiceStartNotAllowedException} /
+ * {@code ForegroundServiceStartNotAllowedException}.
  *
  * <p>Notification channel was registered eagerly by
  * [com.aisandbox.android.AiSandboxApplication.onCreate], so the first
@@ -44,25 +67,49 @@ import com.aisandbox.android.R
  */
 class TerminalForegroundService : Service() {
 
+    /**
+     * Service-owned scope on the main dispatcher. Created in [onCreate],
+     * cancelled in [onDestroy] — so the state/size collectors live exactly as
+     * long as the running service and can never leak past a self-stop. Backed
+     * by a [SupervisorJob] so one collector failing does not kill the other.
+     */
+    private lateinit var serviceScope: CoroutineScope
+
+    /** The controller this service is currently observing (UC-34/35 binding). */
+    private var boundController: TerminalStreamController? = null
+    private var boundSessionN: Int? = null
+
+    /** Parent job for the two collectors; cancelled + relaunched on a rebind. */
+    private var collectorsJob: Job? = null
+
+    /** Last-known notification params — the base for size-driven re-posts. */
+    private var cachedParams: NotificationParams? = null
+
     override fun onBind(intent: Intent?): IBinder? = null
+
+    override fun onCreate() {
+        super.onCreate()
+        serviceScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    }
+
+    override fun onDestroy() {
+        serviceScope.cancel()
+        boundController = null
+        boundSessionN = null
+        collectorsJob = null
+        cachedParams = null
+        super.onDestroy()
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
-            ACTION_START, ACTION_UPDATE -> {
-                val params = NotificationParams.fromIntent(intent)
-                val notification = buildNotification(params)
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                    startForeground(
-                        NOTIFICATION_ID,
-                        notification,
-                        ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
-                    )
-                } else {
-                    @Suppress("DEPRECATION")
-                    startForeground(NOTIFICATION_ID, notification)
-                }
-            }
+            ACTION_START -> handleStart(NotificationParams.fromIntent(intent))
             ACTION_STOP -> {
+                // UC-34 AC2 — notification "Disconnect". Null-check the held
+                // controller before closing; closing drives state → Idle, which
+                // the state collector would also self-stop on, but we stop
+                // explicitly here too (idempotent).
+                boundController?.close("user-disconnect")
                 stopForegroundAndSelf()
             }
             else -> {
@@ -76,6 +123,86 @@ class TerminalForegroundService : Service() {
             }
         }
         return START_STICKY
+    }
+
+    /**
+     * UC-35 — the ONLY start path. Always satisfies the FGS contract by calling
+     * [startForeground] first (we may have been launched via
+     * {@code startForegroundService}, which mandates {@code startForeground}
+     * within ~5 s), then binds to the session's controller and (re)launches the
+     * self-managing collectors.
+     */
+    private fun handleStart(params: NotificationParams) {
+        cachedParams = params
+        startForegroundWith(buildNotification(params))
+
+        // Resolve WITHOUT creating or closing any controller (contrast
+        // AppContainer.terminalController). A start with no live controller is a
+        // stale/raced intent — do NOT bind against null; just self-stop.
+        val controller = requireContainer(this).existingController(params.sessionN)
+        if (controller == null) {
+            stopForegroundAndSelf()
+            return
+        }
+
+        if (controller !== boundController) {
+            // New session (or first start) — rebind and relaunch the collectors
+            // against the new controller. The notification was (re-)posted above.
+            boundController = controller
+            boundSessionN = params.sessionN
+            launchCollectors(controller)
+        }
+        // Same instance → no-op the binding; cachedParams refreshed + the
+        // notification re-posted above is all that's needed.
+    }
+
+    /**
+     * Launch the two self-managing collectors against [controller], cancelling
+     * any prior pair first. Both run on [serviceScope] (main dispatcher), so
+     * every lifecycle op they issue (stopForeground/stopSelf/notify) is
+     * background-legal.
+     */
+    private fun launchCollectors(controller: TerminalStreamController) {
+        collectorsJob?.cancel()
+        collectorsJob = serviceScope.launch {
+            // (i) State collector — self-stop when the stream leaves the active
+            // set. Active = {Open, Connecting, Reconnecting}; everything else
+            // (Idle / GaveUp / Revoked / Failed) tears the FGS down from inside
+            // the service, which is legal in the background (UC-34).
+            launch {
+                controller.state.collect { st ->
+                    if (!st.isActiveStream()) {
+                        stopForegroundAndSelf()
+                    }
+                }
+            }
+            // (ii) Size collector — re-post the notification with fresh cols ×
+            // rows via NotificationManager.notify (background-legal). Rebuilds
+            // from the cached params so the wssUrl / sessionN / idle fields stay
+            // intact instead of being lost to a stale intent.
+            launch {
+                controller.size.collect { size ->
+                    val base = cachedParams ?: return@collect
+                    val updated = base.copy(cols = size.cols, rows = size.rows)
+                    cachedParams = updated
+                    val nm = getSystemService<NotificationManager>() ?: return@collect
+                    nm.notify(NOTIFICATION_ID, buildNotification(updated))
+                }
+            }
+        }
+    }
+
+    private fun startForegroundWith(notification: android.app.Notification) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(
+                NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC,
+            )
+        } else {
+            @Suppress("DEPRECATION")
+            startForeground(NOTIFICATION_ID, notification)
+        }
     }
 
     private fun stopForegroundAndSelf() {
@@ -178,7 +305,6 @@ class TerminalForegroundService : Service() {
 
     companion object {
         const val ACTION_START = "com.aisandbox.android.TerminalForegroundService.START"
-        const val ACTION_UPDATE = "com.aisandbox.android.TerminalForegroundService.UPDATE"
         const val ACTION_STOP = "com.aisandbox.android.TerminalForegroundService.STOP"
 
         const val EXTRA_SESSION_N = "session_n"
@@ -191,7 +317,25 @@ class TerminalForegroundService : Service() {
         private const val REQ_OPEN = 1001
         private const val REQ_DISCONNECT = 1002
 
-        /** Helper: start the service from a [Context]. */
+        /**
+         * The stream states for which the FGS must stay up. Everything else
+         * (Idle / GaveUp / Revoked / Failed) makes the running service
+         * self-stop — see [launchCollectors]. Single source of truth for the
+         * UC-34 active-set so the service and its regression test agree.
+         */
+        private fun TerminalState.isActiveStream(): Boolean =
+            this is TerminalState.Open ||
+                this is TerminalState.Connecting ||
+                this is TerminalState.Reconnecting
+
+        /**
+         * Helper: start the service from a foreground [Context]. This is the
+         * ONLY entry the UI uses — teardown + metadata updates are self-managed
+         * by the running service (UC-34 / UC-35). Callers MUST invoke this from
+         * a foreground context (the screen gates it on a STARTED-lifecycle
+         * {@code Open} transition) so the Android 12+ background-FGS-start
+         * restriction never trips.
+         */
         fun start(context: Context, params: NotificationParams) {
             val intent = params.toIntent(ACTION_START, context)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -200,24 +344,6 @@ class TerminalForegroundService : Service() {
                 @Suppress("DEPRECATION")
                 context.startService(intent)
             }
-        }
-
-        /** Helper: update an already-running service's notification. */
-        fun update(context: Context, params: NotificationParams) {
-            context.startService(params.toIntent(ACTION_UPDATE, context))
-        }
-
-        /** Helper: stop. */
-        fun stop(context: Context) {
-            context.startService(
-                Intent(context, TerminalForegroundService::class.java).setAction(ACTION_STOP),
-            )
-        }
-
-        /** Manually dismiss the notification if the service has already been stopped. */
-        fun dismissNotification(context: Context) {
-            val nm = context.getSystemService<NotificationManager>() ?: return
-            nm.cancel(NOTIFICATION_ID)
         }
     }
 }
