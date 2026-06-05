@@ -300,6 +300,8 @@ dependencies {
     testImplementation("org.junit.jupiter:junit-jupiter-params")
     testImplementation(libs.robolectric)
     testImplementation(libs.assertj.core)
+    // QA-only — TestLifecycleOwner for the UC-35 FGS start-gating unit test.
+    testImplementation(libs.androidx.lifecycle.runtime.testing)
     // kotlin-reflect is required by tests that introspect sealed-class
     // permittedSubclasses (TerminalBellDetectionTest.HapticEvent_pin).
     testImplementation(kotlin("reflect"))

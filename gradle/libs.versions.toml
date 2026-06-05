@@ -176,6 +176,9 @@ androidx-lifecycle-runtime-ktx  = { module = "androidx.lifecycle:lifecycle-runti
 androidx-lifecycle-viewmodel-compose = { module = "androidx.lifecycle:lifecycle-viewmodel-compose", version.ref = "androidxLifecycle" }
 androidx-lifecycle-runtime-compose   = { module = "androidx.lifecycle:lifecycle-runtime-compose", version.ref = "androidxLifecycle" }
 androidx-lifecycle-service      = { module = "androidx.lifecycle:lifecycle-service", version.ref = "androidxLifecycle" }
+# QA-only — TestLifecycleOwner for the UC-35 start-gating unit test (drives a
+# repeatOnLifecycle(STARTED) collector through CREATED→STARTED transitions).
+androidx-lifecycle-runtime-testing = { module = "androidx.lifecycle:lifecycle-runtime-testing", version.ref = "androidxLifecycle" }
 
 androidx-navigation-compose     = { module = "androidx.navigation:navigation-compose", version.ref = "androidxNavCompose" }
 
