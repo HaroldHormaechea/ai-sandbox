@@ -71,6 +71,7 @@ The `/opt/ai-sandbox-server/` payload:
 ├── README.md
 ├── openapi.yaml                   # springdoc-generated OAS, committed in repo
 ├── STREAM_PROTOCOL.md
+├── SESSIONS_EVENTS_PROTOCOL.md     # /v1/sessions/events live status-push framing (UC-32)
 └── sample-config.yaml             # annotated reference of every tunable knob
 ```
 
@@ -473,6 +474,7 @@ analysis lives in [`../docs/THREAT_MODEL.md`](../docs/THREAT_MODEL.md)
 | GET    | `/v1/openapi.yaml`                | springdoc-generated OAS, committed to the repo. |
 | GET    | `/v1/swagger-ui`                  | Swagger UI (strict CSP). |
 | WSS    | `/v1/sessions/{n}/stream`         | Subprotocol `ai-sandbox.v1`. Schema in [STREAM_PROTOCOL.md](STREAM_PROTOCOL.md). |
+| WSS    | `/v1/sessions/events`             | Subprotocol `ai-sandbox.v1`. Live sessions-list status push (UC-32). One-way server→client. Schema in [SESSIONS_EVENTS_PROTOCOL.md](SESSIONS_EVENTS_PROTOCOL.md). |
 
 Errors come back as `application/problem+json` per RFC 9457 with a
 machine-readable `code` (`session_not_found`, `spawn_timeout`,
@@ -488,6 +490,20 @@ machine-readable `code` (`session_not_found`, `spawn_timeout`,
 - Ping every 30s, pong timeout 15s → close 1001.
 
 Full schema in [STREAM_PROTOCOL.md](STREAM_PROTOCOL.md).
+
+## Live sessions-list push (`/v1/sessions/events`)
+
+- Mandatory subprotocol: `Sec-WebSocket-Protocol: ai-sandbox.v1`. Same mTLS
+  allowlist + 4401 cert-revocation behaviour as the terminal stream.
+- One-way server→client text frames only: a `snapshot` (full list) on
+  subscribe and reconnect, then coalesced `delta` (upsert/remove by `n`)
+  frames as the server observes status changes.
+- Driven by a subscriber-gated ~1 s server-side reconcile of the same
+  enumeration `GET /v1/sessions` uses, so it catches out-of-band transitions
+  (a container dying on its own) too. Worst-case push latency ≈ 2 s.
+- Foreground-bound on the client and capped at 4 subscriptions per cert.
+
+Full schema in [SESSIONS_EVENTS_PROTOCOL.md](SESSIONS_EVENTS_PROTOCOL.md).
 
 ## Operator notes & foot-guns
 
