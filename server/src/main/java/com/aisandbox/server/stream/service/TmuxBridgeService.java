@@ -33,9 +33,17 @@ import org.springframework.stereotype.Service;
  *
  * <p>UC-21 generalizes the bridge to target any {@link BridgeTarget}: the main
  * tmux session on the default socket (the original behaviour), or an agent-team
- * pane on a separate {@code claude-swarm-<pid>} socket. When the target names a
- * window/pane, the per-client session focuses + zooms that pane after creation
- * so the single pane fills the client view.
+ * teammate pane (a pane in the {@code main} session on the default socket, or — on
+ * older Claude Code builds — a pane on a separate {@code claude-swarm-<pid>}
+ * socket). When the target names a window/pane, the per-client session focuses
+ * that pane after creation.
+ *
+ * <p>UC-24 generalizes the single-pane <b>zoom</b> to EVERY target: after the
+ * optional focus, if the per-client session's active window has more than one
+ * pane and is not already zoomed, the active pane is zoomed so a multi-pane
+ * window always paints as one pane. This fixes the unzoomed main initial paint
+ * (the "all tmux windows shown" regression) — without a handler/facade change —
+ * while staying a strict no-op for a genuine single-pane window.
  *
  * <p>This service does NOT manage WebSocket I/O directly — that's the
  * facade's job. It exposes start / size / write / read / close primitives.
@@ -157,22 +165,34 @@ public class TmuxBridgeService {
         // the per-client session via {@code -t <session>}, so other clients of the
         // shared base session keep their own status setting.
         runBestEffort(tmuxExec(project, socket, "set-option", "-t", session, "status", "off"));
-        // Step 2b — focus + idempotently zoom the requested pane (agent-team
-        // target). {@code resize-pane -Z} is a TOGGLE, so running it
-        // unconditionally on an already-zoomed pane (a re-bridge / reconnect /
-        // second client) toggles zoom OFF and exposes the unzoomed multi-pane
-        // split — the regression this fix targets. We therefore zoom only when the
-        // window is not already zoomed and actually has more than one pane.
-        // Operations are scoped to the per-client session so they don't disturb
-        // the orchestrator's own view of the shared window.
+        // Step 2b — focus the requested pane for a targeted bridge (an agent-team
+        // teammate, or an explicit main re-selection that carries the orchestrator
+        // pane's coordinates). When no pane is named (the pre-UC-21 main bridge),
+        // we leave focus on the per-client session's active pane and zoom that
+        // below — so the zoom is generalized to EVERY target, not only paned ones.
+        // {@code zoomSpec} is the tmux target the generalized zoom queries + zooms.
+        String zoomSpec = session;
         if (target != null && target.hasPane()) {
             String windowSpec = session + ":" + target.window();
             String paneSpec = windowSpec + "." + target.pane();
             runBestEffort(tmuxExec(project, socket, "select-window", "-t", windowSpec));
             runBestEffort(tmuxExec(project, socket, "select-pane", "-t", paneSpec));
-            if (zoomNeeded(project, socket, paneSpec)) {
-                runBestEffort(tmuxExec(project, socket, "resize-pane", "-Z", "-t", paneSpec));
-            }
+            zoomSpec = paneSpec;
+        }
+        // Step 2d — generalized single-pane zoom for ALL targets (incl. main).
+        // When the per-client session's active window has more than one pane and
+        // is not already zoomed, zoom the active pane so a multi-pane window paints
+        // as a single pane — this is the fix for the unzoomed-main initial paint
+        // (the "all windows shown" regression) without a handler/facade change.
+        //
+        // {@code resize-pane -Z} is a TOGGLE, so zooming an already-zoomed pane (a
+        // re-bridge / reconnect / second client) would toggle zoom OFF and re-expose
+        // the split. {@code zoomNeeded} guards on {@code >1 pane && !zoomed}, so this
+        // stays a strict no-op for a genuine single-pane window (no regression).
+        // Operations are scoped to the per-client session so they don't disturb the
+        // orchestrator's own view of the shared window.
+        if (zoomNeeded(project, socket, zoomSpec)) {
+            runBestEffort(tmuxExec(project, socket, "resize-pane", "-Z", "-t", zoomSpec));
         }
     }
 

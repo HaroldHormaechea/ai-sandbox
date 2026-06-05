@@ -219,9 +219,23 @@ class TerminalStreamController(
                         // frames until the WS leaves Open.
                         val pump = launch { client.incoming.collect { wsSession.feed(it) } }
                         val control = launch { client.controlIncoming.collect { onControlFrame(it) } }
+                        // UC-24 / AC#12 — periodic re-enumeration so teammates that
+                        // appear or disappear mid-stream are reflected without a
+                        // reconnect. `_targets` already updates idempotently from
+                        // each `targets` frame, so the switcher row reacts
+                        // automatically. Scoped to this Open block and cancelled
+                        // with pump/control on every reconnect/teardown so it can
+                        // never leak or multiply across reconnects.
+                        val enumerate = launch {
+                            while (isActive) {
+                                delay(ENUMERATE_INTERVAL_MS)
+                                client.sendEnumerate()
+                            }
+                        }
                         val terminal = client.state.first { it !is StreamClient.State.Open }
                         pump.cancel()
                         control.cancel()
+                        enumerate.cancel()
                         if (terminal is StreamClient.State.Revoked) {
                             _state.value = TerminalState.Revoked
                             return@launch
@@ -263,6 +277,12 @@ class TerminalStreamController(
 
         const val DEFAULT_COLS = 80
         const val DEFAULT_ROWS = 24
+
+        /**
+         * UC-24 / AC#12 — interval between mid-stream target re-enumerations so the
+         * switcher row tracks teammates appearing/disappearing while connected.
+         */
+        const val ENUMERATE_INTERVAL_MS = 3_000L
     }
 }
 

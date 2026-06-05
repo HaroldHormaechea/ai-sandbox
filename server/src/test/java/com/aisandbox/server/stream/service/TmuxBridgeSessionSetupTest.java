@@ -120,23 +120,53 @@ class TmuxBridgeSessionSetupTest {
                 .orElse(null);
     }
 
-    // ── (v) main target — status off, no select / zoom ──────────────────────
+    // ── (v) main target — UC-24 generalized zoom (multi-pane main IS zoomed) ──
 
     @Test
-    void mainTarget_setsStatusOff_andNeverSelectsOrZooms() throws Exception {
-        Recorder rec = recorder("", 0);
+    void mainTarget_multiPaneWindow_isZoomed_withoutAnyPaneSelect() throws Exception {
+        // UC-24 root cause: when the default-socket main window has >1 pane, the
+        // pre-fix code skipped the zoom (no pane named) so the per-client attach
+        // painted the unzoomed split — the "all windows shown" the user reported.
+        // The fix generalizes the needed-only zoom to EVERY target, main included.
+        // window_panes=2, window_zoomed_flag=0 → zoom needed.
+        Recorder rec = recorder("2 0\n", 0);
 
         new TmuxBridgeService(rec.exec).prepareClientSession(PROJECT, null, SESSION, BridgeTarget.main());
 
-        // Order: create → mouse on → status off, and nothing pane-related.
-        assertThat(opSequence(rec.calls)).containsExactly("new-session", "set-option:mouse", "set-option:status");
+        // create → mouse on → status off → zoom query → zoom. No pane select:
+        // main carries no window/pane, so the generalized zoom targets the
+        // per-client session's active window directly.
         assertThat(opSequence(rec.calls))
-                .doesNotContain("select-window", "select-pane", "display-message", "resize-pane");
+                .containsExactly(
+                        "new-session", "set-option:mouse", "set-option:status", "display-message", "resize-pane");
+        assertThat(opSequence(rec.calls)).doesNotContain("select-window", "select-pane");
 
         // No socket flag for the default-socket main session.
         assertThat(firstCall(rec.calls, "new-session")).doesNotContain("-S");
 
-        // status off is scoped to the per-client session (UC-24 AC#1: chrome hidden).
+        // The zoom query + the zoom both target the PER-CLIENT session itself
+        // (zoomSpec == session for an un-paned main target) — never a base session,
+        // so the orchestrator's own view of the main window is not force-zoomed.
+        assertThat(firstCall(rec.calls, "display-message"))
+                .containsSequence("-p", "-t", SESSION, "#{window_panes} #{window_zoomed_flag}");
+        assertThat(firstCall(rec.calls, "resize-pane")).containsSequence("-Z", "-t", SESSION);
+
+        // status off is still scoped to the per-client session (UC-24 AC#1: chrome hidden).
+        assertStatusOffScopedToSession(rec.calls);
+    }
+
+    @Test
+    void mainTarget_singlePaneWindow_isNotZoomed() throws Exception {
+        // A genuine single-pane main window (the no-team case) must stay a strict
+        // no-op — the >1-pane guard prevents a needless zoom toggle (UC-21 AC#1).
+        // window_panes=1 → nothing to zoom.
+        Recorder rec = recorder("1 0\n", 0);
+
+        new TmuxBridgeService(rec.exec).prepareClientSession(PROJECT, null, SESSION, BridgeTarget.main());
+
+        assertThat(opSequence(rec.calls))
+                .containsExactly("new-session", "set-option:mouse", "set-option:status", "display-message");
+        assertThat(opSequence(rec.calls)).doesNotContain("resize-pane", "select-window", "select-pane");
         assertStatusOffScopedToSession(rec.calls);
     }
 

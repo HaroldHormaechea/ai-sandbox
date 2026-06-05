@@ -160,6 +160,41 @@ class TerminalScreenInstrumentationTest {
         assertEquals(listOf("swarm:claude-swarm-1:0.0", "main"), selections)
     }
 
+    // ── UC-24 — multi-pane main: every non-main pane is a labeled tile ────────
+
+    @Test
+    fun switcher_renders_multipane_main_tiles_with_disambiguated_labels() {
+        // The main session now has >1 pane (the regression scenario). Each
+        // non-main pane is surfaced as a tile with a swarm:main:<w>.<p> id; two
+        // same-type teammates whose names were unrecoverable carry distinct
+        // ·<w>.<p> labels so the row renders one labeled tile per pane and never
+        // collides — the on-device form of the server's disambiguator (UC-24 AC#2).
+        val paneOne = StreamTarget(
+            id = "swarm:main:0.1",
+            kind = "swarm",
+            title = "general-purpose ·0.1",
+            agentType = "general-purpose",
+        )
+        val paneTwo = StreamTarget(
+            id = "swarm:main:0.2",
+            kind = "swarm",
+            title = "general-purpose ·0.2",
+            agentType = "general-purpose",
+        )
+        composeTestRule.setContent {
+            AiSandboxTheme {
+                AgentSwitcherBar(
+                    targets = listOf(mainTarget, paneOne, paneTwo),
+                    selectedTargetId = "main",
+                    onSelect = {},
+                )
+            }
+        }
+        composeTestRule.onNodeWithText("main").assertIsDisplayed()
+        composeTestRule.onNodeWithText("general-purpose ·0.1").assertIsDisplayed()
+        composeTestRule.onNodeWithText("general-purpose ·0.2").assertIsDisplayed()
+    }
+
     // ── AC#2 / AC#3 — the modifier bar renders and emits PTY-stdin key events ─
 
     @Test
