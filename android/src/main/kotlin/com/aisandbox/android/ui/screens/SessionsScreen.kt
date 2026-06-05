@@ -66,6 +66,9 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.aisandbox.android.R
 import com.aisandbox.android.net.SessionSummary
@@ -79,6 +82,7 @@ import com.aisandbox.android.ui.theme.OnSurfaceVariant
 import com.aisandbox.android.ui.theme.SurfaceLow
 import com.aisandbox.android.ui.theme.Success
 import com.aisandbox.android.ui.theme.Warning
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.launch
 
 /**
@@ -120,6 +124,25 @@ fun SessionsScreen(
                 duration = SnackbarDuration.Short,
             )
             viewModel.clearError()
+        }
+    }
+
+    // UC-32 / AC6 — bind the live status-push feed to the screen's foreground
+    // lifecycle. On each (re)START: fire one REST refresh() (belt-and-suspenders
+    // resync + the AC5 fallback if the socket never opens) and open the push
+    // feed; the server's initial Snapshot is the authoritative resync. On STOP
+    // the repeatOnLifecycle block is cancelled and the finally closes the socket
+    // so it is never held open in the background.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    LaunchedEffect(viewModel, lifecycleOwner) {
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            viewModel.refresh()
+            viewModel.connectEvents()
+            try {
+                awaitCancellation()
+            } finally {
+                viewModel.disconnectEvents()
+            }
         }
     }
 

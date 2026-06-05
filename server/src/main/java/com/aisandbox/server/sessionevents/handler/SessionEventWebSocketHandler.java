@@ -121,8 +121,8 @@ public class SessionEventWebSocketHandler implements WebSocketHandler {
 
         SessionEventMessage.Snapshot snapshot = facade.snapshot();
 
-        Flux<WebSocketMessage> outbound = Flux.concat(Mono.just(snapshot), sink.asFlux())
-                .map(msg -> session.textMessage(serialize(msg)));
+        Flux<WebSocketMessage> outbound =
+                Flux.concat(Mono.just(snapshot), sink.asFlux()).map(msg -> session.textMessage(serialize(msg)));
 
         // Drain inbound frames so the socket's receive side is read (and any
         // client chatter is discarded) without affecting the outbound feed.
