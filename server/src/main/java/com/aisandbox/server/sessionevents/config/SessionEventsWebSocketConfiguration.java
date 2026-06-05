@@ -6,6 +6,9 @@ import com.aisandbox.server.sessionevents.facade.SessionEventFacade;
 import com.aisandbox.server.sessionevents.handler.SessionEventWebSocketHandler;
 import com.aisandbox.server.sessionevents.service.SessionEventBroadcaster;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
+import com.fasterxml.jackson.databind.json.JsonMapper;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import java.util.Map;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
@@ -13,7 +16,6 @@ import org.springframework.context.annotation.Profile;
 import org.springframework.core.Ordered;
 import org.springframework.web.reactive.HandlerMapping;
 import org.springframework.web.reactive.handler.SimpleUrlHandlerMapping;
-import org.springframework.web.reactive.socket.server.support.WebSocketHandlerAdapter;
 
 /**
  * UC-32 — wiring for the live sessions-list push channel
@@ -34,25 +36,22 @@ import org.springframework.web.reactive.socket.server.support.WebSocketHandlerAd
  * ({@code events} is not a session number), so the ordering only matters versus
  * the REST mapping.
  *
- * <p><b>Adapter reuse.</b> The reactive {@link WebSocketHandlerAdapter} is a
- * singleton in the application context; this config obtains it <i>by type</i>
- * (declaring it only as a constructor-injected dependency of the mapping bean to
- * assert its presence) rather than declaring a second one — a duplicate adapter
- * bean would be ambiguous, and importing the {@code stream} config's bean would
- * reintroduce the dependency this slice avoids.
+ * <p><b>Adapter reuse.</b> This config does NOT declare or inject a
+ * {@code WebSocketHandlerAdapter}: the context already has one (Spring Boot's
+ * autoconfigured {@code webFluxWebSocketHandlerAdapter}, plus the stream
+ * config's own), and the reactive {@code DispatcherHandler} discovers every
+ * {@link HandlerMapping} and adapter bean on its own. Injecting the adapter by
+ * type would be ambiguous (two beans of that type exist), and re-declaring one
+ * would conflict — so the mapping bean takes only the handler, exactly like the
+ * stream config's mapping bean.
  */
 @Configuration
 @Profile("!docs-only")
 public class SessionEventsWebSocketConfiguration {
 
-    /**
-     * Map {@code /v1/sessions/events} to the events handler. {@code adapter} is
-     * injected purely to assert the global {@link WebSocketHandlerAdapter} exists
-     * (obtained by type, not re-declared here).
-     */
+    /** Map {@code /v1/sessions/events} to the events handler. */
     @Bean
-    public HandlerMapping sessionEventsHandlerMapping(
-            SessionEventWebSocketHandler handler, WebSocketHandlerAdapter adapter) {
+    public HandlerMapping sessionEventsHandlerMapping(SessionEventWebSocketHandler handler) {
         SimpleUrlHandlerMapping mapping = new SimpleUrlHandlerMapping();
         mapping.setUrlMap(Map.of("/v1/sessions/events", handler));
         mapping.setOrder(Ordered.HIGHEST_PRECEDENCE + 10);
@@ -64,8 +63,18 @@ public class SessionEventsWebSocketConfiguration {
             SessionEventFacade facade,
             SessionEventBroadcaster broadcaster,
             ActiveConnectionRegistry connections,
-            ActiveStreamRegistry streamRegistry,
-            ObjectMapper objectMapper) {
+            ActiveStreamRegistry streamRegistry) {
+        // Build the frame serializer locally rather than autowiring an
+        // ObjectMapper bean — this reactive (WebFlux) context exposes no
+        // ObjectMapper bean, so an injected dependency fails the whole context
+        // at startup. Mirrors how the stream package serializes its WS frames
+        // (a self-constructed mapper, no bean dependency) without importing it.
+        // JavaTimeModule + WRITE_DATES_AS_TIMESTAMPS disabled ⇒ Row.startedAt
+        // serializes as an ISO-8601 string, matching the REST list.
+        ObjectMapper objectMapper = JsonMapper.builder()
+                .addModule(new JavaTimeModule())
+                .disable(SerializationFeature.WRITE_DATES_AS_TIMESTAMPS)
+                .build();
         SessionEventWebSocketHandler handler = new SessionEventWebSocketHandler(facade, broadcaster, objectMapper);
         // Inject the connection registry post-construct so identity resolves
         // from the Netty channel id (without it every upgrade closes
