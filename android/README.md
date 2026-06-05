@@ -62,10 +62,19 @@ The operator path from source to an enrolled device is three steps:
 - **Terminal** (UC04-3): full-screen attached terminal via
   `wss://host/v1/sessions/{n}/stream` (subprotocol `ai-sandbox.v1`),
   docked modifier bar, optional split-pane. AC14 BEL → 150 ms haptic.
+  The soft keyboard defaults to a **conversational** mode (UC-36): word
+  prediction, the suggestion strip, and autocomplete are on so you can
+  talk to an agent naturally. Autocorrect is deliberately kept off so it
+  can't silently rewrite a command, and a pending word is always flushed
+  to the PTY before any modifier-bar control key — so commands are never
+  dropped or reordered. Flip to raw character-by-character input (the
+  historical Termux behaviour, best for heavy CLI control) from
+  Settings → Keyboard; the choice persists.
 - **Foreground service** (UC04-4): `dataSync` ongoing notification
   keeps the WS alive across lock-screen + task-switch.
 - **Settings** (UC04-5): server URL + pin + client cert metadata +
-  WebSocket diagnostics + a "Simulate cert revoke" test path.
+  WebSocket diagnostics + a Keyboard section (UC-36 conversational vs.
+  raw/char toggle) + a "Simulate cert revoke" test path.
 - **Cert-revoke handling** (UC04-7): close-code-4401 → "Identity
   revoked" dialog → re-scan QR flow.
 - **Pin-mismatch handling**: any TLS cert change on the server →

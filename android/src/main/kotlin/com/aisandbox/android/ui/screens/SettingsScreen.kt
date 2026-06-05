@@ -25,6 +25,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -32,6 +33,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -44,6 +46,7 @@ import com.aisandbox.android.R
 import com.aisandbox.android.net.NetworkEvent
 import com.aisandbox.android.net.NetworkEvents
 import com.aisandbox.android.requireContainer
+import com.aisandbox.android.terminal.KeyboardSettingsStore
 import com.aisandbox.android.ui.components.ConnectedPill
 import com.aisandbox.android.ui.theme.AiSandboxMonoTypography
 import com.aisandbox.android.ui.theme.ErrorTone
@@ -54,6 +57,7 @@ import com.aisandbox.android.ui.theme.SurfaceLow
 import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.TimeZone
+import kotlinx.coroutines.launch
 
 /**
  * UC04-5 settings screen — four sections (Server / Client identity /
@@ -95,6 +99,7 @@ fun SettingsScreen(onBack: () -> Unit) {
         ) {
             ServerSection(profile = profile, onCopy = { copy(context, "server pin", it) })
             IdentitySection(cert = cert, profile = profile, onCopy = { copy(context, "fingerprint", it) })
+            KeyboardSection(container = container)
             WebSocketSection()
             DiagnosticsSection(onSimulateRevoke = {
                 // Emit the CertRevoked NetworkEvent so the root composable
@@ -186,6 +191,43 @@ private fun IdentitySection(
             )
         } else {
             Text("No identity imported.", style = MaterialTheme.typography.bodyMedium, color = OnSurfaceMuted)
+        }
+    }
+}
+
+/**
+ * UC-36 (AC#7) — the conversational-keyboard toggle. Pure projection of
+ * [com.aisandbox.android.terminal.KeyboardSettingsStore] (held on the container);
+ * flipping the switch persists immediately and the terminal screen picks it up via
+ * its ViewModel flow + `restartInput`.
+ */
+@Composable
+private fun KeyboardSection(container: com.aisandbox.android.AppContainer) {
+    val scope = rememberCoroutineScope()
+    val conversational by container.keyboardSettings.conversational
+        .collectAsStateWithLifecycle(initialValue = KeyboardSettingsStore.DEFAULT_CONVERSATIONAL)
+    Section(title = stringResource(R.string.settings_section_keyboard)) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = stringResource(R.string.settings_keyboard_conversational),
+                    style = MaterialTheme.typography.titleSmall,
+                    color = OnSurface,
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = stringResource(R.string.settings_keyboard_conversational_subtitle),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = OnSurfaceMuted,
+                )
+            }
+            Spacer(Modifier.width(12.dp))
+            Switch(
+                checked = conversational,
+                onCheckedChange = { enabled ->
+                    scope.launch { container.keyboardSettings.setConversational(enabled) }
+                },
+            )
         }
     }
 }

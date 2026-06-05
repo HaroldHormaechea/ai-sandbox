@@ -111,6 +111,15 @@ class TerminalStreamController(
         streamClient?.sendStdin(bytes)
     }
 
+    /**
+     * UC-36 — flush a pending IME composing word to the PTY before out-of-band
+     * input (the ModifierBar control bytes). Delegates to the bound view via
+     * [WsTerminalSession]; no-op when nothing is composing.
+     */
+    fun flushComposingText() {
+        wsSession.flushComposingText()
+    }
+
     /** Send a resize frame and remember the geometry for reconnect + the FGS. */
     fun sendResize(cols: Int, rows: Int) {
         if (cols <= 0 || rows <= 0) return

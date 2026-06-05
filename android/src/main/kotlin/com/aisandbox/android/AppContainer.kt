@@ -9,6 +9,7 @@ import com.aisandbox.android.net.SessionEventsClient
 import com.aisandbox.android.net.SessionsApi
 import com.aisandbox.android.net.StreamClient
 import com.aisandbox.android.net.TerminatingSessionsStore
+import com.aisandbox.android.terminal.KeyboardSettingsStore
 import com.aisandbox.android.terminal.TerminalStreamController
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -37,6 +38,13 @@ class AppContainer(applicationContext: Context) {
     val identity: KeyStoreIdentityManager = KeyStoreIdentityManager()
 
     val profileStore: ServerProfileStore = ServerProfileStore(appContext)
+
+    /**
+     * UC-36 — persisted conversational-keyboard toggle (AC#7). Process-scoped so
+     * both the terminal screen (which feeds the value into the TerminalView's
+     * InputConnection) and the settings screen (the toggle UI) read one source.
+     */
+    val keyboardSettings: KeyboardSettingsStore = KeyboardSettingsStore(appContext)
 
     /**
      * UC-28 — process-scoped optimistic-terminating set, shared by the

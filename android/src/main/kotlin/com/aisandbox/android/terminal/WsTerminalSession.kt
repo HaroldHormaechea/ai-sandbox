@@ -76,6 +76,17 @@ class WsTerminalSession(
         session.appendToEmulator(bytes, bytes.size)
     }
 
+    /**
+     * UC-36 — flush any pending IME composing word on the bound view to the PTY.
+     * Used before out-of-band input (the ModifierBar's control bytes) so a
+     * half-composed word is committed + echoed in order (AC#5). No-op when no
+     * view is bound or nothing is composing. Main-thread only (the caller — the
+     * Compose dispatch path — already runs there).
+     */
+    fun flushComposingText() {
+        view?.flushComposingText()
+    }
+
     /** Tear down the session (no local process — just stops accepting input). */
     fun shutdown() {
         view = null
