@@ -287,6 +287,26 @@ public class TmuxBridgeService {
      * SETTLED values after the debounce. The {@code flock} uses an FD-redirect
      * subshell ({@code ( … ) 9>lock}) rather than a nested {@code sh -c} so the
      * body needs no inner shell quoting that would collide with the tmux quotes.
+     *
+     * <p><b>No-view-mode requirement (UC-33 leak fix — must-detach + must-redirect):</b>
+     * the subshell MUST be both backgrounded and have its stdout+stderr redirected
+     * to {@code /dev/null} — the shipped tail is {@code ( … ) >/dev/null 2>&1 9>lock
+     * &}. {@code run-shell -b} runs the body as a foreground command and, on tmux
+     * 3.3a, if that command produces ANY captured output/activity (which the
+     * synchronous {@code flock}/{@code sleep 0.2}/zoom subshell did), tmux flips the
+     * hook's pane into {@code view-mode} — a copy/scrollback overlay that renders the
+     * captured command text on top of the live session, leaking it to every attached
+     * client (Android bridge OR direct {@code tmux attach}, which share the
+     * session/pane). With the trailing {@code &}, {@code run-shell -b} sees a command
+     * that only backgrounds the subshell and returns instantly with no output, so
+     * tmux never opens view-mode; the {@code >/dev/null 2>&1} additionally swallows
+     * any stray output from the detached subshell. The redirect order is significant:
+     * {@code >/dev/null 2>&1} and the {@code 9>}-lock FD apply to the subshell as a
+     * whole, and the {@code &} backgrounds that whole {@code ( … ) >… 9>lock}
+     * construct. The inner {@code $(…)} captures ride their own pipes and are
+     * unaffected by the outer redirect, so the zoom logic still reads settled values.
+     * Do NOT reintroduce a synchronous (non-{@code &}) or un-redirected tail — that
+     * is exactly what leaked the command on attach.
      */
     static String buildLayoutChangedHookCommand(String socket, String session, String mainPaneId) {
         String tmux = (socket != null && !socket.isBlank()) ? "tmux -S " + socket : "tmux";
@@ -300,13 +320,13 @@ public class TmuxBridgeService {
                     + "set -- $(" + tmux + " display-message -p -t " + pane
                     + " '##{window_panes} ##{window_zoomed_flag}'); "
                     + "[ $1 -gt 1 ] && [ $2 = 0 ] && " + tmux + " resize-pane -Z -t " + pane
-                    + " ) 9>" + lock;
+                    + " ) >/dev/null 2>&1 9>" + lock + " &";
         } else {
             body = "( flock -n 9 || exit 0; sleep 0.2; "
                     + "set -- $(" + tmux + " display-message -p -t " + session
                     + " '##{window_panes} ##{window_zoomed_flag}'); "
                     + "[ $1 -gt 1 ] && [ $2 = 0 ] && " + tmux + " resize-pane -Z -t " + session
-                    + " ) 9>" + lock;
+                    + " ) >/dev/null 2>&1 9>" + lock + " &";
         }
         return "run-shell -b \"" + body + "\"";
     }

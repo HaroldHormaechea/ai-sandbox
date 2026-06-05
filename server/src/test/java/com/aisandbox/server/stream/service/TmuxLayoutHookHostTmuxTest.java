@@ -287,7 +287,106 @@ class TmuxLayoutHookHostTmuxTest {
         }
     }
 
+    // ── (5) the leak fix: the hook never flips a pane into view-mode ─────────
+
+    @Test
+    @DisplayName(
+            "the shipped hook re-zooms a split storm WITHOUT ever flipping a pane into view-mode (no leaked command on attach)")
+    void splitStorm_neverEntersViewMode_whileStillConvergingToZoomedMain() throws Exception {
+        // THE REGRESSION GATE for the leaked-attach-command fix. With the pre-fix
+        // SYNCHRONOUS / un-redirected run-shell body, tmux 3.3a flips the hook's
+        // pane into view-mode — a copy/scrollback overlay that renders the hook's
+        // own `( flock -n 9 …` command text on top of the live claude session,
+        // visible to every attached client (Android bridge OR direct `tmux
+        // attach`). The shipped detached + output-redirected tail
+        // `( … ) >/dev/null 2>&1 9>lock &` makes that impossible. `#{pane_in_mode}`
+        // flips EXACTLY with the bug, so it is a clean deterministic discriminator
+        // (verified live on this tmux 3.3a build): this test FAILS on the old hook
+        // body and PASSES on the shipped one, while the re-zoom (UC-33) invariants
+        // below must still hold.
+        newSession(300, 80);
+        String main = activePane();
+        installHook(main); // the SHIPPED production hook (default-socket, pinned main)
+
+        // STORM — many consecutive foreign splits with ZERO inter-split settle, so
+        // the hook fires repeatedly and (pre-fix) would open view-mode on a fire.
+        for (int i = 0; i < 14; i++) {
+            tmux("split-window", "-d", "-t", session); // best-effort, no settle, no assert
+            assertThat(anyPaneInMode())
+                    .as("mid-storm split %d — no pane may flip into view-mode (no leaked command)", i)
+                    .isFalse();
+        }
+
+        // The fix must NOT regress the re-zoom: still converge to pinned+zoomed
+        // main with the detached/redirected hook tail.
+        assertThat(awaitConverged(main, CONVERGE_MS))
+                .as("converges to pinned+zoomed main even with the detached/redirected hook tail")
+                .isTrue();
+
+        // At idle — across several debounce intervals — NO pane is ever in
+        // view-mode (the old hook leaves the pane stuck in the mode; the new one
+        // never opens it, and the hook's own resize-pane -Z re-fire stays silent),
+        // WHILE the window stays zoomed and pinned.
+        for (int i = 0; i < 8; i++) {
+            Thread.sleep(130);
+            assertThat(anyPaneInMode())
+                    .as("idle sample %d — still no pane in view-mode (command never leaks)", i)
+                    .isFalse();
+            assertThat(flag(session, "#{window_zoomed_flag}"))
+                    .as("idle sample %d — still zoomed", i)
+                    .isEqualTo("1");
+            assertThat(activePane())
+                    .as("idle sample %d — still pinned to main", i)
+                    .isEqualTo(main);
+        }
+    }
+
+    @Test
+    @DisplayName("agent/swarm hook also re-zooms a storm without ever opening view-mode")
+    void agentHook_splitStorm_neverEntersViewMode() throws Exception {
+        // The leak is branch-independent — the agent/swarm body shares the same
+        // detached/redirected tail. Drive the NON-PINNED shipped hook and assert
+        // the same no-view-mode invariant while it re-zooms.
+        newSession(240, 60);
+        installHook(null); // agent/swarm target — active-zoom, not pinned
+
+        for (int i = 0; i < 12; i++) {
+            tmux("split-window", "-d", "-t", session);
+            assertThat(anyPaneInMode())
+                    .as("agent hook mid-storm split %d — no pane in view-mode", i)
+                    .isFalse();
+        }
+
+        assertThat(awaitZoomed(CONVERGE_MS))
+                .as("agent hook re-asserts the zoom with the detached/redirected tail")
+                .isTrue();
+        for (int i = 0; i < 6; i++) {
+            Thread.sleep(130);
+            assertThat(anyPaneInMode())
+                    .as("agent hook idle sample %d — no pane in view-mode", i)
+                    .isFalse();
+        }
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────
+
+    /**
+     * True if ANY pane in the session's current window is in a mode (notably
+     * view-mode / copy-mode). The leak surfaces as a pane stuck in view-mode, so
+     * this scans every pane rather than only the active one.
+     */
+    private boolean anyPaneInMode() throws IOException {
+        ProcessExecutor.Result r = tmux("list-panes", "-t", session, "-F", "#{pane_in_mode}");
+        if (r.exitCode() != 0) {
+            return false;
+        }
+        for (String line : r.stdout().split("\\R")) {
+            if ("1".equals(line.trim())) {
+                return true;
+            }
+        }
+        return false;
+    }
 
     private void newSession(int width, int height) throws IOException {
         tmuxOk("new-session", "-d", "-s", session, "-x", Integer.toString(width), "-y", Integer.toString(height));

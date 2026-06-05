@@ -419,6 +419,48 @@ class TmuxBridgeSessionSetupTest {
         new TmuxBridgeService(exec).prepareClientSession(PROJECT, SOCKET, SESSION, swarmPane());
     }
 
+    // ── leak fix — the shipped hook body is DETACHED + output-REDIRECTED ──────
+
+    @Test
+    void hookBody_mainBranch_endsWithDetachedRedirectedLockTail() {
+        // THE FIX (leaked-attach-command): the re-zoom subshell MUST be both
+        // backgrounded (trailing `&`) and have its stdout+stderr sent to
+        // /dev/null while keeping the 9>-lock FD — the shipped tail is
+        // `( … ) >/dev/null 2>&1 9>/tmp/pin-<session>.lock &`. Without it, tmux
+        // 3.3a flips the hook's pane into view-mode and renders the hook's own
+        // `( flock -n 9 …` command text over the live claude session, leaking it
+        // on every attach (Android bridge OR direct `tmux attach`). MAIN branch
+        // (mainPaneId pinned, default socket → bare in-container tmux).
+        String hook = TmuxBridgeService.buildLayoutChangedHookCommand(null, SESSION, "%4");
+
+        assertThat(hook)
+                .as("MAIN hook is a backgrounded run-shell with the leak-proof redirected/locked tail")
+                .startsWith("run-shell -b \"(")
+                .endsWith(") >/dev/null 2>&1 9>/tmp/pin-" + SESSION + ".lock &\"");
+        // Must be detached: the WHOLE subshell is backgrounded (no synchronous,
+        // un-redirected tail can be reintroduced).
+        assertThat(hook).contains(" >/dev/null 2>&1 9>").endsWith("&\"");
+        // The pin + guarded zoom still ride INSIDE the (now detached) subshell.
+        assertThat(hook).contains("select-pane -t %4").contains("resize-pane -Z -t %4");
+    }
+
+    @Test
+    void hookBody_agentBranch_endsWithDetachedRedirectedLockTail() {
+        // Agent/swarm branch (mainPaneId == null, swarm socket): same leak-proof
+        // tail. The body carries the socket-qualified `tmux -S <socket>` and
+        // re-zooms the active per-client session pane (deliberately NO pane pin —
+        // no focus-war with the operator's chosen teammate).
+        String hook = TmuxBridgeService.buildLayoutChangedHookCommand(SOCKET, SESSION, null);
+
+        assertThat(hook)
+                .as("agent hook is a backgrounded run-shell with the leak-proof redirected/locked tail")
+                .startsWith("run-shell -b \"(")
+                .endsWith(") >/dev/null 2>&1 9>/tmp/pin-" + SESSION + ".lock &\"");
+        assertThat(hook).contains("tmux -S " + SOCKET);
+        assertThat(hook).doesNotContain("select-pane");
+        assertThat(hook).contains("resize-pane -Z -t " + SESSION);
+    }
+
     // ── shared assertion ─────────────────────────────────────────────────────
 
     /** Assert a {@code set-option -t <session> status off} was issued, scoped to the per-client session. */
