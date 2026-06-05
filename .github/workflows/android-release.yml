@@ -144,35 +144,14 @@ jobs:
             ${{ steps.artifacts.outputs.apk }}
             ${{ steps.artifacts.outputs.aab }}
           fail_on_unmatched_files: true
-          # UC13 AC10 — prepend release-notes body with the BC integration
-          # callout; `generate_release_notes: true` appends the auto-generated
-          # commit / PR list after this body. The text below records (a) the
-          # new Android-side BC dependency, (b) the unchanged server crypto,
-          # and (c) the explicit reasoning for the asymmetric fix.
+          # Release notes: GitHub auto-generates the commit/PR changelog here as a
+          # baseline. Do NOT hardcode a static `body:` — a fixed blurb gets copied
+          # onto every release and goes stale (it kept advertising the one-time
+          # UC-13 BouncyCastle change on releases that didn't touch crypto).
+          # Curated per-release "New features" / "Bugfixes" notes are written
+          # post-publish by the project-builder `generate-release` skill, which
+          # derives them from the actual diff since the previous android-v* tag.
           generate_release_notes: true
-          body: |
-            ## Crypto provider change (UC13)
-
-            This release adds **BouncyCastle (`bcprov-jdk18on:1.79`)** as a
-            new Android-side dependency. It is registered at process start
-            under the distinct provider name `BC-ai-sandbox-client` (so the
-            Android-stock `"BC"` provider remains untouched) and is used
-            exclusively for the PKCS#12 enrollment-cert import unwrap.
-            TLS continues through Conscrypt for hardware-accelerated
-            AES/AEAD — BC is **not** in the TLS path.
-
-            **Server crypto is unchanged.** The server's
-            `KeyStore.getInstance("PKCS12")` emission stays on modern
-            PBES2 (PBKDF2-HMAC-SHA256 + AES-256, the JDK 21 default since
-            Java 14+).
-
-            Why the asymmetric fix: server stays on modern PBKDF2-AES;
-            Android gets the real BC because Conscrypt's stock provider
-            doesn't recognize the bare PBKDF2 OID `1.2.840.113549.1.5.12`
-            during private-key unwrap. The alternative — regressing the
-            server to legacy PKCS#12 v1 (SHA1+3DES) — was rejected on
-            crypto-strength grounds (3DES is FIPS-deprecated and SHA1's
-            collision posture is well-known).
 
       - name: Wipe keystore from tmpfs
         # Defence in depth — runners are ephemeral, but explicit cleanup
