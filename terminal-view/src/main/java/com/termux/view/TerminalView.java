@@ -57,6 +57,17 @@ public final class TerminalView extends View {
 
     public TerminalViewClient mClient;
 
+    /**
+     * UC-36 (ai-sandbox divergence from upstream Termux): the live
+     * {@link InputConnection} created by {@link #onCreateInputConnection}, retained
+     * so out-of-band input sites (the on-screen ModifierBar, hardware key events)
+     * can flush a pending IME composing region to the PTY before they send a
+     * control byte. Upstream Termux never keeps a reference because it runs
+     * char-based input only; conversational mode needs it. Touched on the main
+     * (UI) thread only.
+     */
+    private InputConnection mInputConnection;
+
     private TextSelectionCursorController mTextSelectionCursorController;
 
     private Handler mTerminalCursorBlinkerHandler;
@@ -310,25 +321,15 @@ public final class TerminalView extends View {
         // initially started with the alternate view or if activity is returned to from another app
         // and the alternate view was the one selected the last time.
         if (mClient.isTerminalViewSelected()) {
-            if (mClient.shouldEnforceCharBasedInput()) {
-                // Some keyboards seems do not reset the internal state on TYPE_NULL.
-                // Affects mostly Samsung stock keyboards.
-                // https://github.com/termux/termux-app/issues/686
-                // However, this is not a valid value as per AOSP since `InputType.TYPE_CLASS_*` is
-                // not set and it logs a warning:
-                // W/InputAttributes: Unexpected input class: inputType=0x00080090 imeOptions=0x02000000
-                // https://cs.android.com/android/platform/superproject/+/android-11.0.0_r40:packages/inputmethods/LatinIME/java/src/com/android/inputmethod/latin/InputAttributes.java;l=79
-                outAttrs.inputType = InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS;
-            } else {
-                // Using InputType.NULL is the most correct input type and avoids issues with other hacks.
-                //
-                // Previous keyboard issues:
-                // https://github.com/termux/termux-packages/issues/25
-                // https://github.com/termux/termux-app/issues/87.
-                // https://github.com/termux/termux-app/issues/126.
-                // https://github.com/termux/termux-app/issues/137 (japanese chars and TYPE_NULL).
-                outAttrs.inputType = InputType.TYPE_NULL;
-            }
+            // UC-36 (ai-sandbox divergence): the inputType is delegated to
+            // computeInputType() so the same policy is unit-testable in isolation.
+            // shouldEnforceCharBasedInput()==true reproduces upstream Termux's
+            // char-based / no-suggestions behaviour (raw mode); ==false selects the
+            // new conversational mode (word prediction + suggestions on). Upstream
+            // used InputType.TYPE_NULL for the non-char path, which made most IMEs
+            // fall back to dumb key events with no composing/suggestions — that is
+            // exactly what UC-36 replaces.
+            outAttrs.inputType = computeInputType(mClient.shouldEnforceCharBasedInput());
         } else {
             // Corresponds to android:inputType="text"
             outAttrs.inputType =  InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_NORMAL;
@@ -338,12 +339,23 @@ public final class TerminalView extends View {
         // keyboard on Android TV (see https://github.com/termux/termux-app/issues/221).
         outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN;
 
-        return new BaseInputConnection(this, true) {
+        // UC-36 (ai-sandbox divergence): retain the InputConnection so out-of-band
+        // input sites can flush a pending composing region before sending control
+        // bytes — see mInputConnection / flushComposingText().
+        mInputConnection = new BaseInputConnection(this, true) {
 
             @Override
             public boolean finishComposingText() {
                 if (TERMINAL_VIEW_KEY_LOGGING_ENABLED) mClient.logInfo(LOG_TAG, "IME: finishComposingText()");
                 super.finishComposingText();
+
+                // UC-36: when detached (no emulator) drop the buffer instead of
+                // retaining it — symmetric with commitText below. Never merge a
+                // stale word into the next session's first commit.
+                if (mEmulator == null) {
+                    getEditable().clear();
+                    return true;
+                }
 
                 sendTextToTerminal(getEditable());
                 getEditable().clear();
@@ -357,12 +369,29 @@ public final class TerminalView extends View {
                 }
                 super.commitText(text, newCursorPosition);
 
-                if (mEmulator == null) return true;
+                // UC-36: when detached (no emulator) CLEAR and DROP the editable —
+                // do not retain it for a later merge. Symmetric with
+                // finishComposingText().
+                if (mEmulator == null) {
+                    getEditable().clear();
+                    return true;
+                }
 
                 Editable content = getEditable();
                 sendTextToTerminal(content);
                 content.clear();
                 return true;
+            }
+
+            @Override
+            public boolean sendKeyEvent(KeyEvent event) {
+                // UC-36: a raw key event (e.g. Enter from the IME, or any key the
+                // keyboard chooses to deliver as an event rather than commitText)
+                // is out-of-band relative to a pending composing word. Flush the
+                // composing region to the PTY first so the word is committed and
+                // echoed before the control key's byte, preserving order (AC#2/#5).
+                flushComposingText();
+                return super.sendKeyEvent(event);
             }
 
             @Override
@@ -433,6 +462,58 @@ public final class TerminalView extends View {
             }
 
         };
+        return mInputConnection;
+    }
+
+    /**
+     * UC-36 (ai-sandbox divergence): compute the IME {@code inputType} for the
+     * terminal view. Extracted as a pure static helper so the policy is unit
+     * testable without instantiating a {@link TerminalView}.
+     *
+     * @param charBased the value of {@link TerminalViewClient#shouldEnforceCharBasedInput()}.
+     * @return the {@code InputType} bitmask to assign to {@code EditorInfo.inputType}.
+     */
+    static int computeInputType(boolean charBased) {
+        if (charBased) {
+            // Raw/char mode — reproduces upstream Termux's historical default:
+            // suppress suggestions and autocorrect so every keystroke maps to a
+            // raw byte. VISIBLE_PASSWORD is the AOSP-blessed way to disable
+            // suggestions without TYPE_NULL's quirks.
+            return InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS;
+        }
+        // Conversational mode (UC-36 default) — a normal text field so the IME
+        // shows word prediction + the suggestion strip + autocompletion.
+        //
+        // Deliberately OMITTED bits, and why:
+        //  - TYPE_TEXT_FLAG_AUTO_CORRECT: left OFF so the IME cannot silently
+        //    rewrite a CLI token (e.g. `grep` → `Greg`). Predictions/corrections
+        //    remain available as tap-to-insert suggestions, never auto-applied
+        //    (AC#4 — "not drop commands" includes "not corrupt commands").
+        //  - TYPE_TEXT_FLAG_CAP_* : left OFF so the first letter of a line is not
+        //    auto-capitalised into a different command.
+        //  - NO_SUGGESTIONS is NOT set, so prediction/suggestions stay ON (AC#1).
+        return InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_NORMAL;
+    }
+
+    /**
+     * UC-36 (ai-sandbox divergence): flush any pending IME composing region to the
+     * PTY immediately. A no-op when there is no composing text (the editable is
+     * empty) or the InputConnection has not been created yet. Must be called on
+     * the main (UI) thread — every call site (the IME's own callbacks,
+     * {@link #onKeyDown}, and the Compose ModifierBar dispatch) already runs there.
+     *
+     * <p>This exists because the terminal is REMOTE: {@link TerminalView} renders
+     * only the server-echoed emulator buffer, never the IME editable. While a word
+     * is being composed locally it has NOT yet reached the PTY; any out-of-band
+     * input (a control byte from the ModifierBar, a raw key event) must commit that
+     * word first so the byte stream stays ordered. {@code finishComposingText()}
+     * routes through the retained connection's override, which forwards the
+     * editable to the PTY and clears it.
+     */
+    public void flushComposingText() {
+        if (mInputConnection != null) {
+            mInputConnection.finishComposingText();
+        }
     }
 
     @Override
@@ -773,6 +854,13 @@ public final class TerminalView extends View {
         if (isSelectingText()) {
             stopTextSelectionMode();
         }
+
+        // UC-36 (ai-sandbox divergence): a hardware/virtual key event is
+        // out-of-band relative to a word still being composed in the IME. Flush
+        // it to the PTY first so the composed word is committed and echoed before
+        // this key's byte(s), keeping the byte stream ordered (AC#2/#5). No-op
+        // when nothing is composing.
+        flushComposingText();
 
         if (mClient.onKeyDown(keyCode, event, mTermSession)) {
             invalidate();
