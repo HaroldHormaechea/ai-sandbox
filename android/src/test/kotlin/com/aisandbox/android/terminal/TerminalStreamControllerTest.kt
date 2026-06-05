@@ -9,7 +9,11 @@ import java.util.concurrent.atomic.AtomicInteger
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
+import org.mockito.ArgumentMatchers.anyInt
+import org.mockito.ArgumentMatchers.anyString
 import org.mockito.Mockito.mock
+import org.mockito.Mockito.never
+import org.mockito.Mockito.times
 import org.mockito.Mockito.verify
 
 /**
@@ -270,6 +274,155 @@ class TerminalStreamControllerTest {
         verify(client).close("user-disconnect")
         assertThat(controller.state.value).isEqualTo(TerminalState.Idle)
         assertThat(closedSessions).containsExactly(7)
+    }
+
+    // ── UC-33 — client re-assert backstop on mid-stream target-set change ─────
+    //
+    // When `enumerate` reports the target/pane id-SET changed mid-stream (a
+    // subagent spawned / despawned while attached), the controller re-asserts the
+    // CURRENTLY-selected target on the existing client (sendSelectTarget(current)
+    // + sendResize) so the server re-bridges → re-zooms and the transient split
+    // collapses without waiting for the operator to tap a tile. The very first
+    // `targets` frame (empty prior) is suppressed; an UNCHANGED set is suppressed;
+    // it fires even when the selection is `main` (the mid-stream-split main case).
+
+    @Test
+    fun `set grows mid-stream re-asserts the selected target (main) on the live client`() {
+        val client = mock(StreamClient::class.java)
+        setStreamClient(client)
+
+        // First frame — empty prior, no re-assert (the initial bridge already zoomed).
+        onControlFrame(
+            """{"type":"targets","targets":[
+                 {"id":"main","kind":"main","title":"main"},
+                 {"id":"swarm:main:0.1","kind":"swarm","agentName":"alice"}
+               ],"selectedId":"main"}""",
+        )
+        verify(client, never()).sendSelectTarget(anyString())
+
+        // A teammate pane spawned mid-stream → the id-set grew → re-assert `main`.
+        onControlFrame(
+            """{"type":"targets","targets":[
+                 {"id":"main","kind":"main","title":"main"},
+                 {"id":"swarm:main:0.1","kind":"swarm","agentName":"alice"},
+                 {"id":"swarm:main:0.2","kind":"swarm","agentName":"bob"}
+               ],"selectedId":"main"}""",
+        )
+        // Re-asserts the still-selected main target exactly once, plus geometry
+        // (defaults 80x24 until a resize arrives) — fires even on `main`.
+        verify(client, times(1)).sendSelectTarget("main")
+        verify(client).sendResize(80, 24)
+        assertThat(controller.selectedTargetId.value).isEqualTo("main")
+    }
+
+    @Test
+    fun `set shrinks mid-stream re-asserts the selected target`() {
+        val client = mock(StreamClient::class.java)
+        setStreamClient(client)
+
+        onControlFrame(
+            """{"type":"targets","targets":[
+                 {"id":"main","kind":"main","title":"main"},
+                 {"id":"swarm:main:0.1","kind":"swarm","agentName":"alice"},
+                 {"id":"swarm:main:0.2","kind":"swarm","agentName":"bob"}
+               ],"selectedId":"main"}""",
+        )
+        verify(client, never()).sendSelectTarget(anyString())
+
+        // bob despawned → the id-set shrank → still a mid-stream change → re-assert.
+        onControlFrame(
+            """{"type":"targets","targets":[
+                 {"id":"main","kind":"main","title":"main"},
+                 {"id":"swarm:main:0.1","kind":"swarm","agentName":"alice"}
+               ],"selectedId":"main"}""",
+        )
+        verify(client, times(1)).sendSelectTarget("main")
+        verify(client).sendResize(80, 24)
+    }
+
+    @Test
+    fun `an unchanged target set does not re-assert (no redundant select per enumerate)`() {
+        val client = mock(StreamClient::class.java)
+        setStreamClient(client)
+
+        val frame =
+            """{"type":"targets","targets":[
+                 {"id":"main","kind":"main","title":"main"},
+                 {"id":"swarm:main:0.1","kind":"swarm","agentName":"alice"}
+               ],"selectedId":"main"}"""
+        onControlFrame(frame) // initial
+        onControlFrame(frame) // same id-set on the next enumerate
+
+        // No re-assert on either frame — avoids re-zooming (and risking a toggle)
+        // every 3s when nothing changed (the pitfall the diff guards against).
+        verify(client, never()).sendSelectTarget(anyString())
+        verify(client, never()).sendResize(anyInt(), anyInt())
+    }
+
+    @Test
+    fun `the first targets frame after connect never re-asserts`() {
+        val client = mock(StreamClient::class.java)
+        setStreamClient(client)
+
+        onControlFrame(
+            """{"type":"targets","targets":[
+                 {"id":"main","kind":"main","title":"main"},
+                 {"id":"swarm:main:0.1","kind":"swarm","agentName":"alice"}
+               ],"selectedId":"main"}""",
+        )
+
+        // Empty prior set → suppressed; the initial bridge already zoomed server-side.
+        verify(client, never()).sendSelectTarget(anyString())
+        verify(client, never()).sendResize(anyInt(), anyInt())
+    }
+
+    @Test
+    fun `a mid-stream change with no live client does not crash`() {
+        // streamClient stays null (never connected / dropped). The re-assert must
+        // be a safe no-op rather than NPE.
+        onControlFrame(
+            """{"type":"targets","targets":[
+                 {"id":"main","kind":"main","title":"main"},
+                 {"id":"swarm:main:0.1","kind":"swarm","agentName":"alice"}
+               ],"selectedId":"main"}""",
+        )
+        onControlFrame(
+            """{"type":"targets","targets":[
+                 {"id":"main","kind":"main","title":"main"},
+                 {"id":"swarm:main:0.1","kind":"swarm","agentName":"alice"},
+                 {"id":"swarm:main:0.2","kind":"swarm","agentName":"bob"}
+               ],"selectedId":"main"}""",
+        )
+        // No exception thrown; the switcher row still tracked the change.
+        assertThat(controller.targets.value.map { it.id })
+            .containsExactly("main", "swarm:main:0.1", "swarm:main:0.2")
+    }
+
+    @Test
+    fun `a non-main selection is re-asserted with its own id on a mid-stream change`() {
+        val client = mock(StreamClient::class.java)
+        setStreamClient(client)
+
+        // Operator is parked on a teammate; first frame is the initial (no re-assert).
+        onControlFrame(
+            """{"type":"targets","targets":[
+                 {"id":"main","kind":"main","title":"main"},
+                 {"id":"swarm:s:0.1","kind":"swarm","agentName":"alice"}
+               ],"selectedId":"swarm:s:0.1"}""",
+        )
+        assertThat(controller.selectedTargetId.value).isEqualTo("swarm:s:0.1")
+        verify(client, never()).sendSelectTarget(anyString())
+
+        // Another teammate spawns → re-assert the CURRENT (non-main) selection.
+        onControlFrame(
+            """{"type":"targets","targets":[
+                 {"id":"main","kind":"main","title":"main"},
+                 {"id":"swarm:s:0.1","kind":"swarm","agentName":"alice"},
+                 {"id":"swarm:s:0.2","kind":"swarm","agentName":"bob"}
+               ],"selectedId":"swarm:s:0.1"}""",
+        )
+        verify(client, times(1)).sendSelectTarget("swarm:s:0.1")
+        verify(client, never()).sendSelectTarget("main")
     }
 
     // ── reflection seams ─────────────────────────────────────────────────────

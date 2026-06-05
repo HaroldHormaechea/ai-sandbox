@@ -81,6 +81,39 @@ class TmuxBridgeSessionSetupTest {
         return rec;
     }
 
+    /**
+     * UC-33 recorder for the MAIN target, which issues TWO {@code display-message}
+     * calls: first {@code #{pane_id}} (to capture the pinned {@code mainPaneId}),
+     * then the {@code #{window_panes} #{window_zoomed_flag}} zoom query. The reply
+     * is selected by the format (the last argv element) so each read returns its
+     * own stub — the single-stdout {@link #recorder} cannot model this.
+     *
+     * @param paneId    stdout for the {@code #{pane_id}} read (the captured mainPaneId)
+     * @param zoomState stdout for the zoom query (e.g. {@code "2 0"})
+     */
+    private static Recorder recorderMain(String paneId, String zoomState) throws IOException {
+        Recorder rec = new Recorder();
+        when(rec.exec.run(any(), any(), any())).thenAnswer(inv -> {
+            List<String> argv = inv.getArgument(0);
+            rec.calls.add(argv);
+            if (argv.contains("display-message")) {
+                String format = argv.get(argv.size() - 1);
+                String out = "#{pane_id}".equals(format) ? paneId : zoomState;
+                return new ProcessExecutor.Result(0, out, "");
+            }
+            return new ProcessExecutor.Result(0, "", "");
+        });
+        return rec;
+    }
+
+    /** The first recorded call whose tmux verb is {@code set-hook}, or null. */
+    private static List<String> firstSetHook(List<List<String>> calls) {
+        return calls.stream()
+                .filter(c -> "set-hook".equals(tmuxArgs(c).get(0)))
+                .findFirst()
+                .orElse(null);
+    }
+
     // ── argv helpers ────────────────────────────────────────────────────────
 
     /** The tmux args (everything after {@code tmux}), with an optional {@code -S <socket>} pair stripped. */
@@ -123,50 +156,93 @@ class TmuxBridgeSessionSetupTest {
     // ── (v) main target — UC-24 generalized zoom (multi-pane main IS zoomed) ──
 
     @Test
-    void mainTarget_multiPaneWindow_isZoomed_withoutAnyPaneSelect() throws Exception {
+    void mainTarget_multiPaneWindow_pinsMainPaneId_thenGuardedZoom_andInstallsHook() throws Exception {
         // UC-24 root cause: when the default-socket main window has >1 pane, the
         // pre-fix code skipped the zoom (no pane named) so the per-client attach
         // painted the unzoomed split — the "all windows shown" the user reported.
-        // The fix generalizes the needed-only zoom to EVERY target, main included.
-        // window_panes=2, window_zoomed_flag=0 → zoom needed.
-        Recorder rec = recorder("2 0\n", 0);
+        // UC-33 additionally PINS the origin pane: the main bridge captures the
+        // stable #{pane_id} (mainPaneId), select-pane's it, then guard-zooms THAT
+        // exact pane (never whichever teammate pane became active), and installs
+        // the window-layout-changed hook so a mid-stream split re-pins immediately.
+        // pane_id="%4"; window_panes=2, window_zoomed_flag=0 → zoom needed.
+        Recorder rec = recorderMain("%4\n", "2 0\n");
 
         new TmuxBridgeService(rec.exec).prepareClientSession(PROJECT, null, SESSION, BridgeTarget.main());
 
-        // create → mouse on → status off → zoom query → zoom. No pane select:
-        // main carries no window/pane, so the generalized zoom targets the
-        // per-client session's active window directly.
+        // create → mouse on → status off → capture pane_id → select that pane →
+        // zoom query → zoom the pinned pane → install hook. No select-WINDOW (main
+        // carries no window coordinate).
         assertThat(opSequence(rec.calls))
                 .containsExactly(
-                        "new-session", "set-option:mouse", "set-option:status", "display-message", "resize-pane");
-        assertThat(opSequence(rec.calls)).doesNotContain("select-window", "select-pane");
+                        "new-session",
+                        "set-option:mouse",
+                        "set-option:status",
+                        "display-message",
+                        "select-pane",
+                        "display-message",
+                        "resize-pane",
+                        "set-hook");
+        assertThat(opSequence(rec.calls)).doesNotContain("select-window");
 
         // No socket flag for the default-socket main session.
         assertThat(firstCall(rec.calls, "new-session")).doesNotContain("-S");
 
-        // The zoom query + the zoom both target the PER-CLIENT session itself
-        // (zoomSpec == session for an un-paned main target) — never a base session,
-        // so the orchestrator's own view of the main window is not force-zoomed.
+        // The pin: select-pane + the zoom both target the captured mainPaneId (%4),
+        // not the per-client session's volatile active pane.
+        assertThat(firstCall(rec.calls, "select-pane")).containsSequence("-t", "%4");
+        assertThat(firstCall(rec.calls, "resize-pane")).containsSequence("-Z", "-t", "%4");
+        // The zoom query reads window state off the pinned pane.
         assertThat(firstCall(rec.calls, "display-message"))
-                .containsSequence("-p", "-t", SESSION, "#{window_panes} #{window_zoomed_flag}");
-        assertThat(firstCall(rec.calls, "resize-pane")).containsSequence("-Z", "-t", SESSION);
+                .as("first display-message captures the stable pane id")
+                .containsSequence("-p", "-t", SESSION, "#{pane_id}");
+
+        // UC-33 — the window-layout-changed hook is installed for the MAIN target,
+        // scoped to the per-client session, and is exactly the SHIPPED production
+        // string (mainPaneId pinned, default socket → bare in-container tmux).
+        List<String> setHook = firstSetHook(rec.calls);
+        assertThat(setHook).isNotNull();
+        assertThat(tmuxArgs(setHook))
+                .containsExactly(
+                        "set-hook",
+                        "-t",
+                        SESSION,
+                        "window-layout-changed",
+                        TmuxBridgeService.buildLayoutChangedHookCommand(null, SESSION, "%4"));
 
         // status off is still scoped to the per-client session (UC-24 AC#1: chrome hidden).
         assertStatusOffScopedToSession(rec.calls);
     }
 
     @Test
-    void mainTarget_singlePaneWindow_isNotZoomed() throws Exception {
-        // A genuine single-pane main window (the no-team case) must stay a strict
-        // no-op — the >1-pane guard prevents a needless zoom toggle (UC-21 AC#1).
-        // window_panes=1 → nothing to zoom.
-        Recorder rec = recorder("1 0\n", 0);
+    void mainTarget_singlePaneWindow_isNotZoomed_butStillPinsAndInstallsHook() throws Exception {
+        // A genuine single-pane main window (the no-team case) must stay a zoom
+        // no-op — the >1-pane guard prevents a needless toggle (UC-21 AC#1). UC-33
+        // still captures + pins the pane id and installs the hook, so a LATER
+        // mid-stream split is caught (the hook re-checks the guard at fire time).
+        // pane_id="%0"; window_panes=1 → nothing to zoom yet.
+        Recorder rec = recorderMain("%0\n", "1 0\n");
 
         new TmuxBridgeService(rec.exec).prepareClientSession(PROJECT, null, SESSION, BridgeTarget.main());
 
         assertThat(opSequence(rec.calls))
-                .containsExactly("new-session", "set-option:mouse", "set-option:status", "display-message");
-        assertThat(opSequence(rec.calls)).doesNotContain("resize-pane", "select-window", "select-pane");
+                .containsExactly(
+                        "new-session",
+                        "set-option:mouse",
+                        "set-option:status",
+                        "display-message",
+                        "select-pane",
+                        "display-message",
+                        "set-hook");
+        assertThat(opSequence(rec.calls)).doesNotContain("resize-pane", "select-window");
+        // The hook is still installed (it is the standing guard for the split that
+        // has not happened yet), pinned to the captured pane.
+        assertThat(tmuxArgs(firstSetHook(rec.calls)))
+                .containsExactly(
+                        "set-hook",
+                        "-t",
+                        SESSION,
+                        "window-layout-changed",
+                        TmuxBridgeService.buildLayoutChangedHookCommand(null, SESSION, "%0"));
         assertStatusOffScopedToSession(rec.calls);
     }
 
@@ -179,7 +255,7 @@ class TmuxBridgeSessionSetupTest {
 
         new TmuxBridgeService(rec.exec).prepareClientSession(PROJECT, SOCKET, SESSION, swarmPane());
 
-        // The exact argv order the fix promises.
+        // The exact argv order the fix promises (UC-33 appends the hook install).
         assertThat(opSequence(rec.calls))
                 .containsExactly(
                         "new-session",
@@ -188,10 +264,28 @@ class TmuxBridgeSessionSetupTest {
                         "select-window",
                         "select-pane",
                         "display-message",
-                        "resize-pane");
+                        "resize-pane",
+                        "set-hook");
 
         // (i) status off issued for the swarm target too.
         assertStatusOffScopedToSession(rec.calls);
+
+        // UC-33 — for an agent/swarm target the hook is the NON-PINNED active-zoom
+        // variant (mainPaneId == null): it zooms the active pane of the per-client
+        // session and never re-selects a pinned pane (no focus-war with the
+        // operator's chosen teammate). Asserted as the SHIPPED production string,
+        // carrying the swarm socket.
+        assertThat(tmuxArgs(firstSetHook(rec.calls)))
+                .containsExactly(
+                        "set-hook",
+                        "-t",
+                        SESSION,
+                        "window-layout-changed",
+                        TmuxBridgeService.buildLayoutChangedHookCommand(SOCKET, SESSION, null));
+        // The agent hook body does NOT pin a pane (no select-pane in its body).
+        assertThat(tmuxArgs(firstSetHook(rec.calls)).get(4))
+                .as("agent hook is active-zoom only — no pane pin")
+                .doesNotContain("select-pane");
 
         // Socket flag IS present for the swarm socket.
         assertThat(firstCall(rec.calls, "new-session")).containsSequence("-S", SOCKET);
@@ -223,7 +317,10 @@ class TmuxBridgeSessionSetupTest {
                         "set-option:status",
                         "select-window",
                         "select-pane",
-                        "display-message");
+                        "display-message",
+                        "set-hook");
+        // The zoom itself is skipped (already zoomed) but the standing hook is
+        // still installed for the next mid-stream layout change.
         assertThat(opSequence(rec.calls)).doesNotContain("resize-pane");
     }
 
@@ -298,6 +395,27 @@ class TmuxBridgeSessionSetupTest {
         });
 
         // Must not throw — best-effort steps swallow failures.
+        new TmuxBridgeService(exec).prepareClientSession(PROJECT, SOCKET, SESSION, swarmPane());
+    }
+
+    @Test
+    void setHookFailure_isBestEffort_andDoesNotAbortTheBridge() throws Exception {
+        // UC-33 Step 2e — a failed set-hook (older tmux without the hook, a
+        // transient error) must never abort the bridge: the client-side backstop
+        // still self-heals within one enumerate. window_panes=2 → zoom proceeds.
+        ProcessExecutor exec = mock(ProcessExecutor.class);
+        when(exec.run(any(), any(), any())).thenAnswer(inv -> {
+            List<String> argv = inv.getArgument(0);
+            if (argv.contains("set-hook")) {
+                return new ProcessExecutor.Result(1, "", "unknown hook");
+            }
+            if (argv.contains("display-message")) {
+                return new ProcessExecutor.Result(0, "2 0\n", "");
+            }
+            return new ProcessExecutor.Result(0, "", "");
+        });
+
+        // Must not throw — the hook install is best-effort.
         new TmuxBridgeService(exec).prepareClientSession(PROJECT, SOCKET, SESSION, swarmPane());
     }
 

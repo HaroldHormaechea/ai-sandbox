@@ -131,11 +131,34 @@ class TerminalStreamController(
         client.sendResize(_size.value.cols, _size.value.rows)
     }
 
+    /**
+     * UC-33 Part A — client backstop for the mid-stream split. When `enumerate`
+     * reports the target/pane set changed (a teammate appeared/disappeared, i.e.
+     * Claude Code split the window while we were attached), re-assert the
+     * CURRENTLY-selected target on the existing WebSocket. This makes the server
+     * re-bridge → re-focus → re-zoom the selected target, collapsing the
+     * transient split without waiting for the operator to tap a switcher tile.
+     *
+     * Unlike [selectTarget] this does NOT mutate [_selectedTargetId] — it only
+     * re-sends the current selection (and geometry, so the re-bridged PTY matches
+     * the rendered size). It is a no-op when the WebSocket is gone.
+     */
+    private fun reassertSelectedTarget() {
+        val client = streamClient ?: return
+        client.sendSelectTarget(_selectedTargetId.value)
+        client.sendResize(_size.value.cols, _size.value.rows)
+    }
+
     /** Parse a server control frame (targets / target-selected / error). */
     private fun onControlFrame(text: String) {
         val obj = runCatching { controlJson.parseToJsonElement(text) }.getOrNull() as? JsonObject ?: return
         when (obj["type"]?.jsonPrimitive?.contentOrNull) {
             "targets" -> {
+                // UC-33 Part A — snapshot the prior target id-set BEFORE replacing
+                // it, so we can detect a mid-stream pane/target change (subagents
+                // spawned while attached) and re-assert the zoom as a client
+                // backstop to the server's window-layout-changed hook.
+                val priorIds = _targets.value.mapTo(HashSet()) { it.id }
                 val arr = obj["targets"] as? JsonArray ?: JsonArray(emptyList())
                 _targets.value = arr.mapNotNull { e ->
                     val o = e as? JsonObject ?: return@mapNotNull null
@@ -152,6 +175,16 @@ class TerminalStreamController(
                     )
                 }
                 obj["selectedId"]?.jsonPrimitive?.contentOrNull?.let { _selectedTargetId.value = it }
+                // Re-assert the selected target iff the target set actually changed
+                // mid-stream. The empty-prior case (the very first `targets` frame
+                // after connect) is deliberately suppressed — that initial bridge
+                // already zoomed on the server, and re-asserting on every connect
+                // would be redundant. The re-assert fires even when the selection
+                // is `main`, because the mid-stream split is exactly the main case.
+                val newIds = _targets.value.mapTo(HashSet()) { it.id }
+                if (priorIds.isNotEmpty() && newIds != priorIds) {
+                    reassertSelectedTarget()
+                }
             }
             "target-selected" ->
                 obj["targetId"]?.jsonPrimitive?.contentOrNull?.let { _selectedTargetId.value = it }
