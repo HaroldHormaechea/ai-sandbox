@@ -145,6 +145,12 @@ android {
     // Robolectric for those tests.
     testOptions {
         unitTests.isReturnDefaultValues = true
+        // Merge the manifest + resources into the Robolectric unit-test
+        // classpath. Required for Robolectric Compose tests (ActivityScenario
+        // needs androidx.activity.ComponentActivity declared via the merged
+        // ui-test-manifest) and for the FGS service test to see the real
+        // AiSandboxApplication / declared <service>.
+        unitTests.isIncludeAndroidResources = true
     }
 }
 
@@ -282,11 +288,20 @@ dependencies {
     // when useJUnitPlatform() is used; otherwise Gradle Test Executor
     // fails to start with "Failed to load JUnit Platform".
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+    // JUnit Vintage engine — required for the JUnit-4-based Robolectric tests
+    // (e.g. TerminalForegroundServiceTest, ServerIdentityChangedScreenTest) to be
+    // discovered + executed by the JUnit Platform alongside the Jupiter tests.
+    // Robolectric's RobolectricTestRunner is a JUnit-4 @RunWith runner; without
+    // the Vintage engine on the runtime classpath, useJUnitPlatform() silently
+    // skips every such test (they report 0 executed). Version comes from junit-bom.
+    testRuntimeOnly("org.junit.vintage:junit-vintage-engine")
     // Global per-test timeout so a hung test fails the build instead
     // of stalling android-ci until the GH Actions job timeout.
     testImplementation("org.junit.jupiter:junit-jupiter-params")
     testImplementation(libs.robolectric)
     testImplementation(libs.assertj.core)
+    // QA-only — TestLifecycleOwner for the UC-35 FGS start-gating unit test.
+    testImplementation(libs.androidx.lifecycle.runtime.testing)
     // kotlin-reflect is required by tests that introspect sealed-class
     // permittedSubclasses (TerminalBellDetectionTest.HapticEvent_pin).
     testImplementation(kotlin("reflect"))

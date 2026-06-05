@@ -114,6 +114,18 @@ class AppContainer(applicationContext: Context) {
         controllers[sessionN] = controller
         return controller
     }
+
+    /**
+     * UC-34 / UC-35 — return the EXISTING controller for [sessionN], or `null`
+     * if none is currently live. Unlike [terminalController] this neither
+     * creates a controller nor tears down other sessions' streams — it is a
+     * pure lookup. The self-managing [com.aisandbox.android.terminal.service.TerminalForegroundService]
+     * uses it to bind to the session it was started for without resurrecting a
+     * controller that has already been closed (a stale/raced ACTION_START must
+     * self-stop, not relaunch a stream).
+     */
+    @Synchronized
+    fun existingController(sessionN: Int): TerminalStreamController? = controllers[sessionN]
 }
 
 /** Lookup helper for ViewModels / Composables; throws if the Application class is mis-wired. */

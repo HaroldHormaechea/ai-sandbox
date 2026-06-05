@@ -8,7 +8,6 @@ import com.aisandbox.android.net.ApiResult
 import com.aisandbox.android.net.SessionSummary
 import com.aisandbox.android.terminal.StreamTarget
 import com.aisandbox.android.terminal.TerminalStreamController
-import com.aisandbox.android.terminal.service.TerminalForegroundService
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -150,14 +149,17 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
     }
 
     /**
-     * AC#7 — Disconnect: tear down the stream + stop the foreground service.
-     * No confirmation; the screen navigates back immediately after.
+     * AC#7 — Disconnect: tear down the stream. No confirmation; the screen
+     * navigates back immediately after. UC-34 — we no longer stop the foreground
+     * service from here: `controller.close(...)` drives the controller's state to
+     * Idle, and the running service self-stops by observing that transition
+     * (background-legal, vs. the old `startService(ACTION_STOP)` that crashed when
+     * disconnect happened while backgrounded).
      */
     fun disconnect() {
         controller?.close("user-disconnect")
         controller = null
         sessionN = -1
-        stopForegroundService()
     }
 
     /**
@@ -191,10 +193,12 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
                 val api = container.sessionsApi(container.httpClient(profile))
                 val ok = api.delete(n, force) is ApiResult.Success
                 if (ok) {
+                    // UC-34 — close() drives state → Idle and the running FGS
+                    // self-stops by observing it (no UI-issued stopService, which
+                    // crashed when the delete completed while backgrounded).
                     controller?.close("deleted")
                     controller = null
                     sessionN = -1
-                    stopForegroundService()
                 } else {
                     // UC-28 AC8 — failure exits terminating; revert to real status.
                     container.terminatingSessions.clear(n)
@@ -207,10 +211,6 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
                 deleting = false
             }
         }
-    }
-
-    private fun stopForegroundService() {
-        TerminalForegroundService.stop(getApplication<Application>())
     }
 
     // NOTE: onCleared() intentionally does NOT close the controller — the WS

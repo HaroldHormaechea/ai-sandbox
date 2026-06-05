@@ -51,6 +51,9 @@ import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.aisandbox.android.R
 import com.aisandbox.android.net.SessionSummary
@@ -109,29 +112,37 @@ fun TerminalScreen(
     // AC14 — observe haptic events and fire a 150 ms vibrate.
     HapticEventListener(viewModel = viewModel)
 
-    // AC21–AC23 — keep the dataSync foreground service running while the WS is
-    // Open; tear it down on Revoked / GaveUp. The notification's cols × rows now
-    // reflect the real rendered geometry (AC#4) instead of a hard-coded 80×24.
+    // AC21–AC23 / UC-34 / UC-35 — START the dataSync foreground service when the
+    // WS reaches Open, but ONLY from a foreground (STARTED) lifecycle state, so a
+    // background `startForegroundService` (illegal on Android 12+, UC-35) can
+    // never fire. We no longer STOP or UPDATE the service from the UI: the
+    // running service self-manages teardown (it observes controller.state and
+    // self-stops on Idle/GaveUp/Revoked/Failed — UC-34) and metadata (it observes
+    // controller.size and re-posts via NotificationManager.notify). The
+    // repeatOnLifecycle gate means an Open transition that lands while
+    // backgrounded is simply not acted on here; if the stream is still Open when
+    // the user returns to the foreground, this re-collects and (re)asserts the
+    // FGS legally. A re-start of an already-running, same-instance service is a
+    // cheap no-op in the service.
     val profile by container.profileStore.profile.collectAsState(initial = null)
     val size by controller.size.collectAsState()
-    LaunchedEffect(state, profile, size) {
-        when (state) {
-            is TerminalState.Open -> {
-                TerminalForegroundService.start(
-                    context,
-                    TerminalForegroundService.NotificationParams(
-                        sessionN = sessionN,
-                        wssUrl = profile?.serverUrl?.replace("https://", "wss://") ?: "",
-                        cols = size.cols,
-                        rows = size.rows,
-                        idleSec = 0,
-                    ),
-                )
+    val lifecycleOwner = LocalLifecycleOwner.current
+    LaunchedEffect(controller) {
+        lifecycleOwner.lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            controller.state.collect { st ->
+                if (st is TerminalState.Open) {
+                    TerminalForegroundService.start(
+                        context,
+                        TerminalForegroundService.NotificationParams(
+                            sessionN = sessionN,
+                            wssUrl = profile?.serverUrl?.replace("https://", "wss://") ?: "",
+                            cols = size.cols,
+                            rows = size.rows,
+                            idleSec = 0,
+                        ),
+                    )
+                }
             }
-            is TerminalState.Revoked, is TerminalState.GaveUp -> {
-                TerminalForegroundService.stop(context)
-            }
-            else -> { /* keep current notification — reconnect counts as still-attached */ }
         }
     }
     // AC23 — one-time prompt on first reach of Open.
