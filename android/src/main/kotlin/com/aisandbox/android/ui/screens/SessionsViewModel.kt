@@ -50,6 +50,21 @@ class SessionsViewModel(application: Application) : AndroidViewModel(application
         terminatingSessions = container.terminatingSessions,
     )
 
+    /**
+     * UC-32 — owns the foreground-bound live push feed. The controller routes
+     * the server's Snapshot/Delta frames into the coordinator's pure apply
+     * methods, so an inbound frame updates the same single [state] StateFlow the
+     * screen renders (AC1/AC3) without a manual [refresh]. The screen drives
+     * [connectEvents]/[disconnectEvents] by lifecycle (AC6).
+     */
+    private val eventsController = SessionEventsController(
+        profileStore = container.profileStore,
+        httpClientFactory = container::httpClient,
+        eventsClientFactory = { client -> container.sessionEventsClient(client) },
+        onSnapshot = { rows -> coordinator.applySnapshot(rows) },
+        onDelta = { upserts, removed -> coordinator.applyDelta(upserts, removed) },
+    )
+
     init {
         refresh()
     }
@@ -63,6 +78,18 @@ class SessionsViewModel(application: Application) : AndroidViewModel(application
     fun delete(n: Int, force: Boolean) = coordinator.delete(n, force)
 
     fun clearError() = coordinator.clearError()
+
+    /** UC-32 — open the live push feed; driven by the screen on foreground START (AC6). */
+    fun connectEvents() = eventsController.connect()
+
+    /** UC-32 — close the live push feed; driven by the screen on foreground STOP (AC6). */
+    fun disconnectEvents() = eventsController.disconnect()
+
+    override fun onCleared() {
+        // Permanent teardown of the push feed's scope when the ViewModel dies.
+        eventsController.close()
+        super.onCleared()
+    }
 }
 
 /** Read-only state surfaced to the Compose layer. */

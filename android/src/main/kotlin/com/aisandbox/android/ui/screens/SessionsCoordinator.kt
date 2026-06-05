@@ -80,28 +80,13 @@ class SessionsCoordinator(
             when (val r = apiFactory(profile).list()) {
                 is ApiResult.Success -> {
                     // UC-28 — race-safe reconcile of the optimistic-terminating
-                    // set against the fresh server list (per-session ± n; an
-                    // in-flight refresh never spuriously resurrects a pill).
-                    // KEEP an optimistic `n` only while it is still present AND
-                    // the server still reports a non-resolving status
-                    // (running / provisioning / starting — possibly stale, so
-                    // do NOT resurrect). CLEAR it when:
-                    //   • the row is absent  → teardown completed (AC7);
-                    //   • the server reports `terminating` → hand off to the
-                    //     server token (the union still keeps the pill);
-                    //   • the server reports `stopped`     → resolved.
-                    val freshByN = r.value.associateBy { it.n }
-                    val current = terminatingSessions.flow.value
-                    val keep = current.filter { n ->
-                        val row = freshByN[n]
-                        row != null && row.state != "terminating" && row.state != "stopped"
-                    }.toSet()
-                    (current - keep).forEach { terminatingSessions.clear(it) }
+                    // set against the fresh server list (shared with the UC-32
+                    // push-apply paths via reconcileTerminating).
                     state.value = state.value.copy(
                         loading = false,
                         sessions = r.value,
                         profile = profile,
-                        terminating = keep,
+                        terminating = reconcileTerminating(r.value),
                     )
                 }
                 is ApiResult.HttpFailure -> {
@@ -116,6 +101,64 @@ class SessionsCoordinator(
 
     fun selectFilter(filter: SessionsFilter) {
         state.value = state.value.copy(filter = filter)
+    }
+
+    /**
+     * UC-32 — apply an authoritative server [SessionEventMessage.Snapshot] from
+     * the live push feed as a FULL RESYNC of the working set (AC5). Pure: it
+     * mutates only [sessions] + the reconciled [terminating] set and NEVER
+     * touches [loading] — the push channel must not drive the REST spinner, so a
+     * dropped/reconnecting feed can't leave a stuck spinner (AC5). The filter,
+     * `visible` ordering (sorted by `n`) and chip counts recompute automatically
+     * off `sessions`.
+     */
+    fun applySnapshot(rows: List<SessionSummary>) {
+        state.value = state.value.copy(
+            sessions = rows,
+            terminating = reconcileTerminating(rows),
+        )
+    }
+
+    /**
+     * UC-32 — apply an incremental [SessionEventMessage.Delta]: idempotent
+     * upsert / remove keyed by `n` against the current working set (AC3). A
+     * re-applied delta is a no-op; a server `terminating`/removal converges with
+     * the UC-28 optimistic flag via [reconcileTerminating] (AC4). Pure, and (like
+     * [applySnapshot]) never touches [loading].
+     */
+    fun applyDelta(upserts: List<SessionSummary>, removed: List<Int>) {
+        if (upserts.isEmpty() && removed.isEmpty()) return
+        val byN = state.value.sessions.associateByTo(LinkedHashMap()) { it.n }
+        upserts.forEach { byN[it.n] = it }
+        removed.forEach { byN.remove(it) }
+        val merged = byN.values.toList()
+        state.value = state.value.copy(
+            sessions = merged,
+            terminating = reconcileTerminating(merged),
+        )
+    }
+
+    /**
+     * UC-28 reconcile, shared by [refresh] and the UC-32 push-apply paths.
+     * KEEP an optimistic-terminating `n` only while it is still present AND the
+     * server still reports a non-resolving status (running / provisioning /
+     * starting — possibly stale, so do NOT resurrect). CLEAR it when:
+     *   • the row is absent  → teardown completed (AC7);
+     *   • the server reports `terminating` → hand off to the server token (the
+     *     union still keeps the pill);
+     *   • the server reports `stopped`     → resolved.
+     * Clears the resolved entries from the process-scoped store and returns the
+     * surviving set for the UI state.
+     */
+    private fun reconcileTerminating(sessions: List<SessionSummary>): Set<Int> {
+        val freshByN = sessions.associateBy { it.n }
+        val current = terminatingSessions.flow.value
+        val keep = current.filter { n ->
+            val row = freshByN[n]
+            row != null && row.state != "terminating" && row.state != "stopped"
+        }.toSet()
+        (current - keep).forEach { terminatingSessions.clear(it) }
+        return keep
     }
 
     fun spawn(label: String?) {

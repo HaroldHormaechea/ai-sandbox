@@ -1,0 +1,91 @@
+package com.aisandbox.android.net
+
+import kotlinx.serialization.json.Json
+import org.assertj.core.api.Assertions.assertThat
+import org.junit.jupiter.api.Test
+
+/**
+ * UC-32 — wire-decode contract for the [SessionEventMessage] sealed hierarchy
+ * (the server→client frames on {@code /v1/sessions/events}).
+ *
+ * <p>Mirrors [SessionEventsClient]'s decoder: a lenient [Json]
+ * ({@code ignoreUnknownKeys = true; isLenient = true}) polymorphic on the
+ * {@code "type"} discriminator, so the server's Jackson
+ * {@code @JsonTypeInfo(property = "type")} frames decode to the matching Kotlin
+ * subtype. The row type is the existing [SessionSummary] verbatim, so the
+ * payload feeds the coordinator with zero extra mapping (AC2).
+ */
+class SessionEventMessageTest {
+
+    private val json = Json { ignoreUnknownKeys = true; isLenient = true }
+
+    @Test
+    fun snapshot_frame_decodes_with_all_session_fields() {
+        val text = """
+            {"type":"snapshot","sessions":[
+              {"n":1,"label":"build","tmuxTitle":"vim","state":"running","uptimeSec":42,"activeStreams":2,"startedAt":"2026-06-05T10:15:30Z"},
+              {"n":2,"label":"","tmuxTitle":"(idle)","state":"provisioning","uptimeSec":0,"activeStreams":0,"startedAt":null}
+            ]}
+        """.trimIndent()
+
+        val msg = json.decodeFromString<SessionEventMessage>(text)
+
+        assertThat(msg).isInstanceOf(SessionEventMessage.Snapshot::class.java)
+        val snapshot = msg as SessionEventMessage.Snapshot
+        assertThat(snapshot.sessions).hasSize(2)
+        val first = snapshot.sessions[0]
+        assertThat(first.n).isEqualTo(1)
+        assertThat(first.label).isEqualTo("build")
+        assertThat(first.tmuxTitle).isEqualTo("vim")
+        assertThat(first.state).isEqualTo("running")
+        assertThat(first.uptimeSec).isEqualTo(42L)
+        assertThat(first.activeStreams).isEqualTo(2)
+        assertThat(first.startedAt).isEqualTo("2026-06-05T10:15:30Z")
+        assertThat(snapshot.sessions[1].state).isEqualTo("provisioning")
+    }
+
+    @Test
+    fun delta_frame_decodes_upserts_and_removed() {
+        val text = """
+            {"type":"delta",
+             "upserts":[{"n":1,"label":"build","tmuxTitle":"vim","state":"stopped","uptimeSec":7,"activeStreams":0,"startedAt":null}],
+             "removed":[3,4]}
+        """.trimIndent()
+
+        val msg = json.decodeFromString<SessionEventMessage>(text)
+
+        assertThat(msg).isInstanceOf(SessionEventMessage.Delta::class.java)
+        val delta = msg as SessionEventMessage.Delta
+        assertThat(delta.upserts).hasSize(1)
+        assertThat(delta.upserts.single().n).isEqualTo(1)
+        assertThat(delta.upserts.single().state).isEqualTo("stopped")
+        assertThat(delta.removed).containsExactly(3, 4)
+    }
+
+    @Test
+    fun empty_snapshot_decodes_to_an_empty_list() {
+        val msg = json.decodeFromString<SessionEventMessage>("""{"type":"snapshot","sessions":[]}""")
+        assertThat((msg as SessionEventMessage.Snapshot).sessions).isEmpty()
+    }
+
+    @Test
+    fun delta_with_omitted_lists_defaults_to_empty() {
+        // The kotlinx defaults (emptyList) tolerate a server that omits an empty
+        // upserts/removed array entirely.
+        val msg = json.decodeFromString<SessionEventMessage>("""{"type":"delta","removed":[5]}""")
+        val delta = msg as SessionEventMessage.Delta
+        assertThat(delta.upserts).isEmpty()
+        assertThat(delta.removed).containsExactly(5)
+    }
+
+    @Test
+    fun unknown_future_field_is_tolerated() {
+        // AC parity with SessionSummary's lenient decode: a field the client
+        // does not know about must never break decode.
+        val text = """
+            {"type":"delta","upserts":[],"removed":[],"serverIssuedAt":"2026-06-05T00:00:00Z","cursor":99}
+        """.trimIndent()
+        val msg = json.decodeFromString<SessionEventMessage>(text)
+        assertThat(msg).isInstanceOf(SessionEventMessage.Delta::class.java)
+    }
+}

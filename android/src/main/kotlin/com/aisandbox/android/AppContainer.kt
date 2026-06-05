@@ -5,6 +5,7 @@ import com.aisandbox.android.identity.KeyStoreIdentityManager
 import com.aisandbox.android.net.AiSandboxHttpClient
 import com.aisandbox.android.net.ServerProfile
 import com.aisandbox.android.net.ServerProfileStore
+import com.aisandbox.android.net.SessionEventsClient
 import com.aisandbox.android.net.SessionsApi
 import com.aisandbox.android.net.StreamClient
 import com.aisandbox.android.net.TerminatingSessionsStore
@@ -78,6 +79,15 @@ class AppContainer(applicationContext: Context) {
 
     fun streamClient(client: AiSandboxHttpClient, sessionN: Int): StreamClient =
         StreamClient(http = client, sessionN = sessionN)
+
+    /**
+     * UC-32 — build a client for the live sessions-list push feed
+     * ({@code /v1/sessions/events}). Mirrors [streamClient]: cheap, per-profile,
+     * rebuilt by the [com.aisandbox.android.ui.screens.SessionEventsController]
+     * on each reconnect attempt.
+     */
+    fun sessionEventsClient(client: AiSandboxHttpClient): SessionEventsClient =
+        SessionEventsClient(http = client)
 
     // ── Terminal stream controllers (UC-21) ─────────────────────────────────
     // Process-scoped, keyed by session N. Owning the controller here (not in
