@@ -6,6 +6,7 @@ import com.aisandbox.server.config.ServerProperties;
 import com.aisandbox.server.identity.ClientIdentity;
 import com.aisandbox.server.stream.dto.StreamServerMessage.TargetInfo;
 import com.aisandbox.server.stream.facade.StreamFacade.AuthorizeResult;
+import com.aisandbox.server.stream.service.ConversationEventMapper;
 import com.aisandbox.server.stream.service.InputInjectionService;
 import com.aisandbox.server.stream.service.InputInjectionService.InjectTarget;
 import com.aisandbox.server.stream.service.SwarmEnumerationService;
@@ -49,6 +50,7 @@ public class ConversationFacade {
     private final SwarmEnumerationService swarm;
     private final TranscriptTailService tail;
     private final InputInjectionService injection;
+    private final ConversationEventMapper mapper;
     private final AuditLogger audit;
     private final ServerProperties props;
 
@@ -57,12 +59,14 @@ public class ConversationFacade {
             SwarmEnumerationService swarm,
             TranscriptTailService tail,
             InputInjectionService injection,
+            ConversationEventMapper mapper,
             AuditLogger audit,
             ServerProperties props) {
         this.streamFacade = streamFacade;
         this.swarm = swarm;
         this.tail = tail;
         this.injection = injection;
+        this.mapper = mapper;
         this.audit = audit;
         this.props = props;
     }
@@ -115,6 +119,36 @@ public class ConversationFacade {
         TailTarget target = toTailTarget(resolveBridgeTarget(n, targetId));
         audit.logEvent(AuditAction.CONVERSATION_OPEN, "ok", "n", n, "targetId", targetId == null ? "main" : targetId);
         return tail.start(n, target, backfillLines());
+    }
+
+    /**
+     * UC-41 (AC5/AC6/AC9) — on-demand fetch of the FULL, untruncated input + result for
+     * one tool call, in response to a client {@code fetch-detail}. Resolves {@code targetId}
+     * to its tail coordinates, re-reads the transcript via the helper, renders the
+     * untruncated detail (bounded to {@code conversationDetailMaxBytes}), audits, and
+     * returns an internal {@link ToolDetailView}. A miss (id scrolled out / unresolvable /
+     * helper timeout) yields {@link ToolDetailView#unavailable(String)} (AC9) — never throws.
+     */
+    public ToolDetailView fetchToolDetail(int n, String targetId, String toolUseId, ClientIdentity identity) {
+        TailTarget target = toTailTarget(resolveBridgeTarget(n, targetId));
+        List<String> lines = tail.fetchDetailLines(n, target, toolUseId);
+        ConversationEventMapper.DetailRender render = mapper.renderDetail(toolUseId, lines);
+        audit.logEvent(
+                AuditAction.CONVERSATION_FETCH_DETAIL,
+                render.available() ? "ok" : "miss",
+                "n",
+                n,
+                "targetId",
+                targetId == null ? "main" : targetId,
+                "toolUseId",
+                toolUseId == null ? "" : toolUseId,
+                "fingerprint",
+                identity == null ? "" : identity.fingerprintHex());
+        if (!render.available()) {
+            return ToolDetailView.unavailable(toolUseId);
+        }
+        return new ToolDetailView(
+                toolUseId, render.toolName(), render.input(), render.result(), render.isError(), true);
     }
 
     /** AC8/AC9 — inject a composer submission into {@code targetId}'s session. */
@@ -222,5 +256,18 @@ public class ConversationFacade {
             return InjectTarget.main();
         }
         return new InjectTarget(b.socketPath(), b.baseSession(), b.window(), b.pane());
+    }
+
+    /**
+     * UC-41 — internal (domain-layer) view of a fetched tool detail, returned by
+     * {@link #fetchToolDetail}. The handler maps it to the wire
+     * {@code ConversationServerMessage.ToolDetail} frame. {@code available=false} carries
+     * empty {@code input}/{@code result} and a {@code false} {@code isError} (AC9).
+     */
+    public record ToolDetailView(
+            String toolUseId, String toolName, String input, String result, boolean isError, boolean available) {
+        static ToolDetailView unavailable(String toolUseId) {
+            return new ToolDetailView(toolUseId, null, "", "", false, false);
+        }
     }
 }

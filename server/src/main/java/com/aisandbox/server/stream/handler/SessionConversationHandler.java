@@ -324,11 +324,38 @@ public class SessionConversationHandler implements WebSocketHandler {
                                 facade.enumerateConversationTargets(ctx.n, ctx.selectedTarget.get());
                         emit(ctx, session, new ConversationServerMessage.Targets(targets, ctx.selectedTarget.get()));
                     });
+            case ConversationClientMessage.FetchDetail fd -> Schedulers.boundedElastic()
+                    .schedule(() -> fetchDetail(session, ctx, fd));
             case ConversationClientMessage.Close c -> session.close(
                             CloseStatus.NORMAL.withReason(c.reason() == null ? "client-close" : c.reason()))
                     .subscribe();
         }
         return Mono.empty();
+    }
+
+    /**
+     * UC-41 (AC5/AC9) — handle a {@code fetch-detail}: re-read the tool call's full input +
+     * result via the facade and emit a {@code tool-detail} frame. Any failure (helper miss,
+     * timeout, exception) degrades to an {@code available=false} frame so the client shows a
+     * clean "detail unavailable" state rather than hanging (AC9) — it never crashes the pump.
+     */
+    private void fetchDetail(WebSocketSession session, ConvCtx ctx, ConversationClientMessage.FetchDetail fd) {
+        ConversationServerMessage.ToolDetail frame;
+        try {
+            ConversationFacade.ToolDetailView view =
+                    facade.fetchToolDetail(ctx.n, ctx.selectedTarget.get(), fd.toolUseId(), ctx.identity);
+            frame = new ConversationServerMessage.ToolDetail(
+                    view.toolUseId(),
+                    view.toolName(),
+                    view.input(),
+                    view.result(),
+                    view.isError(),
+                    view.available());
+        } catch (RuntimeException e) {
+            LOG.warn("conversation fetch-detail for {} failed: {}", fd.toolUseId(), e.toString());
+            frame = new ConversationServerMessage.ToolDetail(fd.toolUseId(), null, "", "", false, false);
+        }
+        emit(ctx, session, frame);
     }
 
     private void applyAnswer(WebSocketSession session, ConvCtx ctx, ConversationClientMessage.Answer a) {

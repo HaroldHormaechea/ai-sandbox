@@ -3,6 +3,7 @@ package com.aisandbox.server.stream.service;
 import com.aisandbox.server.stream.dto.ConversationServerMessage;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
@@ -43,8 +44,22 @@ public class ConversationEventMapper {
     /** Claude Code's plan-mode approval tool (AC13 — see RISK 1 in the proposal). */
     public static final String TOOL_EXIT_PLAN_MODE = "ExitPlanMode";
 
+    /** UC-41 — the skill-invocation tool; {@code primaryText} is its skill name (AC1). */
+    public static final String TOOL_SKILL = "Skill";
+
+    /** UC-41 — the shell tool; {@code primaryText} is its command (AC2). */
+    public static final String TOOL_BASH = "Bash";
+
     /** Cap on a rendered tool-input summary so internal tool noise is summarized, not dumped (AC4). */
     private static final int MAX_SUMMARY_LEN = 600;
+
+    /**
+     * UC-41 (AC6) — byte cap on the on-demand {@link #renderDetail} payload (input +
+     * result). Generous compared to the 600-char streaming summary, but bounded so a
+     * pathological multi-MB tool result can never OOM the device or flood the socket.
+     * 48&nbsp;KB. Mirrored (as a default) by {@code ServerProperties.conversationDetailMaxBytes()}.
+     */
+    public static final int CONVERSATION_DETAIL_MAX_BYTES = 49152;
 
     private final ObjectMapper json = new ObjectMapper();
 
@@ -130,7 +145,94 @@ public class ConversationEventMapper {
             String plan = firstNonNull(text(input, "plan"), "");
             return new ConversationServerMessage.PlanApproval(uuid, sidechain, source, toolUseId, plan);
         }
-        return new ConversationServerMessage.ToolUse(uuid, sidechain, source, name, toolUseId, summarizeInput(input));
+        return new ConversationServerMessage.ToolUse(
+                uuid, sidechain, source, name, toolUseId, summarizeInput(input), primaryText(name, input));
+    }
+
+    /**
+     * UC-41 (D2, AC1/AC2/AC3) — extract the single type-aware label <em>value</em>
+     * server-side; the client formats the surrounding text and applies the ~20-char
+     * snippet budget. {@code Skill} → its skill name (the {@code skill}/{@code name}/
+     * {@code command} input field, in that fallback order); {@code Bash} → its
+     * {@code command}; any other tool → the existing bounded input summary so the
+     * generic "{@code <tool>}: {@code <snippet>}" label has a value to show.
+     */
+    private String primaryText(String name, JsonNode input) {
+        if (TOOL_SKILL.equals(name)) {
+            String skill = firstNonNull(text(input, "skill"), text(input, "name"), text(input, "command"));
+            return bound(skill != null ? skill : summarizeInput(input));
+        }
+        if (TOOL_BASH.equals(name)) {
+            String command = text(input, "command");
+            return bound(command != null ? command : summarizeInput(input));
+        }
+        return summarizeInput(input);
+    }
+
+    /**
+     * UC-41 (AC5/AC6/AC9) — render the FULL, untruncated input + result for a single
+     * tool call from a set of raw transcript lines re-read on demand. Each entry of
+     * {@code rawLines} is either a bare transcript JSON object or the helper's
+     * {@code <source>\t<raw-json>} envelope (the tab-prefix is stripped). The method
+     * scans every line for the {@code tool_use} block whose {@code id} matches
+     * {@code toolUseId} (→ full input) and the {@code tool_result} block whose
+     * {@code tool_use_id} matches (→ full result + {@code isError}). Output is
+     * bounded only to {@link #CONVERSATION_DETAIL_MAX_BYTES}, NOT the 600-char
+     * streaming cap. {@code available} is {@code false} when neither block is found
+     * (scrolled out / expired / helper miss → AC9). Never throws on malformed input.
+     */
+    public DetailRender renderDetail(String toolUseId, List<String> rawLines) {
+        if (toolUseId == null || toolUseId.isBlank() || rawLines == null) {
+            return DetailRender.unavailable();
+        }
+        String toolName = null;
+        String input = null;
+        String result = null;
+        boolean isError = false;
+        boolean found = false;
+        for (String entry : rawLines) {
+            if (entry == null || entry.isBlank()) {
+                continue;
+            }
+            String raw = stripEnvelope(entry);
+            JsonNode root;
+            try {
+                root = json.readTree(raw);
+            } catch (com.fasterxml.jackson.core.JsonProcessingException jpe) {
+                continue; // skip a malformed line without crashing
+            }
+            if (root == null || !root.isObject()) {
+                continue;
+            }
+            JsonNode content = root.path("message").path("content");
+            for (JsonNode block : blocks(content)) {
+                String btype = text(block, "type");
+                if ("tool_use".equals(btype) && toolUseId.equals(text(block, "id"))) {
+                    toolName = firstNonNull(text(block, "name"), toolName);
+                    input = renderInputFull(block.path("input"));
+                    found = true;
+                } else if ("tool_result".equals(btype) && toolUseId.equals(text(block, "tool_use_id"))) {
+                    isError = block.path("is_error").asBoolean(false);
+                    result = renderContentFull(block.path("content"));
+                    found = true;
+                }
+            }
+        }
+        if (!found) {
+            return DetailRender.unavailable();
+        }
+        return new DetailRender(toolName, input == null ? "" : input, result == null ? "" : result, isError, true);
+    }
+
+    /**
+     * UC-41 — the rendered on-demand detail of one tool call (pure data; the facade
+     * wraps it into its internal view and the handler maps it to a {@code tool-detail}
+     * frame). {@code available=false} carries empty input/result.
+     */
+    public record DetailRender(String toolName, String input, String result, boolean isError, boolean available) {
+        static DetailRender unavailable() {
+            return new DetailRender(null, "", "", false, false);
+        }
     }
 
     private List<ConversationServerMessage> mapUser(JsonNode root, String uuid, boolean sidechain, String source) {
@@ -228,6 +330,74 @@ public class ConversationEventMapper {
         return bound(content.toString());
     }
 
+    /**
+     * UC-41 — full, byte-bounded rendering of a tool's input object for the detail
+     * dialog (AC5/AC6). Unlike {@link #summarizeInput}, fields are NOT individually
+     * clamped to 120 chars and the whole is bounded to {@link #CONVERSATION_DETAIL_MAX_BYTES}
+     * (48&nbsp;KB) rather than 600 chars. A single-field input renders as the bare value
+     * (e.g. a {@code Bash} command); a multi-field input renders {@code field: value} per line.
+     */
+    private String renderInputFull(JsonNode input) {
+        if (input == null || input.isMissingNode() || input.isNull()) {
+            return "";
+        }
+        if (input.isValueNode()) {
+            return boundBytes(input.asText(), CONVERSATION_DETAIL_MAX_BYTES);
+        }
+        StringBuilder sb = new StringBuilder();
+        Iterator<String> names = input.fieldNames();
+        while (names.hasNext()) {
+            String field = names.next();
+            JsonNode v = input.get(field);
+            String rendered = v.isValueNode() ? v.asText() : v.toString();
+            if (sb.length() > 0) {
+                sb.append('\n');
+            }
+            sb.append(field).append(": ").append(rendered);
+            if (sb.length() >= CONVERSATION_DETAIL_MAX_BYTES) {
+                break;
+            }
+        }
+        return boundBytes(sb.toString(), CONVERSATION_DETAIL_MAX_BYTES);
+    }
+
+    /**
+     * UC-41 — full, byte-bounded rendering of a {@code tool_result} content (AC5/AC6).
+     * Mirrors {@link #summarizeContent} but bounded to {@link #CONVERSATION_DETAIL_MAX_BYTES}
+     * instead of 600 chars.
+     */
+    private String renderContentFull(JsonNode content) {
+        if (content == null || content.isMissingNode() || content.isNull()) {
+            return "";
+        }
+        if (content.isTextual()) {
+            return boundBytes(content.asText(), CONVERSATION_DETAIL_MAX_BYTES);
+        }
+        if (content.isArray()) {
+            StringBuilder sb = new StringBuilder();
+            for (JsonNode b : content) {
+                String t = b.isTextual() ? b.asText() : firstNonNull(text(b, "text"), "");
+                if (t != null && !t.isBlank()) {
+                    if (sb.length() > 0) {
+                        sb.append('\n');
+                    }
+                    sb.append(t);
+                }
+                if (sb.length() >= CONVERSATION_DETAIL_MAX_BYTES) {
+                    break;
+                }
+            }
+            return boundBytes(sb.toString(), CONVERSATION_DETAIL_MAX_BYTES);
+        }
+        return boundBytes(content.toString(), CONVERSATION_DETAIL_MAX_BYTES);
+    }
+
+    /** Strip the helper's {@code <source>\t<raw-json>} envelope, if present, to the raw JSON half. */
+    private static String stripEnvelope(String entry) {
+        int tab = entry.indexOf('\t');
+        return tab < 0 ? entry : entry.substring(tab + 1);
+    }
+
     private String extractUserText(JsonNode content) {
         if (content == null || content.isMissingNode()) {
             return "";
@@ -292,5 +462,32 @@ public class ConversationEventMapper {
             return trimmed;
         }
         return trimmed.substring(0, max) + "…";
+    }
+
+    /**
+     * UC-41 — bound a string to {@code maxBytes} UTF-8 bytes (NOT chars), appending an
+     * ellipsis when truncated. Used for the detail payload so a multibyte tool result
+     * can never exceed the device-safe cap. Does not {@code strip()} — detail content
+     * preserves its internal whitespace/newlines (only the cap is enforced).
+     */
+    private static String boundBytes(String s, int maxBytes) {
+        if (s == null) {
+            return "";
+        }
+        byte[] utf8 = s.getBytes(StandardCharsets.UTF_8);
+        if (utf8.length <= maxBytes) {
+            return s;
+        }
+        // Truncate at a char boundary whose UTF-8 encoding fits within maxBytes.
+        int end = s.length();
+        while (end > 0 && s.substring(0, end).getBytes(StandardCharsets.UTF_8).length > maxBytes) {
+            // Step back proportionally first for large strings, then refine by one.
+            int overshoot = s.substring(0, end).getBytes(StandardCharsets.UTF_8).length - maxBytes;
+            end -= Math.max(1, overshoot / 4);
+        }
+        if (end < 0) {
+            end = 0;
+        }
+        return s.substring(0, end) + "…";
     }
 }
