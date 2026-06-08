@@ -101,9 +101,8 @@ class ConversationEventMapperTest {
                 + "{\"type\":\"text\",\"text\":\"hello there\"}]}}";
         assertThat(mapper.map("main", line))
                 .singleElement()
-                .isInstanceOfSatisfying(
-                        ConversationServerMessage.AssistantText.class,
-                        a -> assertThat(a.text()).isEqualTo("hello there"));
+                .isInstanceOfSatisfying(ConversationServerMessage.AssistantText.class, a -> assertThat(a.text())
+                        .isEqualTo("hello there"));
     }
 
     @Test
@@ -134,8 +133,9 @@ class ConversationEventMapperTest {
         String line = "{\"type\":\"assistant\",\"uuid\":\"u4\",\"message\":{\"content\":["
                 + "{\"type\":\"tool_use\",\"id\":\"tu9\",\"name\":\"Edit\","
                 + "\"input\":{\"file_path\":\"/x/y.txt\",\"old\":\"a\"}}]}}";
-        assertThat(mapper.map("main", line)).singleElement().isInstanceOfSatisfying(
-                ConversationServerMessage.ToolUse.class, t -> {
+        assertThat(mapper.map("main", line))
+                .singleElement()
+                .isInstanceOfSatisfying(ConversationServerMessage.ToolUse.class, t -> {
                     assertThat(t.toolName()).isEqualTo("Edit");
                     assertThat(t.toolUseId()).isEqualTo("tu9");
                     assertThat(t.inputSummary()).contains("file_path=").contains("/x/y.txt");
@@ -160,8 +160,9 @@ class ConversationEventMapperTest {
         String line = "{\"type\":\"user\",\"uuid\":\"u5\",\"message\":{\"content\":["
                 + "{\"type\":\"tool_result\",\"tool_use_id\":\"tu9\",\"is_error\":true,"
                 + "\"content\":\"command failed\"}]}}";
-        assertThat(mapper.map("main", line)).singleElement().isInstanceOfSatisfying(
-                ConversationServerMessage.ToolResult.class, r -> {
+        assertThat(mapper.map("main", line))
+                .singleElement()
+                .isInstanceOfSatisfying(ConversationServerMessage.ToolResult.class, r -> {
                     assertThat(r.toolUseId()).isEqualTo("tu9");
                     assertThat(r.isError()).isTrue();
                     assertThat(r.summary()).isEqualTo("command failed");
@@ -222,8 +223,9 @@ class ConversationEventMapperTest {
         String line = "{\"type\":\"assistant\",\"uuid\":\"up\",\"message\":{\"content\":["
                 + "{\"type\":\"tool_use\",\"id\":\"tuP\",\"name\":\"ExitPlanMode\","
                 + "\"input\":{\"plan\":\"1. do a\\n2. do b\"}}]}}";
-        assertThat(mapper.map("main", line)).singleElement().isInstanceOfSatisfying(
-                ConversationServerMessage.PlanApproval.class, p -> {
+        assertThat(mapper.map("main", line))
+                .singleElement()
+                .isInstanceOfSatisfying(ConversationServerMessage.PlanApproval.class, p -> {
                     assertThat(p.toolUseId()).isEqualTo("tuP");
                     assertThat(p.plan()).contains("do a").contains("do b");
                 });
@@ -234,8 +236,10 @@ class ConversationEventMapperTest {
     @Test
     void user_prompt_line_maps_to_TurnStart() {
         String line = "{\"type\":\"user\",\"uuid\":\"ut\",\"message\":{\"content\":\"hi claude\"}}";
-        assertThat(mapper.map("main", line)).singleElement().isInstanceOfSatisfying(
-                ConversationServerMessage.TurnStart.class, ts -> assertThat(ts.text()).isEqualTo("hi claude"));
+        assertThat(mapper.map("main", line))
+                .singleElement()
+                .isInstanceOfSatisfying(ConversationServerMessage.TurnStart.class, ts -> assertThat(ts.text())
+                        .isEqualTo("hi claude"));
     }
 
     @Test
@@ -253,8 +257,8 @@ class ConversationEventMapperTest {
     void source_and_sidechain_are_stamped_on_every_frame() {
         String line = "{\"type\":\"assistant\",\"uuid\":\"us\",\"isSidechain\":true,\"message\":{\"content\":["
                 + "{\"type\":\"text\",\"text\":\"from a teammate\"}]}}";
-        ConversationServerMessage.AssistantText a =
-                (ConversationServerMessage.AssistantText) mapper.map("subagent:agent-7", line).get(0);
+        ConversationServerMessage.AssistantText a = (ConversationServerMessage.AssistantText)
+                mapper.map("subagent:agent-7", line).get(0);
         assertThat(a.source()).isEqualTo("subagent:agent-7");
         assertThat(a.isSidechain()).isTrue();
     }
@@ -263,8 +267,8 @@ class ConversationEventMapperTest {
     void sidechain_defaults_to_false_when_absent() {
         String line = "{\"type\":\"assistant\",\"uuid\":\"us2\",\"message\":{\"content\":["
                 + "{\"type\":\"text\",\"text\":\"main agent\"}]}}";
-        ConversationServerMessage.AssistantText a =
-                (ConversationServerMessage.AssistantText) mapper.map("main", line).get(0);
+        ConversationServerMessage.AssistantText a = (ConversationServerMessage.AssistantText)
+                mapper.map("main", line).get(0);
         assertThat(a.isSidechain()).isFalse();
         assertThat(a.source()).isEqualTo("main");
     }

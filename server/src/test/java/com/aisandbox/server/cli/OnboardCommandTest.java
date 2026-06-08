@@ -853,4 +853,266 @@ class OnboardCommandTest {
                 .contains("/opt/ai-sandbox-server")
                 .contains("install dir is read-only");
     }
+
+    // ── UC-38 — image rebuild (--rebuild-image / --rebuild-image-if-stale) ──
+    //
+    // AC5/AC6/AC10 (explicit force) + AC4/AC7/AC8 (staleness-gated upgrade
+    // path). Both flags do ONLY the image rebuild and return immediately —
+    // no PKI / secrets / devtools. The package version stamped onto / compared
+    // against the image comes from the setPackageVersion seam.
+
+    /** Package version injected via the seam for the UC-38 rebuild cases. */
+    private static final String PKG_VERSION = "server-v1.2.3";
+
+    /** onboard() with the UC-38 package-version seam pre-wired. */
+    private static OnboardCommand onboardV(FakeProcessRunner runner, FakeConsoleIO io, Path sshDir, String version) {
+        OnboardCommand c = onboard(runner, io, sshDir);
+        c.setPackageVersion(version);
+        return c;
+    }
+
+    /** True when this capture call is the label-reading classify inspect (carries {@code --format}). */
+    private static boolean isClassifyInspect(java.util.List<String> argv) {
+        return argv.contains("--format");
+    }
+
+    // AC5 + AC10 — --rebuild-image forces a build, image-ONLY, NO pki/secrets.
+    @Test
+    void rebuild_image_forces_build_and_runs_image_only(@TempDir Path tmp) throws Exception {
+        Layout layout = layout(tmp);
+        // Deliberately seed NOTHING — if any onboarding step ran it would try
+        // to provision PKI etc. The image-only early return must skip all that.
+        FakeProcessRunner runner = new FakeProcessRunner();
+        runner.captureResponse = argv -> new ProcessRunner.Result(0, ""); // post-build imagePresent ⇒ present
+        runner.inheritResponse = argv -> 0; // build succeeds
+        FakeConsoleIO io = new FakeConsoleIO();
+        io.tty = true;
+
+        ByteArrayOutputStream outBuf = new ByteArrayOutputStream();
+        ByteArrayOutputStream errBuf = new ByteArrayOutputStream();
+        int exit = executeCapturing(
+                new CommandLine(onboardV(runner, io, tmp.resolve("ssh-dir"), PKG_VERSION)),
+                args(layout, "--rebuild-image"),
+                outBuf,
+                errBuf);
+
+        assertThat(exit).isZero();
+        String stdout = outBuf.toString();
+        assertThat(stdout).contains("ai-context:latest rebuilt (" + PKG_VERSION + ")");
+        // Image-ONLY: the normal onboarding summary never prints, and no
+        // PKI / secret artifacts were created.
+        assertThat(stdout).doesNotContain("aisandboxctl onboard: complete.");
+        assertThat(errBuf.toString()).doesNotContain("provisioning PKI");
+        assertThat(layout.crt()).doesNotExist();
+        assertThat(layout.gitKeyOut()).doesNotExist();
+        // The only shell-out is the docker compose build (forced — no classify
+        // probe first) followed by the imagePresent inspect.
+        assertThat(runner.inheritCalls).hasSize(1);
+        assertThat(runner.inheritCalls.get(0))
+                .containsSequence("docker", "compose")
+                .contains("build");
+        // Version stamped via --build-arg (AC1/AC2).
+        assertThat(runner.inheritCalls.get(0)).containsSequence("--build-arg", "IMAGE_VERSION=" + PKG_VERSION);
+        assertThat(dockerInspectCalls(runner)).isEqualTo(1); // imagePresent only, no classify
+    }
+
+    // AC5 + AC10 — exit 1 + deterministic stderr on a SCRIPTED build failure.
+    @Test
+    void rebuild_image_scripted_build_failure_exits_one_with_deterministic_stderr(@TempDir Path tmp) throws Exception {
+        Layout layout = layout(tmp);
+        FakeProcessRunner runner = new FakeProcessRunner();
+        runner.inheritResponse = argv -> 2; // build returns non-zero
+        FakeConsoleIO io = new FakeConsoleIO();
+
+        ByteArrayOutputStream outBuf = new ByteArrayOutputStream();
+        ByteArrayOutputStream errBuf = new ByteArrayOutputStream();
+        int exit = executeCapturing(
+                new CommandLine(onboardV(runner, io, tmp.resolve("ssh-dir"), PKG_VERSION)),
+                args(layout, "--rebuild-image"),
+                outBuf,
+                errBuf);
+
+        assertThat(exit).isEqualTo(1);
+        assertThat(errBuf.toString()).contains("image rebuild failed (Docker unavailable or build error).");
+    }
+
+    // AC5 — exit 1 + deterministic stderr when Docker is absent (build can't start).
+    @Test
+    void rebuild_image_docker_absent_exits_one_with_deterministic_stderr(@TempDir Path tmp) throws Exception {
+        Layout layout = layout(tmp);
+        FakeProcessRunner runner = new FakeProcessRunner();
+        // Simulate `docker` not on PATH — ProcessBuilder.start() throws IOException.
+        runner.inheritResponse = argv -> {
+            throw new RuntimeException(new IOException("Cannot run program \"docker\": No such file"));
+        };
+        FakeConsoleIO io = new FakeConsoleIO();
+
+        ByteArrayOutputStream outBuf = new ByteArrayOutputStream();
+        ByteArrayOutputStream errBuf = new ByteArrayOutputStream();
+        int exit = executeCapturing(
+                new CommandLine(onboardV(runner, io, tmp.resolve("ssh-dir"), PKG_VERSION)),
+                args(layout, "--rebuild-image"),
+                outBuf,
+                errBuf);
+
+        assertThat(exit).isEqualTo(1);
+        assertThat(errBuf.toString()).contains("image rebuild failed (Docker unavailable or build error).");
+    }
+
+    // AC6 — --rebuild-image + --no-image-build are mutually exclusive ⇒ exit 2.
+    @Test
+    void rebuild_image_with_no_image_build_is_mutually_exclusive(@TempDir Path tmp) throws Exception {
+        Layout layout = layout(tmp);
+        FakeProcessRunner runner = new FakeProcessRunner();
+        FakeConsoleIO io = new FakeConsoleIO();
+
+        ByteArrayOutputStream outBuf = new ByteArrayOutputStream();
+        ByteArrayOutputStream errBuf = new ByteArrayOutputStream();
+        int exit = executeCapturing(
+                new CommandLine(onboardV(runner, io, tmp.resolve("ssh-dir"), PKG_VERSION)),
+                args(layout, "--rebuild-image", "--no-image-build"),
+                outBuf,
+                errBuf);
+
+        assertThat(exit).isEqualTo(2);
+        assertThat(errBuf.toString()).contains("--rebuild-image and --no-image-build are mutually exclusive");
+        // Guard fires before any docker shell-out.
+        assertThat(runner.inheritCalls).isEmpty();
+        assertThat(runner.captureCalls).isEmpty();
+    }
+
+    // AC4/AC7 — --rebuild-image-if-stale, ABSENT image ⇒ rebuild, exit 0.
+    @Test
+    void rebuild_if_stale_absent_image_rebuilds(@TempDir Path tmp) throws Exception {
+        Layout layout = layout(tmp);
+        FakeProcessRunner runner = new FakeProcessRunner();
+        runner.captureResponse = argv -> isClassifyInspect(argv)
+                ? new ProcessRunner.Result(125, "") // classify ⇒ ABSENT
+                : new ProcessRunner.Result(0, ""); // post-build imagePresent ⇒ present
+        runner.inheritResponse = argv -> 0;
+        FakeConsoleIO io = new FakeConsoleIO();
+
+        ByteArrayOutputStream outBuf = new ByteArrayOutputStream();
+        ByteArrayOutputStream errBuf = new ByteArrayOutputStream();
+        int exit = executeCapturing(
+                new CommandLine(onboardV(runner, io, tmp.resolve("ssh-dir"), PKG_VERSION)),
+                args(layout, "--rebuild-image-if-stale"),
+                outBuf,
+                errBuf);
+
+        assertThat(exit).isZero();
+        assertThat(outBuf.toString()).contains("ai-context:latest rebuilt (" + PKG_VERSION + ")");
+        assertThat(runner.inheritCalls).as("absent ⇒ a build fired").hasSize(1);
+    }
+
+    // AC4 — --rebuild-image-if-stale, CURRENT image ⇒ NO build, exit 0.
+    @Test
+    void rebuild_if_stale_current_image_does_not_rebuild(@TempDir Path tmp) throws Exception {
+        Layout layout = layout(tmp);
+        FakeProcessRunner runner = new FakeProcessRunner();
+        // classify ⇒ label == version ⇒ CURRENT.
+        runner.captureResponse = argv -> new ProcessRunner.Result(0, PKG_VERSION + "\n");
+        FakeConsoleIO io = new FakeConsoleIO();
+
+        ByteArrayOutputStream outBuf = new ByteArrayOutputStream();
+        ByteArrayOutputStream errBuf = new ByteArrayOutputStream();
+        int exit = executeCapturing(
+                new CommandLine(onboardV(runner, io, tmp.resolve("ssh-dir"), PKG_VERSION)),
+                args(layout, "--rebuild-image-if-stale"),
+                outBuf,
+                errBuf);
+
+        assertThat(exit).isZero();
+        assertThat(outBuf.toString()).contains("already current (" + PKG_VERSION + ")");
+        assertThat(runner.inheritCalls).as("current ⇒ no build").isEmpty();
+    }
+
+    // AC4/AC7 — --rebuild-image-if-stale, STALE (differing label) ⇒ rebuild, exit 0.
+    @Test
+    void rebuild_if_stale_stale_image_rebuilds(@TempDir Path tmp) throws Exception {
+        Layout layout = layout(tmp);
+        FakeProcessRunner runner = new FakeProcessRunner();
+        runner.captureResponse = argv -> isClassifyInspect(argv)
+                ? new ProcessRunner.Result(0, "server-v0.0.1\n") // classify ⇒ differs ⇒ STALE
+                : new ProcessRunner.Result(0, ""); // imagePresent ⇒ present
+        runner.inheritResponse = argv -> 0;
+        FakeConsoleIO io = new FakeConsoleIO();
+
+        ByteArrayOutputStream outBuf = new ByteArrayOutputStream();
+        ByteArrayOutputStream errBuf = new ByteArrayOutputStream();
+        int exit = executeCapturing(
+                new CommandLine(onboardV(runner, io, tmp.resolve("ssh-dir"), PKG_VERSION)),
+                args(layout, "--rebuild-image-if-stale"),
+                outBuf,
+                errBuf);
+
+        assertThat(exit).isZero();
+        assertThat(outBuf.toString()).contains("ai-context:latest rebuilt (" + PKG_VERSION + ")");
+        assertThat(runner.inheritCalls).as("stale ⇒ a build fired").hasSize(1);
+        // Version stamped onto the new image (AC2).
+        assertThat(runner.inheritCalls.get(0)).containsSequence("--build-arg", "IMAGE_VERSION=" + PKG_VERSION);
+    }
+
+    // AC8 — upgrade guard: Docker unavailable on classify ⇒ exit 0 + deferred message.
+    @Test
+    void rebuild_if_stale_docker_unavailable_defers_and_exits_zero(@TempDir Path tmp) throws Exception {
+        Layout layout = layout(tmp);
+        FakeProcessRunner runner = new FakeProcessRunner();
+        // classify's inspect can't even start docker ⇒ IOException.
+        runner.captureResponse = argv -> {
+            throw new RuntimeException(new IOException("Cannot run program \"docker\""));
+        };
+        FakeConsoleIO io = new FakeConsoleIO();
+
+        ByteArrayOutputStream outBuf = new ByteArrayOutputStream();
+        ByteArrayOutputStream errBuf = new ByteArrayOutputStream();
+        int exit = executeCapturing(
+                new CommandLine(onboardV(runner, io, tmp.resolve("ssh-dir"), PKG_VERSION)),
+                args(layout, "--rebuild-image-if-stale"),
+                outBuf,
+                errBuf);
+
+        assertThat(exit).as("AC8 — the install/upgrade must never fail").isZero();
+        assertThat(errBuf.toString())
+                .contains("image rebuild deferred (Docker unavailable or build error)")
+                .contains("sudo aisandboxctl onboard --rebuild-image");
+        assertThat(runner.inheritCalls).isEmpty();
+    }
+
+    // AC8 — upgrade guard: build FAILS on a stale image ⇒ exit 0 + deferred message.
+    @Test
+    void rebuild_if_stale_build_failure_defers_and_exits_zero(@TempDir Path tmp) throws Exception {
+        Layout layout = layout(tmp);
+        FakeProcessRunner runner = new FakeProcessRunner();
+        runner.captureResponse =
+                argv -> new ProcessRunner.Result(0, "server-v0.0.1\n"); // classify ⇒ STALE ⇒ attempt build
+        runner.inheritResponse = argv -> 7; // build fails
+        FakeConsoleIO io = new FakeConsoleIO();
+
+        ByteArrayOutputStream outBuf = new ByteArrayOutputStream();
+        ByteArrayOutputStream errBuf = new ByteArrayOutputStream();
+        int exit = executeCapturing(
+                new CommandLine(onboardV(runner, io, tmp.resolve("ssh-dir"), PKG_VERSION)),
+                args(layout, "--rebuild-image-if-stale"),
+                outBuf,
+                errBuf);
+
+        assertThat(exit).as("AC8 — a failed rebuild must not fail the install").isZero();
+        assertThat(errBuf.toString())
+                .contains("image rebuild deferred (Docker unavailable or build error)")
+                .contains("sudo aisandboxctl onboard --rebuild-image");
+    }
+
+    // AC11 — --rebuild-image appears in onboard --help; the hidden
+    // --rebuild-image-if-stale is NOT advertised.
+    @Test
+    void help_advertises_rebuild_image_but_not_the_hidden_if_stale_flag() {
+        String usage = new CommandLine(new OnboardCommand()).getUsageMessage();
+        assertThat(usage)
+                .as("AC11 — onboard --help must advertise --rebuild-image")
+                .contains("--rebuild-image");
+        assertThat(usage)
+                .as("the .deb-internal --rebuild-image-if-stale flag is hidden from --help")
+                .doesNotContain("--rebuild-image-if-stale");
+    }
 }

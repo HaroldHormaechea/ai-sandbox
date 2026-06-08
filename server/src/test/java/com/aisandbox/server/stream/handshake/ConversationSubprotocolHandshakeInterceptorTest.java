@@ -39,15 +39,13 @@ class ConversationSubprotocolHandshakeInterceptorTest {
 
     @Test
     void comma_separated_list_with_whitespace_advertises() {
-        assertThat(ConversationSubprotocolHandshakeInterceptor.advertises(
-                        List.of("foo, " + TOKEN + " , bar"), TOKEN))
+        assertThat(ConversationSubprotocolHandshakeInterceptor.advertises(List.of("foo, " + TOKEN + " , bar"), TOKEN))
                 .isTrue();
     }
 
     @Test
     void matching_is_case_insensitive() {
-        assertThat(ConversationSubprotocolHandshakeInterceptor.advertises(
-                        List.of("AI-SANDBOX.CONV.V1"), TOKEN))
+        assertThat(ConversationSubprotocolHandshakeInterceptor.advertises(List.of("AI-SANDBOX.CONV.V1"), TOKEN))
                 .isTrue();
     }
 

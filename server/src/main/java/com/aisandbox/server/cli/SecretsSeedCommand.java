@@ -7,6 +7,7 @@ import com.aisandbox.server.cli.secrets.EnsureSandboxImage;
 import com.aisandbox.server.cli.secrets.GhTokenStep;
 import com.aisandbox.server.cli.secrets.GitIdentityStep;
 import com.aisandbox.server.cli.secrets.ProcessRunner;
+import com.aisandbox.server.cli.secrets.ServerVersion;
 import com.aisandbox.server.cli.secrets.SshKeyStep;
 import java.io.IOException;
 import java.nio.file.Files;
@@ -279,7 +280,10 @@ public class SecretsSeedCommand implements Runnable {
             // opt-outs + flag-driven cover paths needing no docker).
             boolean needsDocker = (!noGh && ghTokenFile == null) || (!noClaudePreInit && claudeConfigSource == null);
             if (needsDocker) {
-                new EnsureSandboxImage(processRunner, consoleIO).run(installDir);
+                // UC-38 — stamp the package version onto the image when the
+                // lazy build runs. This command has no version override seam;
+                // the manifest value (or "dev" off a jar) is authoritative.
+                new EnsureSandboxImage(processRunner, consoleIO).run(installDir, ServerVersion.current());
             }
 
             EncryptedKeyDecryptor decryptor = new EncryptedKeyDecryptor(processRunner);

@@ -81,15 +81,13 @@ class TranscriptTailServiceTest {
 
     @Test
     void scanPending_maps_empty_output_to_idle() throws Exception {
-        when(exec.run(any(), any(), any(Duration.class)))
-                .thenReturn(new ProcessExecutor.Result(0, "", ""));
+        when(exec.run(any(), any(), any(Duration.class))).thenReturn(new ProcessExecutor.Result(0, "", ""));
         assertThat(svc.scanPending(7, TailTarget.main())).isEqualTo(PendingState.IDLE);
     }
 
     @Test
     void scanPending_non_zero_exit_degrades_to_idle() throws Exception {
-        when(exec.run(any(), any(), any(Duration.class)))
-                .thenReturn(new ProcessExecutor.Result(2, "anything", "boom"));
+        when(exec.run(any(), any(), any(Duration.class))).thenReturn(new ProcessExecutor.Result(2, "anything", "boom"));
         assertThat(svc.scanPending(7, TailTarget.main())).isEqualTo(PendingState.IDLE);
     }
 
@@ -101,8 +99,7 @@ class TranscriptTailServiceTest {
 
     @Test
     void scanPending_passes_the_scan_pending_flag_to_the_helper() throws Exception {
-        when(exec.run(any(), any(), any(Duration.class)))
-                .thenReturn(new ProcessExecutor.Result(0, "", ""));
+        when(exec.run(any(), any(), any(Duration.class))).thenReturn(new ProcessExecutor.Result(0, "", ""));
         // The argv builder for scanning appends --scan-pending; assert it is built with backfill 1.
         // (We can only observe via the buildArgv contract; scanPending uses buildArgv(n, target, 1).)
         List<String> base = TranscriptTailService.buildArgv(7, TailTarget.main(), 1);

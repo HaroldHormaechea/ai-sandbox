@@ -232,6 +232,46 @@ an upgrade whose snapshot predates this release prints a one-line
 `onboard --force` hint. Re-run `sudo aisandboxctl onboard --force` any time to
 refresh credentials or re-capture the Claude snapshot.
 
+## Versioned session image and upgrade rebuild
+
+The session image keeps the floating runtime tag `ai-context:latest`, but every
+build also stamps it with an OCI **label** — `com.ai-sandbox.image-version` —
+set to the **server package version** (`ai_sandbox_server_version`, overridden
+by the `server-v*` tag exactly as the jar's version is). The build passes it as
+`docker compose build --build-arg IMAGE_VERSION=<version>`; the
+`SandboxDockerfile` defaults the arg to `dev`, so a plain `docker compose build`
+(e.g. a CI smoke build) still succeeds and just labels the image `dev`. Read the
+label back without running a container:
+
+```bash
+docker image inspect --format '{{ index .Config.Labels "com.ai-sandbox.image-version" }}' ai-context:latest
+```
+
+Staleness is decided **from the label, never the tag**: an image is *current*
+when its label equals the package version, and *stale* when it differs in any
+way (a different version, or a missing label on a pre-UC-38 image).
+
+**Force a rebuild — image only.** `aisandboxctl onboard --rebuild-image` rebuilds
+`ai-context:latest` (stamped with the current package version) and does **only**
+that — no PKI / secrets / Claude / devtools work — even when a current image is
+already present. It is mutually exclusive with `--no-image-build`. Exit codes:
+`0` rebuilt, `1` the rebuild was attempted but failed (Docker unavailable or
+build error), `2` misuse (e.g. both flags).
+
+```bash
+sudo aisandboxctl onboard --rebuild-image
+```
+
+**Automatic rebuild on `.deb` upgrade.** On an upgrade (not a fresh install),
+`postinst` rebuilds the image **synchronously** when the installed image is
+absent or its labelled version differs from the version the new package bundles;
+an already-current image is left untouched. Because the rebuild runs inside
+`postinst configure`, an upgrade on a host with Docker running blocks `apt`/`dpkg`
+for the build duration (multi-minute — accepted). It is fully guarded: if Docker
+is down or the build fails, the upgrade still **succeeds** (exit 0) and prints a
+deferred hint to run `sudo aisandboxctl onboard --rebuild-image` later. A fresh
+install is unchanged — no eager image build in a non-interactive `postinst`.
+
 ## Session uid alignment
 
 Session containers run as the **management server's runtime uid**, not the

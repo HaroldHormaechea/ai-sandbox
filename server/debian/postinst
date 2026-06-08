@@ -72,6 +72,27 @@ case "$1" in
         install -d -m 0700 -o ai-sandbox-server -g ai-sandbox-server /var/lib/ai-sandbox-server/docker-config
         install -d -m 0750 -o ai-sandbox-server -g ai-sandbox-server /var/log/ai-sandbox-server
 
+        # 3b. UC-38 — versioned session-image rebuild on upgrade. On an UPGRADE
+        #     (IS_UPGRADE=1) with Docker available, refresh ai-context:latest
+        #     when its labelled version differs from the version this package
+        #     bundles. aisandboxctl reads its OWN (newly unpacked) version from
+        #     the jar manifest, so nothing is templated here. Runs BEFORE the
+        #     onboarding block so the later lazy build sees a current image and
+        #     skips (no double build). Fully guarded (AC8): the rebuild itself
+        #     always exits 0, and a `timeout`-bounded wrap + the `if`-guard keep
+        #     a hung/slow build from ever failing or wedging dpkg/apt. The
+        #     multi-minute blocking on a real rebuild is accepted (UC-38). A
+        #     fresh install (IS_UPGRADE=0) is untouched — no eager build, AC9.
+        if [ "$IS_UPGRADE" = "1" ] && command -v docker >/dev/null 2>&1; then
+            echo "ai-sandbox-server: checking the session image for staleness (upgrade)..."
+            if timeout 1800 /usr/bin/aisandboxctl onboard --rebuild-image-if-stale </dev/null; then
+                :
+            else
+                echo "ai-sandbox-server: session-image rebuild timed out or could not start;" >&2
+                echo "  rebuild later with: sudo aisandboxctl onboard --rebuild-image" >&2
+            fi
+        fi
+
         # 4. UC-17 / UC-19 — onboarding. The `config` script gathered the
         #    answers (or, under the noninteractive frontend, left the template
         #    defaults). We read them, then immediately db_stop so the rest of
@@ -307,6 +328,11 @@ still hit Claude's first-run wizard. Refresh it from a terminal:
 
 (or `sudo aisandboxctl onboard --force --claude-config-source <dir>` for an
 unattended seed). The CLI wrapper is at /usr/bin/aisandboxctl.
+
+The session image is rebuilt automatically on upgrade when it is out of date.
+If that rebuild was deferred (Docker down at install time), refresh it with:
+
+  sudo aisandboxctl onboard --rebuild-image
 
 EOM
         elif [ "$CLAUDE_SNAPSHOT_PRESENT" = "1" ]; then
