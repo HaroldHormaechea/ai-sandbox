@@ -900,3 +900,87 @@ test('UC-40 AC8 — rotation/truncation reset clears the idle-flush fields (no s
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ════════════════════════════════════════════════════════════════════════════
+// UC-41 — collectToolDetail (the exported pure seam behind `--fetch-detail`):
+// given the main + subagent transcript line sets, return the matched
+// `<source>\t<raw>` envelope lines for ONE toolUseId — the tool_use block whose
+// `id` matches (→ full input) and the tool_result block whose `tool_use_id`
+// matches (→ full result). Lines are kept WHOLE (valid JSON) so the server can
+// parse them; total emitted bytes are bounded by maxBytes. No mocks, no fs.
+// ════════════════════════════════════════════════════════════════════════════
+
+const toolUseLine = (id, name, input) =>
+  JSON.stringify({
+    type: 'assistant',
+    message: { role: 'assistant', content: [{ type: 'tool_use', id, name, input }] },
+    sessionId: SESS,
+  });
+const toolResultLine = (toolUseId, content, isError) =>
+  JSON.stringify({
+    type: 'user',
+    message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: toolUseId, is_error: !!isError, content }] },
+    sessionId: SESS,
+  });
+
+test('UC-41 — collectToolDetail constants are stable', () => {
+  assert.strictEqual(helper.CTRL_DETAIL_NOT_FOUND, 'detail-not-found');
+  assert.strictEqual(helper.DETAIL_OUTPUT_CAP_BYTES, 65536);
+});
+
+test('UC-41 — collectToolDetail matches BOTH the tool_use and its tool_result by id', () => {
+  const use = toolUseLine('tu1', 'Bash', { command: 'ls -la /workspace' });
+  const result = toolResultLine('tu1', 'total 0\ndrwxr-xr-x', false);
+  const noise = toolUseLine('tuOTHER', 'Edit', { file_path: '/x' });
+  const sources = [{ source: 'main', lines: [use, noise, result] }];
+
+  const matched = helper.collectToolDetail('tu1', sources);
+
+  assert.strictEqual(matched.length, 2);
+  // Both carry the `main\t<raw>` envelope; the noise line is excluded.
+  assert.ok(matched.every((l) => l.startsWith('main\t')));
+  assert.ok(matched.some((l) => l.includes('ls -la /workspace')));
+  assert.ok(matched.some((l) => l.includes('drwxr-xr-x')));
+  assert.ok(!matched.some((l) => l.includes('tuOTHER')));
+});
+
+test('UC-41 — collectToolDetail returns [] when the id is not found (drives detail-not-found)', () => {
+  const sources = [{ source: 'main', lines: [toolUseLine('tuA', 'Bash', { command: 'pwd' })] }];
+  assert.deepStrictEqual(helper.collectToolDetail('tuMISSING', sources), []);
+});
+
+test('UC-41 — collectToolDetail stamps the subagent source onto a teammate match', () => {
+  const sources = [
+    { source: 'main', lines: [toolUseLine('tuMain', 'Bash', { command: 'echo main' })] },
+    { source: 'subagent:agent-7', lines: [toolUseLine('tuSub', 'Skill', { skill: 'verify' })] },
+  ];
+
+  const matched = helper.collectToolDetail('tuSub', sources);
+
+  assert.strictEqual(matched.length, 1);
+  assert.ok(matched[0].startsWith('subagent:agent-7\t'), `expected subagent source prefix, got ${matched[0]}`);
+  assert.ok(matched[0].includes('verify'));
+});
+
+test('UC-41 — collectToolDetail keeps lines WHOLE and stops once the byte cap would be exceeded', () => {
+  const big = 'X'.repeat(2000);
+  const first = toolResultLine('tuCap', big, false); // ~2 KB, kept (first is always kept)
+  const second = toolUseLine('tuCap', 'Bash', { command: big }); // would push past a 3 KB cap → dropped
+  const sources = [{ source: 'main', lines: [first, second] }];
+
+  const matched = helper.collectToolDetail('tuCap', sources, 3000);
+
+  // The first matched line is kept whole; the second is dropped by the flood-guard.
+  assert.strictEqual(matched.length, 1);
+  assert.ok(matched[0].includes(big));
+  // It is intact JSON after the envelope (never truncated mid-line).
+  const raw = matched[0].slice(matched[0].indexOf('\t') + 1);
+  assert.doesNotThrow(() => JSON.parse(raw));
+});
+
+test('UC-41 — collectToolDetail is robust to bad input', () => {
+  assert.deepStrictEqual(helper.collectToolDetail(null, [{ source: 'main', lines: [] }]), []);
+  assert.deepStrictEqual(helper.collectToolDetail('tu1', null), []);
+  // Malformed JSON lines are skipped, not thrown.
+  assert.deepStrictEqual(helper.collectToolDetail('tu1', [{ source: 'main', lines: ['not-json', '{ broken'] }]), []);
+});

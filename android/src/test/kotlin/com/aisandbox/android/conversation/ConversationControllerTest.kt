@@ -6,6 +6,7 @@ import com.aisandbox.android.net.ConversationClient
 import com.aisandbox.android.net.ServerProfile
 import com.aisandbox.android.net.ServerProfileStore
 import com.aisandbox.android.terminal.TerminalStreamController
+import com.aisandbox.android.ui.screens.TerminalState
 import java.net.InetAddress
 import java.security.KeyStore
 import java.security.MessageDigest
@@ -261,5 +262,177 @@ class ConversationControllerTest {
         } finally {
             c.close()
         }
+    }
+
+    // ──────────────────────── Part C — UC-41 merged tool rows + detail dialog ─
+
+    /** Enqueue a WS upgrade that replies with [reply] to any inbound frame containing [trigger]. */
+    private fun enqueueAutoReply(trigger: String, reply: String) {
+        server.enqueue(
+            MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+                override fun onMessage(webSocket: WebSocket, text: String) {
+                    if (text.contains(trigger)) webSocket.send(reply)
+                }
+            }),
+        )
+    }
+
+    private fun activityOf(c: ConversationController): ConversationItem.ToolActivity? =
+        c.items.value.singleOrNull() as? ConversationItem.ToolActivity
+
+    @Test
+    fun `tool use then tool result merge into one activity row`() {
+        enqueuePush(
+            listOf(
+                """{"type":"tool-use","uuid":"u1","source":"main","isSidechain":false,"toolName":"Bash",""" +
+                    """"toolUseId":"tu1","inputSummary":"ls -la","primaryText":"ls -la"}""",
+                """{"type":"tool-result","uuid":"u2","source":"main","isSidechain":false,"toolUseId":"tu1",""" +
+                    """"isError":false,"summary":"ok output"}""",
+            ),
+        )
+        val c = networkedController()
+        c.attach(7)
+        try {
+            // AC4 — one merged row (not two), result folded in.
+            assertThat(awaitUntil { activityOf(c)?.result != null }).isTrue
+            val act = activityOf(c)!!
+            assertThat(act.toolUseId).isEqualTo("tu1")
+            assertThat(act.primaryText).isEqualTo("ls -la")
+            assertThat(act.result?.summary).isEqualTo("ok output")
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
+    fun `tool result arriving before tool use still merges into one row`() {
+        // Backfill-boundary split: result first, use second (AC4 pitfall).
+        enqueuePush(
+            listOf(
+                """{"type":"tool-result","uuid":"u2","source":"main","isSidechain":false,"toolUseId":"tu1",""" +
+                    """"isError":true,"summary":"boom"}""",
+                """{"type":"tool-use","uuid":"u1","source":"main","isSidechain":false,"toolName":"Bash",""" +
+                    """"toolUseId":"tu1","inputSummary":"false","primaryText":"false"}""",
+            ),
+        )
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { activityOf(c)?.toolName == "Bash" }).isTrue
+            val act = activityOf(c)!!
+            assertThat(act.result?.isError).isTrue // AC7 — error preserved across the ordering
+            assertThat(act.primaryText).isEqualTo("false")
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
+    fun `a tool use without a result shows the awaiting state`() {
+        enqueuePush(
+            listOf(
+                """{"type":"tool-use","uuid":"u1","source":"main","isSidechain":false,"toolName":"Skill",""" +
+                    """"toolUseId":"tuS","inputSummary":"verify","primaryText":"verify"}""",
+            ),
+        )
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { activityOf(c) != null }).isTrue
+            assertThat(activityOf(c)!!.result).isNull() // AC8 — awaiting result
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
+    fun `tapping a tool bubble loads the on-demand detail`() {
+        enqueueAutoReply(
+            "fetch-detail",
+            """{"type":"tool-detail","toolUseId":"tu1","toolName":"Bash","input":"ls -la /workspace",""" +
+                """"result":"drwxr-xr-x","isError":false,"available":true}""",
+        )
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { c.state.value == TerminalState.Open }).isTrue
+            c.openDetail("tu1", "u1")
+            // AC5/AC6 — the full untruncated input + output arrive into a Loaded dialog state.
+            assertThat(awaitUntil { c.toolDetail.value is ToolDetailState.Loaded }).isTrue
+            val loaded = c.toolDetail.value as ToolDetailState.Loaded
+            assertThat(loaded.input).isEqualTo("ls -la /workspace")
+            assertThat(loaded.result).isEqualTo("drwxr-xr-x")
+            assertThat(loaded.isError).isFalse
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
+    fun `an unavailable tool-detail reply shows the unavailable state`() {
+        enqueueAutoReply(
+            "fetch-detail",
+            """{"type":"tool-detail","toolUseId":"gone","available":false}""",
+        )
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { c.state.value == TerminalState.Open }).isTrue
+            c.openDetail("gone", "u1")
+            assertThat(awaitUntil { c.toolDetail.value == ToolDetailState.Unavailable }).isTrue // AC9
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
+    fun `a disconnect while a detail fetch is in flight degrades to unavailable`() {
+        // The server receives the fetch-detail then closes WITHOUT replying (AC9).
+        server.enqueue(
+            MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+                override fun onMessage(webSocket: WebSocket, text: String) {
+                    if (text.contains("fetch-detail")) webSocket.close(1000, "bye")
+                }
+            }),
+        )
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { c.state.value == TerminalState.Open }).isTrue
+            c.openDetail("tu1", "u1")
+            assertThat(awaitUntil { c.toolDetail.value == ToolDetailState.Unavailable }).isTrue
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
+    fun `closing the detail dialog cancels the in-flight fetch and does not leak`() {
+        // No reply ever comes; closeDetail must cancel+prune so nothing publishes later.
+        enqueueAutoReply("never-match-this", "")
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { c.state.value == TerminalState.Open }).isTrue
+            c.openDetail("tu1", "u1")
+            assertThat(awaitUntil { c.toolDetail.value == ToolDetailState.Loading }).isTrue
+            c.closeDetail()
+            assertThat(c.toolDetail.value).isNull()
+            // The cancelled await must NOT later resurrect the dialog.
+            Thread.sleep(250)
+            assertThat(c.toolDetail.value).isNull()
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
+    fun `a detail fetch with no reply times out to unavailable`() {
+        // Fully offline: openDetail works without a socket (the fetch frame is a no-op),
+        // and the client-side 8 s timeout resolves the dialog to Unavailable (AC9).
+        val c = offlineController()
+        c.openDetail("tu1", "u1")
+        assertThat(c.toolDetail.value).isEqualTo(ToolDetailState.Loading)
+        assertThat(awaitUntil(timeoutMs = 12_000) { c.toolDetail.value == ToolDetailState.Unavailable }).isTrue
     }
 }

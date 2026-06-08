@@ -15,6 +15,7 @@ import com.aisandbox.server.config.ServerProperties;
 import com.aisandbox.server.identity.ClientIdentity;
 import com.aisandbox.server.stream.dto.StreamServerMessage.TargetInfo;
 import com.aisandbox.server.stream.facade.StreamFacade.AuthorizeResult;
+import com.aisandbox.server.stream.service.ConversationEventMapper;
 import com.aisandbox.server.stream.service.InputInjectionService;
 import com.aisandbox.server.stream.service.InputInjectionService.InjectTarget;
 import com.aisandbox.server.stream.service.SwarmEnumerationService;
@@ -43,6 +44,7 @@ class ConversationFacadeTest {
     private SwarmEnumerationService swarm;
     private TranscriptTailService tail;
     private InputInjectionService injection;
+    private ConversationEventMapper mapper;
     private AuditLogger audit;
     private ConversationFacade facade;
 
@@ -72,8 +74,9 @@ class ConversationFacadeTest {
         swarm = mock(SwarmEnumerationService.class);
         tail = mock(TranscriptTailService.class);
         injection = mock(InputInjectionService.class);
+        mapper = mock(ConversationEventMapper.class);
         audit = mock(AuditLogger.class);
-        facade = new ConversationFacade(streamFacade, swarm, tail, injection, audit, props());
+        facade = new ConversationFacade(streamFacade, swarm, tail, injection, mapper, audit, props());
     }
 
     // ──────────────────────── AC21 — authorize reuse ─────────────────────────
@@ -137,6 +140,81 @@ class ConversationFacadeTest {
         assertThat(got).isSameAs(handle);
         verify(tail).start(eq(7), any(), eq(facade.backfillLines()));
         verify(audit).logEvent(eq(AuditAction.CONVERSATION_OPEN), eq("ok"), eq("n"), eq(7), eq("targetId"), eq("main"));
+    }
+
+    // ──────────────────────── UC-41 AC5/AC9 — fetchToolDetail ────────────────
+
+    @Test
+    void fetchToolDetail_renders_the_untruncated_detail_and_audits_ok() {
+        when(swarm.resolveTarget(7, SwarmEnumerationService.MAIN_ID)).thenReturn(BridgeTarget.main());
+        List<String> lines = List.of("main\t{\"some\":\"json\"}");
+        when(tail.fetchDetailLines(eq(7), any(), eq("tu1"))).thenReturn(lines);
+        when(mapper.renderDetail("tu1", lines))
+                .thenReturn(new ConversationEventMapper.DetailRender("Bash", "ls -la /workspace", "drwxr-xr-x", false, true));
+
+        ConversationFacade.ToolDetailView view = facade.fetchToolDetail(7, "main", "tu1", identity());
+
+        assertThat(view.available()).isTrue();
+        assertThat(view.toolUseId()).isEqualTo("tu1");
+        assertThat(view.toolName()).isEqualTo("Bash");
+        assertThat(view.input()).isEqualTo("ls -la /workspace");
+        assertThat(view.result()).isEqualTo("drwxr-xr-x");
+        assertThat(view.isError()).isFalse();
+        verify(audit)
+                .logEvent(
+                        eq(AuditAction.CONVERSATION_FETCH_DETAIL),
+                        eq("ok"),
+                        eq("n"),
+                        eq(7),
+                        eq("targetId"),
+                        eq("main"),
+                        eq("toolUseId"),
+                        eq("tu1"),
+                        eq("fingerprint"),
+                        eq("a".repeat(64)));
+    }
+
+    @Test
+    void fetchToolDetail_carries_the_error_flag_through_to_the_view() {
+        when(swarm.resolveTarget(7, SwarmEnumerationService.MAIN_ID)).thenReturn(BridgeTarget.main());
+        List<String> lines = List.of("main\t{\"some\":\"json\"}");
+        when(tail.fetchDetailLines(eq(7), any(), eq("tuErr"))).thenReturn(lines);
+        when(mapper.renderDetail("tuErr", lines))
+                .thenReturn(new ConversationEventMapper.DetailRender("Bash", "false", "boom", true, true));
+
+        ConversationFacade.ToolDetailView view = facade.fetchToolDetail(7, "main", "tuErr", identity());
+
+        assertThat(view.available()).isTrue();
+        assertThat(view.isError()).isTrue();
+        assertThat(view.result()).isEqualTo("boom");
+    }
+
+    @Test
+    void fetchToolDetail_on_a_miss_returns_unavailable_and_audits_miss() {
+        when(swarm.resolveTarget(7, SwarmEnumerationService.MAIN_ID)).thenReturn(BridgeTarget.main());
+        when(tail.fetchDetailLines(eq(7), any(), eq("gone"))).thenReturn(List.of());
+        when(mapper.renderDetail(eq("gone"), any()))
+                .thenReturn(new ConversationEventMapper.DetailRender(null, "", "", false, false));
+
+        ConversationFacade.ToolDetailView view = facade.fetchToolDetail(7, "main", "gone", identity());
+
+        assertThat(view.available()).isFalse();
+        assertThat(view.toolUseId()).isEqualTo("gone");
+        assertThat(view.input()).isEmpty();
+        assertThat(view.result()).isEmpty();
+        assertThat(view.isError()).isFalse();
+        verify(audit)
+                .logEvent(
+                        eq(AuditAction.CONVERSATION_FETCH_DETAIL),
+                        eq("miss"),
+                        eq("n"),
+                        eq(7),
+                        eq("targetId"),
+                        eq("main"),
+                        eq("toolUseId"),
+                        eq("gone"),
+                        eq("fingerprint"),
+                        eq("a".repeat(64)));
     }
 
     // ──────────────────────── AC8 — composer inject + audit ──────────────────

@@ -20,6 +20,9 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.function.Consumer;
 import org.junit.jupiter.api.Test;
 import org.reactivestreams.Publisher;
 import org.springframework.http.HttpHeaders;
@@ -197,6 +200,90 @@ class SessionConversationHandlerTest {
         verify(facade).startTail(eq(7), eq(SessionConversationHandler.TARGET_MAIN));
     }
 
+    // ──────────────── UC-41 AC5/AC9 — fetch-detail → tool-detail ────────────────
+
+    /**
+     * Drive an Allowed-path handler with a single inbound {@code fetch-detail} frame. The
+     * tail blocks on a latch and EOFs only once the {@code tool-detail} response frame has
+     * been emitted, so {@code block()} returns deterministically with the response already
+     * recorded in {@link FakeSession#sent} — no Docker, no sleeps.
+     */
+    private static FakeSession driveFetchDetail(ConversationFacade facade, String fetchDetailJson) throws Exception {
+        CountDownLatch detailEmitted = new CountDownLatch(1);
+        TranscriptTailService.Tail tail = mock(TranscriptTailService.Tail.class);
+        when(tail.readLine()).thenAnswer(inv -> {
+            detailEmitted.await(5, TimeUnit.SECONDS); // hold the channel open until the reply lands …
+            return null; // … then EOF → teardown completes the sink
+        });
+
+        when(facade.authorizeOpen(eq(7), any())).thenReturn(new StreamFacade.Allowed());
+        when(facade.startTail(eq(7), any())).thenReturn(tail);
+
+        Map<String, Object> attrs = new HashMap<>();
+        attrs.put(SessionConversationHandler.IDENTITY_ATTR, identity());
+        FakeSession session = new FakeSession(URI.create("/v1/sessions/7/conversation"), subprotocolHeaders(), attrs);
+        session.onSent = payload -> {
+            if (payload.contains("tool-detail")) {
+                detailEmitted.countDown();
+            }
+        };
+        session.incoming = Flux.just(session.textMessage(fetchDetailJson));
+
+        newHandler(facade).handle(session).block();
+        return session;
+    }
+
+    @Test
+    void fetch_detail_emits_a_tool_detail_frame_with_the_full_input_and_result() throws Exception {
+        ConversationFacade facade = mock(ConversationFacade.class);
+        when(facade.fetchToolDetail(eq(7), any(), eq("tu1"), any()))
+                .thenReturn(new ConversationFacade.ToolDetailView(
+                        "tu1", "Bash", "ls -la /workspace", "drwxr-xr-x output", false, true));
+
+        FakeSession session =
+                driveFetchDetail(facade, "{\"type\":\"fetch-detail\",\"toolUseId\":\"tu1\",\"uuid\":\"u-line\"}");
+
+        assertThat(session.sent).anySatisfy(f -> assertThat(f)
+                .contains("\"type\":\"tool-detail\"")
+                .contains("\"toolUseId\":\"tu1\"")
+                .contains("\"input\":\"ls -la /workspace\"")
+                .contains("\"available\":true"));
+        assertThat(session.closedWith).isNull();
+    }
+
+    @Test
+    void fetch_detail_miss_emits_an_unavailable_tool_detail_frame() throws Exception {
+        // AC9 — an unresolvable id yields available=false rather than hanging.
+        ConversationFacade facade = mock(ConversationFacade.class);
+        when(facade.fetchToolDetail(eq(7), any(), eq("gone"), any()))
+                .thenReturn(new ConversationFacade.ToolDetailView("gone", null, "", "", false, false));
+
+        FakeSession session =
+                driveFetchDetail(facade, "{\"type\":\"fetch-detail\",\"toolUseId\":\"gone\",\"uuid\":\"u-line\"}");
+
+        assertThat(session.sent).anySatisfy(f -> assertThat(f)
+                .contains("\"type\":\"tool-detail\"")
+                .contains("\"toolUseId\":\"gone\"")
+                .contains("\"available\":false"));
+        assertThat(session.closedWith).isNull();
+    }
+
+    @Test
+    void fetch_detail_degrades_to_unavailable_when_the_facade_throws() throws Exception {
+        // AC9 — a facade exception must NOT crash the pump; the client sees available=false.
+        ConversationFacade facade = mock(ConversationFacade.class);
+        when(facade.fetchToolDetail(eq(7), any(), eq("boom"), any()))
+                .thenThrow(new RuntimeException("helper exploded"));
+
+        FakeSession session =
+                driveFetchDetail(facade, "{\"type\":\"fetch-detail\",\"toolUseId\":\"boom\",\"uuid\":\"u-line\"}");
+
+        assertThat(session.sent).anySatisfy(f -> assertThat(f)
+                .contains("\"type\":\"tool-detail\"")
+                .contains("\"available\":false"));
+        assertThat(session.closedWith).isNull();
+    }
+
     private static HttpHeaders subprotocolHeaders() {
         HttpHeaders h = new HttpHeaders();
         h.add("Sec-WebSocket-Protocol", TOKEN);
@@ -210,6 +297,12 @@ class SessionConversationHandlerTest {
         private final Map<String, Object> attrs;
         final List<String> sent = new ArrayList<>();
         CloseStatus closedWith;
+
+        /** Inbound client frames delivered on {@link #receive()} (empty by default). */
+        volatile Flux<WebSocketMessage> incoming = Flux.empty();
+
+        /** Invoked for every outbound frame as it is sent (used to synchronize tail teardown in tests). */
+        volatile Consumer<String> onSent = s -> {};
 
         FakeSession(URI uri, HttpHeaders headers, Map<String, Object> attrs) {
             this.uri = uri;
@@ -239,13 +332,17 @@ class SessionConversationHandlerTest {
 
         @Override
         public Flux<WebSocketMessage> receive() {
-            return Flux.empty();
+            return incoming;
         }
 
         @Override
         public Mono<Void> send(Publisher<WebSocketMessage> messages) {
             return Flux.from(messages)
-                    .doOnNext(m -> sent.add(m.getPayloadAsText()))
+                    .doOnNext(m -> {
+                        String payload = m.getPayloadAsText();
+                        sent.add(payload);
+                        onSent.accept(payload);
+                    })
                     .then();
         }
 
