@@ -96,6 +96,7 @@ class SessionsScreenInstrumentationTest {
             AiSandboxTheme {
                 SessionsBody(
                     padding = PaddingValues(),
+                    onOpenTerminal = {},
                     state = seededState,
                     onSelectFilter = {},
                     onOpen = { openedN = it },
@@ -109,12 +110,41 @@ class SessionsScreenInstrumentationTest {
         assertEquals("card tap must connect to the tapped session", 1, openedN)
     }
 
+    /**
+     * UC-37 AC1 — a long-press on a session row opens the tmux/terminal view
+     * (the raw/power fallback) via [SessionsBody.onOpenTerminal], distinct from
+     * the single-tap → structured-conversation path ([SessionsBody.onOpen]).
+     */
+    @Test
+    fun long_pressing_a_session_card_fires_onOpenTerminal_with_that_n() {
+        var conversationN: Int? = null
+        var terminalN: Int? = null
+        composeTestRule.setContent {
+            AiSandboxTheme {
+                SessionsBody(
+                    padding = PaddingValues(),
+                    state = seededState,
+                    onSelectFilter = {},
+                    onOpen = { conversationN = it },
+                    onOpenTerminal = { terminalN = it },
+                    onConfirmDelete = { _, _ -> },
+                )
+            }
+        }
+
+        composeTestRule.onNodeWithTag("session-card-2").performTouchInput { longClick() }
+
+        assertEquals("long-press must open the terminal for the pressed session", 2, terminalN)
+        assertNull("long-press must NOT trigger the single-tap conversation path", conversationN)
+    }
+
     @Test
     fun session_cards_are_displayed_and_have_a_click_action() {
         composeTestRule.setContent {
             AiSandboxTheme {
                 SessionsBody(
                     padding = PaddingValues(),
+                    onOpenTerminal = {},
                     state = seededState,
                     onSelectFilter = {},
                     onOpen = {},
@@ -138,6 +168,7 @@ class SessionsScreenInstrumentationTest {
             AiSandboxTheme {
                 SessionsBody(
                     padding = PaddingValues(),
+                    onOpenTerminal = {},
                     state = seededState,
                     onSelectFilter = {},
                     onOpen = {},
@@ -165,6 +196,7 @@ class SessionsScreenInstrumentationTest {
             AiSandboxTheme {
                 SessionsBody(
                     padding = PaddingValues(),
+                    onOpenTerminal = {},
                     state = seededState,
                     onSelectFilter = {},
                     onOpen = {},
@@ -189,6 +221,7 @@ class SessionsScreenInstrumentationTest {
             AiSandboxTheme {
                 SessionsBody(
                     padding = PaddingValues(),
+                    onOpenTerminal = {},
                     state = seededState,
                     onSelectFilter = {},
                     onOpen = {},
@@ -221,6 +254,7 @@ class SessionsScreenInstrumentationTest {
             AiSandboxTheme {
                 SessionsBody(
                     padding = PaddingValues(),
+                    onOpenTerminal = {},
                     state = state,
                     onSelectFilter = {},
                     onOpen = {},
@@ -254,6 +288,7 @@ class SessionsScreenInstrumentationTest {
             AiSandboxTheme {
                 SessionsBody(
                     padding = PaddingValues(),
+                    onOpenTerminal = {},
                     state = attachedState,
                     onSelectFilter = {},
                     onOpen = {},
@@ -281,6 +316,7 @@ class SessionsScreenInstrumentationTest {
             AiSandboxTheme {
                 SessionsBody(
                     padding = PaddingValues(),
+                    onOpenTerminal = {},
                     state = seededState,
                     onSelectFilter = {},
                     onOpen = {},
@@ -326,6 +362,7 @@ class SessionsScreenInstrumentationTest {
             AiSandboxTheme {
                 SessionsBody(
                     padding = PaddingValues(),
+                    onOpenTerminal = {},
                     state = optimisticTerminatingState,
                     onSelectFilter = {},
                     onOpen = {},
@@ -347,6 +384,7 @@ class SessionsScreenInstrumentationTest {
             AiSandboxTheme {
                 SessionsBody(
                     padding = PaddingValues(),
+                    onOpenTerminal = {},
                     state = serverTerminatingState,
                     onSelectFilter = {},
                     onOpen = {},
@@ -368,6 +406,7 @@ class SessionsScreenInstrumentationTest {
             AiSandboxTheme {
                 SessionsBody(
                     padding = PaddingValues(),
+                    onOpenTerminal = {},
                     state = optimisticTerminatingState,
                     onSelectFilter = {},
                     onOpen = {},
@@ -393,6 +432,7 @@ class SessionsScreenInstrumentationTest {
             AiSandboxTheme {
                 SessionsBody(
                     padding = PaddingValues(),
+                    onOpenTerminal = {},
                     state = optimisticTerminatingState,
                     onSelectFilter = {},
                     onOpen = {},
@@ -413,6 +453,7 @@ class SessionsScreenInstrumentationTest {
             AiSandboxTheme {
                 SessionsBody(
                     padding = PaddingValues(),
+                    onOpenTerminal = {},
                     state = seededState,
                     onSelectFilter = { selectedFilter = it },
                     onOpen = {},
