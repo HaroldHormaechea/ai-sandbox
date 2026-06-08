@@ -136,16 +136,14 @@ class ConversationFacadeTest {
 
         assertThat(got).isSameAs(handle);
         verify(tail).start(eq(7), any(), eq(facade.backfillLines()));
-        verify(audit)
-                .logEvent(eq(AuditAction.CONVERSATION_OPEN), eq("ok"), eq("n"), eq(7), eq("targetId"), eq("main"));
+        verify(audit).logEvent(eq(AuditAction.CONVERSATION_OPEN), eq("ok"), eq("n"), eq(7), eq("targetId"), eq("main"));
     }
 
     // ──────────────────────── AC8 — composer inject + audit ──────────────────
 
     @Test
     void injectComposer_resolves_target_injects_and_audits_input() throws Exception {
-        when(swarm.resolveTarget(7, "swarm:main:0.1"))
-                .thenReturn(new BridgeTarget(null, "main", "0", "1"));
+        when(swarm.resolveTarget(7, "swarm:main:0.1")).thenReturn(new BridgeTarget(null, "main", "0", "1"));
 
         facade.injectComposer(7, "swarm:main:0.1", "hello", identity());
 
@@ -190,8 +188,7 @@ class ConversationFacadeTest {
         facade.interrupt(7, "main", identity());
         verify(injection).interrupt(eq(7), any(InjectTarget.class));
         verify(audit)
-                .logEvent(
-                        eq(AuditAction.CONVERSATION_INTERRUPT), eq("ok"), eq("n"), eq(7), eq("targetId"), eq("main"));
+                .logEvent(eq(AuditAction.CONVERSATION_INTERRUPT), eq("ok"), eq("n"), eq(7), eq("targetId"), eq("main"));
     }
 
     @Test
@@ -217,8 +214,7 @@ class ConversationFacadeTest {
     void a_vanished_target_id_falls_back_to_main_without_throwing() throws Exception {
         // The id no longer resolves — resolveTarget throws; the facade must still
         // inject (against main) rather than propagate the failure.
-        when(swarm.resolveTarget(eq(7), eq("swarm:gone:9.9")))
-                .thenThrow(new RuntimeException("no such pane"));
+        when(swarm.resolveTarget(eq(7), eq("swarm:gone:9.9"))).thenThrow(new RuntimeException("no such pane"));
 
         facade.injectComposer(7, "swarm:gone:9.9", "still works", identity());
 

@@ -6,6 +6,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
 import org.junit.jupiter.api.Test;
 
@@ -574,5 +575,138 @@ class DebPostinstContractTest {
                 .as("hang fix (iii) — under the noninteractive frontend the postinst MUST force HAVE_TTY=0 "
                         + "(skip the [Y/n] invite + the bounded read)")
                 .containsPattern("\\$\\{DEBIAN_FRONTEND:-\\}\"\\s*=\\s*\"noninteractive\"[^\\n]*\\n\\s*HAVE_TTY=0");
+    }
+
+    // ── UC-38 — versioned session-image rebuild on upgrade (AC7 / AC8) ──
+    //
+    // The shell glue lives in the postinst (not in Java), so it is pinned
+    // here as a packaging contract — same string-parse approach the rest of
+    // this class uses, plus a `sh -n` syntax gate.
+
+    /**
+     * UC-38 AC7 — the synchronous upgrade rebuild is gated on BOTH
+     * {@code IS_UPGRADE=1} AND {@code command -v docker}. A fresh install
+     * ({@code IS_UPGRADE=0}, AC9) or a Docker-less host therefore never runs
+     * it. The captured {@code IS_UPGRADE} flag (set from {@code $2} on
+     * configure) is the upgrade discriminator.
+     */
+    @Test
+    void postinst_upgrade_rebuild_is_gated_on_is_upgrade_and_docker_presence() throws IOException {
+        String code = stripCommentLines(postinst());
+
+        assertThat(code)
+                .as("UC-38 AC7/AC9 — the upgrade-rebuild block MUST be gated on IS_UPGRADE=1 AND `command -v docker`")
+                .contains("if [ \"$IS_UPGRADE\" = \"1\" ] && command -v docker >/dev/null 2>&1; then");
+    }
+
+    /**
+     * UC-38 AC7 — the upgrade rebuild drives the hidden, staleness-gated
+     * {@code onboard --rebuild-image-if-stale} entry point (NOT the explicit
+     * {@code --rebuild-image} force flag) so a CURRENT image is a no-op and
+     * only a stale/absent one rebuilds.
+     */
+    @Test
+    void postinst_upgrade_rebuild_invokes_onboard_rebuild_image_if_stale() throws IOException {
+        String code = stripCommentLines(postinst());
+
+        assertThat(code)
+                .as("UC-38 AC7 — the upgrade path MUST invoke `aisandboxctl onboard --rebuild-image-if-stale`")
+                .contains("/usr/bin/aisandboxctl onboard --rebuild-image-if-stale");
+    }
+
+    /**
+     * UC-38 AC8 — the synchronous rebuild MUST be bounded by {@code timeout}
+     * and fully guarded so it can never fail or wedge {@code dpkg}/{@code apt}:
+     *
+     * <ul>
+     *   <li>the invocation is wrapped in {@code timeout <N> … }, so a hung
+     *       build is killed rather than blocking the install indefinitely;</li>
+     *   <li>it is fed {@code </dev/null} so the child can never block on a
+     *       read; and</li>
+     *   <li>its non-zero outcome lands in an {@code else} arm (a clear deferred
+     *       message), so {@code set -e} never aborts the postinst — the
+     *       install/upgrade still succeeds.</li>
+     * </ul>
+     */
+    @Test
+    void postinst_upgrade_rebuild_is_timeout_bounded_and_guarded() throws IOException {
+        String code = stripCommentLines(postinst());
+
+        // timeout-bounded, fed from /dev/null, inside an `if` (exit code consumed
+        // ⇒ set -e never trips), with a deferred `else` arm.
+        assertThat(code)
+                .as("UC-38 AC8 — the upgrade rebuild MUST be `timeout`-bounded and fed </dev/null")
+                .containsPattern(
+                        "if\\s+timeout\\s+\\d+\\s+/usr/bin/aisandboxctl onboard --rebuild-image-if-stale\\s*</dev/null;\\s*then");
+        assertThat(code)
+                .as(
+                        "UC-38 AC8 — a failed/timed-out rebuild MUST fall into an `else` defer arm (never abort the install)")
+                .containsPattern("(?s)onboard --rebuild-image-if-stale[^\\n]*\\n\\s*:\\s*\\n\\s*else");
+        // The deferred message points the operator at the explicit re-run flag.
+        assertThat(code)
+                .as("UC-38 AC8 — the defer message MUST point at `onboard --rebuild-image`")
+                .containsPattern("sudo aisandboxctl onboard --rebuild-image\\b");
+    }
+
+    /**
+     * UC-38 AC8 — defence-in-depth: the rebuild block runs BEFORE the
+     * UC-17/UC-19 onboarding block, so a freshly-current image makes the
+     * later lazy build a no-op (no double build), and the file still ends
+     * with the unconditional {@code exit 0} (the install never fails).
+     */
+    @Test
+    void postinst_upgrade_rebuild_precedes_onboarding_and_file_still_ends_exit_zero() throws IOException {
+        String text = postinst();
+        String code = stripCommentLines(text);
+
+        int rebuildIdx = code.indexOf("onboard --rebuild-image-if-stale");
+        int onboardIdx = code.indexOf("/usr/bin/aisandboxctl onboard \"$@\"");
+        assertThat(rebuildIdx).as("UC-38 — the rebuild block must be present").isGreaterThanOrEqualTo(0);
+        assertThat(onboardIdx)
+                .as("UC-17 — the main onboarding invocation must be present")
+                .isGreaterThanOrEqualTo(0);
+        assertThat(rebuildIdx)
+                .as("UC-38 — the upgrade rebuild MUST run BEFORE the onboarding block (avoid a double build)")
+                .isLessThan(onboardIdx);
+
+        assertThat(text)
+                .as("UC-38 AC8 — the postinst MUST still end with an unconditional `exit 0`")
+                .containsPattern("(?m)^exit 0\\s*$");
+    }
+
+    /**
+     * UC-38 — POSIX-syntax gate: the postinst MUST parse cleanly under a
+     * real {@code sh}/{@code dash} ({@code sh -n}). Guarded with
+     * {@link org.junit.jupiter.api.Assumptions#assumeTrue} so the test is
+     * skipped (not failed) on a host with no POSIX shell on the usual paths,
+     * matching this class's existing Assumptions usage.
+     */
+    @Test
+    void postinst_parses_cleanly_under_posix_sh() throws IOException, InterruptedException {
+        assumeTrue(
+                Files.isRegularFile(POSTINST_FILE),
+                "postinst not found at " + POSTINST_FILE + " — test must run with cwd=server/");
+        Path sh = posixShell();
+        assumeTrue(sh != null, "no POSIX sh/dash on the usual paths — skipping the `sh -n` syntax gate");
+
+        Process p = new ProcessBuilder(sh.toString(), "-n", POSTINST_FILE.toString())
+                .redirectErrorStream(true)
+                .start();
+        byte[] out = p.getInputStream().readAllBytes();
+        assumeTrue(p.waitFor(30, TimeUnit.SECONDS), "`sh -n` did not finish within 30s — skipping");
+        assertThat(p.exitValue())
+                .as("UC-38 — `sh -n postinst` MUST report no syntax errors. Output was:\n%s", new String(out))
+                .isZero();
+    }
+
+    /** First POSIX shell found among the usual locations, or {@code null}. */
+    private static Path posixShell() {
+        for (String candidate : new String[] {"/bin/dash", "/usr/bin/dash", "/bin/sh"}) {
+            Path p = Path.of(candidate);
+            if (Files.isExecutable(p)) {
+                return p;
+            }
+        }
+        return null;
     }
 }

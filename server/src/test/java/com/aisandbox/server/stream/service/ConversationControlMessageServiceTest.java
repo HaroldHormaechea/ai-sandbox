@@ -33,14 +33,14 @@ class ConversationControlMessageServiceTest {
     @Test
     void parses_composer_input_frame() {
         ConversationClientMessage m = svc.parseConversation("{\"type\":\"composer-input\",\"text\":\"hi\\nthere\"}");
-        assertThat(m).isInstanceOfSatisfying(
-                ConversationClientMessage.ComposerInput.class, c -> assertThat(c.text()).isEqualTo("hi\nthere"));
+        assertThat(m).isInstanceOfSatisfying(ConversationClientMessage.ComposerInput.class, c -> assertThat(c.text())
+                .isEqualTo("hi\nthere"));
     }
 
     @Test
     void parses_answer_frame_with_selections_and_free_text() {
-        ConversationClientMessage m = svc.parseConversation(
-                "{\"type\":\"answer\",\"questionUuid\":\"tuQ\",\"questionIndex\":0,"
+        ConversationClientMessage m =
+                svc.parseConversation("{\"type\":\"answer\",\"questionUuid\":\"tuQ\",\"questionIndex\":0,"
                         + "\"selections\":[0,2],\"freeText\":\"custom\"}");
         assertThat(m).isInstanceOfSatisfying(ConversationClientMessage.Answer.class, a -> {
             assertThat(a.questionUuid()).isEqualTo("tuQ");
@@ -53,9 +53,8 @@ class ConversationControlMessageServiceTest {
     @Test
     void parses_select_target_interrupt_enumerate_and_close_frames() {
         assertThat(svc.parseConversation("{\"type\":\"select-target\",\"targetId\":\"swarm:main:0.1\"}"))
-                .isInstanceOfSatisfying(
-                        ConversationClientMessage.SelectTarget.class,
-                        st -> assertThat(st.targetId()).isEqualTo("swarm:main:0.1"));
+                .isInstanceOfSatisfying(ConversationClientMessage.SelectTarget.class, st -> assertThat(st.targetId())
+                        .isEqualTo("swarm:main:0.1"));
         assertThat(svc.parseConversation("{\"type\":\"interrupt\"}"))
                 .isInstanceOf(ConversationClientMessage.Interrupt.class);
         assertThat(svc.parseConversation("{\"type\":\"enumerate-targets\"}"))
@@ -68,8 +67,7 @@ class ConversationControlMessageServiceTest {
     void rejects_unknown_or_invalid_conversation_frame() {
         assertThatThrownBy(() -> svc.parseConversation("{\"type\":\"resize\",\"cols\":80}"))
                 .isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> svc.parseConversation("not-json"))
-                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> svc.parseConversation("not-json")).isInstanceOf(IllegalArgumentException.class);
     }
 
     // ──────────────────────── outbound (server → client) ─────────────────────
@@ -103,10 +101,7 @@ class ConversationControlMessageServiceTest {
                 "main",
                 "tuQ",
                 List.of(new ConversationServerMessage.QuestionItem(
-                        "Pick one",
-                        "Choice",
-                        true,
-                        List.of(new ConversationServerMessage.Option("A", "first")))));
+                        "Pick one", "Choice", true, List.of(new ConversationServerMessage.Option("A", "first")))));
         String s = ser(q);
         assertThat(s)
                 .contains("\"type\":\"question\"")
@@ -121,8 +116,8 @@ class ConversationControlMessageServiceTest {
         assertThat(ser(new ConversationServerMessage.PlanApproval("up", false, "main", "tuP", "the plan")))
                 .contains("\"type\":\"plan-approval\"")
                 .contains("\"plan\":\"the plan\"");
-        StreamServerMessage.TargetInfo main =
-                new StreamServerMessage.TargetInfo("main", "main", "main", null, null, null, null, null, "main", null, null);
+        StreamServerMessage.TargetInfo main = new StreamServerMessage.TargetInfo(
+                "main", "main", "main", null, null, null, null, null, "main", null, null);
         assertThat(ser(new ConversationServerMessage.Targets(List.of(main), "main")))
                 .contains("\"type\":\"targets\"")
                 .contains("\"selectedId\":\"main\"");

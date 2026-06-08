@@ -46,8 +46,7 @@ class InputInjectionServiceTest {
     void setUp() throws Exception {
         exec = mock(ProcessExecutor.class);
         // Default: every send-keys succeeds.
-        when(exec.run(any(), any(), any(Duration.class)))
-                .thenReturn(new ProcessExecutor.Result(0, "", ""));
+        when(exec.run(any(), any(), any(Duration.class))).thenReturn(new ProcessExecutor.Result(0, "", ""));
         svc = new InputInjectionService(exec);
     }
 

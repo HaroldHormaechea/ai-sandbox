@@ -77,7 +77,8 @@ class SessionConversationHandlerTest {
 
     @Test
     void absent_subprotocol_emits_error_and_closes_1003() {
-        FakeSession session = new FakeSession(URI.create("/v1/sessions/7/conversation"), new HttpHeaders(), new HashMap<>());
+        FakeSession session =
+                new FakeSession(URI.create("/v1/sessions/7/conversation"), new HttpHeaders(), new HashMap<>());
 
         newHandler(mock(ConversationFacade.class)).handle(session).block();
 
@@ -89,7 +90,8 @@ class SessionConversationHandlerTest {
     @Test
     void subprotocol_present_but_no_identity_closes_with_policy_violation() {
         ConversationFacade facade = mock(ConversationFacade.class);
-        FakeSession session = new FakeSession(URI.create("/v1/sessions/7/conversation"), subprotocolHeaders(), new HashMap<>());
+        FakeSession session =
+                new FakeSession(URI.create("/v1/sessions/7/conversation"), subprotocolHeaders(), new HashMap<>());
 
         newHandler(facade).handle(session).block();
 
@@ -144,8 +146,7 @@ class SessionConversationHandlerTest {
 
         Map<String, Object> attrs = new HashMap<>();
         attrs.put(SessionConversationHandler.IDENTITY_ATTR, identity());
-        FakeSession session =
-                new FakeSession(URI.create("/v1/sessions/7/conversation"), subprotocolHeaders(), attrs);
+        FakeSession session = new FakeSession(URI.create("/v1/sessions/7/conversation"), subprotocolHeaders(), attrs);
 
         newHandler(facade).handle(session).block();
         return session;
@@ -167,8 +168,8 @@ class SessionConversationHandlerTest {
     void no_transcript_then_backfill_recovers_on_the_same_open_channel() throws Exception {
         // After failing loud, a later claude (re)start makes the transcript appear:
         // backfill markers flow through on the SAME still-open channel.
-        FakeSession session = driveAllowedTail(
-                "__ctrl__\tno-transcript", "__ctrl__\tbackfill-start", "__ctrl__\tbackfill-end");
+        FakeSession session =
+                driveAllowedTail("__ctrl__\tno-transcript", "__ctrl__\tbackfill-start", "__ctrl__\tbackfill-end");
 
         assertThat(session.sent).anySatisfy(f -> assertThat(f).contains("no_transcript"));
         assertThat(session.sent).anySatisfy(f -> assertThat(f).contains("backfill-start"));
@@ -189,8 +190,7 @@ class SessionConversationHandlerTest {
 
         Map<String, Object> attrs = new HashMap<>();
         attrs.put(SessionConversationHandler.IDENTITY_ATTR, identity());
-        FakeSession session =
-                new FakeSession(URI.create("/v1/sessions/7/conversation"), subprotocolHeaders(), attrs);
+        FakeSession session = new FakeSession(URI.create("/v1/sessions/7/conversation"), subprotocolHeaders(), attrs);
 
         newHandler(facade).handle(session).block();
 
@@ -244,7 +244,9 @@ class SessionConversationHandlerTest {
 
         @Override
         public Mono<Void> send(Publisher<WebSocketMessage> messages) {
-            return Flux.from(messages).doOnNext(m -> sent.add(m.getPayloadAsText())).then();
+            return Flux.from(messages)
+                    .doOnNext(m -> sent.add(m.getPayloadAsText()))
+                    .then();
         }
 
         @Override
