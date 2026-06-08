@@ -146,14 +146,21 @@ RUN chgrp -R 0 /opt/ai-sandbox && chmod -R g=u /opt/ai-sandbox
 #   aisandbox-android  — Android SDK provisioner + ANDROID_HOME/PATH wiring (UC-27).
 #   aisandbox-emulator — headless AVD provisioning/boot (reworked in UC-27 to
 #                        use the spawn-provisioned SDK root, no baked SDK).
+#   aisandbox-conversation-tail — UC-37 structured-conversation transcript-tail
+#                        helper. Always shipped (no capability gate): the host
+#                        server `docker compose exec`s it to stream the live
+#                        session's transcript JSONL to the Android structured
+#                        view. Node script — the node:20 base guarantees `node`.
 COPY container-bin/aisandbox-emulator /usr/local/bin/aisandbox-emulator
 COPY container-bin/aisandbox-java /usr/local/bin/aisandbox-java
 COPY container-bin/aisandbox-android /usr/local/bin/aisandbox-android
 COPY container-bin/aisandbox-dind /usr/local/bin/aisandbox-dind
+COPY container-bin/aisandbox-conversation-tail /usr/local/bin/aisandbox-conversation-tail
 RUN chmod +x /usr/local/bin/aisandbox-emulator \
              /usr/local/bin/aisandbox-java \
              /usr/local/bin/aisandbox-android \
-             /usr/local/bin/aisandbox-dind
+             /usr/local/bin/aisandbox-dind \
+             /usr/local/bin/aisandbox-conversation-tail
 
 COPY --chown=claude:claude entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh

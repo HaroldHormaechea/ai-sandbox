@@ -344,4 +344,9 @@ data class StreamTarget(
     val agentType: String? = null,
     val agentColor: String? = null,
     val teamName: String? = null,
+    // UC-37 AC18 — additive switcher-badge flags, populated only by the
+    // conversation channel's enumerate path. The binary-stream switcher leaves
+    // them false (default), so the terminal agent-switcher is unaffected.
+    val pendingActivity: Boolean = false,
+    val pendingQuestion: Boolean = false,
 )

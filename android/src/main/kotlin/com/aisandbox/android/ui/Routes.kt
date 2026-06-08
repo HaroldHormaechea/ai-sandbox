@@ -22,9 +22,14 @@ object Routes {
     const val Sessions = "sessions"
     /** Path with `{n}` placeholder; use [terminalFor]. */
     const val TerminalPattern = "terminal/{n}"
+    /** UC-37 — structured conversation view. Path with `{n}`; use [conversationFor]. */
+    const val ConversationPattern = "conversation/{n}"
     const val Settings = "settings"
     const val CertRevoked = "cert-revoked"
     const val ServerIdentityChanged = "server-identity-changed"
 
     fun terminalFor(n: Int): String = "terminal/$n"
+
+    /** UC-37 — single-tap connection-mode destination (long-press → [terminalFor]). */
+    fun conversationFor(n: Int): String = "conversation/$n"
 }

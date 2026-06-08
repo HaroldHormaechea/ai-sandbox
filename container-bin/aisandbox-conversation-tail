@@ -1,0 +1,457 @@
+#!/usr/bin/env node
+/*
+ * UC-37 — in-container transcript-tail helper (decision D2).
+ *
+ * Runs INSIDE a sandbox container (spawned by the host server via
+ *   docker compose -p ai-sandbox-N exec -T claude-sandbox aisandbox-conversation-tail …)
+ * and streams the live interactive `claude` session's structured output to the
+ * server over stdout, which the server reads incrementally (TranscriptTailService).
+ *
+ * Why Node and not bash: the job is robust multi-file tailing with complete-line
+ * integrity, restart re-baselining, and a changing subagent-file glob. The image
+ * base is node:20-bookworm-slim, so `node` is always present; doing this in bash
+ * would be fragile (partial-line reads, offset tracking). The tool reads only —
+ * it never writes the transcript and never executes anything but read-only tmux
+ * queries.
+ *
+ * OUTPUT ENVELOPE (helper → server), one line each:
+ *   <source>\t<raw-transcript-json>      source = "main" | "subagent:<agentId>"
+ *   __ctrl__\tbackfill-start             begins the bounded backfill window
+ *   __ctrl__\tbackfill-end               ends it; live append follows
+ *   __ctrl__\trebaseline                 the entrypoint restart loop spawned a
+ *                                        fresh claude → new transcript file
+ * Only COMPLETE lines are emitted (a trailing partial line is buffered until its
+ * newline arrives). A line is never parsed here — the server's
+ * ConversationEventMapper owns that — so a malformed transcript line is passed
+ * through verbatim and skipped server-side, never crashing the session (AC20).
+ *
+ * SCAN MODE (--scan-pending): one-shot. Resolve the active transcript, inspect
+ * only its tail, print one of `pending-question` / `pending-activity` / `idle`,
+ * exit 0. Used by the conversation enumerate path to badge non-selected targets
+ * (AC18). Never blocks.
+ *
+ * The active-transcript resolution is the load-bearing part (RND §10, proposal
+ * RISK 4): resolve the target pane's claude PID via /proc/<pid>/task/<pid>/children,
+ * then read /proc/<claudePid>/fd to find the OPEN transcript path — giving the
+ * exact file stem with no session-id guessing under the shared claude-config mount.
+ */
+
+'use strict';
+
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+const { execFileSync } = require('child_process');
+
+// ──────────────────────── args ────────────────────────
+
+function parseArgs(argv) {
+  const a = {
+    session: 'main',
+    window: null,
+    pane: null,
+    socket: null,
+    backfill: 200,
+    projectsDir: path.join(os.homedir() || '/home/claude', '.claude', 'projects'),
+    scanPending: false,
+  };
+  for (let i = 2; i < argv.length; i++) {
+    const k = argv[i];
+    switch (k) {
+      case '--session': a.session = argv[++i]; break;
+      case '--window': a.window = argv[++i]; break;
+      case '--pane': a.pane = argv[++i]; break;
+      case '--socket': a.socket = argv[++i]; break;
+      case '--backfill': a.backfill = Math.max(1, parseInt(argv[++i], 10) || 200); break;
+      case '--projects-dir': a.projectsDir = argv[++i]; break;
+      case '--scan-pending': a.scanPending = true; break;
+      default: /* ignore unknown flag */ break;
+    }
+  }
+  return a;
+}
+
+const ARGS = parseArgs(process.argv);
+
+// Exit quietly if the server closed our stdout (EPIPE on write → SIGPIPE-like).
+process.stdout.on('error', (e) => {
+  if (e && e.code === 'EPIPE') process.exit(0);
+});
+
+function out(line) {
+  try {
+    process.stdout.write(line + '\n');
+  } catch (e) {
+    if (e && e.code === 'EPIPE') process.exit(0);
+  }
+}
+
+function emitCtrl(kind) {
+  out('__ctrl__\t' + kind);
+}
+
+// ──────────────────────── tmux / proc resolution ────────────────────────
+
+function tmuxArgs(rest) {
+  const base = [];
+  if (ARGS.socket) {
+    base.push('-S', ARGS.socket);
+  }
+  return base.concat(rest);
+}
+
+function targetSpec() {
+  const s = ARGS.session || 'main';
+  if (ARGS.window && ARGS.pane) {
+    return s + ':' + ARGS.window + '.' + ARGS.pane;
+  }
+  return s;
+}
+
+/** Resolve the pane pid via `tmux display-message -p -t <spec> '#{pane_pid}'`; null on failure. */
+function resolvePanePid() {
+  try {
+    const res = execFileSync(
+      'tmux',
+      tmuxArgs(['display-message', '-p', '-t', targetSpec(), '#{pane_pid}']),
+      { encoding: 'utf8', timeout: 5000 },
+    );
+    const pid = parseInt(String(res).trim(), 10);
+    return Number.isFinite(pid) && pid > 0 ? pid : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function readProc(p) {
+  try {
+    return fs.readFileSync(p, 'utf8');
+  } catch (e) {
+    return null;
+  }
+}
+
+function procChildren(pid) {
+  const raw = readProc('/proc/' + pid + '/task/' + pid + '/children');
+  if (!raw) return [];
+  return raw.trim().split(/\s+/).map((s) => parseInt(s, 10)).filter((n) => Number.isFinite(n) && n > 0);
+}
+
+function isClaude(pid) {
+  const comm = readProc('/proc/' + pid + '/comm');
+  if (comm && comm.trim().toLowerCase().startsWith('claude')) return true;
+  const cmd = readProc('/proc/' + pid + '/cmdline');
+  if (cmd) {
+    const argv0 = cmd.split('\0')[0] || '';
+    const bn = argv0.substring(argv0.lastIndexOf('/') + 1);
+    if (bn.toLowerCase().startsWith('claude')) return true;
+  }
+  return false;
+}
+
+/** DFS from panePid to the first `claude*` descendant; null if none within depth. */
+function findClaudePid(panePid, depth) {
+  if (panePid == null) return null;
+  if (isClaude(panePid)) return panePid;
+  if (depth <= 0) return null;
+  for (const child of procChildren(panePid)) {
+    const found = findClaudePid(child, depth - 1);
+    if (found != null) return found;
+  }
+  return null;
+}
+
+/**
+ * Find the OPEN main transcript path from /proc/<claudePid>/fd — a *.jsonl under
+ * projectsDir that is NOT a subagent file. Picks the most-recently-modified when
+ * several are open. Returns absolute path or null.
+ */
+function resolveMainTranscript(claudePid) {
+  const fdDir = '/proc/' + claudePid + '/fd';
+  let entries;
+  try {
+    entries = fs.readdirSync(fdDir);
+  } catch (e) {
+    return null;
+  }
+  let best = null;
+  let bestMtime = -1;
+  for (const ent of entries) {
+    let target;
+    try {
+      target = fs.readlinkSync(path.join(fdDir, ent));
+    } catch (e) {
+      continue;
+    }
+    if (!target || !target.endsWith('.jsonl')) continue;
+    if (target.indexOf('/projects/') < 0) continue;
+    if (target.indexOf('/subagents/') >= 0) continue;
+    let mtime = 0;
+    try {
+      mtime = fs.statSync(target).mtimeMs;
+    } catch (e) {
+      continue;
+    }
+    if (mtime > bestMtime) {
+      bestMtime = mtime;
+      best = target;
+    }
+  }
+  return best;
+}
+
+/** Resolve the active main transcript path (pane → claude pid → fd), or null. */
+function resolveTranscript() {
+  const panePid = resolvePanePid();
+  if (panePid == null) return null;
+  const claudePid = findClaudePid(panePid, 3);
+  if (claudePid == null) return null;
+  return resolveMainTranscript(claudePid);
+}
+
+/** subagents/agent-*.jsonl directory derived from the main transcript path. */
+function subagentDir(mainPath) {
+  const dir = path.dirname(mainPath);
+  const stem = path.basename(mainPath, '.jsonl');
+  return path.join(dir, stem, 'subagents');
+}
+
+function listSubagentFiles(mainPath) {
+  const dir = subagentDir(mainPath);
+  let files;
+  try {
+    files = fs.readdirSync(dir);
+  } catch (e) {
+    return [];
+  }
+  return files
+    .filter((f) => f.startsWith('agent-') && f.endsWith('.jsonl'))
+    .map((f) => path.join(dir, f));
+}
+
+function subagentSource(filePath) {
+  const bn = path.basename(filePath, '.jsonl'); // agent-<id>
+  const id = bn.startsWith('agent-') ? bn.substring('agent-'.length) : bn;
+  return 'subagent:' + id;
+}
+
+// ──────────────────────── line splitting with residual buffer ────────────────────────
+
+/** Tracks per-file byte offset + a residual partial-line buffer for complete-line emission. */
+function makeReader(filePath, source) {
+  return { filePath, source, offset: 0, residual: '', ino: null };
+}
+
+function statSafe(p) {
+  try {
+    return fs.statSync(p);
+  } catch (e) {
+    return null;
+  }
+}
+
+/** Read new complete lines from reader since its offset; returns array of lines (no newline). */
+function readNewLines(reader) {
+  const st = statSafe(reader.filePath);
+  if (!st) return [];
+  // Rotation / truncation: file shrank or inode changed → reset to start.
+  if (reader.ino != null && (st.ino !== reader.ino || st.size < reader.offset)) {
+    reader.offset = 0;
+    reader.residual = '';
+  }
+  reader.ino = st.ino;
+  if (st.size <= reader.offset) return [];
+  let fd;
+  try {
+    fd = fs.openSync(reader.filePath, 'r');
+  } catch (e) {
+    return [];
+  }
+  const lines = [];
+  try {
+    const len = st.size - reader.offset;
+    const buf = Buffer.allocUnsafe(len);
+    const read = fs.readSync(fd, buf, 0, len, reader.offset);
+    reader.offset += read;
+    reader.residual += buf.toString('utf8', 0, read);
+    let nl;
+    while ((nl = reader.residual.indexOf('\n')) >= 0) {
+      const line = reader.residual.substring(0, nl);
+      reader.residual = reader.residual.substring(nl + 1);
+      if (line.length > 0) lines.push(line);
+    }
+  } catch (e) {
+    /* best-effort */
+  } finally {
+    try { fs.closeSync(fd); } catch (e) { /* ignore */ }
+  }
+  return lines;
+}
+
+/** Read the whole file as complete lines (for backfill); ignores a trailing partial line. */
+function readAllLines(filePath) {
+  let content;
+  try {
+    content = fs.readFileSync(filePath, 'utf8');
+  } catch (e) {
+    return [];
+  }
+  const parts = content.split('\n');
+  // Drop the trailing element if the file did not end with a newline (partial line).
+  if (parts.length > 0 && parts[parts.length - 1] === '') parts.pop();
+  else if (parts.length > 0) parts.pop(); // last is a partial line; skip it for backfill safety
+  return parts.filter((l) => l.length > 0);
+}
+
+// ──────────────────────── scan-pending (one-shot) ────────────────────────
+
+function scanPending() {
+  const mainPath = resolveTranscript();
+  if (!mainPath) {
+    out('idle');
+    return;
+  }
+  const all = readAllLines(mainPath);
+  const tail = all.slice(Math.max(0, all.length - 60));
+  let lastAsk = -1;
+  let lastTurnEnd = -1;
+  let lastLineIsTurnEnd = false;
+  for (let i = 0; i < tail.length; i++) {
+    let o;
+    try { o = JSON.parse(tail[i]); } catch (e) { continue; }
+    if (o && o.type === 'system' && o.subtype === 'turn_duration') {
+      lastTurnEnd = i;
+      lastLineIsTurnEnd = i === tail.length - 1;
+    } else {
+      lastLineIsTurnEnd = false;
+    }
+    if (o && o.type === 'assistant' && o.message && Array.isArray(o.message.content)) {
+      for (const b of o.message.content) {
+        if (b && b.type === 'tool_use' && b.name === 'AskUserQuestion') lastAsk = i;
+      }
+    }
+  }
+  if (lastAsk >= 0 && lastAsk > lastTurnEnd) {
+    out('pending-question');
+  } else if (tail.length > 0 && !lastLineIsTurnEnd) {
+    out('pending-activity');
+  } else {
+    out('idle');
+  }
+}
+
+// ──────────────────────── streaming mode ────────────────────────
+
+const POLL_MS = 300;
+
+function backfill(reader, n) {
+  let buf;
+  try {
+    buf = fs.readFileSync(reader.filePath);
+  } catch (e) {
+    return;
+  }
+  // Split at the last newline so a trailing PARTIAL line is preserved in the
+  // residual (and continued by readNewLines) rather than skipped — otherwise
+  // advancing the offset past a half-written line would corrupt it on completion.
+  const lastNl = buf.lastIndexOf(0x0a);
+  const completeEnd = lastNl >= 0 ? lastNl + 1 : 0;
+  const completeStr = buf.toString('utf8', 0, completeEnd);
+  let lines = completeStr.split('\n');
+  if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+  lines = lines.filter((l) => l.length > 0);
+  const start = Math.max(0, lines.length - n);
+  for (let i = start; i < lines.length; i++) {
+    out(reader.source + '\t' + lines[i]);
+  }
+  reader.offset = completeEnd;
+  reader.residual = buf.toString('utf8', completeEnd, buf.length);
+  const st = statSafe(reader.filePath);
+  reader.ino = st ? st.ino : null;
+}
+
+async function streamLoop() {
+  let mainPath = null;
+  let mainReader = null;
+  const subReaders = new Map(); // filePath → reader
+
+  // Wait for the first resolution (entrypoint restart `sleep 1` window).
+  while (mainPath == null) {
+    mainPath = resolveTranscript();
+    if (mainPath == null) await sleep(POLL_MS);
+  }
+
+  function rebaseline(newMain, announceRebaseline) {
+    if (announceRebaseline) emitCtrl('rebaseline');
+    mainPath = newMain;
+    mainReader = makeReader(mainPath, 'main');
+    subReaders.clear();
+    emitCtrl('backfill-start');
+    backfill(mainReader, ARGS.backfill);
+    for (const sf of listSubagentFiles(mainPath)) {
+      const r = makeReader(sf, subagentSource(sf));
+      backfill(r, ARGS.backfill);
+      subReaders.set(sf, r);
+    }
+    emitCtrl('backfill-end');
+  }
+
+  rebaseline(mainPath, false);
+
+  // Live poll loop.
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    // Detect a fresh claude (restart loop → new transcript file).
+    const current = resolveTranscript();
+    if (current && current !== mainPath) {
+      rebaseline(current, true);
+      await sleep(POLL_MS);
+      continue;
+    }
+
+    if (mainReader) {
+      for (const line of readNewLines(mainReader)) {
+        out(mainReader.source + '\t' + line);
+      }
+    }
+
+    // Re-glob subagent files; new ones get a bounded backfill, known ones append.
+    if (mainPath) {
+      for (const sf of listSubagentFiles(mainPath)) {
+        let r = subReaders.get(sf);
+        if (!r) {
+          r = makeReader(sf, subagentSource(sf));
+          backfill(r, ARGS.backfill);
+          subReaders.set(sf, r);
+        } else {
+          for (const line of readNewLines(r)) {
+            out(r.source + '\t' + line);
+          }
+        }
+      }
+    }
+
+    await sleep(POLL_MS);
+  }
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// ──────────────────────── main ────────────────────────
+
+if (ARGS.scanPending) {
+  try {
+    scanPending();
+  } catch (e) {
+    out('idle');
+  }
+  process.exit(0);
+} else {
+  streamLoop().catch((e) => {
+    // Never crash the session on an internal error — exit quietly so the server
+    // sees EOF and can re-spawn / surface a tail_failed if appropriate.
+    process.exit(0);
+  });
+}

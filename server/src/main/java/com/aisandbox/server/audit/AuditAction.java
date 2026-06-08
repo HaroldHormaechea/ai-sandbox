@@ -11,6 +11,12 @@ public enum AuditAction {
     STREAM_CLOSE,
     // UC-21 — a stream switched its bridged target mid-stream (agent switcher).
     STREAM_REBRIDGE,
+    // UC-37 — structured-conversation channel lifecycle + input events.
+    CONVERSATION_OPEN,
+    CONVERSATION_CLOSE,
+    CONVERSATION_INPUT,
+    CONVERSATION_ANSWER,
+    CONVERSATION_INTERRUPT,
     CLIENT_ADD,
     CLIENT_REMOVE,
     // UC04 — successful POST /v1/enrollment redemption.

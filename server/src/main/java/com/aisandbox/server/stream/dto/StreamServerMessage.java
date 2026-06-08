@@ -58,7 +58,22 @@ public sealed interface StreamServerMessage
      *   <li>{@code socket} / {@code session} / {@code window} / {@code pane} — the
      *       tmux coordinates the server uses to re-bridge (null fields default to
      *       the main session's default socket).</li>
+     *   <li>{@code pendingActivity} / {@code pendingQuestion} — UC-37 D4 additive
+     *       flags consumed by the structured-conversation switcher to badge a
+     *       <b>non-selected</b> target (AC18): {@code pendingActivity} = the
+     *       target's transcript advanced since last seen; {@code pendingQuestion}
+     *       = an {@code AskUserQuestion} is awaiting an answer (the transcript has
+     *       not advanced past the last question). The binary-stream
+     *       ({@code /stream}) enumerator leaves both {@code false} — they are
+     *       populated only on the conversation channel's enumerate path
+     *       (ConversationFacade), so the legacy switcher is byte-unaffected.</li>
      * </ul>
+     *
+     * <p>The 11-arg constructor is retained (defaulting both pending flags to
+     * {@code false}) so every existing {@code new TargetInfo(...)} call site —
+     * {@code SwarmEnumerationService}, {@code StreamFacade}, and QA fixtures —
+     * compiles unchanged; only the conversation enumerate path uses the 13-arg
+     * canonical form or {@link #withPending(boolean, boolean)}.
      */
     record TargetInfo(
             String id,
@@ -71,5 +86,55 @@ public sealed interface StreamServerMessage
             String socket,
             String session,
             String window,
-            String pane) {}
+            String pane,
+            boolean pendingActivity,
+            boolean pendingQuestion) {
+
+        /** Back-compat 11-arg constructor — both pending flags default to {@code false}. */
+        public TargetInfo(
+                String id,
+                String kind,
+                String title,
+                String agentName,
+                String agentType,
+                String agentColor,
+                String teamName,
+                String socket,
+                String session,
+                String window,
+                String pane) {
+            this(
+                    id,
+                    kind,
+                    title,
+                    agentName,
+                    agentType,
+                    agentColor,
+                    teamName,
+                    socket,
+                    session,
+                    window,
+                    pane,
+                    false,
+                    false);
+        }
+
+        /** Return a copy with the UC-37 pending flags set (used by the conversation enumerate path). */
+        public TargetInfo withPending(boolean pendingActivity, boolean pendingQuestion) {
+            return new TargetInfo(
+                    id,
+                    kind,
+                    title,
+                    agentName,
+                    agentType,
+                    agentColor,
+                    teamName,
+                    socket,
+                    session,
+                    window,
+                    pane,
+                    pendingActivity,
+                    pendingQuestion);
+        }
+    }
 }

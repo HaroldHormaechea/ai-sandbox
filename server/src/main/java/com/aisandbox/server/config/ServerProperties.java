@@ -135,7 +135,26 @@ public record ServerProperties(
             @Min(1) int maxTextFrameBytes,
             @Min(1) int outputRingBytes,
             @Min(1) int keepalivePingSeconds,
-            @Min(1) int keepalivePongTimeoutSeconds) {}
+            @Min(1) int keepalivePongTimeoutSeconds) {
+
+        /**
+         * UC-37 — bounded backfill window (transcript lines) replayed when a
+         * structured-conversation channel opens or reconnects (AC6/AC22), so a
+         * long-running session's large transcript never floods the client. The
+         * conversation channel reuses the rest of the {@code streams} caps
+         * (per-client / global / text-frame size); the backfill bound is
+         * intentionally a defaulted accessor rather than a new YAML-bound,
+         * {@code @Min}-validated component so existing {@code config.yaml},
+         * {@code sample-config.yaml}, and QA test fixtures bind unchanged. Promote
+         * to a bound field if per-deployment tuning is ever needed.
+         */
+        public int conversationBackfillLines() {
+            return CONVERSATION_BACKFILL_LINES_DEFAULT;
+        }
+    }
+
+    /** UC-37 default backfill window — see {@link Streams#conversationBackfillLines()}. */
+    public static final int CONVERSATION_BACKFILL_LINES_DEFAULT = 200;
 
     /**
      * UC04 enrollment-endpoint configuration. Tokens issued by

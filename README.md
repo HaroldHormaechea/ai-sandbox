@@ -200,6 +200,15 @@ sudo -u ai-sandbox-server aisandboxctl client invite alice-phone \
 
 Scan the QR from the app's onboarding screen: it redeems the token via the server's mTLS-exempt `POST /v1/enrollment`, imports the returned PKCS#12 bundle into the Android KeyStore as **non-exportable**, and uses that key as its sole TLS client identity thereafter. Re-scanning replaces the identity (one server profile per device). See [`android/README.md`](android/README.md) for the full operator + developer guide, [`design/android-ui/`](design/android-ui/) for the visual spec, and [`server/README.md`](server/README.md#enroll-a-device--aisandboxctl-client-invite) for the `client invite` flags.
 
+### Two ways to connect to a session (UC-37)
+
+From the sessions list, **single-tap** a row to open the **structured conversation view** and **long-press** to open the **tmux/terminal view** — both drive the *same* live `claude` session in that container (there is no separate `claude -p` conversation, and `--remote-control` is not used):
+
+- **Conversation view (single-tap)** — a chat-style front-end. Output is rendered from the running session's transcript as structured items (assistant text, thinking, tool use/results); questions (`AskUserQuestion`) and plan approvals render in a dedicated sheet with selectable options and a free-text "Other"; a local composer with full IME/autocorrect submits without per-keystroke lag (no raw PTY is rendered); a spinner reflects the turn lifecycle; the agent switcher carries over. The protocol is documented in [`server/CONVERSATION_PROTOCOL.md`](server/CONVERSATION_PROTOCOL.md).
+- **Terminal view (long-press)** — today's full-fidelity tmux terminal, kept as the power/raw fallback for TUI states the structured view can't drive (slash menus, arbitrary sub-modes).
+
+Anything done in one view is reflected in the other, since both attach to the one tmux session.
+
 ## Known foot-guns
 
 The default shared-workspace + shared-claude-config layout trades safety for ergonomics. Nothing in the code prevents the following — be aware:

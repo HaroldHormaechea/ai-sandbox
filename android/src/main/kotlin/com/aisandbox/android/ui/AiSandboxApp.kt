@@ -22,6 +22,7 @@ import com.aisandbox.android.net.NetworkEvents
 import com.aisandbox.android.net.TlsFailureTranslation
 import com.aisandbox.android.requireContainer
 import com.aisandbox.android.ui.screens.CertRevokedScreen
+import com.aisandbox.android.ui.screens.ConversationScreen
 import com.aisandbox.android.ui.screens.OnboardingScreen
 import com.aisandbox.android.ui.screens.ServerIdentityChangedScreen
 import com.aisandbox.android.ui.screens.SessionsScreen
@@ -143,7 +144,10 @@ fun AiSandboxApp() {
 
             composable(Routes.Sessions) {
                 SessionsScreen(
-                    onOpen = { n -> navController.navigate(Routes.terminalFor(n)) },
+                    // UC-37 — single-tap opens the structured conversation view;
+                    // long-press opens the tmux/terminal view (the raw fallback).
+                    onOpen = { n -> navController.navigate(Routes.conversationFor(n)) },
+                    onOpenTerminal = { n -> navController.navigate(Routes.terminalFor(n)) },
                     onOpenSettings = { navController.navigate(Routes.Settings) },
                 )
             }
@@ -154,6 +158,14 @@ fun AiSandboxApp() {
             ) { backStackEntry ->
                 val n = backStackEntry.arguments?.getInt("n") ?: 0
                 TerminalScreen(sessionN = n, onBack = { navController.popBackStack() })
+            }
+
+            composable(
+                route = Routes.ConversationPattern,
+                arguments = listOf(navArgument("n") { type = NavType.IntType }),
+            ) { backStackEntry ->
+                val n = backStackEntry.arguments?.getInt("n") ?: 0
+                ConversationScreen(sessionN = n, onBack = { navController.popBackStack() })
             }
 
             composable(Routes.Settings) {

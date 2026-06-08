@@ -1,8 +1,10 @@
 package com.aisandbox.android
 
 import android.content.Context
+import com.aisandbox.android.conversation.ConversationController
 import com.aisandbox.android.identity.KeyStoreIdentityManager
 import com.aisandbox.android.net.AiSandboxHttpClient
+import com.aisandbox.android.net.ConversationClient
 import com.aisandbox.android.net.ServerProfile
 import com.aisandbox.android.net.ServerProfileStore
 import com.aisandbox.android.net.SessionEventsClient
@@ -88,6 +90,10 @@ class AppContainer(applicationContext: Context) {
     fun streamClient(client: AiSandboxHttpClient, sessionN: Int): StreamClient =
         StreamClient(http = client, sessionN = sessionN)
 
+    /** UC-37 — build a per-profile client for the structured-conversation channel. */
+    fun conversationClient(client: AiSandboxHttpClient, sessionN: Int): ConversationClient =
+        ConversationClient(http = client, sessionN = sessionN)
+
     /**
      * UC-32 — build a client for the live sessions-list push feed
      * ({@code /v1/sessions/events}). Mirrors [streamClient]: cheap, per-profile,
@@ -134,6 +140,30 @@ class AppContainer(applicationContext: Context) {
      */
     @Synchronized
     fun existingController(sessionN: Int): TerminalStreamController? = controllers[sessionN]
+
+    // ── Conversation controllers (UC-37) ────────────────────────────────────
+    // Process-scoped, keyed by session N, single-active (mirrors the terminal
+    // registry): opening a conversation for a different N tears down the prior
+    // one's tail. A conversation and a tmux terminal of the SAME N may coexist —
+    // they drive one tmux session, so input from either reflects in both (AC23).
+    private val conversationControllers = HashMap<Int, ConversationController>()
+
+    @Synchronized
+    fun conversationController(sessionN: Int): ConversationController {
+        conversationControllers[sessionN]?.let { return it }
+        conversationControllers.keys.filter { it != sessionN }.forEach { other ->
+            conversationControllers.remove(other)?.close("switch-session")
+        }
+        val controller = ConversationController(
+            sessionN = sessionN,
+            profileStore = profileStore,
+            httpClientFactory = ::httpClient,
+            clientFactory = ::conversationClient,
+            onClosed = { closedN -> synchronized(this) { conversationControllers.remove(closedN) } },
+        )
+        conversationControllers[sessionN] = controller
+        return controller
+    }
 }
 
 /** Lookup helper for ViewModels / Composables; throws if the Application class is mis-wired. */
