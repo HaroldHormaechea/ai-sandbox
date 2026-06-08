@@ -1,0 +1,10 @@
+{
+  "name": "aisandbox-container-bin",
+  "version": "0.0.0",
+  "private": true,
+  "type": "commonjs",
+  "description": "In-container helpers (UC-37 transcript tail) + their Node unit tests. No runtime deps — uses only the node:20 stdlib already in the sandbox base image.",
+  "scripts": {
+    "test": "node --test"
+  }
+}

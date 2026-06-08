@@ -241,6 +241,21 @@ public class SessionConversationHandler implements WebSocketHandler {
                     // beyond letting the new backfill markers flow through.
                     LOG.debug("conversation tail rebaselined for n={}", ctx.n);
                 }
+                case TranscriptTailService.CTRL_NO_TRANSCRIPT -> {
+                    // The helper could not resolve an active transcript within its
+                    // grace window. Surface it as a NON-FATAL error frame (no close):
+                    // the helper keeps polling and will emit backfill markers if the
+                    // transcript later appears (e.g. mid claude restart). This makes
+                    // the original silent-hang bug class observable client-side.
+                    LOG.info("conversation tail reported no resolvable transcript for n={}", ctx.n);
+                    emit(
+                            ctx,
+                            session,
+                            new ConversationServerMessage.ServerError(
+                                    "no_transcript",
+                                    "No active transcript",
+                                    "the live session's transcript could not be resolved yet"));
+                }
                 default -> {
                     /* unknown control — ignore */
                 }
