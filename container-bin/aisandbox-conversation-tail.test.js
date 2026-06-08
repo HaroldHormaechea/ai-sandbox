@@ -76,9 +76,34 @@ test('parseClaudeIdentity returns all-null for a plain main-session cmdline', ()
   assert.strictEqual(id.agentName, null);
   assert.strictEqual(id.teamName, null);
   assert.strictEqual(id.parentSessionId, null);
-  // Empty / nullish input is tolerated.
-  assert.deepStrictEqual(helper.parseClaudeIdentity(''), { agentName: null, teamName: null, parentSessionId: null });
-  assert.deepStrictEqual(helper.parseClaudeIdentity(null), { agentName: null, teamName: null, parentSessionId: null });
+  assert.strictEqual(id.sessionId, null);
+  // Empty / nullish input is tolerated. The identity shape now carries sessionId,
+  // added by the entrypoint restart loop's `claude --session-id <uuid>` (the
+  // tier-0 main anchor) — a plain cmdline still yields null for it.
+  const ALL_NULL = { agentName: null, teamName: null, parentSessionId: null, sessionId: null };
+  assert.deepStrictEqual(helper.parseClaudeIdentity(''), ALL_NULL);
+  assert.deepStrictEqual(helper.parseClaudeIdentity(null), ALL_NULL);
+});
+
+// sessionId extraction — BOTH flag forms (current entrypoint stamps --session-id
+// on the main pane's cmdline; this is the tier-0 anchor for the session-bleed fix).
+test('parseClaudeIdentity extracts sessionId from the `--session-id <value>` form', () => {
+  const sid = '7f3c1a90-0b2e-4d44-9c11-aa55bb66cc77';
+  const cmdline = ['claude', '--session-id', sid, '--dangerously-skip-permissions', ''].join(NUL);
+  const id = helper.parseClaudeIdentity(cmdline);
+  assert.strictEqual(id.sessionId, sid);
+  // A main pane carries no teammate identity.
+  assert.strictEqual(id.agentName, null);
+  assert.strictEqual(id.teamName, null);
+  assert.strictEqual(id.parentSessionId, null);
+});
+
+test('parseClaudeIdentity extracts sessionId from the `--session-id=<value>` form', () => {
+  const sid = 'feedface-1234-5678-9abc-def012345678';
+  const cmdline = ['claude', '--session-id=' + sid, '--dangerously-skip-permissions', ''].join(NUL);
+  const id = helper.parseClaudeIdentity(cmdline);
+  assert.strictEqual(id.sessionId, sid);
+  assert.strictEqual(id.agentName, null);
 });
 
 // ──────────────────────── selectAgentTranscript (teammate/subagent anchoring) ────────────────────────
@@ -292,4 +317,190 @@ test('end-to-end — a shared slug dir resolves the right transcript by listing 
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// UC — session-bleed fix (tier-0 sessionId-exact main anchoring)
+//
+// THE BUG: structured "conversation" mode showed a NEW session ANOTHER session's
+// conversation. Root cause — a solo session's main transcript was resolved by
+// newest-mtime in the SHARED (bind-mounted) ~/.claude slug dir, so it grabbed a
+// foreign, more-recently-appended session's transcript.
+//
+// THE FIX: the entrypoint now launches `claude --session-id <uuid>`, so the main
+// pane's cmdline carries its OWN session id. When a sessionId is present the main
+// transcript is anchored to <session-id>.jsonl EXACTLY and ONLY — null on no-match
+// (NO fallthrough to newest-mtime), so a freshly-started session shows a transient
+// no-transcript state until its OWN transcript lands, never a foreign one.
+// ════════════════════════════════════════════════════════════════════════════
+
+// ──────────────────────── selectMainBySessionId (tier-0 exact anchoring) ────────────────────────
+
+test('selectMainBySessionId — exact stem match returns that candidate', () => {
+  const sid = 'aaaa-bbbb-cccc';
+  const candidates = [
+    { path: '/slug/' + sid + '.jsonl', stem: sid, mtimeMs: 100 },
+    { path: '/slug/other.jsonl', stem: 'other', mtimeMs: 9999 }, // newer, but not our stem
+  ];
+  assert.strictEqual(helper.selectMainBySessionId(candidates, sid), '/slug/' + sid + '.jsonl');
+});
+
+test('selectMainBySessionId — NO match returns null (never falls through to newest-mtime)', () => {
+  const candidates = [
+    // Only foreign sessions exist; ours has not appeared yet. Both are NEWER than
+    // anything we'd accept — selecting by mtime here is exactly the bleed bug.
+    { path: '/slug/foreign-1.jsonl', stem: 'foreign-1', mtimeMs: 5000 },
+    { path: '/slug/foreign-2.jsonl', stem: 'foreign-2', mtimeMs: 9999 },
+  ];
+  assert.strictEqual(helper.selectMainBySessionId(candidates, 'mine-not-here'), null);
+  // Empty / nullish sessionId is also null (defensive — never anchors anything).
+  assert.strictEqual(helper.selectMainBySessionId(candidates, null), null);
+  assert.strictEqual(helper.selectMainBySessionId(candidates, ''), null);
+  assert.strictEqual(helper.selectMainBySessionId([], 'mine-not-here'), null);
+});
+
+test('selectMainBySessionId — pathological duplicate stems → newest mtime among them', () => {
+  const sid = 'dup-stem';
+  const candidates = [
+    { path: '/slug/dup-old.jsonl', stem: sid, mtimeMs: 10 },
+    { path: '/slug/dup-new.jsonl', stem: sid, mtimeMs: 50 },
+  ];
+  assert.strictEqual(helper.selectMainBySessionId(candidates, sid), '/slug/dup-new.jsonl');
+});
+
+// ──────────────────────── selectMainTranscript (regime dispatch) ────────────────────────
+
+// HEADLINE regression — the exact reported scenario. A new session's --session-id
+// matches NO candidate, while a FOREIGN, agentName-absent, NEWER-mtime main file
+// sits in the shared slug dir. The OLD newest-mtime logic would have routed that
+// foreign transcript to the client (the bleed). With tier-0 it MUST be null.
+test('HEADLINE regression — sessionId present but unmatched + newer foreign main file → null (no bleed)', () => {
+  const candidates = [
+    // Foreign session's main file: no agentName, NEWER mtime than anything of ours.
+    // Under the buggy newest-mtime path this would be selected and leaked.
+    { path: '/slug/foreign-orch.jsonl', stem: 'foreign-orch-sid', mtimeMs: 9999, agentNamePresent: false },
+  ];
+  const resolved = helper.selectMainTranscript(candidates, { sessionId: 'my-brand-new-sid' });
+  assert.strictEqual(resolved, null, 'a new session must NOT adopt a foreign session\'s newer transcript');
+});
+
+// own-file-exists — sessionId present AND matching returns OUR transcript even when
+// a foreign file has a strictly newer mtime. Proves the anchor is stem-exact, not
+// mtime-ranked, once our own file is present.
+test('selectMainTranscript — sessionId matches own file; foreign newer-mtime file is ignored', () => {
+  const mySid = 'my-own-sid';
+  const candidates = [
+    { path: '/slug/' + mySid + '.jsonl', stem: mySid, mtimeMs: 100, agentNamePresent: false }, // mine
+    { path: '/slug/foreign.jsonl', stem: 'foreign-sid', mtimeMs: 9999, agentNamePresent: false }, // newer, foreign
+  ];
+  assert.strictEqual(
+    helper.selectMainTranscript(candidates, { sessionId: mySid }),
+    '/slug/' + mySid + '.jsonl',
+  );
+});
+
+// sessionId present → selectMainBySessionId ONLY: parentSessionIds must be ignored
+// entirely (no fallthrough through Tier-1 either).
+test('selectMainTranscript — sessionId present takes precedence over any parentSessionIds match', () => {
+  const mySid = 'sid-x';
+  const parentStem = 'parent-y';
+  const candidates = [
+    { path: '/slug/parent-y.jsonl', stem: parentStem, mtimeMs: 9999, agentNamePresent: false },
+    // our own file does NOT yet exist
+  ];
+  // Even though a parent-anchored candidate exists & is newer, sessionId regime
+  // returns null because OUR sid is unmatched — it never consults parentSessionIds.
+  assert.strictEqual(
+    helper.selectMainTranscript(candidates, { sessionId: mySid, parentSessionIds: new Set([parentStem]) }),
+    null,
+  );
+});
+
+// old-entrypoint degradation — NO sessionId on the cmdline (pre-fix image). The
+// unchanged two-tier path must still work: Tier 1 (selectMainByParent) then
+// Tier 2 (selectMainNewestNoAgent). Backward-compatibility guard.
+test('selectMainTranscript — no sessionId → Tier 1 parent-anchor wins when a parent stem matches', () => {
+  const parentStem = 'orch-stem';
+  const candidates = [
+    { path: '/slug/orch-stem.jsonl', stem: parentStem, mtimeMs: 50, agentNamePresent: false },
+    { path: '/slug/newer-noise.jsonl', stem: 'noise', mtimeMs: 9999, agentNamePresent: false }, // newer, not the parent
+  ];
+  assert.strictEqual(
+    helper.selectMainTranscript(candidates, { parentSessionIds: new Set([parentStem]) }),
+    '/slug/orch-stem.jsonl',
+  );
+});
+
+test('selectMainTranscript — no sessionId, no parent match → Tier 2 newest agentName-absent file', () => {
+  const candidates = [
+    { path: '/slug/teammate.jsonl', stem: 't', mtimeMs: 9999, agentNamePresent: true }, // excluded (has agentName)
+    { path: '/slug/main-stale.jsonl', stem: 'm1', mtimeMs: 100, agentNamePresent: false },
+    { path: '/slug/main-live.jsonl', stem: 'm2', mtimeMs: 500, agentNamePresent: false }, // newest main
+  ];
+  // Empty parent set → Tier 1 declines → Tier 2 picks the newest agentName-absent file.
+  assert.strictEqual(
+    helper.selectMainTranscript(candidates, { parentSessionIds: new Set() }),
+    '/slug/main-live.jsonl',
+  );
+  // Absent opts entirely is tolerated and behaves as the no-sessionId regime.
+  assert.strictEqual(helper.selectMainTranscript(candidates, undefined), '/slug/main-live.jsonl');
+});
+
+// ──────────────────────── end-to-end FS — tier-0 isolation in a shared slug dir ────────────────────────
+
+test('end-to-end — shared slug dir, new session resolves null until its OWN transcript appears', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'uc-sid-'));
+  try {
+    // A foreign solo session already wrote a main transcript with a NEWER mtime.
+    const foreignStem = 'foreign-session-id';
+    writeJsonl(dir, foreignStem + '.jsonl', [
+      { type: 'summary', sessionId: foreignStem },
+      { type: 'user', sessionId: foreignStem },
+    ]);
+
+    const mySid = 'my-session-id';
+
+    // Phase 1 — our transcript does NOT exist yet. Listing sees only the foreign
+    // (newer) file. Tier-0 must return null — NOT the foreign transcript.
+    let listing = helper.listTopLevelTranscripts(dir);
+    assert.strictEqual(helper.selectMainTranscript(listing, { sessionId: mySid }), null,
+      'before our transcript lands we must show no-transcript, never the foreign one');
+
+    // Phase 2 — our own transcript now appears (claude wrote it). It is OLDER in
+    // mtime than the foreign file but Tier-0 anchors by exact stem, so it wins.
+    const myPath = writeJsonl(dir, mySid + '.jsonl', [
+      { type: 'summary', sessionId: mySid },
+      { type: 'user', sessionId: mySid },
+    ]);
+    // Force the foreign file to be the newer of the two (defeats any mtime tiebreak).
+    const future = fs.statSync(myPath).mtime.getTime() + 60_000;
+    fs.utimesSync(path.join(dir, foreignStem + '.jsonl'), new Date(future), new Date(future));
+
+    listing = helper.listTopLevelTranscripts(dir);
+    assert.strictEqual(helper.selectMainTranscript(listing, { sessionId: mySid }), myPath,
+      'once our transcript exists, tier-0 anchors to it by exact stem despite the foreign newer mtime');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ──────────────────────── --scan-pending sanity (live/integration note) ────────────────────────
+//
+// Required case 6 from the proposal: `--scan-pending` should return an idle /
+// non-foreign result on an unmatched sessionId. This is NOT reachable as a pure
+// unit: scanPending() → resolveTranscriptOnce() → resolvePanePid()/findClaudePid()
+// depend on a live tmux server and /proc walk for the claude PID, neither of which
+// exists in this stdlib-only harness. The underlying SELECTION it relies on is
+// already proven dead-on by the tier-0 tests above (an unmatched sessionId yields
+// null → resolveTranscriptForClaude returns null → scanPending prints `idle`,
+// never a foreign transcript's tail). We therefore assert the reachable invariant
+// here and flag the full --scan-pending path as a live/integration check.
+test('scan-pending invariant — an unmatched sessionId yields null resolution (→ idle, not foreign)', () => {
+  // This is the exact decision scanPending() bottoms out on for a brand-new
+  // session whose own transcript has not yet appeared in the shared slug dir.
+  const candidates = [
+    { path: '/slug/foreign-a.jsonl', stem: 'foreign-a', mtimeMs: 7000, agentNamePresent: false },
+    { path: '/slug/foreign-b.jsonl', stem: 'foreign-b', mtimeMs: 9999, agentNamePresent: false },
+  ];
+  assert.strictEqual(helper.selectMainTranscript(candidates, { sessionId: 'unmatched-new-sid' }), null);
 });
