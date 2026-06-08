@@ -3,6 +3,7 @@ package com.aisandbox.android.ui.screens
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
@@ -14,6 +15,7 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -192,8 +194,8 @@ private fun SpinnerRow(phase: TurnPhase) {
 @Composable
 private fun ConversationItemRow(item: ConversationItem) {
     when (item) {
-        is ConversationItem.UserMessage -> Bubble(label = "You", body = item.text, accent = true, item.isSidechain)
-        is ConversationItem.AssistantMessage -> Bubble(label = labelFor(item.source), body = item.text, accent = false, item.isSidechain)
+        is ConversationItem.UserMessage -> Bubble(label = null, body = item.text, isUser = true, item.isSidechain)
+        is ConversationItem.AssistantMessage -> Bubble(label = labelFor(item.source), body = item.text, isUser = false, item.isSidechain)
         is ConversationItem.Thinking -> MetaLine(prefix = "thinking", body = item.text)
         is ConversationItem.ToolUse -> MetaLine(prefix = "▸ ${item.toolName}", body = item.inputSummary)
         is ConversationItem.ToolResult -> MetaLine(
@@ -208,27 +210,44 @@ private fun ConversationItemRow(item: ConversationItem) {
     }
 }
 
+/**
+ * UC-39 — chat-style aligned bubbles. `isUser` encodes the sender side: user
+ * messages (isUser=true) align to the right with no label (passed as null —
+ * right-alignment signals the sender); assistant/agent messages (isUser=false)
+ * align to the left and keep their label plus the `· subagent` annotation. A
+ * bubble sizes to its content, capped at ~80% of the list width, after which
+ * text wraps. Default soft-wrap (no TextOverflow/softWrap override on the body)
+ * keeps long unbroken tokens (URLs/code) inside the cap rather than overflowing.
+ */
 @Composable
-private fun Bubble(label: String, body: String, accent: Boolean, isSidechain: Boolean) {
-    Column(modifier = Modifier.fillMaxWidth()) {
-        Text(
-            text = if (isSidechain) "$label · subagent" else label,
-            style = AiSandboxMonoTypography.metadata,
-            color = OnSurfaceMuted,
-        )
-        Spacer(Modifier.size(2.dp))
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .clip(RoundedCornerShape(12.dp))
-                .background(if (accent) MaterialTheme.colorScheme.primaryContainer else SurfaceLow)
-                .padding(12.dp),
+private fun Bubble(label: String?, body: String, isUser: Boolean, isSidechain: Boolean) {
+    BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+        val maxBubbleWidth = maxWidth * 0.8f
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalAlignment = if (isUser) Alignment.End else Alignment.Start,
         ) {
-            Text(
-                text = body,
-                style = MaterialTheme.typography.bodyMedium,
-                color = if (accent) MaterialTheme.colorScheme.onPrimaryContainer else OnSurface,
-            )
+            if (label != null) {
+                Text(
+                    text = if (isSidechain) "$label · subagent" else label,
+                    style = AiSandboxMonoTypography.metadata,
+                    color = OnSurfaceMuted,
+                )
+                Spacer(Modifier.size(2.dp))
+            }
+            Box(
+                modifier = Modifier
+                    .widthIn(max = maxBubbleWidth)
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(if (isUser) MaterialTheme.colorScheme.primaryContainer else SurfaceLow)
+                    .padding(12.dp),
+            ) {
+                Text(
+                    text = body,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = if (isUser) MaterialTheme.colorScheme.onPrimaryContainer else OnSurface,
+                )
+            }
         }
     }
 }
