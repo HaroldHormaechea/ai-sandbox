@@ -123,6 +123,17 @@ private fun AgentTile(
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
         )
+        // UC-37 AC18 — badge a non-selected target with pending activity/question.
+        // A pending question (red) outranks generic activity (accent dot). The
+        // binary-stream switcher leaves both flags false, so this is a no-op there.
+        if (!selected && (target.pendingQuestion || target.pendingActivity)) {
+            Box(
+                modifier = Modifier
+                    .size(8.dp)
+                    .clip(CircleShape)
+                    .background(if (target.pendingQuestion) Color(0xFFFF6B68) else Accent),
+            )
+        }
     }
 }
 

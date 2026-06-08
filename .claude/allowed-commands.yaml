@@ -49,3 +49,7 @@ commands:
   - emulator
   - sdkmanager
   - avdmanager
+  # UC-37 — the structured-conversation transcript-tail helper
+  # (container-bin/aisandbox-conversation-tail) is a Node script; `node --check`
+  # and functional smoke-tests of the helper need node on PATH.
+  - node

@@ -1,7 +1,8 @@
 package com.aisandbox.android.ui.screens
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -99,6 +100,7 @@ import kotlinx.coroutines.launch
 @Composable
 fun SessionsScreen(
     onOpen: (Int) -> Unit,
+    onOpenTerminal: (Int) -> Unit,
     onOpenSettings: () -> Unit,
     viewModel: SessionsViewModel = viewModel(),
 ) {
@@ -195,6 +197,7 @@ fun SessionsScreen(
             state = state,
             onSelectFilter = viewModel::selectFilter,
             onOpen = onOpen,
+            onOpenTerminal = onOpenTerminal,
             onConfirmDelete = viewModel::delete,
         )
     }
@@ -225,6 +228,7 @@ internal fun SessionsBody(
     state: SessionsUiState,
     onSelectFilter: (SessionsFilter) -> Unit,
     onOpen: (Int) -> Unit,
+    onOpenTerminal: (Int) -> Unit,
     onConfirmDelete: (n: Int, force: Boolean) -> Unit,
 ) {
     // UC20 — the swipe → confirm → delete flow lives in this internal seam
@@ -287,7 +291,12 @@ internal fun SessionsBody(
                             SwipeDeleteBackground(progress = dismissState.progress)
                         },
                     ) {
-                        SessionRow(row = row, effectiveState = effectiveState, onTap = { onOpen(row.n) })
+                        SessionRow(
+                            row = row,
+                            effectiveState = effectiveState,
+                            onTap = { onOpen(row.n) },
+                            onLongPress = { onOpenTerminal(row.n) },
+                        )
                     }
                 }
             }
@@ -375,6 +384,7 @@ private fun EmptyState(filter: SessionsFilter) {
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun SessionRow(
     row: SessionSummary,
@@ -382,6 +392,9 @@ private fun SessionRow(
     // optimistic terminating treatment shows before the server confirms.
     effectiveState: String = row.state,
     onTap: () -> Unit,
+    // UC-37 AC1 — long-press opens the tmux/terminal view; tap opens the
+    // structured conversation view. Swipe-left (delete) is unchanged (AC2).
+    onLongPress: () -> Unit = {},
 ) {
     Box(
         modifier = Modifier
@@ -389,10 +402,10 @@ private fun SessionRow(
             .clip(RoundedCornerShape(14.dp))
             .background(SurfaceLow)
             .testTag("session-card-${row.n}")
-            // AC7 / AC8 — plain tap-to-open only; the long-press → delete
-            // path is gone (swipe-left is now the sole delete affordance).
-            // Horizontal drags are consumed by the enclosing SwipeToDismissBox.
-            .clickable(onClick = onTap, role = Role.Button)
+            // UC-37 AC1/AC2 — tap → conversation, long-press → terminal. The
+            // swipe-left delete affordance (UC20) and live-status (UC32) are
+            // unchanged; horizontal drags are consumed by the SwipeToDismissBox.
+            .combinedClickable(role = Role.Button, onClick = onTap, onLongClick = onLongPress)
             .padding(12.dp),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -418,6 +431,12 @@ private fun SessionRow(
                         color = OnSurfaceMuted,
                     )
                 }
+                // AC2 — discoverable connection-mode hint.
+                Text(
+                    text = "Tap to chat · hold for terminal",
+                    style = AiSandboxMonoTypography.metadata,
+                    color = OnSurfaceMuted,
+                )
             }
             Column(horizontalAlignment = Alignment.End) {
                 StatusPill(state = effectiveState)
