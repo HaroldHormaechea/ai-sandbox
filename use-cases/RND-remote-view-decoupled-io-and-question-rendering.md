@@ -285,7 +285,47 @@ is a property of Claude Code itself, which is the same binary the sandbox image 
 unknown — getting structured question data without screen-scraping a TUI — is solved by data that
 Claude Code already writes to disk. Sub-feature **B** is a green light to build (Stage 1).
 
+## 11. Stage 0b spike — interactive-session transcript timing (2026-06-08)
+
+Ran an **interactive** `claude 2.1.159` inside a real tmux session (reproducing the production
+architecture), sent a prompt via `tmux send-keys`, and watched its transcript JSONL grow. Findings
+(these ground the spinner + structured-output design and confirm the **same-session** approach):
+
+- **Transcript is the live interactive session's structured output.** Block-level lines, one per
+  content block, written as each block completes: `user` → `assistant:thinking` (+6 s) →
+  `assistant:text` (+7 s) → `assistant:tool_use` (+8 s) → `user:tool_result` (+8 s) →
+  `assistant:text` (+10 s) → `system:turn_duration` (+10 s).
+- **`system:turn_duration`** (`durationMs`, `messageCount`) is an explicit **turn-end marker** →
+  stop spinner / re-enable composer deterministically.
+- **`thinking`** is its own line (with `thinking` text + `signature`) → exact "thinking" signal.
+- **No token-level partials** — block-level only (accepted limitation; spinner bridges the gap).
+- **Per-line metadata**: `sessionId`, `uuid`, `parentUuid`, **`isSidechain`** (subagent flag),
+  `cwd`, `gitBranch`, `version`, `timestamp` → enough to drive the agent switcher and DAG.
+- **Input** confirmed to require `tmux send-keys` into the same session (no structured input
+  channel to an interactive `claude`).
+
+Also (Stage 0b, stream-json control checks against the same binary): `--input-format`/`--output-format`
+`stream-json`, `--include-partial-messages`, `--permission-mode`, `--resume`, `--session-id`,
+`--fork-session`, `--replay-user-messages`, `--agents` all exist; **no** `--permission-prompt-tool`;
+multi-turn persistent `-p` sessions over stdin work — but `-p` is rejected for this feature because
+it is a *separate* conversation (see §12).
+
+## 12. Direction change — same-session structured mode (supersedes Approach B/C framing)
+
+User decision (2026-06-08): the new Android mode must drive the **same live interactive session**
+as the terminal — **no `claude -p`** (separate brain), **no `--remote-control`**. Connection-mode
+selection: **single-tap → structured mode, long-press → tmux** (fallback). The structured mode is a
+**second front-end over one session**: output = tail that session's transcript; input = local
+composer → `tmux send-keys` into the same session. This resolves the earlier "Approach C can't be
+wrapped in" tension: it's neither B-only nor `-p`-based C — it's a transcript-driven renderer +
+composer on the existing session. UC-37 was **rewritten** to this complete design and **renamed**
+`37-android-structured-conversation-mode.md`.
+
 ## 9. Changelog
+- **2026-06-08 (redesign)** — Pivoted UC-37 from "question sideband only" to the **complete
+  same-session structured conversation mode** (single-tap structured / long-press tmux). Grounded
+  by Stage 0b interactive-transcript + stream-json control spikes (§11). UC-37 rewritten & renamed.
+  Approach C via `-p` rejected (separate conversation); `--remote-control` excluded.
 - **2026-06-08 (committed)** — Stage 1 / Approach B promoted to a formal use case:
   **UC-37** (`use-cases/37-android-claude-question-sideband.md`, status `pending`). Decisions
   locked: sidecar daemon detector, `ai-sandbox.v2` hard bump, server-side `answer` frame,
