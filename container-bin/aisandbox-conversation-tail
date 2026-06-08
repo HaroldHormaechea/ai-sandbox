@@ -20,6 +20,11 @@
  *   __ctrl__\tbackfill-end               ends it; live append follows
  *   __ctrl__\trebaseline                 the entrypoint restart loop spawned a
  *                                        fresh claude → new transcript file
+ *   __ctrl__\tno-transcript              resolution yielded nothing after a
+ *                                        bounded grace — fail LOUD instead of
+ *                                        hanging silently (the original bug
+ *                                        class: the channel stayed open while
+ *                                        nothing ever arrived)
  * Only COMPLETE lines are emitted (a trailing partial line is buffered until its
  * newline arrives). A line is never parsed here — the server's
  * ConversationEventMapper owns that — so a malformed transcript line is passed
@@ -30,10 +35,36 @@
  * exit 0. Used by the conversation enumerate path to badge non-selected targets
  * (AC18). Never blocks.
  *
- * The active-transcript resolution is the load-bearing part (RND §10, proposal
- * RISK 4): resolve the target pane's claude PID via /proc/<pid>/task/<pid>/children,
- * then read /proc/<claudePid>/fd to find the OPEN transcript path — giving the
- * exact file stem with no session-id guessing under the shared claude-config mount.
+ * ── Active-transcript resolution (the load-bearing part, RND §10) ──
+ * The ORIGINAL implementation resolved the active transcript by scanning the
+ * live claude PID's open fds for an open `*.jsonl`. That premise is empirically
+ * FALSE on the shipping claude build: claude opens→appends→closes the transcript
+ * per write (it watches via inotify) and holds ZERO `.jsonl` fds open between
+ * writes. So fd-scanning returned null on essentially every poll and the helper
+ * emitted nothing — no backfill, no transcript lines, no turn-end — while the
+ * channel stayed open. That is the single root cause behind the three UC-37 bugs
+ * (no user echo / no replies / spinner never clears).
+ *
+ * The fix resolves by **claude-process identity + cwd-slug**, never by a held fd:
+ *   target tmux pane → #{pane_pid} → walk children to the `claude` descendant
+ *     → /proc/<claudePid>/cwd  ⇒  cwd-slug  ⇒  ~/.claude/projects/<slug>/
+ *     → /proc/<claudePid>/cmdline ⇒ identity (--agent-name/--team-name/--parent-session-id)
+ *   • Teammate/subagent pane (cmdline has --agent-name): anchor to the top-level
+ *     <slug>/<sid>.jsonl whose in-file (agentName, teamName) matches the cmdline
+ *     tuple, newest mtime. (agentId is NOT used cross-surface — the cmdline form
+ *     `analyst@team` never matches the transcript's hex stem.)
+ *   • Main/orchestrator pane (cmdline has no --agent-name), two tiers:
+ *       1. Team active (preferred, AC23-exact): any teammate process in the same
+ *          cwd-slug carries --parent-session-id = the orchestrator's transcript
+ *          stem → anchor main to <parent-session-id>.jsonl exactly.
+ *       2. No team (fallback): the agentName-ABSENT <slug>/<sid>.jsonl with the
+ *          newest mtime (the live session is the one being appended), re-anchored
+ *          on a main-pane claude PID change (the entrypoint restart loop).
+ * Once anchored, the file is followed STABLY — resolution only re-runs when the
+ * pane's claude PID changes — so the tail never hops onto a concurrent teammate
+ * or foreign-session file. ~/.claude is bind-mounted/shared across sessions with
+ * the same cwd-slug (AC23): identity-anchoring is mandatory; naive newest-mtime
+ * would route a foreign session's conversation to the client.
  */
 
 'use strict';
@@ -72,6 +103,24 @@ function parseArgs(argv) {
 }
 
 const ARGS = parseArgs(process.argv);
+
+// Reserved control source + kinds (kept in lock-step with TranscriptTailService).
+const CTRL_BACKFILL_START = 'backfill-start';
+const CTRL_BACKFILL_END = 'backfill-end';
+const CTRL_REBASELINE = 'rebaseline';
+const CTRL_NO_TRANSCRIPT = 'no-transcript';
+
+// How many bytes of a candidate transcript we read to sniff its (agentName,
+// teamName) identity. The identifying lines are written at the very top of the
+// file (observed at line index ~4), so a small head read is sufficient and cheap.
+const ID_SCAN_BYTES = 131072;
+
+// Bounded grace before we FAIL LOUD with `no-transcript`. Covers the entrypoint
+// restart `sleep 1` window and a teammate spawn settling; resolution normally
+// succeeds within a tick or two when a transcript exists.
+const GRACE_MS = 8000;
+
+const POLL_MS = 300;
 
 // Exit quietly if the server closed our stdout (EPIPE on write → SIGPIPE-like).
 process.stdout.on('error', (e) => {
@@ -131,6 +180,14 @@ function readProc(p) {
   }
 }
 
+function readProcLink(p) {
+  try {
+    return fs.readlinkSync(p);
+  } catch (e) {
+    return null;
+  }
+}
+
 function procChildren(pid) {
   const raw = readProc('/proc/' + pid + '/task/' + pid + '/children');
   if (!raw) return [];
@@ -161,52 +218,236 @@ function findClaudePid(panePid, depth) {
   return null;
 }
 
+// ──────────────────────── identity + slug resolution (pure seams) ────────────────────────
+
 /**
- * Find the OPEN main transcript path from /proc/<claudePid>/fd — a *.jsonl under
- * projectsDir that is NOT a subagent file. Picks the most-recently-modified when
- * several are open. Returns absolute path or null.
+ * Claude Code's transcript directory name for a cwd: every non-alphanumeric char
+ * is replaced by '-'. e.g. `/workspace/project-builder` → `-workspace-project-builder`,
+ * `/workspace/p/.claude` → `-workspace-p--claude`. (PURE — unit-testable.)
  */
-function resolveMainTranscript(claudePid) {
-  const fdDir = '/proc/' + claudePid + '/fd';
-  let entries;
-  try {
-    entries = fs.readdirSync(fdDir);
-  } catch (e) {
-    return null;
+function slugFromCwd(cwd) {
+  if (!cwd) return null;
+  return String(cwd).replace(/[^a-zA-Z0-9]/g, '-');
+}
+
+/**
+ * Parse a NUL-separated /proc/<pid>/cmdline into the claude identity tuple.
+ * Handles both `--flag value` and `--flag=value` forms. (PURE — unit-testable.)
+ * Returns { agentName, teamName, parentSessionId } (any may be null).
+ */
+function parseClaudeIdentity(cmdlineRaw) {
+  const res = { agentName: null, teamName: null, parentSessionId: null };
+  if (!cmdlineRaw) return res;
+  const parts = String(cmdlineRaw).split('\0');
+  for (let i = 0; i < parts.length; i++) {
+    const p = parts[i];
+    if (p === '--agent-name') res.agentName = parts[i + 1] || null;
+    else if (p === '--team-name') res.teamName = parts[i + 1] || null;
+    else if (p === '--parent-session-id') res.parentSessionId = parts[i + 1] || null;
+    else if (p.startsWith('--agent-name=')) res.agentName = p.substring('--agent-name='.length) || null;
+    else if (p.startsWith('--team-name=')) res.teamName = p.substring('--team-name='.length) || null;
+    else if (p.startsWith('--parent-session-id=')) res.parentSessionId = p.substring('--parent-session-id='.length) || null;
   }
+  return res;
+}
+
+/**
+ * Pick the agent-team transcript from a candidate listing (PURE — unit-testable).
+ * candidates: [{ path, mtimeMs, agentName, teamName }]. Match agentName exactly;
+ * match teamName when the cmdline carried one (it always does for a teammate).
+ * Newest mtime wins. Returns the path or null.
+ */
+function selectAgentTranscript(candidates, agentName, teamName) {
   let best = null;
   let bestMtime = -1;
-  for (const ent of entries) {
-    let target;
-    try {
-      target = fs.readlinkSync(path.join(fdDir, ent));
-    } catch (e) {
-      continue;
-    }
-    if (!target || !target.endsWith('.jsonl')) continue;
-    if (target.indexOf('/projects/') < 0) continue;
-    if (target.indexOf('/subagents/') >= 0) continue;
-    let mtime = 0;
-    try {
-      mtime = fs.statSync(target).mtimeMs;
-    } catch (e) {
-      continue;
-    }
-    if (mtime > bestMtime) {
-      bestMtime = mtime;
-      best = target;
+  for (const c of candidates) {
+    if (!c || c.agentName !== agentName) continue;
+    if (teamName && c.teamName && c.teamName !== teamName) continue;
+    if (c.mtimeMs > bestMtime) {
+      bestMtime = c.mtimeMs;
+      best = c.path;
     }
   }
   return best;
 }
 
-/** Resolve the active main transcript path (pane → claude pid → fd), or null. */
-function resolveTranscript() {
-  const panePid = resolvePanePid();
-  if (panePid == null) return null;
-  const claudePid = findClaudePid(panePid, 3);
+/**
+ * Tier 1 main resolution (PURE — unit-testable). candidates: [{ path, stem, mtimeMs }].
+ * Pick the candidate whose stem is one of the orchestrator session ids advertised
+ * by a teammate's --parent-session-id; newest mtime if several match. null otherwise.
+ */
+function selectMainByParent(candidates, parentSessionIds) {
+  let best = null;
+  let bestMtime = -1;
+  for (const c of candidates) {
+    if (!c || !parentSessionIds.has(c.stem)) continue;
+    if (c.mtimeMs > bestMtime) {
+      bestMtime = c.mtimeMs;
+      best = c.path;
+    }
+  }
+  return best;
+}
+
+/**
+ * Tier 2 main resolution (PURE — unit-testable). candidates: [{ path, mtimeMs,
+ * agentNamePresent }]. Newest agentName-ABSENT transcript (an orchestrator/solo
+ * session never stamps agentName). null if none.
+ */
+function selectMainNewestNoAgent(candidates) {
+  let best = null;
+  let bestMtime = -1;
+  for (const c of candidates) {
+    if (!c || c.agentNamePresent) continue;
+    if (c.mtimeMs > bestMtime) {
+      bestMtime = c.mtimeMs;
+      best = c.path;
+    }
+  }
+  return best;
+}
+
+/** List top-level <slug>/*.jsonl as [{ path, stem, mtimeMs }] (impure FS read). */
+function listTopLevelTranscripts(slugDir) {
+  let entries;
+  try {
+    entries = fs.readdirSync(slugDir);
+  } catch (e) {
+    return [];
+  }
+  const result = [];
+  for (const ent of entries) {
+    if (!ent.endsWith('.jsonl')) continue;
+    const p = path.join(slugDir, ent);
+    let st;
+    try {
+      st = fs.statSync(p);
+    } catch (e) {
+      continue;
+    }
+    if (!st.isFile()) continue;
+    result.push({ path: p, stem: ent.substring(0, ent.length - '.jsonl'.length), mtimeMs: st.mtimeMs });
+  }
+  return result;
+}
+
+/**
+ * Sniff a transcript's identity from a bounded head read (impure FS read).
+ * Returns { agentNamePresent, agentName, teamName }. Only the head is read
+ * because the (agentName, teamName) stamp lands at the very top of the file.
+ */
+function readTranscriptIdentity(filePath, maxBytes) {
+  let fd;
+  try {
+    fd = fs.openSync(filePath, 'r');
+  } catch (e) {
+    return { agentNamePresent: false, agentName: null, teamName: null };
+  }
+  let text = '';
+  try {
+    const st = fs.fstatSync(fd);
+    const len = Math.min(maxBytes, st.size);
+    if (len > 0) {
+      const buf = Buffer.allocUnsafe(len);
+      const read = fs.readSync(fd, buf, 0, len, 0);
+      text = buf.toString('utf8', 0, read);
+    }
+  } catch (e) {
+    /* best-effort */
+  } finally {
+    try { fs.closeSync(fd); } catch (e) { /* ignore */ }
+  }
+  const lines = text.split('\n');
+  // Drop a trailing partial line (no newline terminator within the head window).
+  if (lines.length > 0) lines.pop();
+  let agentName = null;
+  let teamName = null;
+  let agentNamePresent = false;
+  for (const l of lines) {
+    if (!l) continue;
+    // Cheap pre-filter before the JSON.parse.
+    if (l.indexOf('"agentName"') < 0 && l.indexOf('"teamName"') < 0) continue;
+    let o;
+    try { o = JSON.parse(l); } catch (e) { continue; }
+    if (o && typeof o.agentName === 'string' && o.agentName.length > 0) {
+      agentName = o.agentName;
+      agentNamePresent = true;
+    }
+    if (o && typeof o.teamName === 'string' && o.teamName.length > 0) {
+      teamName = o.teamName;
+    }
+    if (agentNamePresent && teamName) break;
+  }
+  return { agentNamePresent, agentName, teamName };
+}
+
+/** Collect --parent-session-id values from claude procs sharing this cwd-slug (impure). */
+function collectParentSessionIds(slug) {
+  const ids = new Set();
+  let pids;
+  try {
+    pids = fs.readdirSync('/proc');
+  } catch (e) {
+    return ids;
+  }
+  for (const ent of pids) {
+    if (!/^\d+$/.test(ent)) continue;
+    const pid = parseInt(ent, 10);
+    const cmd = readProc('/proc/' + pid + '/cmdline');
+    if (!cmd || cmd.indexOf('--parent-session-id') < 0) continue;
+    if (!isClaude(pid)) continue;
+    const cwd = readProcLink('/proc/' + pid + '/cwd');
+    if (!cwd || slugFromCwd(cwd) !== slug) continue;
+    const idn = parseClaudeIdentity(cmd);
+    if (idn.parentSessionId) ids.add(idn.parentSessionId);
+  }
+  return ids;
+}
+
+/**
+ * Resolve the active transcript for an already-resolved claude PID via identity
+ * + cwd-slug (impure orchestration over the pure seams above). Returns an
+ * absolute path or null.
+ */
+function resolveTranscriptForClaude(claudePid) {
   if (claudePid == null) return null;
-  return resolveMainTranscript(claudePid);
+  const cwd = readProcLink('/proc/' + claudePid + '/cwd');
+  const slug = slugFromCwd(cwd);
+  if (!slug) return null;
+  const slugDir = path.join(ARGS.projectsDir, slug);
+  const idn = parseClaudeIdentity(readProc('/proc/' + claudePid + '/cmdline'));
+  const candidates = listTopLevelTranscripts(slugDir);
+  if (candidates.length === 0) return null;
+
+  if (idn.agentName) {
+    // Teammate / subagent pane — anchor by (agentName, teamName).
+    const enriched = candidates.map((c) => {
+      const id = readTranscriptIdentity(c.path, ID_SCAN_BYTES);
+      return { path: c.path, mtimeMs: c.mtimeMs, agentName: id.agentName, teamName: id.teamName };
+    });
+    return selectAgentTranscript(enriched, idn.agentName, idn.teamName);
+  }
+
+  // Main / orchestrator pane.
+  // Tier 1 — a teammate's --parent-session-id is the orchestrator's stem (exact).
+  const parentIds = collectParentSessionIds(slug);
+  if (parentIds.size > 0) {
+    const tier1 = selectMainByParent(candidates, parentIds);
+    if (tier1) return tier1;
+  }
+  // Tier 2 — newest agentName-absent transcript in the slug dir.
+  const enriched = candidates.map((c) => {
+    const id = readTranscriptIdentity(c.path, ID_SCAN_BYTES);
+    return { path: c.path, mtimeMs: c.mtimeMs, agentNamePresent: id.agentNamePresent };
+  });
+  return selectMainNewestNoAgent(enriched);
+}
+
+/** One-shot resolve for the current target pane (used by --scan-pending). */
+function resolveTranscriptOnce() {
+  const panePid = resolvePanePid();
+  const claudePid = findClaudePid(panePid, 3);
+  return resolveTranscriptForClaude(claudePid);
 }
 
 /** subagents/agent-*.jsonl directory derived from the main transcript path. */
@@ -306,7 +547,7 @@ function readAllLines(filePath) {
 // ──────────────────────── scan-pending (one-shot) ────────────────────────
 
 function scanPending() {
-  const mainPath = resolveTranscript();
+  const mainPath = resolveTranscriptOnce();
   if (!mainPath) {
     out('idle');
     return;
@@ -342,8 +583,6 @@ function scanPending() {
 
 // ──────────────────────── streaming mode ────────────────────────
 
-const POLL_MS = 300;
-
 function backfill(reader, n) {
   let buf;
   try {
@@ -371,40 +610,57 @@ function backfill(reader, n) {
 }
 
 async function streamLoop() {
+  let anchorClaudePid = null; // the claude PID the current anchor was resolved from
   let mainPath = null;
   let mainReader = null;
   const subReaders = new Map(); // filePath → reader
+  let graceStart = null;
+  let noTranscriptEmitted = false;
 
-  // Wait for the first resolution (entrypoint restart `sleep 1` window).
-  while (mainPath == null) {
-    mainPath = resolveTranscript();
-    if (mainPath == null) await sleep(POLL_MS);
-  }
-
-  function rebaseline(newMain, announceRebaseline) {
-    if (announceRebaseline) emitCtrl('rebaseline');
+  function rebaseline(newMain, announce) {
+    if (announce) emitCtrl(CTRL_REBASELINE);
     mainPath = newMain;
     mainReader = makeReader(mainPath, 'main');
     subReaders.clear();
-    emitCtrl('backfill-start');
+    emitCtrl(CTRL_BACKFILL_START);
     backfill(mainReader, ARGS.backfill);
     for (const sf of listSubagentFiles(mainPath)) {
       const r = makeReader(sf, subagentSource(sf));
       backfill(r, ARGS.backfill);
       subReaders.set(sf, r);
     }
-    emitCtrl('backfill-end');
+    emitCtrl(CTRL_BACKFILL_END);
+    graceStart = null;
+    noTranscriptEmitted = false;
   }
 
-  rebaseline(mainPath, false);
-
-  // Live poll loop.
+  // Live poll loop. Resolution is re-run ONLY when the pane's claude PID changes
+  // (entrypoint restart loop → fresh claude → new transcript); otherwise the
+  // anchored file is followed stably, so the tail never hops onto a concurrent
+  // teammate or foreign-session transcript in the shared slug dir.
   // eslint-disable-next-line no-constant-condition
   while (true) {
-    // Detect a fresh claude (restart loop → new transcript file).
-    const current = resolveTranscript();
-    if (current && current !== mainPath) {
-      rebaseline(current, true);
+    const panePid = resolvePanePid();
+    const claudePid = findClaudePid(panePid, 3);
+
+    if (claudePid != null && (claudePid !== anchorClaudePid || mainPath == null)) {
+      const resolved = resolveTranscriptForClaude(claudePid);
+      if (resolved) {
+        const hadAnchor = mainPath != null;
+        anchorClaudePid = claudePid;
+        rebaseline(resolved, hadAnchor && resolved !== mainPath);
+      }
+    }
+
+    if (mainPath == null) {
+      // Resolution has not yet produced a file — fail LOUD after a bounded grace
+      // instead of hanging silently (the original bug class).
+      if (graceStart == null) {
+        graceStart = Date.now();
+      } else if (!noTranscriptEmitted && Date.now() - graceStart >= GRACE_MS) {
+        emitCtrl(CTRL_NO_TRANSCRIPT);
+        noTranscriptEmitted = true;
+      }
       await sleep(POLL_MS);
       continue;
     }
@@ -416,17 +672,15 @@ async function streamLoop() {
     }
 
     // Re-glob subagent files; new ones get a bounded backfill, known ones append.
-    if (mainPath) {
-      for (const sf of listSubagentFiles(mainPath)) {
-        let r = subReaders.get(sf);
-        if (!r) {
-          r = makeReader(sf, subagentSource(sf));
-          backfill(r, ARGS.backfill);
-          subReaders.set(sf, r);
-        } else {
-          for (const line of readNewLines(r)) {
-            out(r.source + '\t' + line);
-          }
+    for (const sf of listSubagentFiles(mainPath)) {
+      let r = subReaders.get(sf);
+      if (!r) {
+        r = makeReader(sf, subagentSource(sf));
+        backfill(r, ARGS.backfill);
+        subReaders.set(sf, r);
+      } else {
+        for (const line of readNewLines(r)) {
+          out(r.source + '\t' + line);
         }
       }
     }
@@ -441,17 +695,32 @@ function sleep(ms) {
 
 // ──────────────────────── main ────────────────────────
 
-if (ARGS.scanPending) {
-  try {
-    scanPending();
-  } catch (e) {
-    out('idle');
-  }
-  process.exit(0);
-} else {
-  streamLoop().catch((e) => {
-    // Never crash the session on an internal error — exit quietly so the server
-    // sees EOF and can re-spawn / surface a tail_failed if appropriate.
+if (require.main === module) {
+  if (ARGS.scanPending) {
+    try {
+      scanPending();
+    } catch (e) {
+      out('idle');
+    }
     process.exit(0);
-  });
+  } else {
+    streamLoop().catch((e) => {
+      // Never crash the session on an internal error — exit quietly so the server
+      // sees EOF and can re-spawn / surface a tail_failed if appropriate.
+      process.exit(0);
+    });
+  }
 }
+
+// Pure seams exported for unit testing without a live container (QA owns the
+// tests; these are the testable functions the proposal calls for).
+module.exports = {
+  slugFromCwd,
+  parseClaudeIdentity,
+  selectAgentTranscript,
+  selectMainByParent,
+  selectMainNewestNoAgent,
+  readTranscriptIdentity,
+  listTopLevelTranscripts,
+  CTRL_NO_TRANSCRIPT,
+};

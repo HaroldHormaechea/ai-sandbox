@@ -64,6 +64,14 @@ subagent/teammate lines), and `source` (`main` | `subagent:<agentId>`).
 `AskUserQuestion` → `question`; `ExitPlanMode` → `plan-approval`; every other
 `tool_use` → `tool-use` (internal noise summarized, not dumped).
 
+The `error` frame's `code` is usually fatal-and-close (`unsupported_subprotocol`,
+`not_authorized`, `tail_failed`, `inject_failed`). The one **non-fatal** code is
+`no_transcript`: the helper could not resolve an active transcript within its
+grace window (see *Active-transcript resolution*). The channel stays open — the
+helper keeps polling and a `backfill-start` follows if the transcript later
+appears — so the client should show a transient "connecting / no transcript yet"
+state, not a hard failure.
+
 ### Client → server (`ConversationClientMessage`)
 
 | `type`              | Carries                                                   | AC |
@@ -84,10 +92,13 @@ subagent/teammate lines), and `source` (`main` | `subagent:<agentId>`).
   appends; **`uuid` dedupe** prevents a backfill that overlaps already-seen
   lines from double-rendering.
 - The entrypoint runs `claude` in a `while true` restart loop, so each restart
-  yields a **new** `<session-id>.jsonl`. The helper follows the newest active
-  file (resolved via the live `claude` PID's open fd), emits `rebaseline`, and
-  re-backfills the new file. The client treats `rebaseline` as a soft reset of
-  the live tail (history already shown stays).
+  yields a **new** `<session-id>.jsonl` (and a **new** `claude` PID). The helper
+  re-anchors on a **pane→claude PID change** (see *Active-transcript resolution*),
+  emits `rebaseline`, and re-backfills the new file. The client treats
+  `rebaseline` as a soft reset of the live tail (history already shown stays).
+  Once anchored, the helper follows that one file **stably** (it does not re-pick
+  "newest in dir" each tick), so the tail never hops onto a concurrent teammate
+  or foreign-session transcript in the shared slug dir.
 - Network drop: the client reconnects, re-attaches to the **same** session, and
   the backfill window covers any missed lines.
 
@@ -95,14 +106,48 @@ subagent/teammate lines), and `source` (`main` | `subagent:<agentId>`).
 
 `~/.claude` is bind-mounted and **shared** by default across sessions with an
 identical cwd-slug, so the host cannot disambiguate session N's transcript by
-path. The helper resolves it robustly **in-container**:
+path, and the slug dir holds transcripts from many teams/sessions side by side.
+
+> **Why not the open fd?** An earlier version resolved the transcript by reading
+> the live `claude` PID's open fds for an open `*.jsonl`. That premise is
+> **empirically false** on the shipping `claude` build: `claude`
+> opens→appends→closes the transcript per write (it watches via inotify) and
+> holds **zero** `.jsonl` fds open between writes. fd-scanning therefore returned
+> null on essentially every poll, the helper emitted nothing while the channel
+> stayed open, and the client showed an optimistic spinner with no user echo, no
+> replies, and a spinner that never cleared — the single root cause behind the
+> three UC-37 conversation-mode bugs.
+
+The helper resolves it robustly **in-container by process identity + cwd-slug**:
 
 ```
 target tmux pane → #{pane_pid}
-  → walk /proc/<pid>/task/<pid>/children to the `claude` descendant
-  → read /proc/<claudePid>/fd/* → the OPEN *.jsonl under ~/.claude/projects/
-       that is NOT a subagents/ file  ⇒  the exact active transcript (no guessing)
+  → walk /proc/<pid>/task/<pid>/children to the `claude` descendant (claudePid)
+  → /proc/<claudePid>/cwd      ⇒ cwd-slug ⇒ ~/.claude/projects/<slug>/
+  → /proc/<claudePid>/cmdline  ⇒ identity (--agent-name / --team-name / --parent-session-id)
 ```
+
+The cwd-slug is the cwd with every non-alphanumeric char replaced by `-`
+(`/workspace/p` → `-workspace-p`). Then, depending on the pane's identity:
+
+- **Teammate / subagent pane** (`--agent-name` present): anchor to the top-level
+  `<slug>/<sid>.jsonl` whose **in-file `(agentName, teamName)` matches the cmdline
+  tuple**, newest mtime. (`--agent-id` of the form `analyst@team` is *not* used —
+  it never matches the transcript's hex stem.)
+- **Main / orchestrator pane** (`--agent-name` absent), two tiers:
+  1. *Team active (preferred, AC23-exact):* any teammate process sharing this
+     cwd-slug carries `--parent-session-id` = **the orchestrator's transcript
+     stem** → anchor main to `<parent-session-id>.jsonl` exactly.
+  2. *No team (fallback):* the **`agentName`-absent** `<slug>/<sid>.jsonl` with the
+     newest mtime (the live session is the one actively appended), re-anchored on a
+     main-pane `claude` PID change (the entrypoint restart loop).
+
+Identity-anchoring is **mandatory for AC23**: because the slug dir is shared, a
+naive newest-mtime pick could route a *foreign* session's conversation to the
+client. If resolution yields nothing after a bounded grace (~8 s — covering a
+`claude` restart settling), the helper emits `__ctrl__\tno-transcript` (→ a
+non-fatal `no_transcript` error frame) rather than hanging silently, so the
+condition is observable and testable end-to-end.
 
 Subagent/teammate activity (AC17) is read from
 `<projects>/<slug>/<session-id>/subagents/agent-*.jsonl`, globbed each tick, and

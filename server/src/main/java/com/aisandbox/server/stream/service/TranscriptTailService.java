@@ -31,17 +31,25 @@ import org.springframework.stereotype.Service;
  * a few control lines using the reserved {@code __ctrl__} source:
  * {@code __ctrl__\tbackfill-start}, {@code __ctrl__\tbackfill-end},
  * {@code __ctrl__\trebaseline} (emitted when the entrypoint restart loop spawns
- * a fresh {@code claude} → new transcript file, AC20). The server splits on the
- * first tab; the {@code raw-json} half is handed to {@link ConversationEventMapper}.
+ * a fresh {@code claude} → new transcript file, AC20), and
+ * {@code __ctrl__\tno-transcript} (emitted when the helper cannot resolve any
+ * active transcript within a bounded grace — it fails LOUD instead of hanging
+ * silently). The server splits on the first tab; the {@code raw-json} half is
+ * handed to {@link ConversationEventMapper}.
  *
  * <p>The helper itself (NOT this service) owns: resolving the active {@code
- * claude} PID via the {@code /proc/<pid>/task/<pid>/children} walk →
- * {@code /proc/<pid>/fd} → the open transcript path (exact stem, no session-id
- * guessing under the shared {@code claude-config} mount), the bounded backfill
- * window, restart/rotation re-baselining, the {@code subagents/agent-*.jsonl}
- * glob, reading only complete lines, and skipping malformed lines. This service
- * is a thin lifecycle owner: start the process, expose {@link Tail#readLine()},
- * and {@link Tail#close()} it.
+ * claude} PID via the {@code /proc/<pid>/task/<pid>/children} walk, then
+ * anchoring the transcript by <b>process identity + cwd-slug</b> (NOT by a held
+ * fd — the shipping {@code claude} build opens→appends→closes the transcript per
+ * write and holds no {@code .jsonl} fd open between writes): a teammate pane
+ * anchors by its {@code --agent-name}/{@code --team-name} ↔ transcript fields, a
+ * main/orchestrator pane anchors by a teammate's {@code --parent-session-id}
+ * (the orchestrator's transcript stem) or, with no team, the newest
+ * {@code agentName}-absent transcript in the slug dir. It also owns the bounded
+ * backfill window, restart/rotation re-baselining and stable follow, the
+ * {@code subagents/agent-*.jsonl} glob, reading only complete lines, and
+ * skipping malformed lines. This service is a thin lifecycle owner: start the
+ * process, expose {@link Tail#readLine()}, and {@link Tail#close()} it.
  */
 @Service
 public class TranscriptTailService {
@@ -57,6 +65,15 @@ public class TranscriptTailService {
     public static final String CTRL_BACKFILL_START = "backfill-start";
     public static final String CTRL_BACKFILL_END = "backfill-end";
     public static final String CTRL_REBASELINE = "rebaseline";
+
+    /**
+     * Emitted by the helper when it cannot resolve any active transcript within a
+     * bounded grace. The helper fails LOUD with this control line instead of
+     * hanging silently (the original UC-37 bug class: the channel stayed open
+     * while no backfill / transcript / turn-end ever arrived), so the condition is
+     * observable end-to-end and surfaced to the client as a non-fatal error frame.
+     */
+    public static final String CTRL_NO_TRANSCRIPT = "no-transcript";
 
     private static final Duration SCAN_TIMEOUT = Duration.ofSeconds(8);
 
