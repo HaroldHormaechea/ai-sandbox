@@ -91,8 +91,9 @@ state, not a hard failure.
   and live-appends. The client renders the existing history on open, then
   appends; **`uuid` dedupe** prevents a backfill that overlaps already-seen
   lines from double-rendering.
-- The entrypoint runs `claude` in a `while true` restart loop, so each restart
-  yields a **new** `<session-id>.jsonl` (and a **new** `claude` PID). The helper
+- The entrypoint runs `claude` in a `while true` restart loop, generating a fresh
+  `--session-id <uuid>` each iteration, so each restart yields a **new**
+  `<session-id>.jsonl` (and a **new** `claude` PID). The helper
   re-anchors on a **pane→claude PID change** (see *Active-transcript resolution*),
   emits `rebaseline`, and re-backfills the new file. The client treats
   `rebaseline` as a soft reset of the live tail (history already shown stays).
@@ -124,7 +125,7 @@ The helper resolves it robustly **in-container by process identity + cwd-slug**:
 target tmux pane → #{pane_pid}
   → walk /proc/<pid>/task/<pid>/children to the `claude` descendant (claudePid)
   → /proc/<claudePid>/cwd      ⇒ cwd-slug ⇒ ~/.claude/projects/<slug>/
-  → /proc/<claudePid>/cmdline  ⇒ identity (--agent-name / --team-name / --parent-session-id)
+  → /proc/<claudePid>/cmdline  ⇒ identity (--agent-name / --team-name / --parent-session-id / --session-id)
 ```
 
 The cwd-slug is the cwd with every non-alphanumeric char replaced by `-`
@@ -134,20 +135,34 @@ The cwd-slug is the cwd with every non-alphanumeric char replaced by `-`
   `<slug>/<sid>.jsonl` whose **in-file `(agentName, teamName)` matches the cmdline
   tuple**, newest mtime. (`--agent-id` of the form `analyst@team` is *not* used —
   it never matches the transcript's hex stem.)
-- **Main / orchestrator pane** (`--agent-name` absent), two tiers:
-  1. *Team active (preferred, AC23-exact):* any teammate process sharing this
-     cwd-slug carries `--parent-session-id` = **the orchestrator's transcript
-     stem** → anchor main to `<parent-session-id>.jsonl` exactly.
-  2. *No team (fallback):* the **`agentName`-absent** `<slug>/<sid>.jsonl` with the
-     newest mtime (the live session is the one actively appended), re-anchored on a
-     main-pane `claude` PID change (the entrypoint restart loop).
+- **Main / orchestrator pane** (`--agent-name` absent):
+  0. *sessionId-exact (preferred, current entrypoint — UC-37 session-bleed fix):*
+     the entrypoint restart loop launches `claude --session-id <uuid>`, so the
+     main pane's cmdline carries **its own** session id. Anchor main to
+     `<session-id>.jsonl` **exactly and ONLY** — never fall through to
+     newest-mtime. Until that file exists (a brand-new session before its first
+     transcript write), resolution returns null and the helper surfaces a
+     transient `no_transcript` state, so a freshly-started session can **never**
+     adopt a *foreign* session's transcript from the shared slug dir.
+  1. *Team active (old entrypoint, no `--session-id`):* any teammate process
+     sharing this cwd-slug carries `--parent-session-id` = **the orchestrator's
+     transcript stem** → anchor main to `<parent-session-id>.jsonl` exactly.
+  2. *No team (old-entrypoint fallback):* the **`agentName`-absent**
+     `<slug>/<sid>.jsonl` with the newest mtime (the live session is the one
+     actively appended), re-anchored on a main-pane `claude` PID change.
+
+  Tiers 1–2 are retained only for backward compatibility with a pre-fix
+  entrypoint image whose `claude` launch carries no `--session-id`; with the
+  current entrypoint, tier 0 always wins.
 
 Identity-anchoring is **mandatory for AC23**: because the slug dir is shared, a
 naive newest-mtime pick could route a *foreign* session's conversation to the
-client. If resolution yields nothing after a bounded grace (~8 s — covering a
-`claude` restart settling), the helper emits `__ctrl__\tno-transcript` (→ a
-non-fatal `no_transcript` error frame) rather than hanging silently, so the
-condition is observable and testable end-to-end.
+client — which is exactly the UC-37 bleed the sessionId-exact tier closes. If
+resolution yields nothing after a bounded grace (~8 s — covering a `claude`
+restart settling, or a new session before its first transcript write), the
+helper emits `__ctrl__\tno-transcript` (→ a non-fatal `no_transcript` error
+frame) rather than hanging silently, so the condition is observable and testable
+end-to-end.
 
 Subagent/teammate activity (AC17) is read from
 `<projects>/<slug>/<session-id>/subagents/agent-*.jsonl`, globbed each tick, and

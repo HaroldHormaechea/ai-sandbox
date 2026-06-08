@@ -53,13 +53,24 @@
  *     <slug>/<sid>.jsonl whose in-file (agentName, teamName) matches the cmdline
  *     tuple, newest mtime. (agentId is NOT used cross-surface — the cmdline form
  *     `analyst@team` never matches the transcript's hex stem.)
- *   • Main/orchestrator pane (cmdline has no --agent-name), two tiers:
- *       1. Team active (preferred, AC23-exact): any teammate process in the same
- *          cwd-slug carries --parent-session-id = the orchestrator's transcript
- *          stem → anchor main to <parent-session-id>.jsonl exactly.
- *       2. No team (fallback): the agentName-ABSENT <slug>/<sid>.jsonl with the
- *          newest mtime (the live session is the one being appended), re-anchored
- *          on a main-pane claude PID change (the entrypoint restart loop).
+ *   • Main/orchestrator pane (cmdline has no --agent-name):
+ *       0. sessionId-exact (preferred, current entrypoint): the restart loop now
+ *          launches `claude --session-id <uuid>`, so the main pane's cmdline
+ *          carries its OWN session id. Anchor main to <session-id>.jsonl EXACTLY
+ *          and ONLY — never fall through to newest-mtime. Until that file exists,
+ *          resolution returns null (the helper surfaces a transient no-transcript
+ *          state), so a freshly-started session can NEVER adopt a foreign
+ *          session's transcript from the shared slug dir. This is the UC-37
+ *          session-bleed fix.
+ *       1. Team active (no --session-id, old entrypoint): any teammate process in
+ *          the same cwd-slug carries --parent-session-id = the orchestrator's
+ *          transcript stem → anchor main to <parent-session-id>.jsonl exactly.
+ *       2. No team (old-entrypoint fallback): the agentName-ABSENT <slug>/<sid>.jsonl
+ *          with the newest mtime (the live session is the one being appended),
+ *          re-anchored on a main-pane claude PID change (the restart loop).
+ *     Tiers 1–2 are retained only for backward compatibility with a pre-fix
+ *     entrypoint image whose claude launch carries no --session-id; with the
+ *     current entrypoint, tier 0 always wins.
  * Once anchored, the file is followed STABLY — resolution only re-runs when the
  * pane's claude PID changes — so the tail never hops onto a concurrent teammate
  * or foreign-session file. ~/.claude is bind-mounted/shared across sessions with
@@ -233,10 +244,12 @@ function slugFromCwd(cwd) {
 /**
  * Parse a NUL-separated /proc/<pid>/cmdline into the claude identity tuple.
  * Handles both `--flag value` and `--flag=value` forms. (PURE — unit-testable.)
- * Returns { agentName, teamName, parentSessionId } (any may be null).
+ * Returns { agentName, teamName, parentSessionId, sessionId } (any may be null).
+ * `sessionId` is the main session's own `--session-id` (added by the entrypoint
+ * restart loop) — the stable, cmdline-discoverable anchor for the main pane.
  */
 function parseClaudeIdentity(cmdlineRaw) {
-  const res = { agentName: null, teamName: null, parentSessionId: null };
+  const res = { agentName: null, teamName: null, parentSessionId: null, sessionId: null };
   if (!cmdlineRaw) return res;
   const parts = String(cmdlineRaw).split('\0');
   for (let i = 0; i < parts.length; i++) {
@@ -244,9 +257,11 @@ function parseClaudeIdentity(cmdlineRaw) {
     if (p === '--agent-name') res.agentName = parts[i + 1] || null;
     else if (p === '--team-name') res.teamName = parts[i + 1] || null;
     else if (p === '--parent-session-id') res.parentSessionId = parts[i + 1] || null;
+    else if (p === '--session-id') res.sessionId = parts[i + 1] || null;
     else if (p.startsWith('--agent-name=')) res.agentName = p.substring('--agent-name='.length) || null;
     else if (p.startsWith('--team-name=')) res.teamName = p.substring('--team-name='.length) || null;
     else if (p.startsWith('--parent-session-id=')) res.parentSessionId = p.substring('--parent-session-id='.length) || null;
+    else if (p.startsWith('--session-id=')) res.sessionId = p.substring('--session-id='.length) || null;
   }
   return res;
 }
@@ -305,6 +320,49 @@ function selectMainNewestNoAgent(candidates) {
     }
   }
   return best;
+}
+
+/**
+ * Exact main resolution by the session's OWN --session-id (PURE — unit-testable).
+ * candidates: [{ path, stem, mtimeMs }]. Returns the candidate whose stem equals
+ * sessionId (newest mtime if — pathologically — several share the stem); null if
+ * none. NEVER falls through to newest-mtime: a freshly-started session shows an
+ * empty/transient `no_transcript` state until its OWN transcript appears, never
+ * a foreign session's transcript from the shared (bind-mounted) slug dir.
+ */
+function selectMainBySessionId(candidates, sessionId) {
+  if (!sessionId) return null;
+  let best = null;
+  let bestMtime = -1;
+  for (const c of candidates) {
+    if (!c || c.stem !== sessionId) continue;
+    if (c.mtimeMs > bestMtime) {
+      bestMtime = c.mtimeMs;
+      best = c.path;
+    }
+  }
+  return best;
+}
+
+/**
+ * Decide the main-pane transcript (PURE — unit-testable). Two regimes:
+ *   • sessionId present (current entrypoint stamps --session-id): anchor by it
+ *     EXACTLY via selectMainBySessionId — and ONLY that. No fallthrough, so a new
+ *     session never adopts a foreign transcript while its own is still pending.
+ *   • sessionId absent (old-entrypoint degradation): the unchanged two-tier path,
+ *     selectMainByParent (Tier 1, teamed) then selectMainNewestNoAgent (Tier 2).
+ * candidates carry { path, stem, mtimeMs } and, for the Tier-2 fallback,
+ * agentNamePresent. opts: { sessionId, parentSessionIds }. Returns path or null.
+ */
+function selectMainTranscript(candidates, opts) {
+  const sessionId = opts ? opts.sessionId : null;
+  const parentSessionIds = (opts && opts.parentSessionIds) || new Set();
+  if (sessionId) {
+    return selectMainBySessionId(candidates, sessionId);
+  }
+  const byParent = selectMainByParent(candidates, parentSessionIds);
+  if (byParent) return byParent;
+  return selectMainNewestNoAgent(candidates);
 }
 
 /** List top-level <slug>/*.jsonl as [{ path, stem, mtimeMs }] (impure FS read). */
@@ -428,19 +486,22 @@ function resolveTranscriptForClaude(claudePid) {
     return selectAgentTranscript(enriched, idn.agentName, idn.teamName);
   }
 
-  // Main / orchestrator pane.
-  // Tier 1 — a teammate's --parent-session-id is the orchestrator's stem (exact).
-  const parentIds = collectParentSessionIds(slug);
-  if (parentIds.size > 0) {
-    const tier1 = selectMainByParent(candidates, parentIds);
-    if (tier1) return tier1;
+  // Main / orchestrator pane — delegate the decision to selectMainTranscript.
+  if (idn.sessionId) {
+    // Current entrypoint: anchor EXACTLY by our own --session-id. No fallthrough
+    // to newest-mtime, so we never adopt a foreign session's transcript from the
+    // shared slug dir — we show a transient no-transcript state until ours lands.
+    // (candidates already carry the { path, stem, mtimeMs } stem-match needs.)
+    return selectMainTranscript(candidates, { sessionId: idn.sessionId });
   }
-  // Tier 2 — newest agentName-absent transcript in the slug dir.
+  // Old-entrypoint degradation (no --session-id on cmdline): Tier 1 parent-anchor
+  // then Tier 2 newest agentName-absent. Enrich with agentNamePresent for Tier 2.
+  const parentIds = collectParentSessionIds(slug);
   const enriched = candidates.map((c) => {
     const id = readTranscriptIdentity(c.path, ID_SCAN_BYTES);
-    return { path: c.path, mtimeMs: c.mtimeMs, agentNamePresent: id.agentNamePresent };
+    return { path: c.path, stem: c.stem, mtimeMs: c.mtimeMs, agentNamePresent: id.agentNamePresent };
   });
-  return selectMainNewestNoAgent(enriched);
+  return selectMainTranscript(enriched, { parentSessionIds: parentIds });
 }
 
 /** One-shot resolve for the current target pane (used by --scan-pending). */
@@ -720,6 +781,8 @@ module.exports = {
   selectAgentTranscript,
   selectMainByParent,
   selectMainNewestNoAgent,
+  selectMainBySessionId,
+  selectMainTranscript,
   readTranscriptIdentity,
   listTopLevelTranscripts,
   CTRL_NO_TRANSCRIPT,
