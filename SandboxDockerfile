@@ -165,6 +165,17 @@ RUN chmod +x /usr/local/bin/aisandbox-emulator \
 COPY --chown=claude:claude entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
+# UC-38 — version identity stamped at build time. The build passes the server
+# package version via `--build-arg IMAGE_VERSION=<version>`; the LABEL is read
+# back with `docker image inspect` (no container run) to decide staleness on a
+# `.deb` upgrade. Declared HERE, near the end of the file, on purpose: a version
+# bump only invalidates this tiny final layer, so the expensive apt/npm/RTK RUN
+# layers above stay cached and a re-version rebuild is fast. The arg DEFAULTS to
+# `dev` so a plain `docker compose build` with no --build-arg (e.g. the CI smoke
+# build) never fails on an undefined arg — it just labels the image `dev`.
+ARG IMAGE_VERSION=dev
+LABEL com.ai-sandbox.image-version="${IMAGE_VERSION}"
+
 USER claude
 WORKDIR /workspace
 

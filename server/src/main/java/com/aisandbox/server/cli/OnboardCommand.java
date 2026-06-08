@@ -8,6 +8,7 @@ import com.aisandbox.server.cli.secrets.EnsureSandboxImage;
 import com.aisandbox.server.cli.secrets.GhTokenStep;
 import com.aisandbox.server.cli.secrets.GitIdentityStep;
 import com.aisandbox.server.cli.secrets.ProcessRunner;
+import com.aisandbox.server.cli.secrets.ServerVersion;
 import com.aisandbox.server.cli.secrets.SshKeyStep;
 import java.io.IOException;
 import java.nio.file.FileSystems;
@@ -206,6 +207,22 @@ public class OnboardCommand implements Callable<Integer> {
             description = "Never build " + EnsureSandboxImage.IMAGE_TAG + "; fail fast if a selected step needs it.")
     boolean noImageBuild;
 
+    // ── UC-38 — image rebuild ──────────────────────────────────────────
+
+    @Option(
+            names = "--rebuild-image",
+            description = "Force a rebuild of " + EnsureSandboxImage.IMAGE_TAG + " (the image ONLY — no PKI / secrets"
+                    + " / devtools) stamped with this package's version, then exit. Rebuilds even when a current"
+                    + " image is already present. Mutually exclusive with --no-image-build.")
+    boolean rebuildImage;
+
+    @Option(
+            names = "--rebuild-image-if-stale",
+            hidden = true,
+            description = "Internal (.deb upgrade path): rebuild " + EnsureSandboxImage.IMAGE_TAG + " only when its"
+                    + " labelled version differs from this package's version. Fully guarded — always exits 0.")
+    boolean rebuildImageIfStale;
+
     @Option(
             names = "--force",
             description = "Re-gather already-present components (PKI, git-key, gitconfig, gh-token, claude template).")
@@ -218,6 +235,13 @@ public class OnboardCommand implements Callable<Integer> {
     private ConsoleIO consoleIO = new ConsoleIO.Default();
     private Path sshDir = resolveOperatorSshDir();
     private SystemUserAdmin systemUserAdmin;
+
+    /**
+     * UC-38 — package version stamped onto the image and compared for
+     * staleness. Defaults to the manifest value ({@code "dev"} off a
+     * directory classpath); a test seam overrides it deterministically.
+     */
+    private String packageVersion = ServerVersion.current();
 
     /** Test seam — override the root-check probe. */
     void setRootCheck(BooleanSupplier rootCheck) {
@@ -244,6 +268,11 @@ public class OnboardCommand implements Callable<Integer> {
         this.systemUserAdmin = admin;
     }
 
+    /** Test seam (UC-38) — override the package version stamped onto / compared against the image. */
+    void setPackageVersion(String version) {
+        this.packageVersion = version;
+    }
+
     @Override
     public Integer call() throws Exception {
         boolean posix = isPosix();
@@ -252,6 +281,20 @@ public class OnboardCommand implements Callable<Integer> {
         if (posix && !rootCheck.getAsBoolean()) {
             System.err.println("aisandboxctl onboard: must run as root (use sudo).");
             return 2;
+        }
+
+        // ── UC-38 — image-rebuild early branches ───────────────────────
+        // Both flags do ONLY the image rebuild (no PKI / secrets / devtools)
+        // and return immediately. --rebuild-image is the explicit operator
+        // override; --rebuild-image-if-stale is the hidden .deb upgrade path.
+        if (rebuildImage || rebuildImageIfStale) {
+            // AC6 — mutual exclusion is the first statement of the block.
+            if (noImageBuild) {
+                System.err.println(
+                        "aisandboxctl onboard: --rebuild-image and --no-image-build are mutually exclusive.");
+                return 2;
+            }
+            return runImageRebuild();
         }
 
         // Refuse to point the writable dirs under the read-only install dir
@@ -406,7 +449,7 @@ public class OnboardCommand implements Callable<Integer> {
             return 2;
         }
         if (needsDocker) {
-            new EnsureSandboxImage(processRunner, consoleIO).run(installDir);
+            new EnsureSandboxImage(processRunner, consoleIO).run(installDir, packageVersion);
         }
 
         // ── run the selected steps ─────────────────────────────────────
@@ -485,6 +528,65 @@ public class OnboardCommand implements Callable<Integer> {
             }
         }
         return 0;
+    }
+
+    // ── UC-38 — image rebuild ──────────────────────────────────────────
+
+    /**
+     * Image-only rebuild path for {@code --rebuild-image} /
+     * {@code --rebuild-image-if-stale}. Two distinct exit contracts:
+     *
+     * <ul>
+     *   <li><b>{@code --rebuild-image-if-stale}</b> (the {@code .deb}
+     *       upgrade path) — staleness-gated and fully guarded: a current
+     *       image is a no-op, otherwise rebuild; on ANY failure print a
+     *       deferred message and still return {@code 0}, so the package
+     *       install never fails (AC8).</li>
+     *   <li><b>{@code --rebuild-image}</b> (explicit operator override) —
+     *       unconditional force rebuild (AC10): {@code 0} on success,
+     *       {@code 1} when the rebuild was attempted but failed (Docker
+     *       unavailable / build error).</li>
+     * </ul>
+     *
+     * {@code --rebuild-image} wins if somehow both are supplied.
+     */
+    private Integer runImageRebuild() {
+        EnsureSandboxImage ensure = new EnsureSandboxImage(processRunner, consoleIO);
+
+        if (rebuildImageIfStale && !rebuildImage) {
+            try {
+                if (ensure.classify(packageVersion) == EnsureSandboxImage.Staleness.CURRENT) {
+                    System.out.println("aisandboxctl onboard: " + EnsureSandboxImage.IMAGE_TAG + " is already current ("
+                            + packageVersion + "); no rebuild needed.");
+                    return 0;
+                }
+                ensure.rebuild(installDir, packageVersion);
+                System.out.println(
+                        "aisandboxctl onboard: " + EnsureSandboxImage.IMAGE_TAG + " rebuilt (" + packageVersion + ").");
+                return 0;
+            } catch (IOException | InterruptedException e) {
+                if (e instanceof InterruptedException) {
+                    Thread.currentThread().interrupt();
+                }
+                // AC8 — never fail the install; defer with a clear next step.
+                System.err.println("aisandboxctl onboard: image rebuild deferred (Docker unavailable or build"
+                        + " error); rebuild later with: sudo aisandboxctl onboard --rebuild-image");
+                return 0;
+            }
+        }
+
+        try {
+            ensure.rebuild(installDir, packageVersion);
+            System.out.println(
+                    "aisandboxctl onboard: " + EnsureSandboxImage.IMAGE_TAG + " rebuilt (" + packageVersion + ").");
+            return 0;
+        } catch (IOException | InterruptedException e) {
+            if (e instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
+            System.err.println("aisandboxctl onboard: image rebuild failed (Docker unavailable or build error).");
+            return 1;
+        }
     }
 
     // ── pki init reuse ─────────────────────────────────────────────────
