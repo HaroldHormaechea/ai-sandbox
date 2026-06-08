@@ -1,6 +1,8 @@
 package com.aisandbox.server.stream.service;
 
 import com.aisandbox.server.stream.dto.ControlMessage;
+import com.aisandbox.server.stream.dto.ConversationClientMessage;
+import com.aisandbox.server.stream.dto.ConversationServerMessage;
 import com.aisandbox.server.stream.dto.StreamServerMessage;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
@@ -44,6 +46,37 @@ public class StreamControlMessageService {
      * carry separate {@code @JsonSubTypes} discriminators).
      */
     public byte[] serialize(StreamServerMessage msg) {
+        try {
+            return json.writeValueAsBytes(msg);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException jpe) {
+            return ("{\"type\":\"error\",\"code\":\"serialize_failed\",\"detail\":\""
+                            + jpe.getMessage().replace("\"", "'") + "\"}")
+                    .getBytes(StandardCharsets.UTF_8);
+        }
+    }
+
+    /**
+     * UC-37 — parse an incoming conversation channel text frame as a
+     * {@link ConversationClientMessage}. Separate {@code @JsonTypeInfo}
+     * namespace from {@link #parse(String)} (the binary stream's control
+     * frames), so the {@code select-target} / {@code enumerate-targets} /
+     * {@code close} discriminators that exist in BOTH hierarchies never cross.
+     */
+    public ConversationClientMessage parseConversation(String textFrame) {
+        try {
+            return json.readValue(textFrame, ConversationClientMessage.class);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException jpe) {
+            throw new IllegalArgumentException("Invalid conversation message JSON: " + jpe.getOriginalMessage());
+        }
+    }
+
+    /**
+     * UC-37 — dedicated serialization path for the server→client
+     * {@link ConversationServerMessage} hierarchy. Distinct from
+     * {@link #serialize(StreamServerMessage)} and {@link #serialize(ControlMessage)}
+     * (separate {@code @JsonSubTypes} namespaces).
+     */
+    public byte[] serialize(ConversationServerMessage msg) {
         try {
             return json.writeValueAsBytes(msg);
         } catch (com.fasterxml.jackson.core.JsonProcessingException jpe) {

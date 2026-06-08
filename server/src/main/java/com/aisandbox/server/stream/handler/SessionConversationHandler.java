@@ -1,0 +1,479 @@
+package com.aisandbox.server.stream.handler;
+
+import com.aisandbox.server.identity.ActiveConnectionRegistry;
+import com.aisandbox.server.identity.ActiveStreamRegistry;
+import com.aisandbox.server.identity.ClientIdentity;
+import com.aisandbox.server.stream.dto.ConversationClientMessage;
+import com.aisandbox.server.stream.dto.ConversationServerMessage;
+import com.aisandbox.server.stream.facade.ConversationFacade;
+import com.aisandbox.server.stream.facade.StreamFacade;
+import com.aisandbox.server.stream.handshake.ConversationSubprotocolHandshakeInterceptor;
+import com.aisandbox.server.stream.service.ConversationEventMapper;
+import com.aisandbox.server.stream.service.StreamControlMessageService;
+import com.aisandbox.server.stream.service.TranscriptTailService;
+import io.netty.channel.ChannelId;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.web.reactive.socket.CloseStatus;
+import org.springframework.web.reactive.socket.WebSocketHandler;
+import org.springframework.web.reactive.socket.WebSocketMessage;
+import org.springframework.web.reactive.socket.WebSocketSession;
+import org.springframework.web.reactive.socket.adapter.ReactorNettyWebSocketSession;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+import reactor.core.publisher.Sinks;
+import reactor.core.scheduler.Schedulers;
+
+/**
+ * UC-37 — reactive WebSocket handler for the structured-conversation channel
+ * ({@code /v1/sessions/{n}/conversation}), the JSON-only sibling of the binary
+ * {@link SessionStreamHandler}. It tails the live session's transcript (output)
+ * and injects the local composer / structured answers as {@code send-keys} into
+ * the SAME tmux session (input) — never {@code claude -p}, never
+ * {@code --remote-control} (AC23/AC24).
+ *
+ * <p><b>Subprotocol gate (D1, AC21).</b> {@link #getSubProtocols()} advertises
+ * {@link ConversationSubprotocolHandshakeInterceptor#SUBPROTOCOL} (echoed in the
+ * 101). Reactor-Netty has no working pre-upgrade filter, so the version gate is
+ * applied HERE, post-upgrade: if the client did not advertise the token,
+ * {@link #handle} emits a {@code ServerError} and closes 1003.
+ *
+ * <p><b>Identity</b> resolution reuses the {@link SessionStreamHandler} pattern:
+ * a pre-stashed session attribute (tests) or the TLS-side
+ * {@link ActiveConnectionRegistry} keyed by Netty {@link ChannelId}.
+ *
+ * <p><b>Target switching</b> mirrors the binary stream's generation-token
+ * re-bridge: on a {@code select-target} the handler starts a fresh tail, swaps
+ * the live handle, bumps a generation token (so the single long-lived tail pump
+ * picks up the new handle), then closes the old one — never completing the
+ * shared outbound sink on a swap.
+ */
+public class SessionConversationHandler implements WebSocketHandler {
+
+    /** Key under which the resolved identity is stored on the WebSocket session. */
+    public static final String IDENTITY_ATTR = "ai-sandbox.client-identity";
+
+    /** Id of the always-present main-session target (AC16). */
+    public static final String TARGET_MAIN = "main";
+
+    private static final Logger LOG = LoggerFactory.getLogger(SessionConversationHandler.class);
+
+    /** Close code for an unsupported / absent subprotocol (STREAM_PROTOCOL.md matrix). */
+    private static final CloseStatus UNSUPPORTED = new CloseStatus(1003, "unsupported_subprotocol");
+
+    private final ConversationFacade facade;
+    private final StreamControlMessageService controlSvc;
+    private final ConversationEventMapper mapper;
+    private final ConversationSubprotocolHandshakeInterceptor subprotocol;
+    private final int maxTextBytes;
+
+    private volatile ActiveConnectionRegistry connections;
+    private volatile ActiveStreamRegistry streamRegistry;
+
+    public SessionConversationHandler(
+            ConversationFacade facade,
+            StreamControlMessageService controlSvc,
+            ConversationEventMapper mapper,
+            ConversationSubprotocolHandshakeInterceptor subprotocol,
+            int maxTextBytes) {
+        this.facade = facade;
+        this.controlSvc = controlSvc;
+        this.mapper = mapper;
+        this.subprotocol = subprotocol;
+        this.maxTextBytes = maxTextBytes;
+    }
+
+    public void setActiveConnectionRegistry(ActiveConnectionRegistry connections) {
+        this.connections = connections;
+    }
+
+    public void setActiveStreamRegistry(ActiveStreamRegistry streamRegistry) {
+        this.streamRegistry = streamRegistry;
+    }
+
+    /** D1/AC21 — advertise the conversation subprotocol so it is echoed in the 101 handshake. */
+    @Override
+    public List<String> getSubProtocols() {
+        return List.of(ConversationSubprotocolHandshakeInterceptor.SUBPROTOCOL);
+    }
+
+    @Override
+    public Mono<Void> handle(WebSocketSession session) {
+        int n;
+        try {
+            n = extractN(session);
+        } catch (IllegalArgumentException iae) {
+            return session.close(CloseStatus.BAD_DATA);
+        }
+
+        // D1/AC21 — post-upgrade subprotocol gate.
+        if (!subprotocol.accepts(session)) {
+            return session.send(Mono.just(session.textMessage(serverErrorFrame(
+                            "unsupported_subprotocol",
+                            "Unsupported subprotocol",
+                            "advertise " + ConversationSubprotocolHandshakeInterceptor.SUBPROTOCOL))))
+                    .then(session.close(UNSUPPORTED));
+        }
+
+        ClientIdentity identity = resolveIdentity(session);
+        if (identity == null) {
+            LOG.warn("Closing conversation: no client identity for channel {}", channelIdOf(session));
+            return session.close(CloseStatus.POLICY_VIOLATION);
+        }
+        session.getAttributes().put(IDENTITY_ATTR, identity);
+
+        StreamFacade.AuthorizeResult auth = facade.authorizeOpen(n, identity);
+        if (!(auth instanceof StreamFacade.Allowed)) {
+            String detail = describe(auth);
+            return session.send(Mono.just(session.textMessage(
+                            serverErrorFrame("not_authorized", "Cannot open conversation", detail))))
+                    .then(session.close(CloseStatus.POLICY_VIOLATION.withReason(detail)));
+        }
+
+        Sinks.Many<WebSocketMessage> outbound = Sinks.many().unicast().onBackpressureBuffer();
+        ConvCtx ctx = new ConvCtx(n, identity, outbound);
+
+        ActiveStreamRegistry streams = this.streamRegistry;
+        final String fingerprint = identity.fingerprintHex();
+        if (streams != null) {
+            streams.attach(fingerprint, session);
+        }
+
+        return Mono.fromCallable(() -> facade.startTail(n, ctx.selectedTarget.get()))
+                .subscribeOn(Schedulers.boundedElastic())
+                .flatMap(tail -> {
+                    ctx.tailRef.set(tail);
+
+                    Thread pump = new Thread(() -> pumpTail(session, ctx));
+                    pump.setDaemon(true);
+                    pump.setName("ai-sandbox-conv-tail-" + n);
+                    pump.start();
+
+                    Flux<Void> incoming = session.receive()
+                            .flatMap(msg -> handleIncoming(msg, session, ctx))
+                            .then()
+                            .flux();
+                    Mono<Void> outboundCompletion = session.send(outbound.asFlux());
+                    return Mono.when(incoming, outboundCompletion);
+                })
+                .onErrorResume(t -> {
+                    LOG.warn("conversation tail start failed for n={}: {}", n, t.toString());
+                    return session.send(Mono.just(session.textMessage(
+                                    serverErrorFrame("tail_failed", "Transcript tail failed", t.getMessage()))))
+                            .then(session.close(CloseStatus.SERVER_ERROR));
+                })
+                .doFinally(sig -> {
+                    TranscriptTailService.Tail t = ctx.tailRef.get();
+                    if (t != null) {
+                        t.close();
+                    }
+                    if (streams != null) {
+                        streams.detach(fingerprint, session);
+                    }
+                    facade.auditClose(n, identity, 1000, sig.name());
+                });
+    }
+
+    // ──────────────────────── outbound: tail → frames ────────────────────────
+
+    /**
+     * Single long-lived tail reader. Reads the CURRENT tail handle
+     * ({@code ctx.tailRef}); on a target switch the generation token advances and
+     * this loop picks up the swapped-in tail instead of treating the old tail's
+     * EOF as teardown. The outbound sink is completed ONLY on true teardown.
+     */
+    private void pumpTail(WebSocketSession session, ConvCtx ctx) {
+        int myGen = ctx.generation.get();
+        TranscriptTailService.Tail tail = ctx.tailRef.get();
+        try {
+            while (true) {
+                if (ctx.generation.get() != myGen) {
+                    myGen = ctx.generation.get();
+                    tail = ctx.tailRef.get();
+                }
+                if (tail == null) {
+                    break;
+                }
+                String line;
+                try {
+                    line = tail.readLine();
+                } catch (IOException io) {
+                    if (ctx.generation.get() != myGen) {
+                        continue; // old tail closed by a swap — pick up the new one
+                    }
+                    LOG.info("conversation tail reader done: {}", io.toString());
+                    break;
+                }
+                if (line == null) {
+                    if (ctx.generation.get() != myGen) {
+                        continue; // old tail EOF due to a swap — continue on the new one
+                    }
+                    break; // true EOF → teardown
+                }
+                dispatchTailLine(session, ctx, line);
+            }
+        } finally {
+            ctx.outbound.tryEmitComplete();
+        }
+    }
+
+    /** Parse a helper envelope line ({@code source\traw}) and emit the mapped frame(s). */
+    private void dispatchTailLine(WebSocketSession session, ConvCtx ctx, String line) {
+        int tab = line.indexOf('\t');
+        String source = tab < 0 ? "main" : line.substring(0, tab);
+        String payload = tab < 0 ? line : line.substring(tab + 1);
+
+        if (TranscriptTailService.CTRL_SOURCE.equals(source)) {
+            switch (payload.trim()) {
+                case TranscriptTailService.CTRL_BACKFILL_START -> emit(
+                        ctx, session, new ConversationServerMessage.BackfillStart(ctx.selectedTarget.get()));
+                case TranscriptTailService.CTRL_BACKFILL_END -> emit(
+                        ctx, session, new ConversationServerMessage.BackfillEnd(ctx.selectedTarget.get()));
+                case TranscriptTailService.CTRL_REBASELINE -> {
+                    // entrypoint restart loop spawned a fresh claude → new transcript.
+                    // The helper re-baselines + re-backfills; nothing to do server-side
+                    // beyond letting the new backfill markers flow through.
+                    LOG.debug("conversation tail rebaselined for n={}", ctx.n);
+                }
+                default -> {
+                    /* unknown control — ignore */
+                }
+            }
+            return;
+        }
+
+        for (ConversationServerMessage frame : mapper.map(source, payload)) {
+            if (frame instanceof ConversationServerMessage.Question q) {
+                cacheQuestion(ctx, q);
+            }
+            emit(ctx, session, frame);
+        }
+    }
+
+    private void cacheQuestion(ConvCtx ctx, ConversationServerMessage.Question q) {
+        if (q.toolUseId() != null) {
+            ctx.pendingQuestions.put(q.toolUseId(), q);
+        }
+        if (q.uuid() != null) {
+            ctx.pendingQuestions.put(q.uuid(), q);
+        }
+    }
+
+    // ──────────────────────── inbound: frames → actions ────────────────────────
+
+    private Mono<Void> handleIncoming(WebSocketMessage msg, WebSocketSession session, ConvCtx ctx) {
+        if (msg.getType() != WebSocketMessage.Type.TEXT) {
+            return Mono.empty(); // conversation channel is JSON-text only
+        }
+        String text = msg.getPayloadAsText();
+        if (text.length() > maxTextBytes) {
+            return session.close(CloseStatus.TOO_BIG_TO_PROCESS);
+        }
+        ConversationClientMessage cm;
+        try {
+            cm = controlSvc.parseConversation(text);
+        } catch (IllegalArgumentException iae) {
+            emit(
+                    ctx,
+                    session,
+                    new ConversationServerMessage.ServerError(
+                            "bad_request", "Bad conversation message", iae.getMessage()));
+            return Mono.empty();
+        }
+        return applyClientMessage(cm, session, ctx);
+    }
+
+    private Mono<Void> applyClientMessage(ConversationClientMessage cm, WebSocketSession session, ConvCtx ctx) {
+        switch (cm) {
+            case ConversationClientMessage.ComposerInput in -> Schedulers.boundedElastic()
+                    .schedule(() -> safe(
+                            ctx,
+                            session,
+                            () -> facade.injectComposer(ctx.n, ctx.selectedTarget.get(), in.text(), ctx.identity)));
+            case ConversationClientMessage.Answer a -> Schedulers.boundedElastic()
+                    .schedule(() -> applyAnswer(session, ctx, a));
+            case ConversationClientMessage.Interrupt it -> Schedulers.boundedElastic()
+                    .schedule(() ->
+                            safe(ctx, session, () -> facade.interrupt(ctx.n, ctx.selectedTarget.get(), ctx.identity)));
+            case ConversationClientMessage.SelectTarget st -> Schedulers.boundedElastic()
+                    .schedule(() -> switchTarget(session, ctx, st.targetId()));
+            case ConversationClientMessage.EnumerateTargets et -> Schedulers.boundedElastic()
+                    .schedule(() -> {
+                        List<com.aisandbox.server.stream.dto.StreamServerMessage.TargetInfo> targets =
+                                facade.enumerateConversationTargets(ctx.n, ctx.selectedTarget.get());
+                        emit(ctx, session, new ConversationServerMessage.Targets(targets, ctx.selectedTarget.get()));
+                    });
+            case ConversationClientMessage.Close c -> session.close(
+                            CloseStatus.NORMAL.withReason(c.reason() == null ? "client-close" : c.reason()))
+                    .subscribe();
+        }
+        return Mono.empty();
+    }
+
+    private void applyAnswer(WebSocketSession session, ConvCtx ctx, ConversationClientMessage.Answer a) {
+        ConversationServerMessage.Question q =
+                a.questionUuid() == null ? null : ctx.pendingQuestions.get(a.questionUuid());
+        int optionCount = 0;
+        boolean multiSelect = false;
+        int otherIndex = -1;
+        if (q != null
+                && q.questions() != null
+                && a.questionIndex() < q.questions().size()) {
+            ConversationServerMessage.QuestionItem item = q.questions().get(Math.max(0, a.questionIndex()));
+            optionCount = item.options() == null ? 0 : item.options().size();
+            multiSelect = item.multiSelect();
+            // The "Other" free-text slot is presented by the client after the
+            // listed options, so its option index is the option count.
+            otherIndex = optionCount;
+            if (a.freeText() != null && !a.freeText().isBlank()) {
+                optionCount = optionCount + 1; // include the Other row in the cursor walk
+            }
+        }
+        final int oc = optionCount;
+        final boolean ms = multiSelect;
+        final int oi = otherIndex;
+        safe(
+                ctx,
+                session,
+                () -> facade.injectAnswer(
+                        ctx.n, ctx.selectedTarget.get(), oc, ms, a.selections(), oi, a.freeText(), ctx.identity));
+        if (q != null) {
+            if (q.toolUseId() != null) {
+                ctx.pendingQuestions.remove(q.toolUseId());
+            }
+            if (q.uuid() != null) {
+                ctx.pendingQuestions.remove(q.uuid());
+            }
+        }
+    }
+
+    /**
+     * Switch the conversation's tailed/inject target on the same WebSocket.
+     * Swap-ordering invariant (mirrors {@link SessionStreamHandler#rebridge}):
+     * start new tail → swap tailRef + bump generation → close old tail. Closing
+     * the old tail first would unblock the pump's {@code readLine} while it still
+     * holds the OLD generation, so it would treat the EOF as teardown and complete
+     * the shared sink — killing the WebSocket instead of continuing on the new tail.
+     */
+    private void switchTarget(WebSocketSession session, ConvCtx ctx, String targetId) {
+        String resolved = (targetId == null || targetId.isBlank()) ? TARGET_MAIN : targetId;
+        try {
+            TranscriptTailService.Tail fresh = facade.startTail(ctx.n, resolved);
+            TranscriptTailService.Tail old = ctx.tailRef.getAndSet(fresh);
+            ctx.generation.incrementAndGet();
+            if (old != null) {
+                old.close();
+            }
+            ctx.selectedTarget.set(resolved);
+            ctx.pendingQuestions.clear(); // questions are per-target; the new tail re-backfills its own
+            emit(ctx, session, new ConversationServerMessage.TargetSelected(resolved));
+        } catch (Exception e) {
+            LOG.warn("conversation target switch to {} failed: {}", resolved, e.toString());
+            emit(
+                    ctx,
+                    session,
+                    new ConversationServerMessage.ServerError(
+                            "select_failed", "Target switch failed", e.getMessage() == null ? "" : e.getMessage()));
+        }
+    }
+
+    // ──────────────────────── helpers ────────────────────────
+
+    private interface IoAction {
+        void run() throws IOException;
+    }
+
+    /** Run an injection action, surfacing an {@code error} frame on failure rather than crashing the pump. */
+    private void safe(ConvCtx ctx, WebSocketSession session, IoAction action) {
+        try {
+            action.run();
+        } catch (IOException io) {
+            emit(
+                    ctx,
+                    session,
+                    new ConversationServerMessage.ServerError(
+                            "inject_failed", "Input injection failed", io.getMessage() == null ? "" : io.getMessage()));
+        }
+    }
+
+    private void emit(ConvCtx ctx, WebSocketSession session, ConversationServerMessage msg) {
+        ctx.outbound.tryEmitNext(session.textMessage(new String(controlSvc.serialize(msg), StandardCharsets.UTF_8)));
+    }
+
+    private String serverErrorFrame(String code, String title, String detail) {
+        return new String(
+                controlSvc.serialize(
+                        new ConversationServerMessage.ServerError(code, title, detail == null ? "" : detail)),
+                StandardCharsets.UTF_8);
+    }
+
+    private static String describe(StreamFacade.AuthorizeResult r) {
+        return switch (r) {
+            case StreamFacade.SessionNotFound nf -> "session " + nf.n() + " not found";
+            case StreamFacade.NotRunning nr -> "session " + nr.n() + " is " + nr.state();
+            case StreamFacade.CapExceeded ce -> "stream cap exceeded (" + ce.scope() + ")";
+            case StreamFacade.Draining d -> "server is shutting down";
+            case StreamFacade.Allowed a -> "ok";
+        };
+    }
+
+    private ClientIdentity resolveIdentity(WebSocketSession session) {
+        Object stashed = session.getAttributes().get(IDENTITY_ATTR);
+        if (stashed instanceof ClientIdentity ci) {
+            return ci;
+        }
+        ActiveConnectionRegistry reg = connections;
+        if (reg == null) {
+            return null;
+        }
+        ChannelId cid = channelIdOf(session);
+        return cid == null ? null : reg.identityFor(cid);
+    }
+
+    private static ChannelId channelIdOf(WebSocketSession session) {
+        if (session instanceof ReactorNettyWebSocketSession rnws) {
+            return rnws.getChannelId();
+        }
+        return null;
+    }
+
+    private static int extractN(WebSocketSession session) {
+        // URI shape: wss://host/v1/sessions/{n}/conversation
+        String path = session.getHandshakeInfo().getUri().getPath();
+        String[] parts = path.split("/");
+        for (int i = 0; i < parts.length - 1; i++) {
+            if ("sessions".equals(parts[i]) && i + 1 < parts.length) {
+                try {
+                    return Integer.parseInt(parts[i + 1]);
+                } catch (NumberFormatException nfe) {
+                    throw new IllegalArgumentException("bad session number in path: " + parts[i + 1]);
+                }
+            }
+        }
+        throw new IllegalArgumentException("session number missing in path: " + path);
+    }
+
+    /** Per-connection context shared between the inbound pipeline and the tail pump. */
+    private static final class ConvCtx {
+        final int n;
+        final ClientIdentity identity;
+        final Sinks.Many<WebSocketMessage> outbound;
+        final AtomicReference<TranscriptTailService.Tail> tailRef = new AtomicReference<>();
+        final AtomicInteger generation = new AtomicInteger(0);
+        final AtomicReference<String> selectedTarget = new AtomicReference<>(TARGET_MAIN);
+        final ConcurrentHashMap<String, ConversationServerMessage.Question> pendingQuestions =
+                new ConcurrentHashMap<>();
+
+        ConvCtx(int n, ClientIdentity identity, Sinks.Many<WebSocketMessage> outbound) {
+            this.n = n;
+            this.identity = identity;
+            this.outbound = outbound;
+        }
+    }
+}
