@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.aisandbox.server.identity.ClientIdentity;
@@ -12,6 +13,7 @@ import com.aisandbox.server.stream.facade.StreamFacade;
 import com.aisandbox.server.stream.handshake.ConversationSubprotocolHandshakeInterceptor;
 import com.aisandbox.server.stream.service.ConversationEventMapper;
 import com.aisandbox.server.stream.service.StreamControlMessageService;
+import com.aisandbox.server.stream.service.TranscriptTailService;
 import java.math.BigInteger;
 import java.net.URI;
 import java.util.ArrayList;
@@ -31,9 +33,7 @@ import reactor.core.publisher.Mono;
 /**
  * UC-37 AC21 — the conversation handler's <b>handshake / authorize gate</b>,
  * exercised through a minimal {@link WebSocketSession} double (mirrors
- * {@code SessionStreamHandlerIdentityTest}). The Allowed path is NOT exercised
- * here because it spawns a real {@code docker compose exec} transcript tail —
- * that belongs to the DinD-gated IT tier. These tests pin the four early exits:
+ * {@code SessionStreamHandlerIdentityTest}). These tests pin the four early exits:
  *
  * <ul>
  *   <li>absent subprotocol → {@code error} frame + close <b>1003</b> (the AC21 gate);</li>
@@ -41,6 +41,22 @@ import reactor.core.publisher.Mono;
  *   <li>subprotocol + identity but not authorized → {@code error} frame + close 1008;</li>
  *   <li>malformed path (no session number) → close <b>1007</b> (bad data).</li>
  * </ul>
+ *
+ * <p><b>Allowed-path control-line dispatch (the UC-37 bug-fix gate).</b> The
+ * Allowed path normally spawns a real {@code docker compose exec} transcript
+ * tail (DinD-gated IT tier), but by mocking {@link ConversationFacade#startTail}
+ * to return a fake {@link TranscriptTailService.Tail} we drive the long-lived
+ * tail pump in-process and pin {@code dispatchTailLine}'s control-frame routing
+ * without Docker. This covers the fix for the three conversation-mode bugs whose
+ * shared root cause was an unresolvable transcript: the helper now fails LOUD
+ * with a {@code __ctrl__\tno-transcript} line, and the handler must surface it as
+ * a <b>non-fatal</b> {@code error} frame that does NOT close the channel
+ * (regression guard for the original silent-hang). The backfill markers
+ * ({@code backfill-start}/{@code backfill-end}) that AC6 leans on are pinned the
+ * same way, and the tail is asserted to be anchored to the URI's session number
+ * (a server-tier slice of AC23 — a session's tail is opened for that session
+ * only; the cross-session-leakage prevention proper lives in the Node helper's
+ * identity anchoring, off-limits to {@code paths.test}).
  */
 class SessionConversationHandlerTest {
 
@@ -102,6 +118,83 @@ class SessionConversationHandlerTest {
         newHandler(mock(ConversationFacade.class)).handle(session).block();
 
         assertThat(session.closedWith).isEqualTo(CloseStatus.BAD_DATA);
+    }
+
+    // ──────────────── Allowed path — control-line dispatch (UC-37 fix) ────────────────
+
+    /**
+     * Build an Allowed-path handler whose tail emits {@code tailLines} (in order)
+     * then EOF, and drive it to completion against a fresh {@link FakeSession}.
+     * Mocking {@link TranscriptTailService.Tail#readLine()} lets the real
+     * long-lived pump + {@code dispatchTailLine} run with no Docker. {@code block()}
+     * returns only once the pump hits EOF and completes the outbound sink, so every
+     * emitted frame is already recorded in {@link FakeSession#sent}.
+     */
+    private static FakeSession driveAllowedTail(String... tailLines) throws Exception {
+        TranscriptTailService.Tail tail = mock(TranscriptTailService.Tail.class);
+        var stub = when(tail.readLine());
+        for (String l : tailLines) {
+            stub = stub.thenReturn(l);
+        }
+        stub.thenReturn(null); // EOF → pump tears down, completes the sink
+
+        ConversationFacade facade = mock(ConversationFacade.class);
+        when(facade.authorizeOpen(eq(7), any())).thenReturn(new StreamFacade.Allowed());
+        when(facade.startTail(eq(7), any())).thenReturn(tail);
+
+        Map<String, Object> attrs = new HashMap<>();
+        attrs.put(SessionConversationHandler.IDENTITY_ATTR, identity());
+        FakeSession session =
+                new FakeSession(URI.create("/v1/sessions/7/conversation"), subprotocolHeaders(), attrs);
+
+        newHandler(facade).handle(session).block();
+        return session;
+    }
+
+    @Test
+    void no_transcript_control_emits_nonfatal_error_and_keeps_channel_open() throws Exception {
+        // The helper failed to resolve an active transcript and signalled it LOUD.
+        FakeSession session = driveAllowedTail("__ctrl__\tno-transcript");
+
+        // Surfaced to the client as the no_transcript error frame …
+        assertThat(session.sent).anySatisfy(f -> assertThat(f).contains("no_transcript"));
+        // … but NON-fatal: the handler must NOT close the channel (the original bug
+        // was a silent hang; the new behaviour is observable yet survivable).
+        assertThat(session.closedWith).isNull();
+    }
+
+    @Test
+    void no_transcript_then_backfill_recovers_on_the_same_open_channel() throws Exception {
+        // After failing loud, a later claude (re)start makes the transcript appear:
+        // backfill markers flow through on the SAME still-open channel.
+        FakeSession session = driveAllowedTail(
+                "__ctrl__\tno-transcript", "__ctrl__\tbackfill-start", "__ctrl__\tbackfill-end");
+
+        assertThat(session.sent).anySatisfy(f -> assertThat(f).contains("no_transcript"));
+        assertThat(session.sent).anySatisfy(f -> assertThat(f).contains("backfill-start"));
+        assertThat(session.sent).anySatisfy(f -> assertThat(f).contains("backfill-end"));
+        assertThat(session.closedWith).isNull();
+    }
+
+    @Test
+    void tail_is_anchored_to_the_path_session_number() throws Exception {
+        // AC23 (server-tier slice): the tail opened for this WebSocket is started
+        // for the session number in the URI (7), never a foreign session.
+        TranscriptTailService.Tail tail = mock(TranscriptTailService.Tail.class);
+        when(tail.readLine()).thenReturn(null);
+
+        ConversationFacade facade = mock(ConversationFacade.class);
+        when(facade.authorizeOpen(eq(7), any())).thenReturn(new StreamFacade.Allowed());
+        when(facade.startTail(eq(7), any())).thenReturn(tail);
+
+        Map<String, Object> attrs = new HashMap<>();
+        attrs.put(SessionConversationHandler.IDENTITY_ATTR, identity());
+        FakeSession session =
+                new FakeSession(URI.create("/v1/sessions/7/conversation"), subprotocolHeaders(), attrs);
+
+        newHandler(facade).handle(session).block();
+
+        verify(facade).startTail(eq(7), eq(SessionConversationHandler.TARGET_MAIN));
     }
 
     private static HttpHeaders subprotocolHeaders() {
