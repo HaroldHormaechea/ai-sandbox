@@ -504,3 +504,399 @@ test('scan-pending invariant — an unmatched sessionId yields null resolution (
   ];
   assert.strictEqual(helper.selectMainTranscript(candidates, { sessionId: 'unmatched-new-sid' }), null);
 });
+
+// ════════════════════════════════════════════════════════════════════════════
+// UC-40 — stranded-question live delivery (idle-flush + backfill partial fix)
+//
+// THE BUG: in the structured (non-tmux) conversation view the assistant message
+// that carries an `AskUserQuestion` (and the equivalent `ExitPlanMode` approval)
+// never appeared until the user answered in tmux. `claude` writes that assistant
+// line then BLOCKS awaiting the answer WITHOUT a trailing newline, so the helper —
+// which only emits newline-terminated lines — stranded it in `residual` with no
+// idle drain. It appeared "retroactively" only when the next turn supplied the
+// newline. A second, latent bug: `backfill` advanced the offset to the last
+// newline (not buf.length), so a connect-time trailing partial would be re-read
+// and DUPLICATED by the next readNewLines.
+//
+// THE FIX (exported seams, all driven here against REAL temp files, no mocks):
+//   • readNewLines(reader, nowMs) — emits only \n-terminated lines; stamps
+//     residualSinceMs only when new bytes actually arrive; suppresses exactly one
+//     newline-terminated copy equal to a previously idle-flushed line (one-shot).
+//   • idleFlush(reader, nowMs)    — returns the residual ONCE, only when it is
+//     non-empty, unchanged for >= FLUSH_IDLE_MS, AND parses as a complete JSON
+//     object; never mutates offset/residual.
+//   • backfill(reader, n, nowMs)  — sets offset = buf.length so the held trailing
+//     partial is never double-read.
+// nowMs is threaded everywhere so idle timing is DETERMINISTIC — no sleeps.
+// ════════════════════════════════════════════════════════════════════════════
+
+const SESS = 'sess-uc40';
+
+// One-line transcript builders (each returns a single JSON string, no newline).
+const userLine = (t) => JSON.stringify({ type: 'user', message: { role: 'user', content: t }, sessionId: SESS });
+const turnEndLine = (n) => JSON.stringify({ type: 'system', subtype: 'turn_duration', durationMs: n || 1234, sessionId: SESS });
+const assistantTextLine = (t) =>
+  JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: t }] }, sessionId: SESS });
+// Assistant message bundling a text block + an AskUserQuestion tool_use in the
+// SAME content[] array — the exact shape that disappeared (AC4).
+const assistantQuestionLine = (t) =>
+  JSON.stringify({
+    type: 'assistant',
+    message: {
+      role: 'assistant',
+      content: [
+        { type: 'text', text: t || 'Which option do you prefer?' },
+        {
+          type: 'tool_use',
+          id: 'toolu_q',
+          name: 'AskUserQuestion',
+          input: { questions: [{ question: 'A or B?', header: 'Choice', options: [{ label: 'A' }, { label: 'B' }] }] },
+        },
+      ],
+    },
+    sessionId: SESS,
+  });
+// Plan-mode approval prompt — same "assistant message that then blocks on input"
+// mechanism (AC5).
+const assistantExitPlanLine = (t) =>
+  JSON.stringify({
+    type: 'assistant',
+    message: {
+      role: 'assistant',
+      content: [
+        { type: 'text', text: t || 'Here is the plan' },
+        { type: 'tool_use', id: 'toolu_p', name: 'ExitPlanMode', input: { plan: '1. do it\n2. ship it' } },
+      ],
+    },
+    sessionId: SESS,
+  });
+
+const mkTmp = (pfx) => fs.mkdtempSync(path.join(os.tmpdir(), pfx));
+// Join complete lines into a newline-terminated transcript body.
+const body = (lines) => lines.join('\n') + '\n';
+
+// Capture everything the helper writes to stdout during fn() (for backfill()),
+// stripping the trailing newline `out()` appends. Synchronous — restores before
+// the node:test reporter writes its own TAP output.
+function captureOut(fn) {
+  const orig = process.stdout.write;
+  const lines = [];
+  process.stdout.write = (chunk) => {
+    lines.push(String(chunk).replace(/\n$/, ''));
+    return true;
+  };
+  try {
+    fn();
+  } finally {
+    process.stdout.write = orig;
+  }
+  return lines;
+}
+
+// Sanity: the constants the timing logic hinges on (=900, =3×POLL_MS).
+test('UC-40 — FLUSH_IDLE_MS is 900 and equals 3×POLL_MS', () => {
+  assert.strictEqual(helper.POLL_MS, 300);
+  assert.strictEqual(helper.FLUSH_IDLE_MS, 900);
+  assert.strictEqual(helper.FLUSH_IDLE_MS, 3 * helper.POLL_MS);
+});
+
+// ──────────────────────── 1. Headline (AC1/AC2/AC9) ────────────────────────
+
+test('UC-40 AC1/AC2/AC9 — unterminated assistant+AskUserQuestion line: held, idle-flushed once, no double-emit', () => {
+  const dir = mkTmp('uc40-headline-');
+  try {
+    const file = path.join(dir, 'main.jsonl');
+    // Prior, newline-terminated turns already on disk.
+    fs.writeFileSync(file, body([userLine('deploy please'), turnEndLine()]));
+    const reader = helper.makeReader(file, 'main');
+    const t0 = 1_000_000;
+    // Backfill the existing complete lines; residual must be empty afterward.
+    captureOut(() => helper.backfill(reader, 200, t0));
+    assert.strictEqual(reader.residual, '', 'newline-terminated backfill leaves no residual');
+
+    // claude writes the assistant message + its AskUserQuestion, then BLOCKS —
+    // NO trailing newline yet.
+    const qline = assistantQuestionLine('Which deploy target?');
+    fs.appendFileSync(file, qline);
+
+    // AC1/AC2: readNewLines emits NOTHING (no terminator) — the line is stranded.
+    const t1 = t0 + helper.POLL_MS;
+    assert.deepStrictEqual(helper.readNewLines(reader, t1), []);
+    assert.strictEqual(reader.residual, qline);
+
+    // Before the idle window elapses: not flushed.
+    assert.strictEqual(helper.idleFlush(reader, t1 + helper.FLUSH_IDLE_MS - 1), null);
+
+    // At the idle window: the stranded complete-JSON line is delivered live, ONCE.
+    assert.strictEqual(helper.idleFlush(reader, t1 + helper.FLUSH_IDLE_MS), qline);
+    // Still blocked, polled again → one-shot guard: no re-emit.
+    assert.strictEqual(helper.idleFlush(reader, t1 + helper.FLUSH_IDLE_MS + helper.POLL_MS), null);
+    // idleFlush NEVER mutates offset/residual.
+    assert.strictEqual(reader.residual, qline);
+
+    // The real newline finally arrives, followed by the next turn's line.
+    const next = turnEndLine();
+    fs.appendFileSync(file, '\n' + next + '\n');
+    const emitted = helper.readNewLines(reader, t1 + 2 * helper.FLUSH_IDLE_MS);
+    // The idle-flushed question's newline-terminated copy is suppressed exactly
+    // once; only the genuinely-new line is emitted (no double-emit).
+    assert.deepStrictEqual(emitted, [next]);
+    assert.strictEqual(reader.pendingFlushed, null);
+    assert.strictEqual(reader.residual, '');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ──────────────────────── 2. complete-JSON-but-unterminated NOT emitted pre-idle ────────────────────────
+
+test('UC-40 #2 — a complete-JSON but unterminated line is NOT emitted by readNewLines alone (pre-idle)', () => {
+  const dir = mkTmp('uc40-noemit-');
+  try {
+    const file = path.join(dir, 'main.jsonl');
+    const qline = assistantQuestionLine('still blocked');
+    fs.writeFileSync(file, qline); // ONLY content, no trailing newline
+    const reader = helper.makeReader(file, 'main');
+    const t0 = 2_000_000;
+    // No newline anywhere → readNewLines emits nothing, holds it in residual.
+    assert.deepStrictEqual(helper.readNewLines(reader, t0), []);
+    assert.strictEqual(reader.residual, qline);
+    // And the idle window has NOT elapsed, so idleFlush also declines for now.
+    assert.strictEqual(helper.idleFlush(reader, t0), null);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ──────────────────────── 3. genuinely partial residual is NEVER idle-flushed ────────────────────────
+
+test('UC-40 #3 — a genuinely partial/unparseable residual is NOT idle-flushed even after the window elapses', () => {
+  const dir = mkTmp('uc40-partial-');
+  try {
+    const file = path.join(dir, 'main.jsonl');
+    const half = '{"type":"assistant","message":{"role":"assistant","content":[{"a":1,'; // truncated mid-write
+    fs.writeFileSync(file, half);
+    const reader = helper.makeReader(file, 'main');
+    const t0 = 3_000_000;
+    assert.deepStrictEqual(helper.readNewLines(reader, t0), []);
+    assert.strictEqual(reader.residual, half);
+    // JSON.parse fails → idleFlush MUST decline, no matter how long it sits.
+    assert.strictEqual(helper.idleFlush(reader, t0 + helper.FLUSH_IDLE_MS), null);
+    assert.strictEqual(helper.idleFlush(reader, t0 + 100 * helper.FLUSH_IDLE_MS), null);
+    assert.strictEqual(reader.pendingFlushed, null);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ──────────────────────── 4. residualSinceMs resets while the writer grows the line ────────────────────────
+
+test('UC-40 #4 — residualSinceMs resets on every grow; no premature flush mid-write', () => {
+  const dir = mkTmp('uc40-grow-');
+  try {
+    const file = path.join(dir, 'main.jsonl');
+    const reader = helper.makeReader(file, 'main');
+    const t0 = 4_000_000;
+
+    const full = assistantQuestionLine('mid-write');
+    const cut = Math.floor(full.length / 2);
+    const prefix = full.slice(0, cut);
+    const suffix = full.slice(cut);
+    // Guard the fixture: the prefix alone must be incomplete JSON.
+    assert.throws(() => JSON.parse(prefix.trimEnd()), 'prefix fixture must be unparseable');
+
+    // Poll 1 — writer has written the prefix only (no newline).
+    fs.writeFileSync(file, prefix);
+    assert.deepStrictEqual(helper.readNewLines(reader, t0), []);
+    assert.strictEqual(reader.residualSinceMs, t0);
+
+    // Poll 2 — writer appended the suffix, completing the object (still no newline).
+    fs.appendFileSync(file, suffix);
+    assert.deepStrictEqual(helper.readNewLines(reader, t0 + helper.POLL_MS), []);
+    // The timer RESET to the second poll's clock because new bytes arrived.
+    assert.strictEqual(reader.residualSinceMs, t0 + helper.POLL_MS);
+    assert.strictEqual(reader.residual, full);
+
+    // FLUSH_IDLE_MS measured from t0 has already elapsed here — but measured from
+    // the RESET (t0+POLL_MS) it has NOT. The residual IS now complete JSON, so the
+    // ONLY thing preventing a flush is the reset → proves no premature mid-write flush.
+    assert.strictEqual(helper.idleFlush(reader, t0 + helper.FLUSH_IDLE_MS), null);
+
+    // Once the writer goes quiet for a full window from the last grow, it flushes.
+    assert.strictEqual(helper.idleFlush(reader, t0 + helper.POLL_MS + helper.FLUSH_IDLE_MS), full);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ──────────────────────── 5. backfill secondary-bug regression (trailing partial held ONCE) ────────────────────────
+
+test('UC-40 #5 — backfill of a no-trailing-newline file holds the partial ONCE, idle-flushable, no double-emit', () => {
+  const dir = mkTmp('uc40-backfill-');
+  try {
+    const file = path.join(dir, 'main.jsonl');
+    const l1 = userLine('hello');
+    const l2 = assistantTextLine('working on it');
+    const qline = assistantQuestionLine('connect-time pending question');
+    // Complete lines + a trailing partial (the blocking question), NO final newline.
+    fs.writeFileSync(file, body([l1, l2]) + qline);
+    const reader = helper.makeReader(file, 'main');
+    const t0 = 5_000_000;
+
+    // backfill emits ONLY the complete lines — never the trailing partial.
+    const emitted = captureOut(() => helper.backfill(reader, 200, t0));
+    assert.deepStrictEqual(emitted, ['main\t' + l1, 'main\t' + l2]);
+
+    // The fix: offset == buf.length (NOT the last-newline offset), partial held in
+    // residual exactly once.
+    const size = fs.statSync(file).size;
+    assert.strictEqual(reader.offset, size, 'offset advanced to buf.length, not completeEnd');
+    assert.strictEqual(reader.residual, qline);
+    assert.strictEqual(reader.pendingFlushed, null);
+
+    // No new bytes → readNewLines re-reads NOTHING (the pre-fix bug would re-read
+    // [completeEnd,size) and DUPLICATE the partial).
+    assert.deepStrictEqual(helper.readNewLines(reader, t0 + helper.POLL_MS), []);
+    assert.strictEqual(reader.residual, qline);
+
+    // The connect-time pending question becomes idle-flushable after the window.
+    assert.strictEqual(helper.idleFlush(reader, t0), null); // window not elapsed
+    assert.strictEqual(helper.idleFlush(reader, t0 + helper.FLUSH_IDLE_MS), qline);
+
+    // The eventual newline + next line: the flushed copy is suppressed once; no
+    // doubled/corrupt emit.
+    const next = turnEndLine();
+    fs.appendFileSync(file, '\n' + next + '\n');
+    assert.deepStrictEqual(helper.readNewLines(reader, t0 + 2 * helper.FLUSH_IDLE_MS), [next]);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ──────────────────────── 6. ExitPlanMode (AC5) ────────────────────────
+
+test('UC-40 AC5 — an unterminated ExitPlanMode approval line flushes live the same way', () => {
+  const dir = mkTmp('uc40-plan-');
+  try {
+    const file = path.join(dir, 'main.jsonl');
+    fs.writeFileSync(file, body([userLine('plan it')]));
+    const reader = helper.makeReader(file, 'main');
+    const t0 = 6_000_000;
+    captureOut(() => helper.backfill(reader, 200, t0));
+
+    const planLine = assistantExitPlanLine('proposed plan');
+    fs.appendFileSync(file, planLine); // blocking, no newline
+
+    const t1 = t0 + helper.POLL_MS;
+    assert.deepStrictEqual(helper.readNewLines(reader, t1), []);
+    assert.strictEqual(helper.idleFlush(reader, t1 + helper.FLUSH_IDLE_MS - 1), null);
+    assert.strictEqual(helper.idleFlush(reader, t1 + helper.FLUSH_IDLE_MS), planLine);
+
+    // Newline lands later → suppressed once, no double-emit.
+    fs.appendFileSync(file, '\n');
+    assert.deepStrictEqual(helper.readNewLines(reader, t1 + 2 * helper.FLUSH_IDLE_MS), []);
+    assert.strictEqual(reader.pendingFlushed, null);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ──────────────────────── 7. Subagent / isSidechain (AC7) ────────────────────────
+
+test('UC-40 AC7 — a subagent reader (source subagent:<id>) gets the same live idle delivery', () => {
+  const dir = mkTmp('uc40-sub-');
+  try {
+    const file = path.join(dir, 'agent-abc123.jsonl');
+    const reader = helper.makeReader(file, 'subagent:abc123');
+    assert.strictEqual(reader.source, 'subagent:abc123');
+    const t0 = 7_000_000;
+
+    const qline = assistantQuestionLine('teammate needs a decision');
+    fs.writeFileSync(file, qline); // blocking, no newline
+    assert.deepStrictEqual(helper.readNewLines(reader, t0), []);
+    // Same idle-flush path applies regardless of source.
+    assert.strictEqual(helper.idleFlush(reader, t0 + helper.FLUSH_IDLE_MS), qline);
+    // Source is untouched — streamLoop prefixes `subagent:abc123\t<line>` on emit.
+    assert.strictEqual(reader.source, 'subagent:abc123');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ──────────────────────── 8. No regression (AC8) + rotation reset ────────────────────────
+
+test('UC-40 AC8 — normal newline-terminated turns stream unaffected (no spurious suppression)', () => {
+  const dir = mkTmp('uc40-normal-');
+  try {
+    const file = path.join(dir, 'main.jsonl');
+    fs.writeFileSync(file, ''); // start empty, stream live
+    const reader = helper.makeReader(file, 'main');
+    const t0 = 8_000_000;
+
+    // First two complete turns arrive together.
+    const a = userLine('q1');
+    const b = assistantTextLine('a1');
+    fs.appendFileSync(file, body([a, b]));
+    assert.deepStrictEqual(helper.readNewLines(reader, t0), [a, b]);
+    assert.strictEqual(reader.residual, '');
+    assert.strictEqual(reader.pendingFlushed, null);
+
+    // A third complete turn streams on the next poll — nothing suppressed.
+    const c = turnEndLine();
+    fs.appendFileSync(file, body([c]));
+    assert.deepStrictEqual(helper.readNewLines(reader, t0 + helper.POLL_MS), [c]);
+
+    // A legitimately repeated identical line is NOT suppressed (suppression is a
+    // one-shot keyed on an idle flush, which never happened here).
+    fs.appendFileSync(file, body([c]));
+    assert.deepStrictEqual(helper.readNewLines(reader, t0 + 2 * helper.POLL_MS), [c]);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('UC-40 AC8 — rotation/truncation reset clears the idle-flush fields (no stale suppression)', () => {
+  const dir = mkTmp('uc40-rotate-');
+  try {
+    const file = path.join(dir, 'main.jsonl');
+    // A deliberately LARGE original so the rotated single-line file is strictly
+    // smaller (st.size < reader.offset → triggers the truncation-reset branch).
+    fs.writeFileSync(
+      file,
+      body([
+        assistantQuestionLine('old-1'),
+        assistantQuestionLine('old-2'),
+        assistantTextLine('old-3'),
+        turnEndLine(),
+      ]),
+    );
+    const reader = helper.makeReader(file, 'main');
+    const t0 = 9_000_000;
+    helper.readNewLines(reader, t0); // sets ino + offset == original size
+    const origOffset = reader.offset;
+    assert.ok(origOffset > 0);
+
+    // Simulate a prior idle flush still on the books for THIS reader (committed
+    // model: pendingFlushed HOLDS the flushed residual string, null when clear).
+    const stale = assistantQuestionLine('stale-flushed-question');
+    reader.pendingFlushed = stale;
+    reader.residual = 'leftover-junk';
+
+    // Rotation: the entrypoint restart loop spawned a fresh claude → a brand-new,
+    // SMALLER transcript that happens to contain a line equal to the stale one.
+    // rm+recreate also changes the inode, the other reset trigger.
+    fs.rmSync(file);
+    fs.writeFileSync(file, body([stale]));
+    assert.ok(fs.statSync(file).size < origOffset, 'rotated file must be smaller to drive the reset');
+    const emitted = helper.readNewLines(reader, t0 + helper.POLL_MS);
+
+    // The reset cleared pendingFlushed, so the new line is NOT wrongly suppressed
+    // by a stale flush record.
+    assert.deepStrictEqual(emitted, [stale]);
+    assert.strictEqual(reader.pendingFlushed, null);
+    assert.strictEqual(reader.residual, '');
+    assert.strictEqual(reader.offset, fs.statSync(file).size);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

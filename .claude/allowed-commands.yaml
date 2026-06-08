@@ -53,3 +53,6 @@ commands:
   # (container-bin/aisandbox-conversation-tail) is a Node script; `node --check`
   # and functional smoke-tests of the helper need node on PATH.
   - node
+  # UC-40 — the helper's regression suite runs via `npm test` (= `node --test`)
+  # from container-bin/.
+  - npm
