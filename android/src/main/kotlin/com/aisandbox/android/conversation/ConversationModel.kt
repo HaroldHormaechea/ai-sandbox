@@ -47,26 +47,32 @@ sealed interface ConversationItem {
         override val key: String get() = "$uuid|assistant|${text.hashCode()}"
     }
 
-    data class ToolUse(
+    /**
+     * UC-41 (AC4) — ONE collapsed, type-aware row per tool call, merging the
+     * `tool_use` with its paired `tool_result` (matched on [toolUseId]). The
+     * controller upserts this item on both the `tool-use` and `tool-result` frames,
+     * keyed on [toolUseId] so the two never render as separate rows. [result] is
+     * `null` until the paired `tool_result` arrives — the row then shows an
+     * "awaiting result" state (AC8); it becomes non-null in place when the result
+     * lands. [primaryText] is the server-extracted type-aware label value (the skill
+     * name / command / summary, AC1/AC2/AC3); the view formats the surrounding label.
+     *
+     * <p>[key] is **uuid-independent** (`toolactivity|<toolUseId>`): the `tool_use`
+     * and `tool_result` lines carry DIFFERENT transcript uuids, so a uuid-folded key
+     * would split the pair — keying on the shared [toolUseId] is what merges them and
+     * also survives a backfill boundary that splits the pair (AC4 / pitfall).
+     */
+    data class ToolActivity(
         override val uuid: String,
         override val source: String,
         override val isSidechain: Boolean,
         val toolName: String,
         val toolUseId: String,
         val inputSummary: String,
+        val primaryText: String,
+        val result: ToolResultData?,
     ) : ConversationItem {
-        override val key: String get() = "$uuid|tooluse|$toolUseId"
-    }
-
-    data class ToolResult(
-        override val uuid: String,
-        override val source: String,
-        override val isSidechain: Boolean,
-        val toolUseId: String,
-        val isError: Boolean,
-        val summary: String,
-    ) : ConversationItem {
-        override val key: String get() = "$uuid|toolresult|$toolUseId"
+        override val key: String get() = "toolactivity|$toolUseId"
     }
 
     /** An `AskUserQuestion` rendered inline in the transcript (the sheet is separate state). */
@@ -90,6 +96,36 @@ sealed interface ConversationItem {
     ) : ConversationItem {
         override val key: String get() = "$uuid|plan|$toolUseId"
     }
+}
+
+/**
+ * UC-41 — the merged `tool_result` half of a [ConversationItem.ToolActivity]: the
+ * (bounded, streaming) result summary plus its error flag (AC7). Present once the
+ * `tool-result` frame arrives; the full untruncated output is fetched on demand into
+ * a [ToolDetailState] when the bubble is tapped.
+ */
+data class ToolResultData(
+    val isError: Boolean,
+    val summary: String,
+)
+
+/**
+ * UC-41 (AC5/AC6/AC9) — the on-demand detail-dialog state for a tapped tool bubble.
+ * [Loading] while the `fetch-detail` round-trip is in flight, [Loaded] with the full
+ * untruncated input + output, or [Unavailable] when the id could not be resolved
+ * (miss / timeout / disconnect-while-pending) — the dialog then shows a clear
+ * "detail unavailable" state rather than hanging. `null` means no dialog is open.
+ */
+sealed interface ToolDetailState {
+    data object Loading : ToolDetailState
+
+    data class Loaded(
+        val input: String,
+        val result: String,
+        val isError: Boolean,
+    ) : ToolDetailState
+
+    data object Unavailable : ToolDetailState
 }
 
 /** One question within an `AskUserQuestion` (AC10). */

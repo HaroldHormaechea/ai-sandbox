@@ -96,6 +96,9 @@ function parseArgs(argv) {
     backfill: 200,
     projectsDir: path.join(os.homedir() || '/home/claude', '.claude', 'projects'),
     scanPending: false,
+    // UC-41 — one-shot detail fetch for a single tool call (AC5).
+    fetchDetail: false,
+    toolUseId: null,
   };
   for (let i = 2; i < argv.length; i++) {
     const k = argv[i];
@@ -107,6 +110,8 @@ function parseArgs(argv) {
       case '--backfill': a.backfill = Math.max(1, parseInt(argv[++i], 10) || 200); break;
       case '--projects-dir': a.projectsDir = argv[++i]; break;
       case '--scan-pending': a.scanPending = true; break;
+      case '--fetch-detail': a.fetchDetail = true; break;
+      case '--tool-use-id': a.toolUseId = argv[++i]; break;
       default: /* ignore unknown flag */ break;
     }
   }
@@ -120,6 +125,16 @@ const CTRL_BACKFILL_START = 'backfill-start';
 const CTRL_BACKFILL_END = 'backfill-end';
 const CTRL_REBASELINE = 'rebaseline';
 const CTRL_NO_TRANSCRIPT = 'no-transcript';
+// UC-41 — emitted (instead of matched lines) when a --fetch-detail id is not found.
+const CTRL_DETAIL_NOT_FOUND = 'detail-not-found';
+
+// UC-41 — total byte ceiling on a --fetch-detail emission. Matched lines are kept
+// WHOLE (never truncated mid-JSON, so the server can always parse them); once the
+// running total would exceed this cap, further matched lines are dropped. Set to
+// the server's ProcessExecutor stdout buffer (64 KiB) so the server never has to
+// truncate our output mid-line. The server additionally byte-bounds the RENDERED
+// input/result to 48 KB (ConversationEventMapper.CONVERSATION_DETAIL_MAX_BYTES).
+const DETAIL_OUTPUT_CAP_BYTES = 65536;
 
 // How many bytes of a candidate transcript we read to sniff its (agentName,
 // teamName) identity. The identifying lines are written at the very top of the
@@ -727,6 +742,71 @@ function scanPending() {
   }
 }
 
+// ──────────────────────── fetch-detail (one-shot) ────────────────────────
+
+/**
+ * UC-41 (AC5/AC9) — pure seam (exported for QA): given the main + subagent
+ * transcript line sets, return the matched `<source>\t<raw>` envelope lines for one
+ * `toolUseId` — the `tool_use` block whose `id` matches (→ full input) and the
+ * `tool_result` block whose `tool_use_id` matches (→ full result). Lines are kept
+ * WHOLE (valid JSON) so the server can parse them; total emitted bytes are bounded
+ * by `maxBytes` (oversize extras dropped). Returns [] when nothing matches.
+ *
+ * @param toolUseId the tool call id to match
+ * @param sources   [{ source: 'main'|'subagent:<id>', lines: [rawJsonString,...] }, ...]
+ * @param maxBytes  total byte ceiling (defaults to DETAIL_OUTPUT_CAP_BYTES)
+ */
+function collectToolDetail(toolUseId, sources, maxBytes) {
+  if (!toolUseId || !Array.isArray(sources)) return [];
+  const cap = maxBytes || DETAIL_OUTPUT_CAP_BYTES;
+  const matched = [];
+  let total = 0;
+  for (const src of sources) {
+    if (!src || !Array.isArray(src.lines)) continue;
+    const source = src.source || 'main';
+    for (const raw of src.lines) {
+      if (!raw) continue;
+      let o;
+      try { o = JSON.parse(raw); } catch (e) { continue; }
+      const content = o && o.message ? o.message.content : null;
+      if (!Array.isArray(content)) continue;
+      let hit = false;
+      for (const b of content) {
+        if (!b || typeof b !== 'object') continue;
+        if (b.type === 'tool_use' && b.id === toolUseId) { hit = true; break; }
+        if (b.type === 'tool_result' && b.tool_use_id === toolUseId) { hit = true; break; }
+      }
+      if (!hit) continue;
+      const line = source + '\t' + raw;
+      const bytes = Buffer.byteLength(line, 'utf8');
+      if (total > 0 && total + bytes > cap) continue; // flood-guard; keep lines whole
+      matched.push(line);
+      total += bytes;
+    }
+  }
+  return matched;
+}
+
+/**
+ * UC-41 (AC5/AC9) — one-shot resolve of the active transcript, scan main +
+ * subagent files for `toolUseId`, and print the matched raw envelope lines (the
+ * server re-renders them untruncated). Emits `__ctrl__\tdetail-not-found` on an
+ * unresolvable transcript or a no-match, so the server maps it to `available=false`.
+ */
+function fetchDetail() {
+  const id = ARGS.toolUseId;
+  if (!id) { emitCtrl(CTRL_DETAIL_NOT_FOUND); return; }
+  const mainPath = resolveTranscriptOnce();
+  if (!mainPath) { emitCtrl(CTRL_DETAIL_NOT_FOUND); return; }
+  const sources = [{ source: 'main', lines: readAllLines(mainPath) }];
+  for (const f of listSubagentFiles(mainPath)) {
+    sources.push({ source: subagentSource(f), lines: readAllLines(f) });
+  }
+  const matched = collectToolDetail(id, sources, DETAIL_OUTPUT_CAP_BYTES);
+  if (matched.length === 0) { emitCtrl(CTRL_DETAIL_NOT_FOUND); return; }
+  for (const line of matched) out(line);
+}
+
 // ──────────────────────── streaming mode ────────────────────────
 
 function backfill(reader, n, nowMs) {
@@ -875,6 +955,13 @@ if (require.main === module) {
       out('idle');
     }
     process.exit(0);
+  } else if (ARGS.fetchDetail) {
+    try {
+      fetchDetail();
+    } catch (e) {
+      emitCtrl(CTRL_DETAIL_NOT_FOUND);
+    }
+    process.exit(0);
   } else {
     streamLoop().catch((e) => {
       // Never crash the session on an internal error — exit quietly so the server
@@ -900,7 +987,10 @@ module.exports = {
   readNewLines,
   idleFlush,
   backfill,
+  collectToolDetail,
   CTRL_NO_TRANSCRIPT,
+  CTRL_DETAIL_NOT_FOUND,
+  DETAIL_OUTPUT_CAP_BYTES,
   FLUSH_IDLE_MS,
   POLL_MS,
 };

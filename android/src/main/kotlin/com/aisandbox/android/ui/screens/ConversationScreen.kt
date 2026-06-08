@@ -1,6 +1,7 @@
 package com.aisandbox.android.ui.screens
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -10,6 +11,8 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -20,7 +23,10 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.selection.SelectionContainer
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.MoreVert
@@ -33,7 +39,9 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -46,8 +54,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.aisandbox.android.conversation.ConversationItem
+import com.aisandbox.android.conversation.ToolDetailState
 import com.aisandbox.android.conversation.TurnPhase
 import com.aisandbox.android.ui.components.AgentSwitcherBar
 import com.aisandbox.android.ui.components.Composer
@@ -81,6 +91,7 @@ fun ConversationScreen(
     val selectedTargetId by viewModel.selectedTargetId.collectAsState()
     val pendingSheet by viewModel.pendingSheet.collectAsState()
     val turnPhase by viewModel.turnPhase.collectAsState()
+    val toolDetail by viewModel.toolDetail.collectAsState()
 
     var menuOpen by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
@@ -149,9 +160,19 @@ fun ConversationScreen(
                     items = items,
                     modifier = Modifier.fillMaxSize(),
                     listState = listState,
+                    onToolTap = { toolUseId ->
+                        // AC5 — resolve the originating tool_use line's uuid (server scoping) and fetch.
+                        val uuid = items.firstOrNull {
+                            it is ConversationItem.ToolActivity && it.toolUseId == toolUseId
+                        }?.uuid ?: ""
+                        viewModel.openDetail(toolUseId, uuid)
+                    },
                 )
             }
             SpinnerRow(turnPhase)
+        }
+        toolDetail?.let { detail ->
+            ToolDetailDialog(state = detail, onDismiss = viewModel::closeDetail)
         }
     }
 }
@@ -201,6 +222,7 @@ internal fun ConversationContent(
     items: List<ConversationItem>,
     modifier: Modifier = Modifier,
     listState: LazyListState = rememberLazyListState(),
+    onToolTap: (String) -> Unit = {},
 ) {
     LazyColumn(
         state = listState,
@@ -209,27 +231,148 @@ internal fun ConversationContent(
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         items(items = items, key = { it.key }) { item ->
-            ConversationItemRow(item)
+            ConversationItemRow(item, onToolTap)
         }
     }
 }
 
 @Composable
-private fun ConversationItemRow(item: ConversationItem) {
+private fun ConversationItemRow(item: ConversationItem, onToolTap: (String) -> Unit) {
     when (item) {
         is ConversationItem.UserMessage -> Bubble(label = null, body = item.text, isUser = true, item.isSidechain)
         is ConversationItem.AssistantMessage -> Bubble(label = labelFor(item.source), body = item.text, isUser = false, item.isSidechain)
         is ConversationItem.Thinking -> MetaLine(prefix = "thinking", body = item.text)
-        is ConversationItem.ToolUse -> MetaLine(prefix = "▸ ${item.toolName}", body = item.inputSummary)
-        is ConversationItem.ToolResult -> MetaLine(
-            prefix = if (item.isError) "✗ result" else "✓ result",
-            body = item.summary,
-        )
+        is ConversationItem.ToolActivity -> ToolBubble(item = item, onTap = { onToolTap(item.toolUseId) })
         is ConversationItem.Question -> MetaLine(
             prefix = "❓ question",
             body = item.questions.firstOrNull()?.question ?: "",
         )
         is ConversationItem.PlanApproval -> MetaLine(prefix = "📋 plan", body = item.plan)
+    }
+}
+
+/**
+ * UC-41 (AC1/AC2/AC3/AC4/AC7/AC8) — the single collapsed, type-aware tool row. One
+ * line: "Skill loaded `<name>`", "Command used: `<~20-char snippet>`…", or
+ * "`<tool>`: `<snippet>`…". An error result (AC7) recolors the label and adds a `✗`;
+ * a not-yet-arrived result (AC8) shows an "awaiting result" hint. Tapping opens the
+ * detail dialog (AC5) via [onTap].
+ */
+@Composable
+internal fun ToolBubble(item: ConversationItem.ToolActivity, onTap: () -> Unit) {
+    val isError = item.result?.isError == true
+    val awaiting = item.result == null
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .clickable(onClick = onTap)
+            .padding(vertical = 2.dp, horizontal = 2.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = toolBubbleLabel(item),
+                style = AiSandboxMonoTypography.metadata,
+                color = if (isError) Warning else OnSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false),
+            )
+            if (isError) {
+                Spacer(Modifier.width(6.dp))
+                Text(text = "✗", style = AiSandboxMonoTypography.metadata, color = Warning)
+            }
+        }
+        if (awaiting) {
+            Text(
+                text = "awaiting result…",
+                style = AiSandboxMonoTypography.metadata,
+                color = OnSurfaceMuted,
+            )
+        }
+        if (item.isSidechain) {
+            Text(text = "· subagent", style = AiSandboxMonoTypography.metadata, color = OnSurfaceMuted)
+        }
+    }
+}
+
+/** UC-41 — type-aware collapsed label. ~20-char snippet + ellipsis only when truncated (AC2/AC3). */
+private fun toolBubbleLabel(item: ConversationItem.ToolActivity): String {
+    val value = item.primaryText.ifBlank { item.inputSummary }
+    return when (item.toolName) {
+        "Skill" -> "Skill loaded ${value.ifBlank { "skill" }}"
+        "Bash" -> "Command used: ${toolSnippet(value)}"
+        else -> "${item.toolName}: ${toolSnippet(value)}"
+    }
+}
+
+private const val TOOL_SNIPPET_LEN = 20
+
+private fun toolSnippet(s: String): String =
+    if (s.length > TOOL_SNIPPET_LEN) s.take(TOOL_SNIPPET_LEN) + "…" else s
+
+/**
+ * UC-41 (AC5/AC6/AC9) — the on-demand detail dialog: scrollable, selectable, bounded
+ * max-height for large outputs. Renders the [ToolDetailState]: a spinner while
+ * [ToolDetailState.Loading], the full untruncated input + output when
+ * [ToolDetailState.Loaded] (the output label recolors on error, AC7), or a clear
+ * "Detail unavailable" message when [ToolDetailState.Unavailable] (AC9).
+ */
+@Composable
+internal fun ToolDetailDialog(state: ToolDetailState, onDismiss: () -> Unit) {
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(shape = RoundedCornerShape(12.dp), color = SurfaceLow) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 480.dp)
+                    .padding(16.dp),
+            ) {
+                Text(text = "Tool detail", style = MaterialTheme.typography.titleSmall, color = OnSurface)
+                Spacer(Modifier.height(12.dp))
+                Box(modifier = Modifier.weight(1f, fill = false)) {
+                    when (state) {
+                        ToolDetailState.Loading -> Row(verticalAlignment = Alignment.CenterVertically) {
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                            Spacer(Modifier.width(10.dp))
+                            Text("Loading…", style = MaterialTheme.typography.bodySmall, color = OnSurfaceMuted)
+                        }
+                        ToolDetailState.Unavailable -> Text(
+                            text = "Detail unavailable",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = Warning,
+                        )
+                        is ToolDetailState.Loaded -> SelectionContainer {
+                            Column(modifier = Modifier.verticalScroll(rememberScrollState())) {
+                                Text("Input", style = MaterialTheme.typography.labelMedium, color = OnSurfaceVariant)
+                                Spacer(Modifier.height(4.dp))
+                                Text(
+                                    text = state.input.ifBlank { "(empty)" },
+                                    style = AiSandboxMonoTypography.metadata,
+                                    color = OnSurface,
+                                )
+                                Spacer(Modifier.height(16.dp))
+                                Text(
+                                    text = "Output",
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = if (state.isError) Warning else OnSurfaceVariant,
+                                )
+                                Spacer(Modifier.height(4.dp))
+                                Text(
+                                    text = state.result.ifBlank { "(empty)" },
+                                    style = AiSandboxMonoTypography.metadata,
+                                    color = OnSurface,
+                                )
+                            }
+                        }
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+                TextButton(onClick = onDismiss, modifier = Modifier.align(Alignment.End)) {
+                    Text("Close")
+                }
+            }
+        }
     }
 }
 

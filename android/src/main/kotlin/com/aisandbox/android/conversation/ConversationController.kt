@@ -11,10 +11,13 @@ import com.aisandbox.android.net.ServerProfileStore
 import com.aisandbox.android.terminal.StreamTarget
 import com.aisandbox.android.terminal.TerminalStreamController
 import com.aisandbox.android.ui.screens.TerminalState
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -23,6 +26,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
@@ -77,6 +81,23 @@ class ConversationController(
     private val _turnPhase = MutableStateFlow(TurnPhase.IDLE)
     val turnPhase: StateFlow<TurnPhase> = _turnPhase.asStateFlow()
 
+    /** UC-41 — the currently-open tool-detail dialog state (AC5/AC9); null when none is open. */
+    private val _toolDetail = MutableStateFlow<ToolDetailState?>(null)
+    val toolDetail: StateFlow<ToolDetailState?> = _toolDetail.asStateFlow()
+
+    /**
+     * UC-41 — in-flight `fetch-detail` requests keyed by `toolUseId`. Guarded by
+     * [detailLock]. Each is completed by the matching `tool-detail` frame, the 8 s
+     * timeout, a disconnect, or [closeDetail] — and PRUNED on EVERY one of those exit
+     * paths so a request can never leak.
+     */
+    private val detailLock = Any()
+    private val pendingDetail = HashMap<String, CompletableDeferred<ToolDetailState>>()
+
+    /** The toolUseId of the dialog currently shown, so a stale in-flight reply can't overwrite a newer open. */
+    @Volatile
+    private var activeDetailId: String? = null
+
     /** Ordered, deduped item store (key → item). Guarded by [itemLock]. */
     private val itemLock = Any()
     private val itemMap = LinkedHashMap<String, ConversationItem>()
@@ -110,6 +131,7 @@ class ConversationController(
     fun selectTarget(targetId: String) {
         _selectedTargetId.value = targetId
         clearItems()
+        closeDetail() // the open dialog belongs to the old target's tool call
         _pendingSheet.value = null
         _turnPhase.value = TurnPhase.IDLE
         client?.sendSelectTarget(targetId)
@@ -119,6 +141,54 @@ class ConversationController(
     fun interrupt() {
         client?.sendInterrupt()
         _turnPhase.value = TurnPhase.IDLE
+    }
+
+    /**
+     * UC-41 (AC5/AC6/AC9) — open the detail dialog for a tapped tool bubble: show
+     * [ToolDetailState.Loading], send a `fetch-detail`, and await the matching
+     * `tool-detail` frame with an 8 s timeout. The in-flight request is registered in
+     * [pendingDetail] and PRUNED on every exit path — frame, timeout, cancellation
+     * (from [closeDetail]), or disconnect — so it can never leak. A stale reply for a
+     * superseded open is dropped via [activeDetailId].
+     */
+    fun openDetail(toolUseId: String, uuid: String) {
+        if (toolUseId.isBlank()) return
+        activeDetailId = toolUseId
+        _toolDetail.value = ToolDetailState.Loading
+        val deferred = CompletableDeferred<ToolDetailState>()
+        synchronized(detailLock) {
+            // A prior in-flight request for the same id is superseded; complete it so its
+            // awaiter unblocks and prunes, then replace it.
+            pendingDetail.put(toolUseId, deferred)?.complete(ToolDetailState.Unavailable)
+        }
+        client?.sendFetchDetail(toolUseId, uuid)
+        scope.launch {
+            val resolved = try {
+                withTimeout(DETAIL_TIMEOUT_MS) { deferred.await() }
+            } catch (e: TimeoutCancellationException) {
+                ToolDetailState.Unavailable
+            } catch (e: CancellationException) {
+                null // closeDetail cancelled this await; do not publish
+            } finally {
+                synchronized(detailLock) {
+                    if (pendingDetail[toolUseId] === deferred) pendingDetail.remove(toolUseId)
+                }
+            }
+            // Publish only if this is still the dialog the user is looking at.
+            if (resolved != null && activeDetailId == toolUseId) {
+                _toolDetail.value = resolved
+            }
+        }
+    }
+
+    /** UC-41 — dismiss the detail dialog and cancel+prune every in-flight fetch (no leaks). */
+    fun closeDetail() {
+        activeDetailId = null
+        _toolDetail.value = null
+        synchronized(detailLock) {
+            pendingDetail.values.forEach { it.cancel() }
+            pendingDetail.clear()
+        }
     }
 
     fun userTriggeredReconnect() {
@@ -155,19 +225,20 @@ class ConversationController(
                 addItem(ConversationItem.AssistantMessage(uuid(obj), source(obj), sidechain(obj), str(obj, "text") ?: ""))
                 if (!backfilling && _turnPhase.value != TurnPhase.IDLE) _turnPhase.value = TurnPhase.WORKING
             }
-            "tool-use" -> addItem(
-                ConversationItem.ToolUse(
-                    uuid(obj), source(obj), sidechain(obj),
-                    str(obj, "toolName") ?: "tool", str(obj, "toolUseId") ?: "", str(obj, "inputSummary") ?: "",
-                ),
+            "tool-use" -> upsertToolUse(
+                uuid(obj), source(obj), sidechain(obj),
+                toolName = str(obj, "toolName") ?: "tool",
+                toolUseId = str(obj, "toolUseId") ?: "",
+                inputSummary = str(obj, "inputSummary") ?: "",
+                primaryText = str(obj, "primaryText") ?: "",
             )
-            "tool-result" -> addItem(
-                ConversationItem.ToolResult(
-                    uuid(obj), source(obj), sidechain(obj),
-                    str(obj, "toolUseId") ?: "", obj["isError"]?.jsonPrimitive?.booleanOrNull ?: false,
-                    str(obj, "summary") ?: "",
-                ),
+            "tool-result" -> upsertToolResult(
+                uuid(obj), source(obj), sidechain(obj),
+                toolUseId = str(obj, "toolUseId") ?: "",
+                isError = obj["isError"]?.jsonPrimitive?.booleanOrNull ?: false,
+                summary = str(obj, "summary") ?: "",
             )
+            "tool-detail" -> onToolDetail(obj)
             "question" -> {
                 val toolUseId = str(obj, "toolUseId") ?: uuid(obj)
                 val questions = parseQuestions(obj["questions"] as? JsonArray)
@@ -244,6 +315,101 @@ class ConversationController(
         }
     }
 
+    /**
+     * UC-41 (AC4/AC8) — additive upsert of the `tool_use` half of a merged
+     * [ConversationItem.ToolActivity], keyed on [toolUseId]. If the row already exists
+     * (e.g. its `tool_result` arrived FIRST across a backfill boundary), its [result]
+     * is preserved; otherwise the row is created with `result = null` (the "awaiting
+     * result" state). On a backfill-overlap re-delivery the use fields are idempotent.
+     */
+    private fun upsertToolUse(
+        uuid: String,
+        source: String,
+        isSidechain: Boolean,
+        toolName: String,
+        toolUseId: String,
+        inputSummary: String,
+        primaryText: String,
+    ) {
+        val key = "toolactivity|$toolUseId"
+        synchronized(itemLock) {
+            val existing = itemMap[key] as? ConversationItem.ToolActivity
+            itemMap[key] = ConversationItem.ToolActivity(
+                uuid = uuid,
+                source = source,
+                isSidechain = isSidechain,
+                toolName = toolName,
+                toolUseId = toolUseId,
+                inputSummary = inputSummary,
+                primaryText = primaryText,
+                result = existing?.result, // preserve a result that arrived first
+            )
+            _items.value = itemMap.values.toList()
+        }
+    }
+
+    /**
+     * UC-41 (AC4/AC7/AC8) — additive upsert of the `tool_result` half. If the row's
+     * `tool_use` arrived first, it is merged in place (the awaiting state clears);
+     * otherwise a placeholder row is created carrying only the result, so a
+     * result-before-use ordering still renders one merged bubble (the use fields fill
+     * in when the `tool-use` frame lands).
+     */
+    private fun upsertToolResult(
+        uuid: String,
+        source: String,
+        isSidechain: Boolean,
+        toolUseId: String,
+        isError: Boolean,
+        summary: String,
+    ) {
+        val key = "toolactivity|$toolUseId"
+        val data = ToolResultData(isError = isError, summary = summary)
+        synchronized(itemLock) {
+            val existing = itemMap[key] as? ConversationItem.ToolActivity
+            itemMap[key] = if (existing != null) {
+                existing.copy(result = data)
+            } else {
+                ConversationItem.ToolActivity(
+                    uuid = uuid,
+                    source = source,
+                    isSidechain = isSidechain,
+                    toolName = "tool",
+                    toolUseId = toolUseId,
+                    inputSummary = "",
+                    primaryText = "",
+                    result = data,
+                )
+            }
+            _items.value = itemMap.values.toList()
+        }
+    }
+
+    /** UC-41 (AC5/AC9) — route a `tool-detail` frame to its in-flight [openDetail] awaiter. */
+    private fun onToolDetail(obj: JsonObject) {
+        val toolUseId = str(obj, "toolUseId") ?: return
+        val available = obj["available"]?.jsonPrimitive?.booleanOrNull ?: false
+        val resolved: ToolDetailState = if (available) {
+            ToolDetailState.Loaded(
+                input = str(obj, "input") ?: "",
+                result = str(obj, "result") ?: "",
+                isError = obj["isError"]?.jsonPrimitive?.booleanOrNull ?: false,
+            )
+        } else {
+            ToolDetailState.Unavailable
+        }
+        synchronized(detailLock) {
+            pendingDetail[toolUseId]?.complete(resolved)
+        }
+    }
+
+    /** UC-41 (AC9) — on any disconnect, fail every in-flight detail fetch so the dialog degrades cleanly. */
+    private fun failPendingDetailsOnDisconnect() {
+        synchronized(detailLock) {
+            pendingDetail.values.forEach { it.complete(ToolDetailState.Unavailable) }
+        }
+    }
+
     private fun clearItems() {
         synchronized(itemLock) {
             itemMap.clear()
@@ -289,6 +455,7 @@ class ConversationController(
                         val terminal = c.state.first { it !is ConversationClient.State.Open }
                         pump.cancel()
                         enumerate.cancel()
+                        failPendingDetailsOnDisconnect() // AC9 — disconnect-while-pending → Unavailable
                         if (terminal is ConversationClient.State.Revoked) {
                             _state.value = TerminalState.Revoked
                             return@launch
@@ -324,5 +491,8 @@ class ConversationController(
 
     companion object {
         private const val TAG = "ConversationCtrl"
+
+        /** UC-41 (AC9) — client-side timeout on a `fetch-detail` round-trip; matches the server's 8 s helper cap. */
+        private const val DETAIL_TIMEOUT_MS = 8_000L
     }
 }
