@@ -184,13 +184,16 @@ class ConversationBubbleAlignmentInstrumentationTest {
                 uuid = "a3",
             ),
             user("https://example.com/" + "z".repeat(160) + "/x", uuid = "u2"),
-            ConversationItem.ToolUse(
+            // UC-41 — the merged collapsed tool row replaces the old MetaLine tool dump.
+            ConversationItem.ToolActivity(
                 uuid = "t1",
                 source = "main",
                 isSidechain = false,
                 toolName = "Bash",
                 toolUseId = "tu1",
                 inputSummary = "ls -la /workspace",
+                primaryText = "ls -la /workspace",
+                result = null,
             ),
             ConversationItem.Thinking(uuid = "th1", source = "main", isSidechain = false, text = "considering options"),
         )
@@ -200,11 +203,11 @@ class ConversationBubbleAlignmentInstrumentationTest {
             }
         }
 
-        // Meta line renders unchanged, left/full-width (AC6) — its prefix sits at the left margin.
-        composeTestRule.onNodeWithText("▸ Bash").assertIsDisplayed()
+        // UC-41 — the collapsed tool row renders type-aware ("Command used: …"), left/full-width.
+        composeTestRule.onNodeWithText("Command used: ls -la /workspace").assertIsDisplayed()
         val w = rootWidthPx()
-        val meta = composeTestRule.onNodeWithText("▸ Bash").getUnclippedBoundsInRoot()
-        assertTrue("meta prefix should start near the left margin (full-width row)", meta.left.value < w * 0.2f)
+        val meta = composeTestRule.onNodeWithText("Command used: ls -la /workspace").getUnclippedBoundsInRoot()
+        assertTrue("tool row should start near the left margin (full-width row)", meta.left.value < w * 0.2f)
 
         saveScreenshot("all_scenarios")
     }

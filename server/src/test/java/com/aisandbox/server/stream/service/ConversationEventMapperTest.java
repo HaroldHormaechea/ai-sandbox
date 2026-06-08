@@ -273,6 +273,148 @@ class ConversationEventMapperTest {
         assertThat(a.source()).isEqualTo("main");
     }
 
+    // ──────────────── UC-41 AC1/AC2/AC3 — primaryText type-aware label value ──────────
+
+    @Test
+    void skill_tool_use_primaryText_is_the_skill_name() {
+        String line = "{\"type\":\"assistant\",\"uuid\":\"us1\",\"message\":{\"content\":["
+                + "{\"type\":\"tool_use\",\"id\":\"tuS\",\"name\":\"Skill\","
+                + "\"input\":{\"skill\":\"android-emulator-setup\",\"args\":\"--boot\"}}]}}";
+        ConversationServerMessage.ToolUse t =
+                (ConversationServerMessage.ToolUse) mapper.map("main", line).get(0);
+        // The client formats "Skill loaded <name>"; the server supplies just the name (AC1).
+        assertThat(t.primaryText()).isEqualTo("android-emulator-setup");
+    }
+
+    @Test
+    void skill_tool_use_primaryText_falls_back_to_name_then_command_field() {
+        String byName = "{\"type\":\"assistant\",\"uuid\":\"us2\",\"message\":{\"content\":["
+                + "{\"type\":\"tool_use\",\"id\":\"tuS2\",\"name\":\"Skill\",\"input\":{\"name\":\"deep-research\"}}]}}";
+        assertThat(((ConversationServerMessage.ToolUse) mapper.map("main", byName).get(0)).primaryText())
+                .isEqualTo("deep-research");
+        String byCommand = "{\"type\":\"assistant\",\"uuid\":\"us3\",\"message\":{\"content\":["
+                + "{\"type\":\"tool_use\",\"id\":\"tuS3\",\"name\":\"Skill\",\"input\":{\"command\":\"verify\"}}]}}";
+        assertThat(((ConversationServerMessage.ToolUse) mapper.map("main", byCommand).get(0)).primaryText())
+                .isEqualTo("verify");
+    }
+
+    @Test
+    void bash_tool_use_primaryText_is_the_command() {
+        String line = "{\"type\":\"assistant\",\"uuid\":\"ub\",\"message\":{\"content\":["
+                + "{\"type\":\"tool_use\",\"id\":\"tuB\",\"name\":\"Bash\","
+                + "\"input\":{\"command\":\"git status --porcelain\",\"description\":\"check\"}}]}}";
+        ConversationServerMessage.ToolUse t =
+                (ConversationServerMessage.ToolUse) mapper.map("main", line).get(0);
+        // The client formats "Command used: <snippet>"; the server supplies the full command (AC2).
+        assertThat(t.primaryText()).isEqualTo("git status --porcelain");
+    }
+
+    @Test
+    void other_tool_use_primaryText_is_the_bounded_summary() {
+        String line = "{\"type\":\"assistant\",\"uuid\":\"uo\",\"message\":{\"content\":["
+                + "{\"type\":\"tool_use\",\"id\":\"tuE\",\"name\":\"Edit\","
+                + "\"input\":{\"file_path\":\"/x/y.txt\"}}]}}";
+        ConversationServerMessage.ToolUse t =
+                (ConversationServerMessage.ToolUse) mapper.map("main", line).get(0);
+        // AC3 — any other tool falls back to the bounded summary (client renders "<tool>: <snippet>").
+        assertThat(t.primaryText()).contains("file_path=").contains("/x/y.txt");
+    }
+
+    // ──────────────── UC-41 AC5/AC6/AC9 — renderDetail (untruncated, byte-bounded) ──────
+
+    @Test
+    void renderDetail_returns_full_untruncated_input_and_result_beyond_the_600_char_cap() {
+        // Input + result each far exceed the 600-char streaming summary cap (AC6).
+        String bigInput = "echo " + "A".repeat(1000);
+        String bigResult = "B".repeat(1200);
+        String useLine = "{\"type\":\"assistant\",\"uuid\":\"u1\",\"message\":{\"content\":["
+                + "{\"type\":\"tool_use\",\"id\":\"tu1\",\"name\":\"Bash\",\"input\":{\"command\":\"" + bigInput
+                + "\"}}]}}";
+        String resultLine = "{\"type\":\"user\",\"uuid\":\"u2\",\"message\":{\"content\":["
+                + "{\"type\":\"tool_result\",\"tool_use_id\":\"tu1\",\"is_error\":false,\"content\":\"" + bigResult
+                + "\"}]}}";
+
+        ConversationEventMapper.DetailRender d = mapper.renderDetail("tu1", List.of(useLine, resultLine));
+
+        assertThat(d.available()).isTrue();
+        assertThat(d.toolName()).isEqualTo("Bash");
+        assertThat(d.isError()).isFalse();
+        // Untruncated: well past the 600-char streaming cap, content preserved verbatim.
+        assertThat(d.input().length()).isGreaterThan(600);
+        assertThat(d.input()).contains(bigInput);
+        assertThat(d.result().length()).isGreaterThan(600);
+        assertThat(d.result()).contains(bigResult);
+    }
+
+    @Test
+    void renderDetail_strips_the_source_tab_envelope_before_parsing() {
+        // The helper hands lines as `<source>\t<raw-json>`; renderDetail must strip the prefix.
+        String useLine = "main\t{\"type\":\"assistant\",\"uuid\":\"u1\",\"message\":{\"content\":["
+                + "{\"type\":\"tool_use\",\"id\":\"tuX\",\"name\":\"Bash\",\"input\":{\"command\":\"ls -la\"}}]}}";
+        String resultLine = "subagent:agent-3\t{\"type\":\"user\",\"uuid\":\"u2\",\"message\":{\"content\":["
+                + "{\"type\":\"tool_result\",\"tool_use_id\":\"tuX\",\"is_error\":true,\"content\":\"boom\"}]}}";
+
+        ConversationEventMapper.DetailRender d = mapper.renderDetail("tuX", List.of(useLine, resultLine));
+
+        assertThat(d.available()).isTrue();
+        assertThat(d.input()).contains("ls -la");
+        assertThat(d.result()).contains("boom");
+        assertThat(d.isError()).isTrue();
+    }
+
+    @Test
+    void renderDetail_byte_caps_a_pathological_result_with_an_ellipsis() {
+        // A multi-KB result must be bounded to CONVERSATION_DETAIL_MAX_BYTES (AC6 OOM guard).
+        String huge = "C".repeat(ConversationEventMapper.CONVERSATION_DETAIL_MAX_BYTES + 20000);
+        String resultLine = "{\"type\":\"user\",\"uuid\":\"u2\",\"message\":{\"content\":["
+                + "{\"type\":\"tool_result\",\"tool_use_id\":\"tuBig\",\"content\":\"" + huge + "\"}]}}";
+
+        ConversationEventMapper.DetailRender d = mapper.renderDetail("tuBig", List.of(resultLine));
+
+        assertThat(d.available()).isTrue();
+        assertThat(d.result()).endsWith("…");
+        // Bounded to the byte cap (plus the few bytes of the ellipsis sentinel).
+        assertThat(d.result().getBytes(java.nio.charset.StandardCharsets.UTF_8).length)
+                .isLessThanOrEqualTo(ConversationEventMapper.CONVERSATION_DETAIL_MAX_BYTES + 4);
+    }
+
+    @Test
+    void renderDetail_returns_unavailable_when_the_id_is_not_found() {
+        // AC9 — a scrolled-out / unresolvable id degrades to available=false (not an exception).
+        String useLine = "{\"type\":\"assistant\",\"uuid\":\"u1\",\"message\":{\"content\":["
+                + "{\"type\":\"tool_use\",\"id\":\"tuPresent\",\"name\":\"Bash\",\"input\":{\"command\":\"ls\"}}]}}";
+
+        ConversationEventMapper.DetailRender d = mapper.renderDetail("tuMissing", List.of(useLine));
+
+        assertThat(d.available()).isFalse();
+        assertThat(d.input()).isEmpty();
+        assertThat(d.result()).isEmpty();
+    }
+
+    @Test
+    void renderDetail_is_robust_to_null_blank_id_and_malformed_lines() {
+        assertThat(mapper.renderDetail(null, List.of("x")).available()).isFalse();
+        assertThat(mapper.renderDetail("  ", List.of("x")).available()).isFalse();
+        assertThat(mapper.renderDetail("tu1", null).available()).isFalse();
+        // A malformed line must be skipped, not throw.
+        assertThat(mapper.renderDetail("tu1", List.of("not-json", "{ broken")).available())
+                .isFalse();
+    }
+
+    @Test
+    void renderDetail_resolves_the_use_even_when_the_result_has_not_arrived() {
+        // AC8 — detail is fetchable from the tool_use alone (awaiting-result state).
+        String useLine = "{\"type\":\"assistant\",\"uuid\":\"u1\",\"message\":{\"content\":["
+                + "{\"type\":\"tool_use\",\"id\":\"tuOnly\",\"name\":\"Skill\",\"input\":{\"skill\":\"verify\"}}]}}";
+
+        ConversationEventMapper.DetailRender d = mapper.renderDetail("tuOnly", List.of(useLine));
+
+        assertThat(d.available()).isTrue();
+        assertThat(d.toolName()).isEqualTo("Skill");
+        assertThat(d.input()).contains("verify");
+        assertThat(d.result()).isEmpty();
+    }
+
     // ──────────────────────── helper ─────────────────────────────────────────
 
     private static String extractUuid(ConversationServerMessage m) {

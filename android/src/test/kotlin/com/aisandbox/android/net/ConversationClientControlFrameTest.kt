@@ -116,6 +116,7 @@ class ConversationClientControlFrameTest {
         assertThat(c.sendInterrupt()).isFalse
         assertThat(c.sendSelectTarget("main")).isFalse
         assertThat(c.sendAnswer("uq", 0, listOf(0), "")).isFalse
+        assertThat(c.sendFetchDetail("tu1", "u1")).isFalse
     }
 
     // ── outbound frames (captured server-side) ─────────────────────────────────
@@ -201,6 +202,35 @@ class ConversationClientControlFrameTest {
         c.sendSelectTarget("swarm:main:0.1")
         assertThat(received.poll(2, TimeUnit.SECONDS))
             .isEqualTo("""{"type":"select-target","targetId":"swarm:main:0.1"}""")
+        c.close()
+    }
+
+    @Test
+    fun `sendFetchDetail emits a fetch-detail frame with the tool id and uuid`() = runBlocking {
+        val received = LinkedBlockingQueue<String>()
+        server.enqueue(recordingUpgrade(received))
+        val c = newClient(7)
+        c.connect()
+
+        // UC-41 AC5 — the tap-to-expand request carries both the merge key (toolUseId)
+        // and the originating tool_use line's uuid (server-side transcript scoping).
+        assertThat(c.sendFetchDetail("tu9", "u-line")).isTrue
+        assertThat(received.poll(2, TimeUnit.SECONDS))
+            .isEqualTo("""{"type":"fetch-detail","toolUseId":"tu9","uuid":"u-line"}""")
+        c.close()
+    }
+
+    @Test
+    fun `sendFetchDetail json-escapes the ids`() = runBlocking {
+        val received = LinkedBlockingQueue<String>()
+        server.enqueue(recordingUpgrade(received))
+        val c = newClient(7)
+        c.connect()
+
+        c.sendFetchDetail("t\"u", "u\\1")
+        val frame = received.poll(2, TimeUnit.SECONDS)
+        assertThat(frame).contains(""""toolUseId":"t\"u"""")
+        assertThat(frame).contains(""""uuid":"u\\1"""")
         c.close()
     }
 

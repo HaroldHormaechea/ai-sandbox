@@ -50,8 +50,9 @@ subagent/teammate lines), and `source` (`main` | `subagent:<agentId>`).
 | `turn-start`      | `uuid`, `isSidechain`, `source`, `text` (user prompt)               | 14, 6 |
 | `thinking`        | `…`, `text` (thinking block)                                        | 5  |
 | `assistant-text`  | `…`, `text`                                                         | 3  |
-| `tool-use`        | `…`, `toolName`, `toolUseId`, `inputSummary` (bounded)             | 4  |
+| `tool-use`        | `…`, `toolName`, `toolUseId`, `inputSummary` (bounded), `primaryText` | 4, 41 |
 | `tool-result`     | `…`, `toolUseId`, `isError`, `summary`                             | 4  |
+| `tool-detail`     | `toolUseId`, `toolName`, `input`, `result`, `isError`, `available` (UC-41 on-demand, untruncated) | 41 |
 | `question`        | `…`, `toolUseId`, `questions[]` (`question`,`header`,`multiSelect`,`options[]{label,description}`) | 10 |
 | `plan-approval`   | `…`, `toolUseId`, `plan`                                           | 13 |
 | `turn-end`        | `…`, `durationMs`, `messageCount` (the `system:turn_duration` marker) | 15 |
@@ -63,6 +64,27 @@ subagent/teammate lines), and `source` (`main` | `subagent:<agentId>`).
 
 `AskUserQuestion` → `question`; `ExitPlanMode` → `plan-approval`; every other
 `tool_use` → `tool-use` (internal noise summarized, not dumped).
+
+**UC-41 — collapsed tool bubbles + on-demand detail.** The client renders one
+collapsed, type-aware bubble per tool call, merging the `tool-use` with its
+paired `tool-result` (matched on `toolUseId`) into a single row. To support that:
+
+- `tool-use` carries an extra **`primaryText`** field: the single type-aware label
+  *value*, extracted server-side (decision D2). For a `Skill` call it is the skill
+  name; for a `Bash` call it is the command; for any other tool it is the bounded
+  input summary. The client formats the surrounding label ("Skill loaded `<name>`",
+  "Command used: `<snippet>`…", "`<tool>`: `<snippet>`…") and applies its own
+  ~20-char snippet budget — the server supplies only the raw value.
+- `tool-detail` is the **on-demand, untruncated** payload for one tool call, sent in
+  response to a client `fetch-detail` (see below). Unlike `tool-use`/`tool-result`
+  (bounded to the 600-char streaming summary), it carries the FULL `input` and
+  `result`, re-read from the transcript on demand and bounded only to a generous
+  device-safe cap — **48 KB** (`ServerProperties.Streams.conversationDetailMaxBytes()`,
+  matching `ConversationEventMapper.CONVERSATION_DETAIL_MAX_BYTES`). When the id
+  cannot be resolved (scrolled out of the retained window, expired, helper
+  miss/timeout) the frame is returned with **`available=false`** and empty
+  `input`/`result` — the client shows a "detail unavailable" state rather than
+  hanging or crashing (AC9).
 
 The `error` frame's `code` is usually fatal-and-close (`unsupported_subprotocol`,
 `not_authorized`, `tail_failed`, `inject_failed`). The one **non-fatal** code is
@@ -81,7 +103,24 @@ state, not a hard failure.
 | `select-target`     | `targetId`                                                | 17 |
 | `interrupt`         | — (ESC into the session)                                  | —  |
 | `enumerate-targets` | —                                                         | 16, 18 |
+| `fetch-detail`      | `toolUseId`, `uuid` — request the full input + result for one tool call | 41 |
 | `close`             | `reason`                                                  | —  |
+
+### On-demand tool detail (`fetch-detail` → `tool-detail`, UC-41 AC5/AC6/AC9)
+
+When the user taps a collapsed tool bubble, the client sends `fetch-detail`
+(`toolUseId`, plus the originating `tool_use` line's `uuid` for scoping). This is
+**not** injected into the tmux session — it is a server-local read. The server
+resolves the current target's transcript, runs the helper one-shot
+(`aisandbox-conversation-tail --fetch-detail --tool-use-id <id>`), which scans the
+main + subagent transcript files for the `tool_use` (id match → full input) and the
+`tool_result` (`tool_use_id` match → full result + `is_error`), and prints the
+matched raw `<source>\t<raw>` envelope lines. The server renders them untruncated
+(48 KB cap) into a `tool-detail` frame. On a miss the helper instead prints a
+single `__ctrl__\tdetail-not-found` control line; the server maps that (and any
+non-zero exit / timeout / exception) to a `tool-detail` frame with
+`available=false` (AC9). The fetch is audited as `conversation_fetch_detail`
+(`ok` / `miss`).
 
 ## Backfill, reconnect, restart (AC6 / AC20 / AC22)
 

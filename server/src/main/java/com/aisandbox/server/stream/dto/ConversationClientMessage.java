@@ -27,6 +27,7 @@ import java.util.List;
     @JsonSubTypes.Type(value = ConversationClientMessage.SelectTarget.class, name = "select-target"),
     @JsonSubTypes.Type(value = ConversationClientMessage.Interrupt.class, name = "interrupt"),
     @JsonSubTypes.Type(value = ConversationClientMessage.EnumerateTargets.class, name = "enumerate-targets"),
+    @JsonSubTypes.Type(value = ConversationClientMessage.FetchDetail.class, name = "fetch-detail"),
     @JsonSubTypes.Type(value = ConversationClientMessage.Close.class, name = "close")
 })
 public sealed interface ConversationClientMessage
@@ -35,6 +36,7 @@ public sealed interface ConversationClientMessage
                 ConversationClientMessage.SelectTarget,
                 ConversationClientMessage.Interrupt,
                 ConversationClientMessage.EnumerateTargets,
+                ConversationClientMessage.FetchDetail,
                 ConversationClientMessage.Close {
 
     /**
@@ -66,6 +68,18 @@ public sealed interface ConversationClientMessage
 
     /** Ask the server to (re)enumerate the conversation targets (AC16/AC18). No payload. */
     record EnumerateTargets() implements ConversationClientMessage {}
+
+    /**
+     * UC-41 (AC5) — request the full, untruncated input + result for a single
+     * tool call, sent when the user taps a collapsed tool bubble. {@code toolUseId}
+     * keys the tool call (the merge key on the client); {@code uuid} is the
+     * transcript message id of the originating {@code tool_use} line, carried so
+     * the server-side fetch can scope its transcript re-read. The server replies
+     * with a {@link ConversationServerMessage.ToolDetail} frame (with
+     * {@code available=false} on a miss — AC9). It is NOT injected into the tmux
+     * session; it is a server-local read.
+     */
+    record FetchDetail(String toolUseId, String uuid) implements ConversationClientMessage {}
 
     /** Client-initiated clean close. */
     record Close(String reason) implements ConversationClientMessage {}

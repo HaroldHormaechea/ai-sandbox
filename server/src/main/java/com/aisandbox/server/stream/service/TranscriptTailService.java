@@ -77,6 +77,16 @@ public class TranscriptTailService {
 
     private static final Duration SCAN_TIMEOUT = Duration.ofSeconds(8);
 
+    /** UC-41 — one-shot {@code --fetch-detail} timeout (AC5/AC9); a miss/slow helper degrades to empty. */
+    private static final Duration DETAIL_TIMEOUT = Duration.ofSeconds(8);
+
+    /**
+     * UC-41 — control line the helper prints (instead of matched transcript lines)
+     * when a {@code --fetch-detail} id cannot be found in the retained transcript
+     * window. Surfaced to the client as {@code available=false} (AC9).
+     */
+    public static final String CTRL_DETAIL_NOT_FOUND = "detail-not-found";
+
     private final ProcessExecutor exec;
 
     public TranscriptTailService(ProcessExecutor exec) {
@@ -124,6 +134,48 @@ public class TranscriptTailService {
         } catch (IOException io) {
             LOG.debug("scanPending failed for n={} target={}: {}", n, target, io.toString());
             return PendingState.IDLE;
+        }
+    }
+
+    /**
+     * UC-41 (AC5/AC9) — one-shot, bounded re-read of {@code target}'s transcript for
+     * the raw {@code tool_use} + {@code tool_result} lines of a single {@code toolUseId}.
+     * Runs the helper in {@code --fetch-detail} mode (resolve transcript once, scan main +
+     * subagent files, print the matched {@code <source>\t<raw>} lines), then exits — so
+     * {@link ProcessExecutor#run} is appropriate, like {@link #scanPending}. Returns the
+     * matched envelope lines (handed to {@code ConversationEventMapper#renderDetail});
+     * an EMPTY list on a miss, the {@code detail-not-found} control line, a non-zero exit,
+     * a timeout, or any I/O error — the caller maps an empty result to {@code available=false}.
+     * Never throws.
+     */
+    public List<String> fetchDetailLines(int n, TailTarget target, String toolUseId) {
+        if (toolUseId == null || toolUseId.isBlank()) {
+            return List.of();
+        }
+        try {
+            List<String> argv = new ArrayList<>(buildArgv(n, target, 1));
+            argv.add("--fetch-detail");
+            argv.add("--tool-use-id");
+            argv.add(toolUseId);
+            ProcessExecutor.Result r = exec.run(argv, null, DETAIL_TIMEOUT);
+            if (r.exitCode() != 0 || r.stdout() == null || r.stdout().isBlank()) {
+                return List.of();
+            }
+            List<String> lines = new ArrayList<>();
+            for (String line : r.stdout().split("\n", -1)) {
+                if (line.isBlank()) {
+                    continue;
+                }
+                // The helper emits `__ctrl__\tdetail-not-found` on a miss → no matched lines.
+                if (line.startsWith(CTRL_SOURCE) && line.contains(CTRL_DETAIL_NOT_FOUND)) {
+                    return List.of();
+                }
+                lines.add(line);
+            }
+            return lines;
+        } catch (IOException io) {
+            LOG.debug("fetchDetailLines failed for n={} target={} id={}: {}", n, target, toolUseId, io.toString());
+            return List.of();
         }
     }
 

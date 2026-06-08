@@ -66,6 +66,12 @@ class ConversationClient(
 
     fun sendInterrupt(): Boolean = sendText("""{"type":"interrupt"}""")
 
+    /** UC-41 (AC5) — request the full untruncated input + result for one tool call (server-local read, not injected). */
+    fun sendFetchDetail(toolUseId: String, uuid: String): Boolean =
+        sendText(
+            """{"type":"fetch-detail","toolUseId":"${jsonEscape(toolUseId)}","uuid":"${jsonEscape(uuid)}"}""",
+        )
+
     /**
      * Send a structured answer. [selections] are option indices; [freeText] is
      * the always-present "Other" value (empty when unused).

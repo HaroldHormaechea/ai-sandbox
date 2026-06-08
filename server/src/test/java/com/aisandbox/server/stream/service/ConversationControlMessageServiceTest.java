@@ -64,6 +64,17 @@ class ConversationControlMessageServiceTest {
     }
 
     @Test
+    void parses_fetch_detail_frame_with_tool_use_id_and_uuid() {
+        // UC-41 AC5 — the tap-to-expand request frame.
+        ConversationClientMessage m =
+                svc.parseConversation("{\"type\":\"fetch-detail\",\"toolUseId\":\"tu9\",\"uuid\":\"u-line\"}");
+        assertThat(m).isInstanceOfSatisfying(ConversationClientMessage.FetchDetail.class, fd -> {
+            assertThat(fd.toolUseId()).isEqualTo("tu9");
+            assertThat(fd.uuid()).isEqualTo("u-line");
+        });
+    }
+
+    @Test
     void rejects_unknown_or_invalid_conversation_frame() {
         assertThatThrownBy(() -> svc.parseConversation("{\"type\":\"resize\",\"cols\":80}"))
                 .isInstanceOf(IllegalArgumentException.class);
@@ -82,15 +93,36 @@ class ConversationControlMessageServiceTest {
                 .contains("\"type\":\"thinking\"");
         assertThat(ser(new ConversationServerMessage.AssistantText("u3", false, "main", "hello")))
                 .contains("\"type\":\"assistant-text\"");
-        assertThat(ser(new ConversationServerMessage.ToolUse("u4", false, "main", "Bash", "tu1", "ls")))
+        assertThat(ser(new ConversationServerMessage.ToolUse("u4", false, "main", "Bash", "tu1", "ls", "ls")))
                 .contains("\"type\":\"tool-use\"")
-                .contains("\"toolName\":\"Bash\"");
+                .contains("\"toolName\":\"Bash\"")
+                .contains("\"primaryText\":\"ls\"");
         assertThat(ser(new ConversationServerMessage.ToolResult("u5", false, "main", "tu1", true, "boom")))
                 .contains("\"type\":\"tool-result\"")
                 .contains("\"isError\":true");
         assertThat(ser(new ConversationServerMessage.TurnEnd("u6", false, "main", 1200L, 4)))
                 .contains("\"type\":\"turn-end\"")
                 .contains("\"durationMs\":1200");
+    }
+
+    @Test
+    void serializes_tool_detail_frame_with_full_input_and_result() {
+        // UC-41 AC5/AC6 — the on-demand untruncated detail frame.
+        String s = ser(new ConversationServerMessage.ToolDetail(
+                "tu9", "Bash", "ls -la /workspace", "total 0\ndrwxr-xr-x", false, true));
+        assertThat(s)
+                .contains("\"type\":\"tool-detail\"")
+                .contains("\"toolUseId\":\"tu9\"")
+                .contains("\"toolName\":\"Bash\"")
+                .contains("\"input\":\"ls -la /workspace\"")
+                .contains("\"available\":true");
+    }
+
+    @Test
+    void serializes_unavailable_tool_detail_frame() {
+        // UC-41 AC9 — a miss carries empty input/result and available=false.
+        String s = ser(new ConversationServerMessage.ToolDetail("gone", null, "", "", false, false));
+        assertThat(s).contains("\"type\":\"tool-detail\"").contains("\"available\":false");
     }
 
     @Test

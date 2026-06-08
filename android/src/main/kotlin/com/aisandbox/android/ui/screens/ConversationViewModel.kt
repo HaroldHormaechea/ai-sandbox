@@ -7,6 +7,7 @@ import com.aisandbox.android.AiSandboxApplication
 import com.aisandbox.android.conversation.ConversationController
 import com.aisandbox.android.conversation.ConversationItem
 import com.aisandbox.android.conversation.PendingSheet
+import com.aisandbox.android.conversation.ToolDetailState
 import com.aisandbox.android.conversation.TurnPhase
 import com.aisandbox.android.terminal.StreamTarget
 import com.aisandbox.android.terminal.TerminalStreamController
@@ -48,6 +49,9 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
     private val _turnPhase = MutableStateFlow(TurnPhase.IDLE)
     val turnPhase: StateFlow<TurnPhase> = _turnPhase.asStateFlow()
 
+    private val _toolDetail = MutableStateFlow<ToolDetailState?>(null)
+    val toolDetail: StateFlow<ToolDetailState?> = _toolDetail.asStateFlow()
+
     /** Resolve the controller for [sessionN] and (idempotently) start its loop. */
     fun attach(sessionN: Int) {
         if (this.sessionN == sessionN && controller != null) {
@@ -64,6 +68,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
         viewModelScope.launch { c.selectedTargetId.collect { _selectedTargetId.value = it } }
         viewModelScope.launch { c.pendingSheet.collect { _pendingSheet.value = it } }
         viewModelScope.launch { c.turnPhase.collect { _turnPhase.value = it } }
+        viewModelScope.launch { c.toolDetail.collect { _toolDetail.value = it } }
     }
 
     fun submitComposer(text: String) = controller?.submitComposer(text) ?: Unit
@@ -74,6 +79,12 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
     fun selectTarget(targetId: String) = controller?.selectTarget(targetId) ?: Unit
 
     fun interrupt() = controller?.interrupt() ?: Unit
+
+    /** UC-41 (AC5) — open the detail dialog for a tapped tool bubble. */
+    fun openDetail(toolUseId: String, uuid: String) = controller?.openDetail(toolUseId, uuid) ?: Unit
+
+    /** UC-41 — dismiss the detail dialog. */
+    fun closeDetail() = controller?.closeDetail() ?: Unit
 
     fun userTriggeredReconnect() = controller?.userTriggeredReconnect() ?: Unit
 

@@ -17,6 +17,8 @@ public enum AuditAction {
     CONVERSATION_INPUT,
     CONVERSATION_ANSWER,
     CONVERSATION_INTERRUPT,
+    // UC-41 — on-demand fetch of a tool call's full (untruncated) input + result.
+    CONVERSATION_FETCH_DETAIL,
     CLIENT_ADD,
     CLIENT_REMOVE,
     // UC04 — successful POST /v1/enrollment redemption.

@@ -43,6 +43,7 @@ import java.util.List;
     @JsonSubTypes.Type(value = ConversationServerMessage.AssistantText.class, name = "assistant-text"),
     @JsonSubTypes.Type(value = ConversationServerMessage.ToolUse.class, name = "tool-use"),
     @JsonSubTypes.Type(value = ConversationServerMessage.ToolResult.class, name = "tool-result"),
+    @JsonSubTypes.Type(value = ConversationServerMessage.ToolDetail.class, name = "tool-detail"),
     @JsonSubTypes.Type(value = ConversationServerMessage.Question.class, name = "question"),
     @JsonSubTypes.Type(value = ConversationServerMessage.PlanApproval.class, name = "plan-approval"),
     @JsonSubTypes.Type(value = ConversationServerMessage.TurnEnd.class, name = "turn-end"),
@@ -58,6 +59,7 @@ public sealed interface ConversationServerMessage
                 ConversationServerMessage.AssistantText,
                 ConversationServerMessage.ToolUse,
                 ConversationServerMessage.ToolResult,
+                ConversationServerMessage.ToolDetail,
                 ConversationServerMessage.Question,
                 ConversationServerMessage.PlanApproval,
                 ConversationServerMessage.TurnEnd,
@@ -90,14 +92,44 @@ public sealed interface ConversationServerMessage
      * / {@code ExitPlanMode} (those map to {@link Question} / {@link PlanApproval}).
      * {@code inputSummary} is a compact, human-readable rendering of the key
      * tool inputs — internal tool noise is summarized, not dumped raw.
+     *
+     * <p>UC-41 — {@code primaryText} is the single, type-aware label <em>value</em>
+     * extracted server-side (decision D2): the skill name for a {@code Skill} call,
+     * the command for a {@code Bash} call, or the bounded summary for any other
+     * tool. The client formats the surrounding label text ("Skill loaded …",
+     * "Command used: …") and applies its own ~20-char snippet budget; the server
+     * only supplies the raw value so the formatting policy stays client-side.
      */
     record ToolUse(
-            String uuid, boolean isSidechain, String source, String toolName, String toolUseId, String inputSummary)
+            String uuid,
+            boolean isSidechain,
+            String source,
+            String toolName,
+            String toolUseId,
+            String inputSummary,
+            String primaryText)
             implements ConversationServerMessage {}
 
     /** A {@code user:tool_result} block (AC4) paired with its {@link ToolUse} via {@code toolUseId}. */
     record ToolResult(
             String uuid, boolean isSidechain, String source, String toolUseId, boolean isError, String summary)
+            implements ConversationServerMessage {}
+
+    /**
+     * UC-41 (AC5/AC6/AC9) — the on-demand, untruncated detail for a single tool
+     * call, produced in response to a client {@link ConversationClientMessage.FetchDetail}.
+     * Unlike the live {@link ToolUse}/{@link ToolResult} frames (bounded to the
+     * 600-char streaming summary), this frame carries the FULL tool {@code input}
+     * and {@code result} re-read from the transcript on demand, bounded only to a
+     * generous device-safe cap ({@code ServerProperties.conversationDetailMaxBytes},
+     * 48&nbsp;KB). {@code available} is {@code false} when the id could not be
+     * resolved (scrolled out of the retained window, expired, helper miss/timeout)
+     * — the client then shows a "detail unavailable" state rather than hanging
+     * (AC9). When {@code available} is {@code false}, {@code input}/{@code result}
+     * are empty and {@code isError} is {@code false}.
+     */
+    record ToolDetail(
+            String toolUseId, String toolName, String input, String result, boolean isError, boolean available)
             implements ConversationServerMessage {}
 
     /**

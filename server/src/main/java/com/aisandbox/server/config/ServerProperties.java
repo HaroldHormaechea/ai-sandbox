@@ -151,10 +151,26 @@ public record ServerProperties(
         public int conversationBackfillLines() {
             return CONVERSATION_BACKFILL_LINES_DEFAULT;
         }
+
+        /**
+         * UC-41 — byte cap on the on-demand tool-detail payload (full input + result)
+         * returned by a {@code fetch-detail} frame (AC6), bounding a pathological
+         * multi-MB tool result so the dialog can't OOM the device. Like
+         * {@link #conversationBackfillLines()} this is a defaulted accessor rather than
+         * a new YAML-bound, {@code @Min}-validated component, so existing
+         * {@code config.yaml} / {@code sample-config.yaml} / QA fixtures bind unchanged.
+         * Matches {@code ConversationEventMapper.CONVERSATION_DETAIL_MAX_BYTES}.
+         */
+        public int conversationDetailMaxBytes() {
+            return CONVERSATION_DETAIL_MAX_BYTES_DEFAULT;
+        }
     }
 
     /** UC-37 default backfill window — see {@link Streams#conversationBackfillLines()}. */
     public static final int CONVERSATION_BACKFILL_LINES_DEFAULT = 200;
+
+    /** UC-41 default tool-detail byte cap (48&nbsp;KB) — see {@link Streams#conversationDetailMaxBytes()}. */
+    public static final int CONVERSATION_DETAIL_MAX_BYTES_DEFAULT = 49152;
 
     /**
      * UC04 enrollment-endpoint configuration. Tokens issued by
