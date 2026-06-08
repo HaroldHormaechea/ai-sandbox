@@ -284,7 +284,7 @@ fi
 #   3. relaunch claude so it's ready for the next ./attach
 # The tmux session itself never dies.
 tmux new-session -d -s main -c "$START_DIR" \
-    'while true; do claude --dangerously-skip-permissions; tmux detach-client -s main 2>/dev/null; printf "\033c\033[3J"; sleep 1; done'
+    'while true; do cid="$(cat /proc/sys/kernel/random/uuid)"; claude --session-id "$cid" --dangerously-skip-permissions; tmux detach-client -s main 2>/dev/null; printf "\033c\033[3J"; sleep 1; done'
 
 # UC-27 — signal readiness AFTER the main tmux session exists (capabilities are
 # already provisioned above, so toolchains are ready at handover). spawn.sh polls
