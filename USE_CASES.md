@@ -7,6 +7,7 @@ Statuses:
 - `in-progress` — the dev-team has started analysis
 - `done` — implementation and tests completed
 - `blocked` — the dev-team escalated (6-round cap hit, user abort, or infeasibility)
+- `rejected` — reviewed and deliberately not implemented (closed without dispatch)
 
 | # | File | Title | Status | Updated |
 |---|------|-------|--------|---------|
@@ -34,7 +35,7 @@ Statuses:
 | 22 | [use-cases/22-onboarding-toolchain-android-testing.md](use-cases/22-onboarding-toolchain-android-testing.md) | Onboarding toolchain selection with full Android build/test/emulator image support | done | 2026-05-25 |
 | 23 | [use-cases/23-android-terminal-keyboard-insets.md](use-cases/23-android-terminal-keyboard-insets.md) | Android terminal — on-screen keyboard occludes the input (IME insets) | done | 2026-05-25 |
 | 24 | [use-cases/24-android-terminal-multi-window-leak-fix.md](use-cases/24-android-terminal-multi-window-leak-fix.md) | Android terminal — fix "all tmux windows shown" regression (only main pane + agent switcher) | done | 2026-06-05 |
-| 25 | [use-cases/25-android-terminal-split-pane.md](use-cases/25-android-terminal-split-pane.md) | Android terminal — split-pane support (UC04-3c) [tentative, pending review] | pending | 2026-05-30 |
+| 25 | [use-cases/25-android-terminal-split-pane.md](use-cases/25-android-terminal-split-pane.md) | Android terminal — split-pane support (UC04-3c) [rejected] | rejected | 2026-06-08 |
 | 26 | [use-cases/26-server-setup-devtools-step-dind.md](use-cases/26-server-setup-devtools-step-dind.md) | Server setup — "Select the development tools you want to install" step with rootless Docker-in-Docker | done | 2026-05-31 |
 | 27 | [use-cases/27-devtools-capability-selector.md](use-cases/27-devtools-capability-selector.md) | Server setup — manifest-driven, launch-adapted dev-tools capability selector (Linux-only) | done | 2026-05-31 |
 | 28 | [use-cases/28-android-terminating-state-block-redelete.md](use-cases/28-android-terminating-state-block-redelete.md) | "awaiting termination" feedback state + block re-delete while terminating | done | 2026-06-01 |
