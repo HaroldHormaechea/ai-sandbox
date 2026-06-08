@@ -36,6 +36,13 @@ AVDMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/avdmanager"
 ADB="$SDK_ROOT/platform-tools/adb"
 PIDFILE="$CACHE_ROOT/emulator.pid"
 LOGFILE="$CACHE_ROOT/emulator.log"
+# Staged X11/GL host libraries the emulator binary dynamically links against.
+# The minimal session image does not ship these in the default loader path, so
+# without prepending this dir to LD_LIBRARY_PATH the emulator dies at startup
+# with `libX11.so.6: cannot open shared object file` and then hangs the
+# boot-wait loop below. Guarded by existence so a host that already provides the
+# libs system-wide is unaffected.
+HOST_LIBS="${AISB_ANDROID_HOST_LIBS:-$CACHE_ROOT/host-libs}"
 
 log() { printf '  [aisandbox-emulator] %s\n' "$*" >&2; }
 die() { printf '  [aisandbox-emulator] ERROR: %s\n' "$*" >&2; exit 1; }
@@ -107,7 +114,12 @@ cmd_start() {
     fi
 
     log "Booting headless AVD '$AVD_NAME'..."
-    ANDROID_SDK_ROOT="$SDK_ROOT" ANDROID_AVD_HOME="$AVD_HOME" \
+    local emu_libpath="${LD_LIBRARY_PATH:-}"
+    if [ -d "$HOST_LIBS" ]; then
+        emu_libpath="$HOST_LIBS${emu_libpath:+:$emu_libpath}"
+        log "Prepending staged X11/GL host libs to LD_LIBRARY_PATH: $HOST_LIBS"
+    fi
+    ANDROID_SDK_ROOT="$SDK_ROOT" ANDROID_AVD_HOME="$AVD_HOME" LD_LIBRARY_PATH="$emu_libpath" \
         nohup "$SDK_ROOT/emulator/emulator" -avd "$AVD_NAME" \
         -no-window -gpu swiftshader_indirect -no-audio -no-boot-anim -no-snapshot \
         ${accel_args[@]+"${accel_args[@]}"} >"$LOGFILE" 2>&1 &
@@ -145,6 +157,7 @@ cmd_doctor() {
     log "/dev/kvm           : $(kvm_ok && echo 'present + accessible' || echo 'ABSENT/inaccessible — emulator will be slow/unavailable')"
     log "cache root         : $CACHE_ROOT"
     log "emulator installed : $([ -x "$SDK_ROOT/emulator/emulator" ] && echo yes || echo 'no (installed on first start)')"
+    log "X11/GL host libs   : $([ -d "$HOST_LIBS" ] && echo "present ($HOST_LIBS)" || echo "absent — emulator may fail with libX11.so.6 unless host provides them")"
     log "AVD '$AVD_NAME'      : $(ANDROID_SDK_ROOT="$SDK_ROOT" "$AVDMANAGER" list avd 2>/dev/null | grep -q "Name: $AVD_NAME" && echo present || echo 'not created yet')"
 }
 
