@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -144,16 +145,11 @@ fun ConversationScreen(
             )
             ConnectionBanner(state)
             Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
-                LazyColumn(
-                    state = listState,
+                ConversationContent(
+                    items = items,
                     modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    items(items = items, key = { it.key }) { item ->
-                        ConversationItemRow(item)
-                    }
-                }
+                    listState = listState,
+                )
             }
             SpinnerRow(turnPhase)
         }
@@ -188,6 +184,33 @@ private fun SpinnerRow(phase: TurnPhase) {
         CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
         Spacer(Modifier.width(10.dp))
         Text(label, style = MaterialTheme.typography.bodySmall, color = OnSurfaceMuted)
+    }
+}
+
+/**
+ * The scrollable transcript list. Extracted from [ConversationScreen] as an
+ * `internal` seam so same-package instrumented tests can render representative
+ * conversation items deterministically. Pure extraction — `state`,
+ * `contentPadding`, `verticalArrangement`, item keys, and row rendering are
+ * verbatim from the inline `LazyColumn` it replaced; no visual or
+ * scroll/ordering change. The working spinner stays in [ConversationScreen] as
+ * a sibling below this list, exactly as before.
+ */
+@Composable
+internal fun ConversationContent(
+    items: List<ConversationItem>,
+    modifier: Modifier = Modifier,
+    listState: LazyListState = rememberLazyListState(),
+) {
+    LazyColumn(
+        state = listState,
+        modifier = modifier,
+        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        items(items = items, key = { it.key }) { item ->
+            ConversationItemRow(item)
+        }
     }
 }
 
