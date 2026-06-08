@@ -135,11 +135,11 @@ const POLL_MS = 300;
 
 // Bounded idle before a stranded, COMPLETE trailing line (one written with no
 // terminating newline because `claude` is now blocking on an AskUserQuestion /
-// ExitPlanMode answer) is flushed live. A few × POLL_MS: long enough that a
+// ExitPlanMode answer) is flushed live. 3 × POLL_MS (~900ms): long enough that a
 // writer mid-line is not mistaken for a blocked one, short enough that the
 // question reaches the structured view promptly. The flush only ever fires once
-// the residual parses as a complete JSON object (see idleFlush).
-const IDLE_FLUSH_MS = 900;
+// the residual parses as complete JSON (see idleFlush).
+const FLUSH_IDLE_MS = 3 * POLL_MS;
 
 // Exit quietly if the server closed our stdout (EPIPE on write → SIGPIPE-like).
 process.stdout.on('error', (e) => {
@@ -552,16 +552,16 @@ function subagentSource(filePath) {
  * emission. The idle-flush fields support live delivery of a stranded trailing
  * line (UC-40):
  *   residualSinceMs — the clock value when `residual` last GREW (new bytes
- *     arrived). The idle timer is measured from here; it resets on every append,
- *     so an actively-written line is never mistaken for a blocked one.
- *   pendingFlushed  — one-shot flag: this reader's current `residual` has already
- *     been emitted live via idleFlush, so when the real newline later lands the
- *     duplicate copy is suppressed exactly once.
- *   flushedLine     — the exact string that was idle-flushed, used to match (and
- *     suppress) that one eventual newline-terminated copy.
+ *     arrived), or null when residual is empty. The idle timer is measured from
+ *     here; it resets on every append, so an actively-written line is never
+ *     mistaken for a blocked one.
+ *   pendingFlushed  — the exact residual string already emitted live via
+ *     idleFlush, or null. Doubles as the one-shot guard (don't reflush the same
+ *     residual) and the suppression key (drop the one eventual newline-terminated
+ *     copy of that string).
  */
 function makeReader(filePath, source) {
-  return { filePath, source, offset: 0, residual: '', ino: null, residualSinceMs: 0, pendingFlushed: false, flushedLine: null };
+  return { filePath, source, offset: 0, residual: '', ino: null, residualSinceMs: null, pendingFlushed: null };
 }
 
 function statSafe(p) {
@@ -584,15 +584,16 @@ function readNewLines(reader, nowMs) {
   if (!st) return [];
   // Rotation / truncation: file shrank or inode changed → reset to start. Also
   // clear the idle-flush bookkeeping so a rotated file starts clean and never
-  // suppresses a legitimate line on the strength of a stale flushedLine.
+  // suppresses a legitimate line on the strength of a stale pendingFlushed.
   if (reader.ino != null && (st.ino !== reader.ino || st.size < reader.offset)) {
     reader.offset = 0;
     reader.residual = '';
-    reader.residualSinceMs = nowMs;
-    reader.pendingFlushed = false;
-    reader.flushedLine = null;
+    reader.residualSinceMs = null;
+    reader.pendingFlushed = null;
   }
   reader.ino = st.ino;
+  // No-growth poll tick: return WITHOUT touching residualSinceMs, so the idle
+  // timer keeps accumulating toward FLUSH_IDLE_MS while the writer is blocked.
   if (st.size <= reader.offset) return [];
   let fd;
   try {
@@ -601,28 +602,23 @@ function readNewLines(reader, nowMs) {
     return [];
   }
   const lines = [];
+  let read = 0;
   try {
     const len = st.size - reader.offset;
     const buf = Buffer.allocUnsafe(len);
-    const read = fs.readSync(fd, buf, 0, len, reader.offset);
+    read = fs.readSync(fd, buf, 0, len, reader.offset);
     reader.offset += read;
-    if (read > 0) {
-      // New bytes arrived → the writer is active, not blocked. Reset the idle
-      // timer so idleFlush cannot fire on a residual that is still growing.
-      reader.residual += buf.toString('utf8', 0, read);
-      reader.residualSinceMs = nowMs;
-    }
+    if (read > 0) reader.residual += buf.toString('utf8', 0, read);
     let nl;
     while ((nl = reader.residual.indexOf('\n')) >= 0) {
       const line = reader.residual.substring(0, nl);
       reader.residual = reader.residual.substring(nl + 1);
       // If this exact line was already delivered live by idleFlush, drop this one
       // newline-terminated copy (one-shot) instead of double-emitting it. Keyed on
-      // the exact string + the one-shot flag, so a legitimately repeated line is
-      // NOT suppressed.
-      if (reader.pendingFlushed && line === reader.flushedLine) {
-        reader.pendingFlushed = false;
-        reader.flushedLine = null;
+      // the trimmed flushed string, so a legitimately repeated identical line still
+      // emits (pendingFlushed is cleared after the single suppression).
+      if (reader.pendingFlushed != null && line.trim() === reader.pendingFlushed.trim()) {
+        reader.pendingFlushed = null;
         continue;
       }
       if (line.length > 0) lines.push(line);
@@ -632,12 +628,21 @@ function readNewLines(reader, nowMs) {
   } finally {
     try { fs.closeSync(fd); } catch (e) { /* ignore */ }
   }
+  // Idle-timer bookkeeping (placed AFTER the early-return above): a growing
+  // residual resets the timer (writer active); an emptied residual clears it and
+  // any pending suppression key.
+  if (reader.residual) {
+    if (read > 0) reader.residualSinceMs = nowMs;
+  } else {
+    reader.residualSinceMs = null;
+    reader.pendingFlushed = null;
+  }
   return lines;
 }
 
 /**
  * Idle/safety-net flush (UC-40). When a reader's `residual` holds a COMPLETE,
- * parseable JSON object that has not grown for IDLE_FLUSH_MS — the signature of
+ * parseable JSON line that has not grown for FLUSH_IDLE_MS — the signature of
  * `claude` having written an assistant message (+ its AskUserQuestion /
  * ExitPlanMode tool_use) and then blocked awaiting the answer, with no trailing
  * newline yet — return that line so it can be delivered live. Returns null
@@ -647,28 +652,24 @@ function readNewLines(reader, nowMs) {
  *   • NEVER mutates `offset` or `residual` — the eventual real newline is consumed
  *     normally by readNewLines, which then sees pendingFlushed and drops the one
  *     duplicate. Half-written / un-parseable residual is NEVER emitted.
- *   • One-shot per residual (pendingFlushed guard) so a still-blocked session is
- *     not re-flushed every poll.
+ *   • One-shot per residual (pendingFlushed === residual guard) so a still-blocked
+ *     session is not re-flushed every poll.
  * `nowMs` is the injectable clock (default Date.now()) for deterministic tests.
  */
 function idleFlush(reader, nowMs) {
   if (nowMs === undefined) nowMs = Date.now();
   if (!reader.residual) return null;
-  if (reader.pendingFlushed) return null;
-  if (nowMs - reader.residualSinceMs < IDLE_FLUSH_MS) return null;
-  const candidate = reader.residual;
-  let parsed;
+  if (reader.pendingFlushed === reader.residual) return null; // already flushed this exact residual
+  if (reader.residualSinceMs == null) return null;
+  if (nowMs - reader.residualSinceMs < FLUSH_IDLE_MS) return null;
   try {
-    parsed = JSON.parse(candidate.trimEnd());
+    JSON.parse(reader.residual.trim());
   } catch (e) {
-    return null; // not a complete JSON object yet — never emit a half-written line
+    return null; // not complete JSON yet — never emit a half-written line
   }
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
-  // Mark one-shot: readNewLines suppresses the exact newline-terminated copy when
-  // it lands. Store the untrimmed snapshot — that is what readNewLines extracts.
-  reader.pendingFlushed = true;
-  reader.flushedLine = candidate;
-  return candidate;
+  // Mark one-shot: readNewLines suppresses the matching newline-terminated copy.
+  reader.pendingFlushed = reader.residual;
+  return reader.residual;
 }
 
 /** Read the whole file as complete lines (for backfill); ignores a trailing partial line. */
@@ -688,6 +689,9 @@ function readAllLines(filePath) {
 
 // ──────────────────────── scan-pending (one-shot) ────────────────────────
 
+// NON-GOAL for UC-40: scanPending / AC18 switcher badging is intentionally left
+// unchanged — it reads only complete (newline-terminated) lines and deliberately
+// drops a trailing partial; the UC-40 idle flush is a streaming-mode concern only.
 function scanPending() {
   const mainPath = resolveTranscriptOnce();
   if (!mainPath) {
@@ -755,10 +759,11 @@ function backfill(reader, n, nowMs) {
   reader.residual = buf.toString('utf8', completeEnd, buf.length);
   reader.offset = buf.length;
   // Seed the idle-flush bookkeeping: a connect-time stranded question sits in the
-  // residual here and must become eligible for live delivery after the idle.
-  reader.residualSinceMs = nowMs;
-  reader.pendingFlushed = false;
-  reader.flushedLine = null;
+  // residual here and must become eligible for live delivery after the idle. Use
+  // a numeric stamp only when residual is non-empty; an empty residual leaves the
+  // timer null (nothing to flush).
+  reader.residualSinceMs = reader.residual ? nowMs : null;
+  reader.pendingFlushed = null;
   const st = statSafe(reader.filePath);
   reader.ino = st ? st.ino : null;
 }
@@ -819,13 +824,16 @@ async function streamLoop() {
       continue;
     }
 
-    // One clock value per iteration so readNewLines and idleFlush agree on "now".
-    const now = Date.now();
-
     if (mainReader) {
-      for (const line of readNewLines(mainReader, now)) {
+      for (const line of readNewLines(mainReader)) {
         out(mainReader.source + '\t' + line);
       }
+      // Idle/safety-net flush (UC-40): deliver the stranded, complete trailing line
+      // live while `claude` is still blocked on an AskUserQuestion / ExitPlanMode
+      // answer. idleFlush never touches offset/residual; the eventual
+      // newline-terminated copy is suppressed once by readNewLines.
+      const fl = idleFlush(mainReader, Date.now());
+      if (fl) out(mainReader.source + '\t' + fl);
     }
 
     // Re-glob subagent files; new ones get a bounded backfill, known ones append.
@@ -833,27 +841,20 @@ async function streamLoop() {
       let r = subReaders.get(sf);
       if (!r) {
         r = makeReader(sf, subagentSource(sf));
-        backfill(r, ARGS.backfill, now);
+        backfill(r, ARGS.backfill);
         subReaders.set(sf, r);
       } else {
-        for (const line of readNewLines(r, now)) {
+        for (const line of readNewLines(r)) {
           out(r.source + '\t' + line);
         }
       }
     }
 
-    // Idle/safety-net flush (UC-40): deliver a stranded, complete trailing line
-    // live — for the main reader AND every subagent (isSidechain) reader — while
-    // `claude` is still blocked awaiting an AskUserQuestion / ExitPlanMode answer.
-    // idleFlush never touches offset/residual; the eventual newline-terminated
-    // copy is suppressed once by readNewLines (pendingFlushed).
-    if (mainReader) {
-      const flushed = idleFlush(mainReader, now);
-      if (flushed != null) out(mainReader.source + '\t' + flushed);
-    }
+    // Idle/safety-net flush for every subagent (isSidechain) reader — a teammate's
+    // blocking question must be delivered live too, not just the main transcript's.
     for (const r of subReaders.values()) {
-      const flushed = idleFlush(r, now);
-      if (flushed != null) out(r.source + '\t' + flushed);
+      const fl = idleFlush(r, Date.now());
+      if (fl) out(r.source + '\t' + fl);
     }
 
     await sleep(POLL_MS);
@@ -900,6 +901,6 @@ module.exports = {
   idleFlush,
   backfill,
   CTRL_NO_TRANSCRIPT,
-  IDLE_FLUSH_MS,
+  FLUSH_IDLE_MS,
   POLL_MS,
 };
