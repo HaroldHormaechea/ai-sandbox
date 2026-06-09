@@ -27,6 +27,7 @@ import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -495,7 +496,22 @@ private fun SessionRow(
                 )
             }
             Column(horizontalAlignment = Alignment.End) {
-                StatusPill(state = effectiveState)
+                // UC-48 — when Claude is actively working in this session, prefix the
+                // StatusPill with a small working spinner (AC1). Double-gated on
+                // running (AC7): a stale working=true must never animate on a
+                // terminating/paused/stopped row even if it races the state override.
+                // The spinner matches the conversation view's SpinnerRow exactly
+                // (16.dp / 2.dp — AC5) so the affordance is consistent. The pill stays
+                // the row's status anchor; the spinner sits to its left in one Row.
+                if (row.working && effectiveState == "running") {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                        Spacer(Modifier.width(6.dp))
+                        StatusPill(state = effectiveState)
+                    }
+                } else {
+                    StatusPill(state = effectiveState)
+                }
                 if (row.activeStreams > 0) {
                     Spacer(Modifier.height(6.dp))
                     AttachedBadge(count = row.activeStreams)
