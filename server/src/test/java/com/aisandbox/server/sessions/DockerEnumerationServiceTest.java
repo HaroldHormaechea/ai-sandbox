@@ -1132,4 +1132,97 @@ class DockerEnumerationServiceTest {
         // The running-gate skips the working read entirely for a non-running row.
         verify(names, never()).working(13);
     }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // UC-49 — per-session pending-question flag on the enumeration hot path
+    // ──────────────────────────────────────────────────────────────────────
+
+    /**
+     * UC-49 AC1 — a RUNNING session whose cached pending-question flag is true
+     * carries {@code pendingQuestion=true} on its {@link SessionRecord}, so the
+     * Android row shows the "?" badge. The cached read is non-blocking (the same
+     * warming refresh that fetches the name fetches the pending flag).
+     */
+    @Test
+    void running_session_carries_the_cached_pending_question_flag() throws Exception {
+        ProcessExecutor exec = runningSession(3);
+        ConversationNameService names = mock(ConversationNameService.class);
+        when(names.pendingQuestion(3)).thenReturn(true);
+
+        DockerEnumerationService svc = new DockerEnumerationService(exec, new TerminatingSessions(), names);
+        SessionRecord r = svc.enumerate().get(0);
+
+        assertThat(r.state()).isEqualTo("running");
+        assertThat(r.pendingQuestion())
+                .as("AC1 — a running session with a pending question reports pendingQuestion=true")
+                .isTrue();
+        verify(names).pendingQuestion(3);
+        verify(names).refreshAsync(eq(3), eq("ai-sandbox-3"));
+    }
+
+    /**
+     * UC-49 — a RUNNING session with no pending question carries
+     * {@code pendingQuestion=false} (no badge).
+     */
+    @Test
+    void running_session_without_a_pending_question_carries_false() throws Exception {
+        ProcessExecutor exec = runningSession(6);
+        ConversationNameService names = mock(ConversationNameService.class);
+        when(names.pendingQuestion(6)).thenReturn(false);
+
+        DockerEnumerationService svc = new DockerEnumerationService(exec, new TerminatingSessions(), names);
+        SessionRecord r = svc.enumerate().get(0);
+
+        assertThat(r.pendingQuestion())
+                .as("a running session with no pending question reports false")
+                .isFalse();
+    }
+
+    /**
+     * UC-49 AC8 — a NON-running (paused) session never reads the pending flag and
+     * always reports {@code pendingQuestion=false}: the badge is never shown for a
+     * paused / terminating / stopped row, and a stale cached pending can never race
+     * a non-running override into a "?" badge.
+     */
+    @Test
+    void paused_session_never_reads_pending_and_reports_false() throws Exception {
+        ProcessExecutor exec = mock(ProcessExecutor.class);
+        when(exec.run(
+                        argThat(argv -> argv != null && argv.size() >= 3 && "ls".equals(argv.get(2))),
+                        any(),
+                        any(),
+                        any()))
+                .thenReturn(new ProcessExecutor.Result(0, "[{\"Name\":\"ai-sandbox-13\"}]", ""));
+        when(exec.run(argThat(argv -> argv != null && argv.contains("ps")), any(), any(), any()))
+                .thenReturn(new ProcessExecutor.Result(0, "paused-cid\n", ""));
+        when(exec.run(argThat(argv -> argv != null && argv.contains("inspect")), any(), any()))
+                .thenReturn(new ProcessExecutor.Result(0, "lbl|paused|false", ""));
+        ConversationNameService names = mock(ConversationNameService.class);
+
+        DockerEnumerationService svc = new DockerEnumerationService(exec, new TerminatingSessions(), names);
+        SessionRecord r = svc.enumerate().get(0);
+
+        assertThat(r.state()).isEqualTo("paused");
+        assertThat(r.pendingQuestion())
+                .as("AC8 — a non-running session never reports pendingQuestion=true")
+                .isFalse();
+        // The running-gate skips the pending read entirely for a non-running row.
+        verify(names, never()).pendingQuestion(13);
+    }
+
+    /**
+     * UC-49 back-compat — the {@link TerminatingSessions}-only ctor (no name
+     * service) leaves every row {@code pendingQuestion=false} without an NPE.
+     */
+    @Test
+    void null_name_service_back_compat_ctor_yields_no_pending_without_npe() throws Exception {
+        ProcessExecutor exec = runningSession(5);
+
+        DockerEnumerationService svc = new DockerEnumerationService(exec, new TerminatingSessions());
+        SessionRecord r = svc.enumerate().get(0);
+
+        assertThat(r.pendingQuestion())
+                .as("the pre-UC-49 ctor leaves every row not-pending (no badge)")
+                .isFalse();
+    }
 }

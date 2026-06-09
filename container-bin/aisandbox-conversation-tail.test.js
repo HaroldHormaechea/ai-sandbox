@@ -1410,3 +1410,147 @@ test('UC-48 deriveWorking — optional live-corpus smoke over real transcripts (
   }
   console.log(`  [corpus] deriveWorking returned working=true for ${working}/${jsonls.length} real transcripts`);
 });
+
+// ════════════════════════════════════════════════════════════════════════════
+// UC-49 — pending-question detection: looksLikePendingAskUserQuestion (pure
+// predicate seam) + the 3-line / mutual-exclusion data contract.
+//
+// The matcher reads the VISIBLE pane chrome of a LIVE, awaiting-answer
+// AskUserQuestion sheet (the transcript CANNOT see a blocking question — UC-48's
+// live finding). It requires CO-OCCURRING chrome: an affordance row ("Type
+// something" / "Chat about this") PLUS either the option cursor ❯ (single sheet)
+// OR the multi-question wizard tab strip (Submit + a checkbox glyph). ExitPlanMode
+// is explicitly excluded. The fixtures below approximate the real 2.1.169 chrome;
+// the EXACT tokens are locked against a REAL pending ask in the live capture-pane
+// gate (see the QA live-gate report) — these unit fixtures pin the predicate's
+// logic (co-occurrence, exclusion, single-vs-multi, empty/null).
+// ════════════════════════════════════════════════════════════════════════════
+
+// A single-question sheet: a focused option (❯) + the "Type something" free-text
+// "Other" row. → pending.
+const UC49_SINGLE_QUESTION_PANE = [
+  '╭──────────────────────────────────────────────╮',
+  '│ Which database should we use?                  │',
+  '│                                                │',
+  '│  ❯ 1. PostgreSQL                               │',
+  '│    2. MySQL                                    │',
+  '│    3. SQLite                                   │',
+  '│    4. Type something else                      │',
+  '╰──────────────────────────────────────────────╯',
+  '  Chat about this instead · esc to cancel',
+].join('\n');
+
+// A multi-question wizard: the Submit review tab + checkbox glyphs + the
+// "Type something" affordance, but NO option cursor — exercises the wizard branch
+// of the OR (affordance + Submit + checkbox), independent of ❯. → pending.
+const UC49_MULTI_QUESTION_PANE = [
+  '╭──────────────────────────────────────────────╮',
+  '│ Configure your project                         │',
+  '│  ← ☐ Language    ☑ Framework    Submit →       │',
+  '│    Type something                              │',
+  '╰──────────────────────────────────────────────╯',
+].join('\n');
+
+// ExitPlanMode (UC-40 delivers it live too) — the plan-approval prompt. Even when
+// it carries an option cursor AND we inject the affordance text, the explicit
+// ExitPlanMode exclusion must win. → NOT pending.
+const UC49_EXITPLANMODE_PANE = [
+  '╭──────────────────────────────────────────────╮',
+  '│ Ready to code?                                 │',
+  '│  ❯ 1. Yes, and auto-accept edits               │',
+  '│    2. Yes, and manually approve edits          │',
+  '│    3. No, keep planning                        │',
+  '│    Type something                              │',
+  '╰──────────────────────────────────────────────╯',
+].join('\n');
+
+// Ordinary working output (a tool-use turn mid-flight). No affordance, no cursor,
+// no wizard strip. → NOT pending.
+const UC49_WORKING_PANE = [
+  '● Refactoring the SessionRow composable…',
+  '  ⎿ Reading SessionsScreen.kt (476 lines)',
+  '  ⎿ Updated android/.../SessionsScreen.kt',
+  'esc to interrupt',
+].join('\n');
+
+// Prose that merely MENTIONS the affordance string (and "Submit") but has neither
+// the option cursor nor a checkbox glyph — the co-occurrence guard must reject it
+// so an ordinary line never trips the badge. → NOT pending.
+const UC49_PROSE_MENTIONS_AFFORDANCE =
+  'The CLI prints "Type something" as a hint, and I will Submit the PR when done.';
+
+test('UC-49 looksLikePendingAskUserQuestion — a single-question sheet (affordance + ❯) is pending (AC1/AC9)', () => {
+  assert.strictEqual(helper.looksLikePendingAskUserQuestion(UC49_SINGLE_QUESTION_PANE), true);
+});
+
+test('UC-49 looksLikePendingAskUserQuestion — a multi-question wizard (affordance + Submit + checkbox) is pending (AC9)', () => {
+  assert.strictEqual(helper.looksLikePendingAskUserQuestion(UC49_MULTI_QUESTION_PANE), true);
+});
+
+test('UC-49 looksLikePendingAskUserQuestion — an ExitPlanMode sheet is NOT pending even with affordance + cursor (exclusion wins)', () => {
+  assert.strictEqual(helper.looksLikePendingAskUserQuestion(UC49_EXITPLANMODE_PANE), false);
+});
+
+test('UC-49 looksLikePendingAskUserQuestion — ordinary working output is NOT pending', () => {
+  assert.strictEqual(helper.looksLikePendingAskUserQuestion(UC49_WORKING_PANE), false);
+});
+
+test('UC-49 looksLikePendingAskUserQuestion — prose mentioning the affordance alone is NOT pending (co-occurrence guard)', () => {
+  // "Type something" + "Submit" present, but no ❯ and no checkbox glyph → the
+  // affordance alone must not trip the badge.
+  assert.strictEqual(helper.looksLikePendingAskUserQuestion(UC49_PROSE_MENTIONS_AFFORDANCE), false);
+});
+
+test('UC-49 looksLikePendingAskUserQuestion — empty / null / non-string input is NOT pending', () => {
+  assert.strictEqual(helper.looksLikePendingAskUserQuestion(''), false);
+  assert.strictEqual(helper.looksLikePendingAskUserQuestion(null), false);
+  assert.strictEqual(helper.looksLikePendingAskUserQuestion(undefined), false);
+  assert.strictEqual(helper.looksLikePendingAskUserQuestion(42), false);
+  assert.strictEqual(helper.looksLikePendingAskUserQuestion({}), false);
+});
+
+test('UC-49 PENDING_QUESTION_CHROME stays pinned to the Claude build (lock-step with InputInjectionService)', () => {
+  // The matcher is version-pinned; a TUI restyle is a one-line bump here. This
+  // pins the documented pinned version so a silent drift is caught.
+  assert.strictEqual(helper.PENDING_QUESTION_CHROME.pinnedClaudeVersion, '2.1.169');
+});
+
+// Mutual exclusion + the 3-line output contract. Composes the TWO real production
+// seams (looksLikePendingAskUserQuestion + deriveWorking) exactly as
+// conversationName() composes them, and pins the line-3 token mapping + the
+// capture-failure (null ⇒ omit line 3 ⇒ server retains prior) policy.
+test('UC-49 mutual exclusion — a pending pane forces working=idle even when the transcript is mid-turn (AC5)', () => {
+  // The transcript alone says "working" (a turn is mid-flight)…
+  const lines = [userLine('start the migration'), assistantTextLine('working on it')];
+  assert.strictEqual(helper.deriveWorking(lines), true);
+  // …but the VISIBLE pane shows a pending question.
+  const pending = helper.looksLikePendingAskUserQuestion(UC49_SINGLE_QUESTION_PANE);
+  assert.strictEqual(pending, true);
+  // Production composition (conversationName): pending===true ⇒ working forced false.
+  const working = pending === true ? false : helper.deriveWorking(lines);
+  assert.strictEqual(working, false, 'AC5 — a pending question is never reported as working');
+});
+
+test('UC-49 line-3 token contract — true→"pending-question", false→"none", null→omitted (retain)', () => {
+  const line3 = (p) => (p === null ? null : p ? 'pending-question' : 'none');
+  // A real pending pane → "pending-question".
+  assert.strictEqual(line3(helper.looksLikePendingAskUserQuestion(UC49_SINGLE_QUESTION_PANE)), 'pending-question');
+  // A real non-pending pane → "none".
+  assert.strictEqual(line3(helper.looksLikePendingAskUserQuestion(UC49_WORKING_PANE)), 'none');
+  // capturePaneText() failure ⇒ pending=null ⇒ line 3 OMITTED (2-line output,
+  // exactly the pre-UC-49 shape) so the server retains its prior pending value
+  // (failure policy (b)) — no one-poll "?" flicker.
+  assert.strictEqual(line3(null), null);
+});
+
+test('UC-49 — name + working + pending seams produce the expected 3-line tuple from one input (AC5)', () => {
+  // A working transcript with a pending pane → (name, idle, pending-question):
+  // working is suppressed by the pending precedence.
+  const lines = [userLine('Refactor the SessionRow'), assistantTextLine('mid turn')];
+  const name = helper.deriveConversationName(lines) || '';
+  const pending = helper.looksLikePendingAskUserQuestion(UC49_SINGLE_QUESTION_PANE);
+  const working = pending === true ? false : helper.deriveWorking(lines);
+  assert.strictEqual(name, 'Refactor the SessionRow');
+  assert.strictEqual(working ? 'working' : 'idle', 'idle');
+  assert.strictEqual(pending ? 'pending-question' : 'none', 'pending-question');
+});

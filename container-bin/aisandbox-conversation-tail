@@ -710,6 +710,13 @@ function readAllLines(filePath) {
 // NON-GOAL for UC-40: scanPending / AC18 switcher badging is intentionally left
 // unchanged — it reads only complete (newline-terminated) lines and deliberately
 // drops a trailing partial; the UC-40 idle flush is a streaming-mode concern only.
+//
+// KNOWN LATENT GAP (UC-49, out of scope here): scanPending derives "pending" from
+// the TRANSCRIPT tail, which shares the same blindness UC-48/UC-49 hit — a live,
+// awaiting-answer AskUserQuestion is NOT persisted to the transcript while Claude
+// blocks, so the UC-37 switcher badge can miss it. UC-49 fixes only the
+// sessions-list row (via the visible-pane capture in conversationName); aligning
+// the switcher badge to the same pane signal is deferred, NOT done here.
 function scanPending() {
   const mainPath = resolveTranscriptOnce();
   if (!mainPath) {
@@ -977,6 +984,80 @@ function deriveWorking(lines) {
   return tail.length > 0 && !lastLineIsTurnEnd;
 }
 
+// ──────────────────────── pending-question detection (UC-49) ────────────────────────
+
+/**
+ * UC-49 — visible-pane chrome of a LIVE, awaiting-answer AskUserQuestion sheet,
+ * PINNED to the Claude Code TUI build in
+ * {@code InputInjectionService.PINNED_CLAUDE_VERSION} (2.1.169). The transcript
+ * tail CANNOT see a pending question — the UC-48 live finding proved Claude does
+ * not persist the blocking assistant turn while it waits — so the only reliable
+ * signal is the rendered screen, which is why {@link conversationName} scrapes
+ * `tmux capture-pane`. A TUI restyle of the sheet is a ONE-LINE change here: bump
+ * the pinned version and adjust the markers below.
+ */
+const PENDING_QUESTION_CHROME = {
+  // Kept in lock-step with InputInjectionService.PINNED_CLAUDE_VERSION.
+  pinnedClaudeVersion: '2.1.169',
+  // Free-text / chat-instead affordance rows the AskUserQuestion sheet renders
+  // (single AND multi-question): "Type something" is the free-text "Other" row
+  // (always the last option); "Chat about this" sits outside the option ring.
+  affordance: /Type something|Chat about this/,
+  // The selected-option cursor glyph the sheet draws on the focused option.
+  optionCursor: /❯/,
+  // Multi-question wizard tab strip: a "Submit" review tab + checkbox glyphs
+  // (`← ☐ Q1  ☐ Q2 … ✔ Submit →`).
+  wizardSubmit: /Submit/,
+  wizardCheckbox: /[☐☑✔✓]/,
+  // ExitPlanMode (UC-40 delivers it live too) uses DIFFERENT chrome — a plan
+  // approval prompt with no free-text affordance — and must NOT raise "?".
+  excludeExitPlanMode: /ExitPlanMode|Ready to code\?|No, keep planning/i,
+};
+
+/**
+ * UC-49 — PURE predicate (exported for QA): does the captured VISIBLE pane text
+ * show a pending AskUserQuestion awaiting an answer? Single- and multi-question
+ * agnostic (AC9). Requires CO-OCCURRING chrome — an affordance row PLUS the option
+ * cursor, OR the affordance row PLUS the multi-question wizard tab strip — so an
+ * ordinary line of prose that merely contains "Type something" never trips it.
+ * {@code ExitPlanMode} is explicitly excluded. Returns false for empty/non-string
+ * input. PURE: no I/O, deterministic on its argument.
+ */
+function looksLikePendingAskUserQuestion(paneText) {
+  if (typeof paneText !== 'string' || paneText.length === 0) return false;
+  const c = PENDING_QUESTION_CHROME;
+  if (c.excludeExitPlanMode.test(paneText)) return false;
+  const hasAffordance = c.affordance.test(paneText);
+  const hasOptionCursor = c.optionCursor.test(paneText);
+  const hasWizardTabs = c.wizardSubmit.test(paneText) && c.wizardCheckbox.test(paneText);
+  // Single-question sheet: affordance row + the option cursor.
+  // Multi-question wizard: affordance row + the Submit/checkbox tab strip.
+  return hasAffordance && (hasOptionCursor || hasWizardTabs);
+}
+
+/**
+ * UC-49 — capture the MAIN pane's VISIBLE screen ONLY (no `-S` scrollback, AC5)
+ * via the SAME {@link targetSpec} the name/working signal already resolves, so
+ * pending and working always describe the same pane. Returns the captured text,
+ * or {@code null} on an exec failure / non-zero exit / an empty capture. {@code
+ * null} is the "unknown" signal (failure policy (b)): {@link conversationName}
+ * then omits the pending line so the server RETAINS its prior pending value for
+ * this tick, avoiding a one-poll "?" flicker while a question is genuinely up.
+ */
+function capturePaneText() {
+  try {
+    const res = execFileSync(
+      'tmux',
+      tmuxArgs(['capture-pane', '-p', '-t', targetSpec()]),
+      { encoding: 'utf8', timeout: 5000 },
+    );
+    const s = String(res);
+    return s.length > 0 ? s : null;
+  } catch (e) {
+    return null;
+  }
+}
+
 /**
  * One-shot: resolve the MAIN pane's active transcript, derive the conversation
  * name AND the working/idle signal from the SAME readAllLines, and print exactly
@@ -984,6 +1065,11 @@ function deriveWorking(lines) {
  *   line1 = the conversation name, or empty when none (server parses it via
  *           firstLine — unchanged from UC-47).
  *   line2 = "working" | "idle" (server parses it via secondLine).
+ *   line3 = "pending-question" | "none" (UC-49; server parses it via thirdLine).
+ *           APPEND-ONLY and back-compat: an old server ignores it, and it is
+ *           OMITTED entirely (2-line output, exactly the pre-UC-49 shape) when the
+ *           pane capture fails, so the server retains its prior pending value
+ *           (failure policy (b)) rather than flickering the "?" off.
  * Any no-transcript / failure path prints empty name + idle so the server falls
  * back to tmuxTitle (AC3) and shows no spinner. Never blocks.
  */
@@ -992,8 +1078,21 @@ function conversationName() {
   if (!mainPath) { out(''); out('idle'); return; }
   const lines = readAllLines(mainPath);
   const name = deriveConversationName(lines);
+  // UC-49 — compute pending FIRST from the VISIBLE pane (the transcript can't see a
+  // blocking AskUserQuestion). null ⇒ capture failed → omit line3 so the server
+  // RETAINS its prior pending value (failure policy (b)); the resulting 2-line
+  // output matches the pre-UC-49 shape exactly.
+  const paneText = capturePaneText();
+  const pending = paneText == null ? null : looksLikePendingAskUserQuestion(paneText);
   out(name || '');
-  out(deriveWorking(lines) ? 'working' : 'idle');
+  // Revised working (AC5, source-level mutual exclusion): a pending question is
+  // at-rest "waiting", never "working" — pending ⇒ idle; else the existing
+  // transcript-derived working logic. The server enforces the same precedence too.
+  const working = pending === true ? false : deriveWorking(lines);
+  out(working ? 'working' : 'idle');
+  if (pending !== null) {
+    out(pending ? 'pending-question' : 'none');
+  }
 }
 
 // ──────────────────────── streaming mode ────────────────────────
@@ -1194,6 +1293,9 @@ module.exports = {
   deriveConversationName,
   // UC-48 — working/idle derivation seam (QA unit tests).
   deriveWorking,
+  // UC-49 — pending-question predicate seam (QA unit tests against pane fixtures).
+  looksLikePendingAskUserQuestion,
+  PENDING_QUESTION_CHROME,
   CONVERSATION_NAME_MAX_CP,
   CTRL_NO_TRANSCRIPT,
   CTRL_DETAIL_NOT_FOUND,

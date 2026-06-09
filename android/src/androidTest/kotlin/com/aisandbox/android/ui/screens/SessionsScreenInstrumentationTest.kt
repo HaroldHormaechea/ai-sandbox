@@ -26,6 +26,7 @@ import androidx.test.platform.app.InstrumentationRegistry
 import com.aisandbox.android.R
 import com.aisandbox.android.net.LifecycleAction
 import com.aisandbox.android.net.SessionSummary
+import com.aisandbox.android.ui.components.PENDING_QUESTION_BADGE_DESCRIPTION
 import com.aisandbox.android.ui.theme.AiSandboxTheme
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -862,5 +863,153 @@ class SessionsScreenInstrumentationTest {
         )
 
         composeTestRule.onAllNodes(workingSpinner).assertCountEquals(0)
+    }
+
+    // ── UC-49 — per-row pending-question "?" badge (AC1 / AC5 / AC7 / AC8) ────
+
+    /** A running row carrying both the working and pending flags + an optional name/state. */
+    private fun pendingRow(
+        n: Int,
+        pending: Boolean,
+        working: Boolean = false,
+        name: String? = null,
+        state: String = "running",
+    ) = SessionSummary(
+        n = n,
+        label = "s$n",
+        state = state,
+        tmuxTitle = "(idle)",
+        conversationName = name,
+        working = working,
+        pendingQuestion = pending,
+    )
+
+    /**
+     * AC1 / AC5 — a running row with a pending question shows exactly one "?" badge
+     * and NO working spinner, EVEN when the row also carries working=true: pending
+     * takes precedence client-side so the row never shows both.
+     */
+    @Test
+    fun pending_running_row_shows_badge_and_never_the_spinner() {
+        setBody(
+            SessionsUiState(
+                sessions = listOf(pendingRow(1, pending = true, working = true)),
+                filter = SessionsFilter.ALL,
+            ),
+        )
+
+        composeTestRule.onAllNodesWithContentDescription(PENDING_QUESTION_BADGE_DESCRIPTION).assertCountEquals(1)
+        // AC5 — the working spinner is suppressed while pending (never both).
+        composeTestRule.onAllNodes(workingSpinner).assertCountEquals(0)
+    }
+
+    /**
+     * AC5 complement — a running row that is working but NOT pending shows the
+     * spinner and NO "?" badge: the two indicators are mutually exclusive and the
+     * badge only appears for a genuine pending question.
+     */
+    @Test
+    fun working_but_not_pending_row_shows_spinner_not_badge() {
+        setBody(
+            SessionsUiState(
+                sessions = listOf(pendingRow(1, pending = false, working = true)),
+                filter = SessionsFilter.ALL,
+            ),
+        )
+
+        composeTestRule.onAllNodes(workingSpinner).assertCountEquals(1)
+        composeTestRule.onAllNodesWithContentDescription(PENDING_QUESTION_BADGE_DESCRIPTION).assertCountEquals(0)
+    }
+
+    /**
+     * AC5 — across a list, a pending row shows the badge and a working row shows
+     * the spinner: exactly one badge and exactly one spinner, never both on one row.
+     */
+    @Test
+    fun pending_and_working_rows_show_one_badge_and_one_spinner_respectively() {
+        setBody(
+            SessionsUiState(
+                sessions = listOf(
+                    pendingRow(1, pending = true, working = true),
+                    pendingRow(2, pending = false, working = true),
+                ),
+                filter = SessionsFilter.ALL,
+            ),
+        )
+
+        composeTestRule.onAllNodesWithContentDescription(PENDING_QUESTION_BADGE_DESCRIPTION).assertCountEquals(1)
+        composeTestRule.onAllNodes(workingSpinner).assertCountEquals(1)
+    }
+
+    /**
+     * AC7 — the "?" badge coexists with the lifecycle StatusPill, the (UC-47)
+     * conversation name, and the (UC-46) overflow menu without breaking the row:
+     * all are present and the card stays intact.
+     */
+    @Test
+    fun pending_badge_coexists_with_pill_name_and_menu() {
+        setBody(
+            SessionsUiState(
+                sessions = listOf(pendingRow(1, pending = true, name = "Pick a database")),
+                filter = SessionsFilter.ALL,
+            ),
+        )
+
+        composeTestRule.onAllNodesWithContentDescription(PENDING_QUESTION_BADGE_DESCRIPTION).assertCountEquals(1)
+        composeTestRule.onNodeWithText("running").assertIsDisplayed()
+        composeTestRule.onNodeWithText("Pick a database", substring = true).assertIsDisplayed()
+        // The UC-46 overflow menu trigger still renders for the row.
+        composeTestRule.onNodeWithTag("session-menu-1").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("session-card-1").assertIsDisplayed()
+    }
+
+    /**
+     * AC8 — a non-running (paused) row never shows the badge even with a stale
+     * pendingQuestion=true: the render is double-gated on state=="running".
+     */
+    @Test
+    fun paused_row_with_stale_pending_true_shows_no_badge() {
+        setBody(
+            SessionsUiState(
+                sessions = listOf(pendingRow(7, pending = true, state = "paused")),
+                filter = SessionsFilter.ALL,
+            ),
+        )
+
+        composeTestRule.onAllNodesWithContentDescription(PENDING_QUESTION_BADGE_DESCRIPTION).assertCountEquals(0)
+        composeTestRule.onNodeWithText("paused").assertIsDisplayed()
+    }
+
+    /**
+     * AC8 — a stopped row never shows the badge.
+     */
+    @Test
+    fun stopped_row_with_stale_pending_true_shows_no_badge() {
+        setBody(
+            SessionsUiState(
+                sessions = listOf(pendingRow(3, pending = true, state = "stopped")),
+                filter = SessionsFilter.ALL,
+            ),
+        )
+
+        composeTestRule.onAllNodesWithContentDescription(PENDING_QUESTION_BADGE_DESCRIPTION).assertCountEquals(0)
+    }
+
+    /**
+     * AC8 — a TERMINATING override (a stale pending=true racing a teardown) must
+     * not show the badge: the row's effective state is `terminating`, so the badge
+     * is gated off even though the row carries pendingQuestion=true.
+     */
+    @Test
+    fun terminating_row_with_stale_pending_true_shows_no_badge() {
+        setBody(
+            SessionsUiState(
+                sessions = listOf(pendingRow(1, pending = true)),
+                terminating = setOf(1),
+                filter = SessionsFilter.ALL,
+            ),
+        )
+
+        composeTestRule.onAllNodesWithContentDescription(PENDING_QUESTION_BADGE_DESCRIPTION).assertCountEquals(0)
     }
 }

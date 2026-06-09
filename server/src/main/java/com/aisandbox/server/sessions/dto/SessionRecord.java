@@ -39,6 +39,13 @@ import java.time.Instant;
  *     ({@code ConversationNameService.working(int)}). Only ever {@code true} for
  *     a {@code running} session; {@code false} for idle / pending-question /
  *     non-running. Drives the Android row's working spinner (AC1, AC2, AC7).
+ * @param pendingQuestion UC-49 — whether the session's MAIN pane is showing an
+ *     {@code AskUserQuestion} awaiting an answer, derived from the visible pane
+ *     capture (the transcript cannot see a blocking question), cached server-side
+ *     ({@code ConversationNameService.pendingQuestion(int)}). Mutually exclusive
+ *     with {@code working} (a pending question is "waiting", never "working" — AC5);
+ *     only ever {@code true} for a {@code running} session (AC8). Drives the
+ *     Android row's "?" badge, which suppresses the working spinner (AC1, AC5).
  */
 public record SessionRecord(
         int n,
@@ -49,13 +56,33 @@ public record SessionRecord(
         int activeStreams,
         Instant startedAt,
         String conversationName,
-        boolean working) {
+        boolean working,
+        boolean pendingQuestion) {
+
+    /**
+     * UC-49 back-compat 9-arg constructor for call sites (and test fixtures)
+     * created after UC-48 but before this use case appended {@code pendingQuestion}.
+     * Delegates with {@code pendingQuestion=false}, so a session reported through
+     * the pre-UC-49 shape simply never shows the "?" badge.
+     */
+    public SessionRecord(
+            int n,
+            String label,
+            String tmuxTitle,
+            String state,
+            long uptimeSec,
+            int activeStreams,
+            Instant startedAt,
+            String conversationName,
+            boolean working) {
+        this(n, label, tmuxTitle, state, uptimeSec, activeStreams, startedAt, conversationName, working, false);
+    }
 
     /**
      * UC-48 back-compat 8-arg constructor for call sites (and test fixtures)
-     * created after UC-47 but before this use case appended {@code working}.
-     * Delegates with {@code working=false}, so a session reported through the
-     * pre-UC-48 shape simply never shows the working spinner.
+     * created after UC-47 but before that use case appended {@code working}.
+     * Delegates with {@code working=false} (and {@code pendingQuestion=false}), so a
+     * session reported through the pre-UC-48 shape shows neither spinner nor badge.
      */
     public SessionRecord(
             int n,

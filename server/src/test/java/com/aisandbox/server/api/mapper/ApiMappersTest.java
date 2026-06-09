@@ -60,4 +60,48 @@ class ApiMappersTest {
 
         assertThat(out).extracting(ApiDtos.SessionSummary::working).containsExactly(true, false);
     }
+
+    // ── UC-49 — pendingQuestion carried onto the REST DTO ─────────────────────
+
+    @Test
+    void toSummary_carries_pendingQuestion_true() {
+        // A pending session is mutually exclusive with working server-side; the
+        // 10-arg record carries pendingQuestion=true, working=false.
+        SessionRecord r =
+                new SessionRecord(3, "alpha", "vim", "running", 42L, 1, STARTED, "Pick a database", false, true);
+
+        ApiDtos.SessionSummary s = ApiMappers.toSummary(r);
+
+        assertThat(s.pendingQuestion())
+                .as("AC1 — a pending session maps pendingQuestion=true onto the REST DTO")
+                .isTrue();
+        assertThat(s.working())
+                .as("AC5 — pending and working are mutually exclusive")
+                .isFalse();
+    }
+
+    @Test
+    void toSummary_carries_pendingQuestion_false() {
+        SessionRecord r = new SessionRecord(4, "beta", "(idle)", "running", 0L, 0, STARTED, null, false, false);
+
+        assertThat(ApiMappers.toSummary(r).pendingQuestion()).isFalse();
+    }
+
+    @Test
+    void back_compat_record_without_pendingQuestion_defaults_to_false() {
+        // The pre-UC-49 9-arg SessionRecord ctor delegates pendingQuestion=false, so
+        // a row built through the old shape never shows the "?" badge.
+        SessionRecord r = new SessionRecord(5, "gamma", "(idle)", "running", 0L, 0, STARTED, "name", false);
+
+        assertThat(ApiMappers.toSummary(r).pendingQuestion()).isFalse();
+    }
+
+    @Test
+    void toSummaries_maps_each_record_including_pendingQuestion() {
+        List<ApiDtos.SessionSummary> out = ApiMappers.toSummaries(List.of(
+                new SessionRecord(1, "a", "t", "running", 0L, 0, STARTED, null, false, true),
+                new SessionRecord(2, "b", "t", "running", 0L, 0, STARTED, null, false, false)));
+
+        assertThat(out).extracting(ApiDtos.SessionSummary::pendingQuestion).containsExactly(true, false);
+    }
 }
