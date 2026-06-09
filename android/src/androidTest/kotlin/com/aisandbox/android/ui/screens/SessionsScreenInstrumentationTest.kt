@@ -5,6 +5,9 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.semantics.ProgressBarRangeInfo
+import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsDisplayed
@@ -764,5 +767,100 @@ class SessionsScreenInstrumentationTest {
         composeTestRule.onNodeWithText(longName, substring = true).assertIsDisplayed()
         composeTestRule.onNodeWithTag("session-card-1").assertIsDisplayed()
         composeTestRule.onNodeWithText("running").assertIsDisplayed()
+    }
+
+    // ── UC-48 — per-row working spinner (AC1 / AC2 / AC5 / AC6 / AC7) ─────────
+
+    /**
+     * Matches the indeterminate [CircularProgressIndicator] the working spinner
+     * is (Material3 stamps `ProgressBarRangeInfo.Indeterminate` onto its
+     * semantics). The conversation view's `SpinnerRow` uses the SAME indeterminate
+     * primitive (16.dp / 2.dp), so a count of these nodes is the spinner count and
+     * the affordance is consistent across the app (AC5).
+     */
+    private val workingSpinner =
+        SemanticsMatcher.expectValue(SemanticsProperties.ProgressBarRangeInfo, ProgressBarRangeInfo.Indeterminate)
+
+    private fun runningRow(n: Int, working: Boolean, name: String? = null, state: String = "running") =
+        SessionSummary(n = n, label = "s$n", state = state, tmuxTitle = "(idle)", conversationName = name, working = working)
+
+    /**
+     * AC1 — a running, WORKING row animates exactly one working spinner in its
+     * status area; an idle running row in the same list shows none. AC2 is the
+     * complement: working=false ⇒ no spinner.
+     */
+    @Test
+    fun working_running_row_shows_one_spinner_and_idle_row_shows_none() {
+        setBody(
+            SessionsUiState(
+                sessions = listOf(
+                    runningRow(1, working = true),
+                    runningRow(2, working = false),
+                ),
+                filter = SessionsFilter.ALL,
+            ),
+        )
+
+        // Exactly one spinner across the two rows — only the working one (AC1/AC2).
+        composeTestRule.onAllNodes(workingSpinner).assertCountEquals(1)
+    }
+
+    /**
+     * AC6 — the working spinner coexists cleanly with the lifecycle StatusPill and
+     * the (UC-46/47) conversation name in the row's status section: all three are
+     * present, the spinner is shown, and the row/card stays intact.
+     */
+    @Test
+    fun working_spinner_coexists_with_pill_and_conversation_name() {
+        setBody(
+            SessionsUiState(
+                sessions = listOf(runningRow(1, working = true, name = "Refactor the SessionRow")),
+                filter = SessionsFilter.ALL,
+            ),
+        )
+
+        composeTestRule.onAllNodes(workingSpinner).assertCountEquals(1)
+        // The lifecycle pill still renders its running label.
+        composeTestRule.onNodeWithText("running").assertIsDisplayed()
+        // The conversation name still renders as the status line.
+        composeTestRule.onNodeWithText("Refactor the SessionRow", substring = true).assertIsDisplayed()
+        // The card is intact (no layout break swallowing the row).
+        composeTestRule.onNodeWithTag("session-card-1").assertIsDisplayed()
+    }
+
+    /**
+     * AC7 — a non-running session never shows the spinner even if its last-known
+     * working flag is true: a paused row with working=true shows NO spinner (the
+     * render is double-gated on state=="running").
+     */
+    @Test
+    fun paused_row_with_stale_working_true_shows_no_spinner() {
+        setBody(
+            SessionsUiState(
+                sessions = listOf(runningRow(7, working = true, state = "paused")),
+                filter = SessionsFilter.ALL,
+            ),
+        )
+
+        composeTestRule.onAllNodes(workingSpinner).assertCountEquals(0)
+        composeTestRule.onNodeWithText("paused").assertIsDisplayed()
+    }
+
+    /**
+     * AC7 — a TERMINATING override (a stale working=true racing a teardown) must
+     * not animate: the row's effective state is `terminating`, so the spinner is
+     * gated off even though the row carries working=true.
+     */
+    @Test
+    fun terminating_row_with_stale_working_true_shows_no_spinner() {
+        setBody(
+            SessionsUiState(
+                sessions = listOf(runningRow(1, working = true)),
+                terminating = setOf(1),
+                filter = SessionsFilter.ALL,
+            ),
+        )
+
+        composeTestRule.onAllNodes(workingSpinner).assertCountEquals(0)
     }
 }

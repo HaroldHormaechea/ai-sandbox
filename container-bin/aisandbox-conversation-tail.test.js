@@ -1291,3 +1291,122 @@ test('UC-47 deriveConversationName produces sane names on REAL on-disk transcrip
   // string-content path fires on the real corpus (the anti-regression point).
   assert.ok(withName > 0, 'expected at least one real transcript to derive a conversation name');
 });
+
+// ════════════════════════════════════════════════════════════════════════════
+// UC-48 — deriveWorking: the binary working/idle list-row signal (pure seam).
+//
+// working=true iff there is ≥1 transcript entry AND the last MEANINGFUL entry is
+// NOT a {type:"system",subtype:"turn_duration"} turn-end; a pending
+// AskUserQuestion (after the last turn-end) is at-rest IDLE; empty/no-input is
+// idle. Reuses the UC-40 line builders (userLine / turnEndLine /
+// assistantTextLine / assistantQuestionLine) defined above.
+// ════════════════════════════════════════════════════════════════════════════
+
+test('UC-48 deriveWorking — empty / non-array input is idle (false)', () => {
+  assert.strictEqual(helper.deriveWorking([]), false);
+  assert.strictEqual(helper.deriveWorking(null), false);
+  assert.strictEqual(helper.deriveWorking(undefined), false);
+  assert.strictEqual(helper.deriveWorking('not-an-array'), false);
+});
+
+test('UC-48 deriveWorking — a turn-end as the last entry is idle (turn complete)', () => {
+  const lines = [userLine('do the thing'), assistantTextLine('on it'), turnEndLine()];
+  assert.strictEqual(helper.deriveWorking(lines), false);
+});
+
+test('UC-48 deriveWorking — mid-flight (last entry is not a turn-end) is working', () => {
+  // A turn started (user prompt) and the assistant is producing output with no
+  // turn-end yet → working.
+  const lines = [userLine('do the thing'), assistantTextLine('working on it')];
+  assert.strictEqual(helper.deriveWorking(lines), true);
+});
+
+test('UC-48 deriveWorking — a fresh turn after a previous turn-end is working again', () => {
+  const lines = [
+    userLine('first'),
+    assistantTextLine('done first'),
+    turnEndLine(),
+    userLine('second'),
+    assistantTextLine('mid second turn'),
+  ];
+  assert.strictEqual(helper.deriveWorking(lines), true);
+});
+
+test('UC-48 deriveWorking — a pending AskUserQuestion is at-rest IDLE (conversation-view parity)', () => {
+  // The assistant asked a question and is BLOCKED awaiting the answer → idle.
+  const lines = [userLine('start'), assistantQuestionLine('A or B?')];
+  assert.strictEqual(helper.deriveWorking(lines), false);
+});
+
+test('UC-48 deriveWorking — an ANSWERED question (turn-end after it) is idle', () => {
+  const lines = [userLine('start'), assistantQuestionLine('A or B?'), turnEndLine()];
+  assert.strictEqual(helper.deriveWorking(lines), false);
+});
+
+test('UC-48 deriveWorking — work resumed after a question was answered is working', () => {
+  const lines = [
+    userLine('start'),
+    assistantQuestionLine('A or B?'),
+    turnEndLine(),
+    userLine('A'),
+    assistantTextLine('continuing with A'),
+  ];
+  assert.strictEqual(helper.deriveWorking(lines), true);
+});
+
+test('UC-48 deriveWorking — tolerates a malformed JSON line without throwing', () => {
+  const lines = ['{ this is not json', userLine('start'), assistantTextLine('mid turn')];
+  assert.strictEqual(helper.deriveWorking(lines), true);
+});
+
+// Anti-regression — the one-shot emits TWO lines from the SAME readAllLines:
+// line1 = deriveConversationName(lines) || '', line2 = deriveWorking ? 'working'
+// : 'idle'. We assert the two seams agree on the same input (the exact pair the
+// production conversationName() prints). The in-container exec wiring of out()
+// is live-verify scope; this pins the data contract.
+test('UC-48 — name and working seams produce the expected (line1, line2) pair from one input', () => {
+  const lines = [userLine('Refactor the SessionRow'), assistantTextLine('mid turn')];
+  const line1 = helper.deriveConversationName(lines) || '';
+  const line2 = helper.deriveWorking(lines) ? 'working' : 'idle';
+  assert.strictEqual(line1, 'Refactor the SessionRow');
+  assert.strictEqual(line2, 'working');
+
+  // And an idle, completed turn → name still present, line2 idle.
+  const idleLines = [userLine('Refactor the SessionRow'), assistantTextLine('done'), turnEndLine()];
+  assert.strictEqual(helper.deriveConversationName(idleLines) || '', 'Refactor the SessionRow');
+  assert.strictEqual(helper.deriveWorking(idleLines) ? 'working' : 'idle', 'idle');
+});
+
+test('UC-48 deriveWorking — optional live-corpus smoke over real transcripts (env-gated)', () => {
+  const os = require('node:os');
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const projectsRoot = path.join(os.homedir(), '.claude', 'projects');
+  if (!fs.existsSync(projectsRoot)) {
+    console.log('  [corpus] ~/.claude/projects absent — skipping deriveWorking corpus smoke');
+    return;
+  }
+  const jsonls = [];
+  const walk = (dir, depth) => {
+    if (depth > 2 || jsonls.length >= 12) return;
+    let entries = [];
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (e) { return; }
+    for (const e of entries) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) walk(p, depth + 1);
+      else if (e.isFile() && e.name.endsWith('.jsonl')) jsonls.push(p);
+      if (jsonls.length >= 12) return;
+    }
+  };
+  walk(projectsRoot, 0);
+  let working = 0;
+  for (const file of jsonls) {
+    let lines;
+    try { lines = fs.readFileSync(file, 'utf8').split('\n').filter((l) => l.length > 0); } catch (e) { continue; }
+    // Invariant: deriveWorking never throws and always returns a boolean.
+    const w = helper.deriveWorking(lines);
+    assert.strictEqual(typeof w, 'boolean', 'deriveWorking must return a boolean on every real transcript');
+    if (w) working++;
+  }
+  console.log(`  [corpus] deriveWorking returned working=true for ${working}/${jsonls.length} real transcripts`);
+});

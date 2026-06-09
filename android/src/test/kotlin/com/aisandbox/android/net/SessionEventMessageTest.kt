@@ -116,4 +116,33 @@ class SessionEventMessageTest {
         val delta = json.decodeFromString<SessionEventMessage>(deltaText) as SessionEventMessage.Delta
         assertThat(delta.upserts.single().conversationName).isEqualTo("Now testing UC-47")
     }
+
+    /**
+     * UC-48 AC3 / AC4 — the `working` flag rides the UC-32 push frames (same
+     * [SessionSummary] row type). A snapshot row carries it; a delta upsert carries
+     * the UPDATED flag (the live working↔idle transition path — no manual refresh);
+     * a row that omits it decodes to false (older server / no spinner).
+     */
+    @Test
+    fun snapshot_and_delta_frames_carry_the_working_flag() {
+        val snapshotText = """
+            {"type":"snapshot","sessions":[
+              {"n":1,"label":"build","tmuxTitle":"vim","state":"running","uptimeSec":42,"activeStreams":2,"startedAt":null,"working":true},
+              {"n":2,"label":"","tmuxTitle":"(idle)","state":"running","uptimeSec":0,"activeStreams":0,"startedAt":null}
+            ]}
+        """.trimIndent()
+        val snapshot = json.decodeFromString<SessionEventMessage>(snapshotText) as SessionEventMessage.Snapshot
+        assertThat(snapshot.sessions[0].working).isTrue()
+        // Omitted field → false (older server payload); row shows no spinner.
+        assertThat(snapshot.sessions[1].working).isFalse()
+
+        val deltaText = """
+            {"type":"delta",
+             "upserts":[{"n":1,"label":"build","tmuxTitle":"vim","state":"running","uptimeSec":50,"activeStreams":2,"startedAt":null,"working":false}],
+             "removed":[]}
+        """.trimIndent()
+        val delta = json.decodeFromString<SessionEventMessage>(deltaText) as SessionEventMessage.Delta
+        // The live transition working→idle reaches the client over a delta upsert.
+        assertThat(delta.upserts.single().working).isFalse()
+    }
 }

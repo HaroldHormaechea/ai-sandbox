@@ -132,6 +132,44 @@ class SessionEventWatcherTest {
         assertThat(delta.removed()).isEmpty();
     }
 
+    /** UC-48 — a running row carrying an explicit working flag (name omitted). */
+    private static Row rowWorking(int n, String state, boolean working) {
+        return new Row(n, "s" + n, "(idle)", state, 0L, 0, null, null, working);
+    }
+
+    /**
+     * UC-48 AC4 — the working flag updates live over the UC-32 push with NO
+     * watcher edit. When ONLY {@code working} flips between two ticks (identical
+     * n / label / title / state / streams / name), {@link Row} record-equality
+     * still sees a difference, so the watcher emits exactly one coalesced
+     * {@link Delta} carrying the row with the NEW working value — the spinner
+     * turns on/off without a manual refresh.
+     */
+    @Test
+    void a_working_flag_change_alone_emits_one_delta_with_the_new_value() {
+        subscribers(1);
+
+        // Tick 1 baselines [1: running, working=false].
+        snapshot(rowWorking(1, "running", false));
+        watcher.tick();
+
+        // Tick 2 — same row in every field EXCEPT the working flag (idle → working).
+        snapshot(rowWorking(1, "running", true));
+        watcher.tick();
+
+        ArgumentCaptor<SessionEventMessage> captor = ArgumentCaptor.forClass(SessionEventMessage.class);
+        verify(broadcaster, times(1)).broadcast(captor.capture());
+        Delta delta = (Delta) captor.getValue();
+        assertThat(delta.upserts()).containsExactly(rowWorking(1, "running", true));
+        assertThat(delta.upserts().get(0).working()).isTrue();
+        assertThat(delta.removed()).isEmpty();
+
+        // Tick 3 — the working flag is unchanged → no spurious churn from the field.
+        snapshot(rowWorking(1, "running", true));
+        watcher.tick();
+        verify(broadcaster, times(1)).broadcast(any(SessionEventMessage.class));
+    }
+
     /**
      * UC-47 AC4 — a name appearing for the first time (null → a value) is itself
      * a change that pushes a delta; and a tick where the name is unchanged emits
