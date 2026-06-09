@@ -48,7 +48,15 @@ public final class ApiDtos {
                                     + " shows it as the row's primary status line, falling back to tmuxTitle when"
                                     + " absent. Omitted from the JSON when null (class-level @JsonInclude(NON_NULL)):"
                                     + " an idle / between-conversations / non-running session simply has no field.")
-                    String conversationName) {}
+                    String conversationName,
+            @Schema(
+                            description = "UC-48 — true when Claude is actively working in this session's main"
+                                    + " pane (a turn is mid-flight); false when idle, awaiting an answer, or"
+                                    + " non-running. The client shows an animated working spinner in the row's"
+                                    + " status area while true (double-gated on state==running). Hysteresis-"
+                                    + "debounced server-side so a brief between-turns idle does not strobe it.",
+                            defaultValue = "false")
+                    boolean working) {}
 
     @Schema(description = "Detail returned by GET /v1/sessions/{n}.")
     public record SessionDetailDto(

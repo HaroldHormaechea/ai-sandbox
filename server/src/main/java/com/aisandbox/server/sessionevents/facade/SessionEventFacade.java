@@ -122,7 +122,8 @@ public class SessionEventFacade {
                 r.uptimeSec(),
                 r.activeStreams(),
                 r.startedAt(),
-                r.conversationName());
+                r.conversationName(),
+                r.working());
     }
 
     /**

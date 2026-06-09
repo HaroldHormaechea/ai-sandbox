@@ -14,6 +14,7 @@ import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.LongSupplier;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -77,13 +78,40 @@ public class ConversationNameService {
      */
     static final int MAX_NAME_CODEPOINTS = 120;
 
+    /**
+     * UC-48 — hysteresis OFF-window. {@link #working(int)} reports {@code true}
+     * for this long after the last {@code working=true} derivation, so a brief
+     * idle gap between two turns (or one refresh tick that happens to catch a
+     * momentary turn-end) does not strobe the spinner off. ~2.5s comfortably
+     * spans a single ~1s enumeration cache window plus a refresh round-trip.
+     */
+    static final Duration OFF_WINDOW = Duration.ofMillis(2500);
+
+    static final long OFF_WINDOW_NANOS = OFF_WINDOW.toNanos();
+
     private static final int POOL_SIZE = 4;
     private static final int QUEUE_CAPACITY = 32;
 
     private final ProcessExecutor executor;
 
+    /**
+     * Monotonic clock source (nanoseconds) for the working-signal hysteresis.
+     * Defaults to {@link System#nanoTime} in production; injected in unit tests
+     * so the OFF-window aging is deterministic. Used ONLY for relative
+     * comparisons — never as a wall-clock.
+     */
+    private final LongSupplier clock;
+
     /** n → derived conversation name. Absence ⇒ no known name (row falls back). */
     private final ConcurrentHashMap<Integer, String> cache = new ConcurrentHashMap<>();
+
+    /**
+     * UC-48 — n → {@code clock.getAsLong()} at the most recent {@code working=true}
+     * derivation. {@link #working(int)} reports {@code true} while the entry is
+     * younger than {@link #OFF_WINDOW_NANOS}; a {@code working=false} derivation is
+     * a no-op (the entry simply ages out), giving the spinner its OFF-debounce.
+     */
+    private final ConcurrentHashMap<Integer, Long> lastWorkingNanos = new ConcurrentHashMap<>();
 
     /** Sessions with a refresh currently queued or running — dedups resubmits. */
     private final Set<Integer> inFlight = ConcurrentHashMap.newKeySet();
@@ -91,7 +119,18 @@ public class ConversationNameService {
     private final ThreadPoolExecutor pool;
 
     public ConversationNameService(ProcessExecutor executor) {
+        this(executor, System::nanoTime);
+    }
+
+    /**
+     * UC-48 — package-private constructor that injects the monotonic {@code clock}
+     * so unit tests can drive the working-signal hysteresis deterministically.
+     * Production wiring uses the public single-arg ctor (Spring) which defaults
+     * the clock to {@link System#nanoTime}.
+     */
+    ConversationNameService(ProcessExecutor executor, LongSupplier clock) {
         this.executor = executor;
+        this.clock = clock;
         // Discard-on-overflow: under a burst the freshest tasks are simply dropped
         // (the next enumeration re-submits). The handler clears the in-flight marker
         // for a dropped task so that session is not wedged out of future refreshes.
@@ -120,6 +159,20 @@ public class ConversationNameService {
      */
     public String cachedName(int n) {
         return cache.get(n);
+    }
+
+    /**
+     * UC-48 — non-blocking read of the working signal for session {@code n}, with
+     * OFF-window hysteresis: {@code true} iff a {@code working=true} derivation
+     * landed within the last {@link #OFF_WINDOW_NANOS}. Absence (never working, or
+     * aged past the window) ⇒ {@code false}. Safe to call on the enumeration hot
+     * path. The DEBOUNCE is OFF-only: turning ON is immediate (the next refresh
+     * stamps the timestamp), turning OFF lags by the window so a momentary
+     * between-turns idle does not strobe the spinner (AC4 pitfall).
+     */
+    public boolean working(int n) {
+        Long ts = lastWorkingNanos.get(n);
+        return ts != null && (clock.getAsLong() - ts) < OFF_WINDOW_NANOS;
     }
 
     /**
@@ -161,6 +214,10 @@ public class ConversationNameService {
             return;
         }
         cache.keySet().retainAll(activeNs);
+        // UC-48 — drop the working timestamp for vanished sessions too, so a
+        // re-used session number can't inherit a stale "working" from a prior
+        // tenant within the OFF-window.
+        lastWorkingNanos.keySet().retainAll(activeNs);
         // In-flight tasks self-clear in their finally; retaining here only trims
         // markers for sessions that vanished mid-derive (harmless if the task later
         // no-ops its remove).
@@ -186,15 +243,29 @@ public class ConversationNameService {
         @Override
         public void run() {
             try {
-                String name = derive(n, project);
-                if (name != null && !name.isBlank()) {
-                    cache.put(n, name);
+                SessionSignals sig = derive(n, project);
+                if (sig == null) {
+                    // Exec failure (exit≠0 / timeout / IOException): the derivation
+                    // produced no signals at all — touch NOTHING. Both the cached
+                    // name and the working timestamp are left exactly as they were, so
+                    // a transient blip neither clears a good name (AC3) nor strobes the
+                    // spinner (the OFF-window keeps aging on its own).
+                    return;
+                }
+                // Success — apply name and working INDEPENDENTLY.
+                if (sig.nameOrNull() != null && !sig.nameOrNull().isBlank()) {
+                    cache.put(n, sig.nameOrNull());
                 } else {
                     // No name available — clear any stale entry, but never store an
-                    // empty/blank value (AC3: a failed/empty lookup must not poison
-                    // the cache; the row falls back to tmuxTitle).
+                    // empty/blank value (AC3: a row with no name falls back to tmuxTitle).
                     cache.remove(n);
                 }
+                if (sig.working()) {
+                    // Stamp the most-recent working moment; working(n) ages it out.
+                    lastWorkingNanos.put(n, clock.getAsLong());
+                }
+                // working==false → no-op: let the existing timestamp (if any) age out
+                // of the OFF-window, giving the spinner its debounce.
             } catch (RuntimeException e) {
                 LOG.debug("conversation-name refresh for n={} failed: {}", n, e.toString());
             } finally {
@@ -204,11 +275,25 @@ public class ConversationNameService {
     }
 
     /**
-     * Run the helper one-shot and return the trimmed, codepoint-capped name, or
-     * {@code null} on any failure / empty output. {@code LC_ALL=C} keeps the exec
-     * environment locale-stable, mirroring the other docker calls.
+     * UC-48 — the pair of signals one helper invocation yields. {@code nameOrNull}
+     * is the (possibly null/blank) conversation name from line 1; {@code working}
+     * is the working/idle flag from line 2. A {@code null} {@link SessionSignals}
+     * (NOT a {@code SessionSignals} with null name) signals an exec FAILURE — the
+     * caller then touches neither cache. The two fields are applied independently:
+     * an empty name still clears the name cache while a {@code working=true} still
+     * stamps the timestamp.
      */
-    private String derive(int n, String project) {
+    record SessionSignals(String nameOrNull, boolean working) {}
+
+    /**
+     * Run the helper one-shot and return both signals, or {@code null} on an exec
+     * FAILURE (exit≠0 / timeout / IOException) so the caller leaves both caches
+     * untouched. On success the name (line 1) is trimmed + codepoint-capped (may be
+     * null/blank) and the working flag is parsed from line 2 ({@code "working"} ⇒
+     * true, anything else incl. a missing line ⇒ false). {@code LC_ALL=C} keeps the
+     * exec environment locale-stable, mirroring the other docker calls.
+     */
+    private SessionSignals derive(int n, String project) {
         try {
             List<String> argv = List.of(
                     "docker", "compose", "-p", project, "exec", "-T", "claude-sandbox", HELPER, CONVERSATION_NAME_FLAG);
@@ -216,9 +301,11 @@ public class ConversationNameService {
             if (r.exitCode() != 0) {
                 return null;
             }
-            return capCodepoints(trimToNull(firstLine(r.stdout())), MAX_NAME_CODEPOINTS);
+            String name = capCodepoints(trimToNull(firstLine(r.stdout())), MAX_NAME_CODEPOINTS);
+            boolean working = parseWorking(secondLine(r.stdout()));
+            return new SessionSignals(name, working);
         } catch (IOException io) {
-            // Any I/O failure (exec error, timeout) → no name; do NOT poison the cache.
+            // Any I/O failure (exec error, timeout) → no signals; do NOT poison either cache.
             LOG.debug("conversation-name derive for n={} project={}: {}", n, project, io.toString());
             return null;
         }
@@ -233,6 +320,34 @@ public class ConversationNameService {
         }
         int nl = out.indexOf('\n');
         return nl < 0 ? out : out.substring(0, nl);
+    }
+
+    /**
+     * UC-48 — second newline-delimited line of {@code out} (the working/idle flag),
+     * or {@code null} when there is no second line (old single-line helper output,
+     * or a failure path). Null-safe.
+     */
+    static String secondLine(String out) {
+        if (out == null) {
+            return null;
+        }
+        int nl = out.indexOf('\n');
+        if (nl < 0) {
+            return null;
+        }
+        String rest = out.substring(nl + 1);
+        int nl2 = rest.indexOf('\n');
+        return nl2 < 0 ? rest : rest.substring(0, nl2);
+    }
+
+    /**
+     * UC-48 — parse the helper's working flag (line 2). Only the exact token
+     * {@code "working"} (case-insensitive, trimmed) ⇒ {@code true}; {@code "idle"},
+     * empty, or a missing/blank line ⇒ {@code false}. Conservative by design: any
+     * unexpected output reads as idle (no spinner) rather than a stuck spinner.
+     */
+    static boolean parseWorking(String line) {
+        return line != null && "working".equalsIgnoreCase(line.strip());
     }
 
     /** Strip and return {@code null} for an empty/blank result. */
