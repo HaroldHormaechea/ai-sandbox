@@ -285,6 +285,86 @@ class ConversationControllerTest {
     }
 
     @Test
+    fun `a tool-result matching the pending sheet toolUseId dismisses the sheet`() {
+        // UC-44 AC3a — the stuck-popup safety net. When the underlying ask is resolved/aborted
+        // server-side (e.g. an "Other" answer declined the ask, the turn proceeded), the resolving
+        // `tool-result` carries the SAME toolUseId as the sheet's questionUuid. The controller must
+        // dismiss the sheet on that matched frame so it can never linger after the ask is resolved.
+        val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        server.enqueue(
+            MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+                override fun onOpen(webSocket: WebSocket, response: Response) {
+                    wsRef.set(webSocket)
+                }
+            }),
+        )
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { wsRef.get() != null }).isTrue
+            wsRef.get()!!.send(
+                """{"type":"question","uuid":"uq","source":"main","isSidechain":false,"toolUseId":"tuQ",""" +
+                    """"questions":[{"question":"Pick","header":"H","multiSelect":false,""" +
+                    """"options":[{"label":"A","description":""},{"label":"B","description":""}]}]}""",
+            )
+            assertThat(
+                awaitUntil { (c.pendingSheet.value as? PendingSheet.Questions)?.questionUuid == "tuQ" },
+            ).isTrue
+            // The matching tool-result (toolUseId == the sheet's questionUuid) resolves the ask …
+            wsRef.get()!!.send(
+                """{"type":"tool-result","uuid":"ur","source":"main","isSidechain":false,""" +
+                    """"toolUseId":"tuQ","isError":false,"summary":"done"}""",
+            )
+            // … so the sheet dismisses cleanly (AC3a) — it never lingers once the ask is resolved.
+            assertThat(awaitUntil { c.pendingSheet.value == null }).isTrue
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
+    fun `a tool-result with a non-matching toolUseId does not dismiss an unrelated sheet`() {
+        // UC-44 AC3a (negative) — only the tool-result that RESOLVES the pending ask dismisses it.
+        // A tool-result for a DIFFERENT tool call (any other Bash/Read/etc. that finishes while the
+        // ask is still open) must NOT tear down the unrelated sheet.
+        val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        server.enqueue(
+            MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+                override fun onOpen(webSocket: WebSocket, response: Response) {
+                    wsRef.set(webSocket)
+                }
+            }),
+        )
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { wsRef.get() != null }).isTrue
+            wsRef.get()!!.send(
+                """{"type":"question","uuid":"uq","source":"main","isSidechain":false,"toolUseId":"tuQ",""" +
+                    """"questions":[{"question":"Pick","header":"H","multiSelect":false,""" +
+                    """"options":[{"label":"A","description":""},{"label":"B","description":""}]}]}""",
+            )
+            assertThat(
+                awaitUntil { (c.pendingSheet.value as? PendingSheet.Questions)?.questionUuid == "tuQ" },
+            ).isTrue
+            // An UNRELATED tool-result (different toolUseId) lands while the ask is still pending.
+            wsRef.get()!!.send(
+                """{"type":"tool-result","uuid":"ur2","source":"main","isSidechain":false,""" +
+                    """"toolUseId":"tuOTHER","isError":false,"summary":"unrelated"}""",
+            )
+            // Wait until that unrelated result is observably processed (its merged row appears) …
+            assertThat(
+                awaitUntil { c.items.value.any { it is ConversationItem.ToolActivity && it.toolUseId == "tuOTHER" } },
+            ).isTrue
+            // … and the sheet is STILL up: a non-matching result must not dismiss it.
+            assertThat(c.pendingSheet.value).isInstanceOf(PendingSheet.Questions::class.java)
+            assertThat((c.pendingSheet.value as PendingSheet.Questions).questionUuid).isEqualTo("tuQ")
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
     fun `a live turn drives the thinking spinner`() {
         enqueuePush(
             listOf(
