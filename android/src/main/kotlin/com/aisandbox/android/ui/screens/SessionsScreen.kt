@@ -69,6 +69,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -463,11 +464,20 @@ private fun SessionRow(
                         color = OnSurfaceVariant,
                     )
                 }
-                if (row.tmuxTitle.isNotBlank()) {
+                // UC-47 — prefer the Claude conversation name as the primary status
+                // line; fall back to the tmux title (which is already normalized to
+                // (idle)/(unavailable)) when no name is known (AC1, AC3). Single line
+                // + ellipsis so a long/odd name never breaks the layout or pushes out
+                // the StatusPill — the middle Column is weight(1f), so the trailing
+                // pill/badge/menu stay fixed (AC5).
+                val statusLine = row.conversationName?.takeIf { it.isNotBlank() } ?: row.tmuxTitle
+                if (statusLine.isNotBlank()) {
                     Text(
-                        text = row.tmuxTitle,
+                        text = statusLine,
                         style = AiSandboxMonoTypography.metadata,
                         color = OnSurfaceMuted,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
                 // AC2 — discoverable connection-mode hint. UC-46: only show it

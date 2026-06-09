@@ -163,6 +163,15 @@ data class SessionSummary(
     val uptimeSec: Long = 0L,
     val activeStreams: Int = 0,
     val startedAt: String? = null,
+    /**
+     * UC-47 — the Claude conversation name for the session's main pane, or null
+     * when none is known (idle / no active conversation / non-running). The server
+     * omits the field when null (@JsonInclude(NON_NULL)); the default keeps decode
+     * lenient. The row shows it as the primary status line, falling back to
+     * [tmuxTitle] when null/blank. Covers REST and the UC-32 push (which reuses
+     * this DTO).
+     */
+    val conversationName: String? = null,
 )
 
 @Serializable

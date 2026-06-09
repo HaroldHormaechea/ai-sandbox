@@ -99,6 +99,8 @@ function parseArgs(argv) {
     // UC-41 — one-shot detail fetch for a single tool call (AC5).
     fetchDetail: false,
     toolUseId: null,
+    // UC-47 — one-shot conversation-name derivation for the sessions-list row.
+    conversationName: false,
   };
   for (let i = 2; i < argv.length; i++) {
     const k = argv[i];
@@ -112,6 +114,7 @@ function parseArgs(argv) {
       case '--scan-pending': a.scanPending = true; break;
       case '--fetch-detail': a.fetchDetail = true; break;
       case '--tool-use-id': a.toolUseId = argv[++i]; break;
+      case '--conversation-name': a.conversationName = true; break;
       default: /* ignore unknown flag */ break;
     }
   }
@@ -814,6 +817,141 @@ function fetchDetail() {
   for (const line of matched) out(line);
 }
 
+// ──────────────────────── conversation-name (one-shot) ────────────────────────
+
+// UC-47 — codepoint cap on an emitted conversation name. The server re-caps at
+// 120 codepoints too (ConversationNameService.MAX_NAME_CODEPOINTS); capping here
+// as well keeps the emitted envelope small and the two ends consistent.
+const CONVERSATION_NAME_MAX_CP = 120;
+
+/** Collapse any run of whitespace (newlines/tabs/spaces) to a single space; trim. (PURE) */
+function sanitizeOneLine(s) {
+  if (typeof s !== 'string') return '';
+  return s.replace(/\s+/g, ' ').trim();
+}
+
+/** Truncate to at most `maxCp` Unicode codepoints (never splits a surrogate pair). (PURE) */
+function capCodepoints(s, maxCp) {
+  if (typeof s !== 'string') return '';
+  const cps = Array.from(s); // iterates by codepoint, not UTF-16 unit
+  if (cps.length <= maxCp) return s;
+  return cps.slice(0, maxCp).join('');
+}
+
+/** Sanitize → cap → null-if-empty. (PURE) */
+function finalizeName(raw) {
+  const clean = sanitizeOneLine(raw);
+  if (clean === '') return null;
+  return capCodepoints(clean, CONVERSATION_NAME_MAX_CP);
+}
+
+/**
+ * Decide whether a `type:"user"` line is NOT the user's own prompt and must be
+ * skipped (PURE — mirror of the server ConversationEventMapper.mapUser classifier,
+ * lines ~255-311). Structural markers only:
+ *   • top-level sourceToolUseID nonblank → a folded harness/Skill body, not a prompt
+ *   • isMeta === true → a harness system note
+ *   • content array carrying a tool_result block → a tool result, not a prompt
+ *   • string content that is a <command-name>…</command-name> + <command-args>
+ *     wrapper, or a <local-command-stdout> wrapper → a slash-command echo
+ */
+function isNonPromptUserLine(o) {
+  if (!o) return true;
+  if (typeof o.sourceToolUseID === 'string' && o.sourceToolUseID.trim() !== '') return true;
+  if (o.isMeta === true) return true;
+  const content = o.message ? o.message.content : undefined;
+  if (Array.isArray(content)) {
+    for (const b of content) {
+      if (b && b.type === 'tool_result') return true;
+    }
+  }
+  if (typeof content === 'string') {
+    const s = content.trim();
+    if (s.startsWith('<command-name>') && s.indexOf('</command-name>') >= 0 && s.indexOf('<command-args>') >= 0) {
+      return true;
+    }
+    if (s.startsWith('<local-command-stdout>')) return true;
+  }
+  return false;
+}
+
+/**
+ * Extract a user line's text by its ACTUAL content shape (PURE — mirror of the
+ * server extractUserText/blocks, lines ~459-491):
+ *   • string content → the string DIRECTLY (the 253/263 common case)
+ *   • array content   → concatenate the `text` blocks
+ * Deliberately does NOT apply an array-only guard (the fetch-detail helper line
+ * ~778 `if (!Array.isArray(content)) continue`): that guard would drop string
+ * content and make this ALWAYS return '' for the common case.
+ */
+function extractUserText(content) {
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    const parts = [];
+    for (const b of content) {
+      if (b && b.type === 'text' && typeof b.text === 'string' && b.text.trim() !== '') {
+        parts.push(b.text);
+      }
+    }
+    return parts.join('\n');
+  }
+  return '';
+}
+
+/**
+ * Derive the conversation name from a transcript's complete lines (PURE —
+ * unit-testable). Tiered, matching the pinned proposal:
+ *   tier 0 (opportunistic) — the NEWEST {"type":"summary"} line's `summary`
+ *            (last occurrence wins; documented as effectively never present, so a
+ *            cheap `"summary"` pre-filter keeps it nearly free).
+ *   tier 1 (PRIMARY) — the FIRST real user prompt (skip isNonPromptUserLine),
+ *            reading content by actual shape; an empty extraction → keep scanning.
+ *   tier 2 — null (caller falls back to tmuxTitle).
+ * Returns a sanitized, codepoint-capped single-line string, or null.
+ */
+function deriveConversationName(lines) {
+  if (!Array.isArray(lines)) return null;
+  // Tier 0 — newest summary.
+  let summary = null;
+  for (const raw of lines) {
+    if (!raw || raw.indexOf('"summary"') < 0) continue; // cheap pre-filter
+    let o;
+    try { o = JSON.parse(raw); } catch (e) { continue; }
+    if (o && o.type === 'summary' && typeof o.summary === 'string') {
+      const f = finalizeName(o.summary);
+      if (f) summary = f; // keep updating so the LAST (newest) summary wins
+    }
+  }
+  if (summary) return summary;
+  // Tier 1 — first real user prompt.
+  for (const raw of lines) {
+    if (!raw) continue;
+    let o;
+    try { o = JSON.parse(raw); } catch (e) { continue; }
+    if (!o || o.type !== 'user') continue;
+    if (isNonPromptUserLine(o)) continue;
+    const content = o.message ? o.message.content : undefined;
+    const f = finalizeName(extractUserText(content));
+    if (!f) continue; // empty after sanitize → try the next prompt
+    return f;
+  }
+  // Tier 2.
+  return null;
+}
+
+/**
+ * One-shot: resolve the MAIN pane's active transcript, derive the conversation
+ * name, print exactly one line (the name, or empty when none), exit 0. Any
+ * no-transcript / failure path prints empty so the server falls back to tmuxTitle
+ * (AC3). Never blocks.
+ */
+function conversationName() {
+  const mainPath = resolveTranscriptOnce();
+  if (!mainPath) { out(''); return; }
+  const name = deriveConversationName(readAllLines(mainPath));
+  out(name || '');
+}
+
 // ──────────────────────── streaming mode ────────────────────────
 
 function backfill(reader, n, nowMs) {
@@ -969,6 +1107,14 @@ if (require.main === module) {
       emitCtrl(CTRL_DETAIL_NOT_FOUND);
     }
     process.exit(0);
+  } else if (ARGS.conversationName) {
+    try {
+      conversationName();
+    } catch (e) {
+      // Any failure → empty (no name); the server falls back to tmuxTitle (AC3).
+      out('');
+    }
+    process.exit(0);
   } else {
     streamLoop().catch((e) => {
       // Never crash the session on an internal error — exit quietly so the server
@@ -995,6 +1141,14 @@ module.exports = {
   idleFlush,
   backfill,
   collectToolDetail,
+  // UC-47 — conversation-name derivation seams (QA unit tests).
+  sanitizeOneLine,
+  capCodepoints,
+  finalizeName,
+  isNonPromptUserLine,
+  extractUserText,
+  deriveConversationName,
+  CONVERSATION_NAME_MAX_CP,
   CTRL_NO_TRANSCRIPT,
   CTRL_DETAIL_NOT_FOUND,
   DETAIL_OUTPUT_CAP_BYTES,
