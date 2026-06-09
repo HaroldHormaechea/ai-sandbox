@@ -84,6 +84,24 @@ class SessionsApi(private val http: AiSandboxHttpClient) {
         }
     }
 
+    /**
+     * UC-46 — drive a Docker-lifecycle action on a session via
+     * {@code POST /v1/sessions/{n}/{action}} (no body). 204 → [ApiResult.Success];
+     * a 404/409/500 problem+json comes back as [ApiResult.HttpFailure] (the
+     * caller surfaces `session_not_found` / `session_state_conflict` /
+     * `internal_error` codes). Transport failures bubble as a [Throwable]
+     * exactly like [delete].
+     */
+    suspend fun lifecycle(n: Int, action: LifecycleAction): ApiResult<Unit> = withContext(Dispatchers.IO) {
+        val req = Request.Builder()
+            .url("$base/v1/sessions/$n/${action.token}")
+            .post(ByteArray(0).toRequestBody(null))
+            .build()
+        client.newCall(req).execute().use { resp ->
+            if (resp.code == 204) ApiResult.Success(Unit) else mapResponse(resp) { Unit }
+        }
+    }
+
     private inline fun <T> mapResponse(
         resp: okhttp3.Response,
         deserialize: (String) -> T,
@@ -167,4 +185,36 @@ internal data class SessionsListEnvelope(
 sealed interface ApiResult<out T> {
     data class Success<T>(val value: T) : ApiResult<T>
     data class HttpFailure(val status: Int, val code: String, val detail: String) : ApiResult<Nothing>
+}
+
+/**
+ * UC-46 — client mirror of the server's
+ * {@code com.aisandbox.server.sessions.dto.LifecycleAction}. The
+ * [token] is the path segment for {@code POST /v1/sessions/{n}/{action}};
+ * [isValidFrom] MUST stay byte-identical to the server's transition matrix
+ * so the row context menu greys out exactly the actions the server would
+ * reject with 409 `session_state_conflict`. The server remains the final
+ * arbiter — this mirror only avoids guaranteed-409 round-trips.
+ *
+ * <table>
+ *   <tr><th>Action</th><th>Valid from</th></tr>
+ *   <tr><td>START</td><td>stopped</td></tr>
+ *   <tr><td>STOP</td><td>running, provisioning, paused</td></tr>
+ *   <tr><td>PAUSE</td><td>running</td></tr>
+ *   <tr><td>UNPAUSE</td><td>paused</td></tr>
+ * </table>
+ */
+enum class LifecycleAction(val token: String) {
+    STOP("stop"),
+    START("start"),
+    PAUSE("pause"),
+    UNPAUSE("unpause");
+
+    /** Whether this action is a legal transition from [state]. */
+    fun isValidFrom(state: String): Boolean = when (this) {
+        START -> state == "stopped"
+        STOP -> state == "running" || state == "provisioning" || state == "paused"
+        PAUSE -> state == "running"
+        UNPAUSE -> state == "paused"
+    }
 }

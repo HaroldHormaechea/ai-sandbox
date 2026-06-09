@@ -2,6 +2,7 @@ package com.aisandbox.android.ui.screens
 
 import android.util.Log
 import com.aisandbox.android.net.ApiResult
+import com.aisandbox.android.net.LifecycleAction
 import com.aisandbox.android.net.ServerProfile
 import com.aisandbox.android.net.SessionSummary
 import com.aisandbox.android.net.SessionsApi
@@ -257,6 +258,59 @@ class SessionsCoordinator(
                 if (TlsFailureTranslation.translate(t, profile.pinSha256Hex, host) == null) {
                     state.value = state.value.copy(lastError = t.message ?: "delete_failed")
                 }
+            }
+        }
+    }
+
+    /**
+     * UC-46 — drive a Docker-lifecycle action (stop/start/pause/unpause) on
+     * session [n]. Mirrors [delete] for the optimistic-pending / surface-error
+     * contract (AC6/AC7):
+     *
+     *   • mark [n] in [SessionsUiState.pendingActions] BEFORE the call resolves
+     *     so the row's action control disables immediately (no double-fire);
+     *   • on success, [refresh] reconciles the row to the authoritative server
+     *     state (the next UC-32 push does the same out of band);
+     *   • on an explicit HTTP failure (e.g. 409 `session_state_conflict` from a
+     *     state that drifted) OR a transport throw, surface the error and clear
+     *     the pending flag so the row reverts to its real state — never a stuck
+     *     fake state (AC7);
+     *   • the pending flag is always cleared in `finally`, so a thrown call
+     *     can't leave the control permanently disabled.
+     */
+    fun lifecycle(n: Int, action: LifecycleAction) {
+        scope.launch {
+            val profile = profileSupplier() ?: run {
+                state.value = state.value.copy(lastError = "no_profile")
+                return@launch
+            }
+            // AC6 — optimistic pending the instant the action is requested.
+            state.value = state.value.copy(pendingActions = state.value.pendingActions + n, lastError = null)
+            try {
+                when (val r = apiFactory(profile).lifecycle(n, action)) {
+                    is ApiResult.Success -> refresh()
+                    is ApiResult.HttpFailure -> {
+                        Log.w(TAG, "Lifecycle ${action.token} $n failed: ${r.code} (${r.status}) ${r.detail}")
+                        state.value = state.value.copy(lastError = "${r.code} (${r.status})")
+                    }
+                }
+            } catch (t: Throwable) {
+                // Mirror delete(): the http-client interceptor already
+                // translated + surfaced any SSL/IO failure (full-screen
+                // identity-changed dialog) before re-throwing, so only raise a
+                // snackbar for throwables it did NOT surface (avoid double).
+                Log.w(TAG, "Lifecycle ${action.token} $n threw: ${t.message}", t)
+                val host = profile.serverUrl
+                    .substringAfter("://")
+                    .substringBefore('/')
+                    .substringBefore(':')
+                if (TlsFailureTranslation.translate(t, profile.pinSha256Hex, host) == null) {
+                    state.value = state.value.copy(lastError = t.message ?: "lifecycle_failed")
+                }
+            } finally {
+                // AC6/AC7 — release the control; refresh() / the next push
+                // carries the authoritative state.
+                state.value = state.value.copy(pendingActions = state.value.pendingActions - n)
             }
         }
     }
