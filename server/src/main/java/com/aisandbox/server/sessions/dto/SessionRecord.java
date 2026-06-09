@@ -27,6 +27,32 @@ import java.time.Instant;
  * @param uptimeSec    seconds since the container started, or 0 when unknown
  * @param activeStreams currently-attached WebSocket count
  * @param startedAt    container start time, or epoch when unknown
+ * @param conversationName UC-47 — the derived Claude conversation name for the
+ *     session's MAIN pane (newest {@code summary} line, else the first real user
+ *     prompt, codepoint-capped server-side), or {@code null} when none is known
+ *     (idle / no active conversation / lookup not yet warmed / non-running). The
+ *     Android row prefers it over {@code tmuxTitle} as the primary status line,
+ *     falling back to {@code tmuxTitle} when null/blank (AC1, AC3).
  */
 public record SessionRecord(
-        int n, String label, String tmuxTitle, String state, long uptimeSec, int activeStreams, Instant startedAt) {}
+        int n,
+        String label,
+        String tmuxTitle,
+        String state,
+        long uptimeSec,
+        int activeStreams,
+        Instant startedAt,
+        String conversationName) {
+
+    /**
+     * UC-47 back-compat 7-arg constructor for call sites (and test fixtures)
+     * created before this use case appended {@code conversationName}. Delegates
+     * with a {@code null} name, so a session reported through the old shape
+     * simply carries no conversation name and the row falls back to
+     * {@code tmuxTitle} — exactly the pre-UC-47 behaviour.
+     */
+    public SessionRecord(
+            int n, String label, String tmuxTitle, String state, long uptimeSec, int activeStreams, Instant startedAt) {
+        this(n, label, tmuxTitle, state, uptimeSec, activeStreams, startedAt, null);
+    }
+}

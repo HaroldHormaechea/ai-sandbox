@@ -62,6 +62,30 @@ class SessionEventFacadeTest {
                         new Row(2, "", "(idle)", "provisioning", 0L, 0, null));
     }
 
+    /**
+     * UC-47 AC2 — the new {@code conversationName} field flows verbatim from the
+     * {@link SessionRecord} onto the wire {@link Row} (the same {@code Row} the
+     * UC-32 snapshot/delta push and the REST DTO carry), and a {@code null} name
+     * round-trips as {@code null} so the client falls back to the tmux title.
+     */
+    @Test
+    void snapshot_carries_the_conversation_name_field_through_to_the_wire_row() throws IOException {
+        Instant started = Instant.parse("2026-06-05T10:15:30Z");
+        when(sessionFacade.listSessions())
+                .thenReturn(List.of(
+                        new SessionRecord(1, "build", "vim", "running", 42L, 2, started, "Refactor the SessionRow"),
+                        new SessionRecord(2, "", "(idle)", "running", 0L, 0, started, null)));
+
+        Snapshot snapshot = facade.snapshot();
+
+        assertThat(snapshot.sessions())
+                .containsExactly(
+                        new Row(1, "build", "vim", "running", 42L, 2, started, "Refactor the SessionRow"),
+                        new Row(2, "", "(idle)", "running", 0L, 0, started, null));
+        assertThat(snapshot.sessions().get(0).conversationName()).isEqualTo("Refactor the SessionRow");
+        assertThat(snapshot.sessions().get(1).conversationName()).isNull();
+    }
+
     @Test
     void snapshot_swallows_ioexception_and_serves_an_empty_snapshot() throws IOException {
         when(sessionFacade.listSessions()).thenThrow(new IOException("docker enumeration down"));

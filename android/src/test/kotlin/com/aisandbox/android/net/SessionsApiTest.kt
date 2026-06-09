@@ -194,6 +194,45 @@ class SessionsApiTest {
         }
     }
 
+    /**
+     * UC-47 AC2 — the server-provided `conversationName` field decodes onto
+     * [SessionSummary] over REST: a row that carries it exposes it, a row that
+     * OMITS it (the server's `@JsonInclude(NON_NULL)`) defaults to null, and a
+     * row with an explicit null also reads null. The client reads the field —
+     * it never synthesizes a name (AC2).
+     */
+    @Test
+    fun conversationNameField_decodesFromRestAndDefaultsToNullWhenAbsent() = runTest {
+        val (server, profile) = startPinnedServer()
+        try {
+            server.enqueue(
+                MockResponse().setResponseCode(200).setBody(
+                    """
+                    [
+                      {"n":1,"label":"a","tmuxTitle":"(idle)","state":"running","uptimeSec":1,"activeStreams":0,"startedAt":null,"conversationName":"Refactor the SessionRow"},
+                      {"n":2,"label":"b","tmuxTitle":"vim","state":"running","uptimeSec":2,"activeStreams":0,"startedAt":null},
+                      {"n":3,"label":"c","tmuxTitle":"(idle)","state":"running","uptimeSec":3,"activeStreams":0,"startedAt":null,"conversationName":null}
+                    ]
+                    """.trimIndent(),
+                ),
+            )
+
+            val result = apiFor(profile).list()
+
+            assertThat(result).isInstanceOf(ApiResult.Success::class.java)
+            val rows = (result as ApiResult.Success).value
+            assertThat(rows.map { it.n }).containsExactly(1, 2, 3)
+            // Present → exposed verbatim.
+            assertThat(rows[0].conversationName).isEqualTo("Refactor the SessionRow")
+            // Omitted (server NON_NULL) → null default, row falls back to tmuxTitle.
+            assertThat(rows[1].conversationName).isNull()
+            // Explicit null → null.
+            assertThat(rows[2].conversationName).isNull()
+        } finally {
+            server.shutdown()
+        }
+    }
+
     @Test
     fun problemJsonError_mapsToHttpFailureWithCode() = runTest {
         val (server, profile) = startPinnedServer()

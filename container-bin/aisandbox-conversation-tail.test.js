@@ -1037,3 +1037,257 @@ test('UC-42 — collectToolDetail stamps the subagent source onto a correlated i
   assert.ok(matched.every((l) => l.startsWith('subagent:agent-7\t')));
   assert.ok(matched.some((l) => l.includes('teammate skill body')));
 });
+
+// ════════════════════════════════════════════════════════════════════════════
+// UC-47 — conversation-name derivation seams
+//
+// The `--conversation-name` one-shot resolves the MAIN pane's active transcript
+// and prints a single derived name (or empty). The runtime resolve/exec path is
+// not exercisable without a live container, but the DERIVATION is pure and is
+// the actual anti-regression surface — the original UC-37 fetch-detail helper's
+// array-only guard (`if (!Array.isArray(content)) continue`) would have made the
+// PRIMARY case (string content, ~253/263 real lines) ALWAYS return empty. These
+// tests pin the tiered derivation, the structural skip-classifier, and the
+// codepoint cap, and ALSO run the real seam against on-disk transcripts.
+// ════════════════════════════════════════════════════════════════════════════
+
+// ── builders mirroring the real transcript line shapes ──
+const summaryLine = (s) => JSON.stringify({ type: 'summary', summary: s });
+// String-content user prompt — the COMMON (253/263) case.
+const userStringLine = (t) => JSON.stringify({ type: 'user', message: { role: 'user', content: t } });
+// Array-content user prompt — text blocks concatenated.
+const userArrayLine = (...texts) =>
+  JSON.stringify({
+    type: 'user',
+    message: { role: 'user', content: texts.map((t) => ({ type: 'text', text: t })) },
+  });
+const assistantLine = (t) =>
+  JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: t }] } });
+
+// ── sanitizeOneLine ──
+test('UC-47 sanitizeOneLine collapses any whitespace run to a single space and trims', () => {
+  assert.strictEqual(helper.sanitizeOneLine('  hello\n\tworld   \n  again '), 'hello world again');
+  assert.strictEqual(helper.sanitizeOneLine('single'), 'single');
+  assert.strictEqual(helper.sanitizeOneLine('   \n\t  '), '');
+  assert.strictEqual(helper.sanitizeOneLine(undefined), '');
+  assert.strictEqual(helper.sanitizeOneLine(42), '');
+});
+
+// ── capCodepoints (AC5) ──
+test('UC-47 capCodepoints truncates by codepoint and never splits a surrogate pair', () => {
+  assert.strictEqual(helper.capCodepoints('abcdef', 3), 'abc');
+  assert.strictEqual(helper.capCodepoints('abc', 5), 'abc'); // under the cap, unchanged
+  // Astral-plane emoji are 2 UTF-16 units each but 1 codepoint — capping at 2
+  // must yield exactly 2 whole emoji, never a lone surrogate half.
+  const emoji = '😀😁😂😃';
+  const capped = helper.capCodepoints(emoji, 2);
+  assert.strictEqual(Array.from(capped).length, 2);
+  assert.strictEqual(capped, '😀😁');
+  // The capped string must remain well-formed (no lone surrogate).
+  assert.ok(!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(capped));
+});
+
+test('UC-47 CONVERSATION_NAME_MAX_CP is 120 and finalizeName caps at it (emoji-safe)', () => {
+  assert.strictEqual(helper.CONVERSATION_NAME_MAX_CP, 120);
+  const longAscii = 'x'.repeat(200);
+  assert.strictEqual(Array.from(helper.finalizeName(longAscii)).length, 120);
+  const longEmoji = '😀'.repeat(200);
+  const cappedEmoji = helper.finalizeName(longEmoji);
+  assert.strictEqual(Array.from(cappedEmoji).length, 120);
+  assert.ok(!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(cappedEmoji));
+});
+
+// ── finalizeName ──
+test('UC-47 finalizeName returns null for empty/whitespace-only input', () => {
+  assert.strictEqual(helper.finalizeName(''), null);
+  assert.strictEqual(helper.finalizeName('   \n\t '), null);
+  assert.strictEqual(helper.finalizeName('  kept  '), 'kept');
+});
+
+// ── isNonPromptUserLine classifier ──
+test('UC-47 isNonPromptUserLine — a plain string-content user prompt is a REAL prompt', () => {
+  assert.strictEqual(helper.isNonPromptUserLine({ type: 'user', message: { content: 'real prompt' } }), false);
+});
+
+test('UC-47 isNonPromptUserLine skips a folded harness/Skill body (sourceToolUseID set)', () => {
+  assert.strictEqual(
+    helper.isNonPromptUserLine({ sourceToolUseID: 'tu_123', message: { content: 'folded body' } }),
+    true,
+  );
+});
+
+test('UC-47 isNonPromptUserLine skips an isMeta system note', () => {
+  assert.strictEqual(helper.isNonPromptUserLine({ isMeta: true, message: { content: 'meta note' } }), true);
+});
+
+test('UC-47 isNonPromptUserLine skips a tool_result-carrying array line', () => {
+  const o = { message: { content: [{ type: 'tool_result', content: 'output' }] } };
+  assert.strictEqual(helper.isNonPromptUserLine(o), true);
+});
+
+test('UC-47 isNonPromptUserLine skips a slash-command wrapper and a local-command-stdout echo', () => {
+  const cmd = {
+    message: { content: '<command-name>/foo</command-name>\n<command-args>bar</command-args>' },
+  };
+  assert.strictEqual(helper.isNonPromptUserLine(cmd), true);
+  const stdout = { message: { content: '<local-command-stdout>some output</local-command-stdout>' } };
+  assert.strictEqual(helper.isNonPromptUserLine(stdout), true);
+});
+
+test('UC-47 isNonPromptUserLine treats a null/absent object defensively as non-prompt', () => {
+  assert.strictEqual(helper.isNonPromptUserLine(null), true);
+  assert.strictEqual(helper.isNonPromptUserLine(undefined), true);
+});
+
+// ── extractUserText (the anti-regression core) ──
+test('UC-47 extractUserText reads STRING content DIRECTLY (the 253/263 common case)', () => {
+  // This is the exact case the old array-only guard would have dropped.
+  assert.strictEqual(helper.extractUserText('hello world'), 'hello world');
+});
+
+test('UC-47 extractUserText concatenates the text blocks of ARRAY content', () => {
+  const content = [
+    { type: 'text', text: 'first' },
+    { type: 'tool_use', name: 'Bash' }, // non-text block ignored
+    { type: 'text', text: 'second' },
+  ];
+  assert.strictEqual(helper.extractUserText(content), 'first\nsecond');
+});
+
+test('UC-47 extractUserText returns empty for a non-string/non-array shape', () => {
+  assert.strictEqual(helper.extractUserText(undefined), '');
+  assert.strictEqual(helper.extractUserText({ foo: 'bar' }), '');
+});
+
+// ── deriveConversationName — tiered ──
+test('UC-47 deriveConversationName PRIMARY — first real STRING-content user prompt wins', () => {
+  const lines = [
+    assistantLine('assistant noise'),
+    userStringLine('Refactor the SessionRow to show the conversation name'),
+    userStringLine('a later prompt that must NOT win'),
+  ];
+  assert.strictEqual(
+    helper.deriveConversationName(lines),
+    'Refactor the SessionRow to show the conversation name',
+  );
+});
+
+test('UC-47 deriveConversationName reads an array-text-block first prompt', () => {
+  const lines = [userArrayLine('Add a ', 'conversation name field')];
+  assert.strictEqual(helper.deriveConversationName(lines), 'Add a\nconversation name field'.replace(/\s+/g, ' '));
+});
+
+test('UC-47 deriveConversationName skips meta/command/stdout/tool_result/folded lines to the first REAL prompt', () => {
+  const lines = [
+    JSON.stringify({ type: 'user', isMeta: true, message: { content: 'meta' } }),
+    JSON.stringify({ type: 'user', message: { content: '<command-name>/clear</command-name>\n<command-args></command-args>' } }),
+    JSON.stringify({ type: 'user', message: { content: '<local-command-stdout>stdout</local-command-stdout>' } }),
+    JSON.stringify({ type: 'user', sourceToolUseID: 'tu_9', message: { content: 'folded skill body' } }),
+    JSON.stringify({ type: 'user', message: { content: [{ type: 'tool_result', content: 'res' }] } }),
+    userStringLine('the actual first human prompt'),
+  ];
+  assert.strictEqual(helper.deriveConversationName(lines), 'the actual first human prompt');
+});
+
+test('UC-47 deriveConversationName tier-0 — newest summary beats the first user prompt', () => {
+  const lines = [
+    userStringLine('the first user prompt'),
+    summaryLine('Conversation about UC-47'),
+  ];
+  assert.strictEqual(helper.deriveConversationName(lines), 'Conversation about UC-47');
+});
+
+test('UC-47 deriveConversationName tier-0 — the LAST (newest) summary wins among several', () => {
+  const lines = [
+    summaryLine('older summary'),
+    userStringLine('a prompt'),
+    summaryLine('newest summary'),
+  ];
+  assert.strictEqual(helper.deriveConversationName(lines), 'newest summary');
+});
+
+test('UC-47 deriveConversationName — an empty/whitespace extraction is skipped, the next real prompt wins', () => {
+  const lines = [
+    userStringLine('   '), // sanitizes to empty → keep scanning
+    userArrayLine(''), // empty text block → empty → keep scanning
+    userStringLine('finally a real one'),
+  ];
+  assert.strictEqual(helper.deriveConversationName(lines), 'finally a real one');
+});
+
+test('UC-47 deriveConversationName tier-2 — no transcript / no real prompt → null', () => {
+  assert.strictEqual(helper.deriveConversationName([]), null);
+  assert.strictEqual(helper.deriveConversationName(null), null);
+  // Only assistant + non-prompt user lines → null (row falls back to tmuxTitle, AC3).
+  const lines = [
+    assistantLine('only assistant text'),
+    JSON.stringify({ type: 'user', isMeta: true, message: { content: 'meta' } }),
+  ];
+  assert.strictEqual(helper.deriveConversationName(lines), null);
+});
+
+test('UC-47 deriveConversationName tolerates a malformed JSON line without throwing', () => {
+  const lines = ['{not valid json', userStringLine('survives the bad line')];
+  assert.strictEqual(helper.deriveConversationName(lines), 'survives the bad line');
+});
+
+test('UC-47 deriveConversationName caps a pathologically long first prompt at 120 codepoints (AC5)', () => {
+  const lines = [userStringLine('y'.repeat(500))];
+  const name = helper.deriveConversationName(lines);
+  assert.strictEqual(Array.from(name).length, 120);
+});
+
+// ── Corpus check: run the PURE seam against REAL transcripts on disk ──
+// Not an assertion-heavy test — it proves the derivation produces sane,
+// non-empty names on the actual ~/.claude/projects corpus (no docker needed)
+// and surfaces a few examples in the test output for the QA report.
+test('UC-47 deriveConversationName produces sane names on REAL on-disk transcripts', () => {
+  const os = require('node:os');
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const projectsRoot = path.join(os.homedir(), '.claude', 'projects');
+  if (!fs.existsSync(projectsRoot)) {
+    console.log('  [corpus] ~/.claude/projects absent — skipping live-corpus check');
+    return; // environment-gated, never a hard failure
+  }
+  const jsonls = [];
+  const walk = (dir, depth) => {
+    if (depth > 2 || jsonls.length >= 12) return;
+    let entries = [];
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch (e) { return; }
+    for (const e of entries) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) walk(p, depth + 1);
+      else if (e.isFile() && e.name.endsWith('.jsonl')) jsonls.push(p);
+      if (jsonls.length >= 12) return;
+    }
+  };
+  walk(projectsRoot, 0);
+  if (jsonls.length === 0) {
+    console.log('  [corpus] no .jsonl transcripts found — skipping');
+    return;
+  }
+  let withName = 0;
+  const examples = [];
+  for (const file of jsonls) {
+    let lines;
+    try {
+      lines = fs.readFileSync(file, 'utf8').split('\n').filter((l) => l.length > 0);
+    } catch (e) {
+      continue;
+    }
+    const name = helper.deriveConversationName(lines);
+    if (name) {
+      withName++;
+      // Invariants on every derived name: single line, within the cap.
+      assert.ok(!name.includes('\n'), 'derived name must be single-line');
+      assert.ok(Array.from(name).length <= helper.CONVERSATION_NAME_MAX_CP, 'derived name within codepoint cap');
+      if (examples.length < 5) examples.push(`${path.basename(file)} → ${JSON.stringify(name)}`);
+    }
+  }
+  console.log(`  [corpus] derived a name for ${withName}/${jsonls.length} real transcripts. Examples:`);
+  for (const ex of examples) console.log(`    ${ex}`);
+  // At least one real transcript should yield a name — proves the PRIMARY
+  // string-content path fires on the real corpus (the anti-regression point).
+  assert.ok(withName > 0, 'expected at least one real transcript to derive a conversation name');
+});

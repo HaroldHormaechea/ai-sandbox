@@ -19,7 +19,14 @@ public final class ApiMappers {
 
     public static ApiDtos.SessionSummary toSummary(SessionRecord r) {
         return new ApiDtos.SessionSummary(
-                r.n(), r.label(), r.tmuxTitle(), r.state(), r.uptimeSec(), r.activeStreams(), r.startedAt());
+                r.n(),
+                r.label(),
+                r.tmuxTitle(),
+                r.state(),
+                r.uptimeSec(),
+                r.activeStreams(),
+                r.startedAt(),
+                r.conversationName());
     }
 
     public static List<ApiDtos.SessionSummary> toSummaries(List<SessionRecord> rs) {
