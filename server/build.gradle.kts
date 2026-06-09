@@ -144,6 +144,15 @@ tasks.named<Test>("test") {
     // QA owns integration tests; the *.java naming convention (*IT.java)
     // discriminates so the ordinary `:test` run doesn't execute them.
     exclude("**/*IT.class")
+    // Diagnostic: print each test as it STARTS so a hang is identifiable
+    // from the CI log — the last "started" line with no matching
+    // passed/failed is the hung test. (Pairs with the per-method timeout
+    // in src/test/resources/junit-platform.properties, which fails a
+    // genuine hang fast instead of letting it eat the whole job timeout.)
+    testLogging {
+        events("started", "passed", "failed", "skipped")
+        showStandardStreams = false
+    }
 }
 
 val integrationTest by tasks.registering(Test::class) {
