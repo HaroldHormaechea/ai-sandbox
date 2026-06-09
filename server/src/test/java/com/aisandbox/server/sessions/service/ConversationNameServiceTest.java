@@ -5,7 +5,6 @@ import static org.awaitility.Awaitility.await;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.argThat;
 import static org.mockito.ArgumentMatchers.eq;
-import static org.mockito.Mockito.atMost;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -14,7 +13,6 @@ import static org.mockito.Mockito.when;
 
 import java.io.IOException;
 import java.time.Duration;
-import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -102,7 +100,8 @@ class ConversationNameServiceTest {
         ConversationNameService svc = new ConversationNameService(exec);
         try {
             svc.refreshAsync(3, "ai-sandbox-3");
-            await().atMost(POLL).untilAsserted(() -> assertThat(svc.cachedName(3)).isEqualTo("Refactor the SessionRow"));
+            await().atMost(POLL)
+                    .untilAsserted(() -> assertThat(svc.cachedName(3)).isEqualTo("Refactor the SessionRow"));
         } finally {
             svc.shutdown();
         }
@@ -155,7 +154,8 @@ class ConversationNameServiceTest {
             svc.refreshAsync(7, "ai-sandbox-7");
 
             release.countDown();
-            await().atMost(POLL).untilAsserted(() -> assertThat(svc.cachedName(7)).isEqualTo("late-name"));
+            await().atMost(POLL)
+                    .untilAsserted(() -> assertThat(svc.cachedName(7)).isEqualTo("late-name"));
             // Exactly one derive ran despite three refreshAsync calls for n=7.
             verify(exec, times(1)).run(any(), any(), any(), any());
         } finally {
@@ -174,11 +174,13 @@ class ConversationNameServiceTest {
         ConversationNameService svc = new ConversationNameService(exec);
         try {
             svc.refreshAsync(2, "ai-sandbox-2");
-            await().atMost(POLL).untilAsserted(() -> assertThat(svc.cachedName(2)).isEqualTo("warm-name"));
+            await().atMost(POLL)
+                    .untilAsserted(() -> assertThat(svc.cachedName(2)).isEqualTo("warm-name"));
 
             // A later FAILED derive must clear the stale entry, never store blank.
             svc.refreshAsync(2, "ai-sandbox-2");
-            await().atMost(POLL).untilAsserted(() -> assertThat(svc.cachedName(2)).isNull());
+            await().atMost(POLL)
+                    .untilAsserted(() -> assertThat(svc.cachedName(2)).isNull());
         } finally {
             svc.shutdown();
         }
@@ -239,7 +241,8 @@ class ConversationNameServiceTest {
         ConversationNameService svc = new ConversationNameService(exec);
         try {
             svc.refreshAsync(9, "ai-sandbox-9");
-            await().atMost(POLL).untilAsserted(() -> assertThat(svc.cachedName(9)).isEqualTo("n"));
+            await().atMost(POLL)
+                    .untilAsserted(() -> assertThat(svc.cachedName(9)).isEqualTo("n"));
             // Mirrors the tmuxTitle / readiness exec shape, plus the one-shot flag.
             verify(exec)
                     .run(
