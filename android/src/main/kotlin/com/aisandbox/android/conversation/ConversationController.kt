@@ -105,6 +105,22 @@ class ConversationController(
     @Volatile
     private var backfilling = false
 
+    /**
+     * UC-45 — optimistic local-echo state, all guarded by [itemLock] (same lock as
+     * [itemMap], so the optimistic insert and the reconcile mutate the store atomically).
+     *
+     * [localSeqCounter] mints a monotonic id per submission, used as the optimistic
+     * bubble's stable [ConversationItem.UserMessage.localSeq] / dedupe key.
+     * [pendingEchoes] is a FIFO of the local keys of optimistic bubbles still awaiting
+     * their authoritative `turn-start` echo, so echoes reconcile in submission order
+     * (AC5; rapid multi-submit, pitfall). [reconciledServerKeys] records the
+     * server-derived keys of bubbles already reconciled, so a reconnect/backfill replay
+     * of an already-reconciled line is a no-op rather than a duplicate (AC8).
+     */
+    private var localSeqCounter = 0L
+    private val pendingEchoes = ArrayDeque<String>()
+    private val reconciledServerKeys = HashSet<String>()
+
     /** Start (or no-op resume) the connect/reconnect loop. Idempotent. */
     fun attach(n: Int) {
         require(n == sessionN) { "controller bound to $sessionN, attach($n)" }
@@ -112,12 +128,36 @@ class ConversationController(
         startConnectLoop()
     }
 
-    /** AC8/AC9 — submit composer text. Shows the working spinner immediately (AC14). */
+    /**
+     * AC8/AC9 — submit composer text. Shows the working spinner immediately (AC14).
+     *
+     * UC-45 — also echoes the message locally as an optimistic bubble the instant the
+     * user hits send (AC1), so the transcript reflects what they typed without waiting
+     * on the server round-trip. The bubble carries a stable [localSeq] key and is pushed
+     * onto [pendingEchoes]; the authoritative `turn-start` echo later reconciles it in
+     * place via [reconcileOrAddUserMessage] (AC3). The text sent to the session is
+     * unchanged (AC7) — local echo is display-only.
+     */
     fun submitComposer(text: String) {
         if (text.isBlank()) return
         if (_pendingSheet.value != null) return // AC12 — composer locked while a sheet is pending
         _turnPhase.value = TurnPhase.WORKING
-        client?.sendComposer(text)
+        synchronized(itemLock) {
+            val seq = localSeqCounter++
+            val key = "localuser|$seq"
+            // uuid="" until the server echo backfills it; source="main", isSidechain=false
+            // match a user's own line in the structured (non-sidechain) conversation.
+            itemMap[key] = ConversationItem.UserMessage(
+                uuid = "",
+                source = "main",
+                isSidechain = false,
+                text = text,
+                localSeq = seq,
+            )
+            pendingEchoes.addLast(key)
+            _items.value = itemMap.values.toList()
+        }
+        client?.sendComposer(text) // AC7 — unchanged; injects byte-for-byte the same text
     }
 
     /** AC11 — submit a structured answer; optimistically dismiss the sheet and show the spinner. */
@@ -212,6 +252,11 @@ class ConversationController(
         scope.cancel()
         client?.close(reason)
         client = null
+        synchronized(itemLock) {
+            // UC-45 — clear optimistic-echo bookkeeping alongside the rest of the teardown.
+            pendingEchoes.clear()
+            reconciledServerKeys.clear()
+        }
         _state.value = TerminalState.Idle
         onClosed(sessionN)
     }
@@ -223,7 +268,13 @@ class ConversationController(
         when (obj["type"]?.jsonPrimitive?.contentOrNull) {
             "turn-start" -> {
                 val t = str(obj, "text")
-                if (!t.isNullOrBlank()) addItem(ConversationItem.UserMessage(uuid(obj), source(obj), sidechain(obj), t))
+                // Preserve today's non-blank guard: a blank turn-start must neither add a
+                // bubble nor pop a pending echo (else it could blank out the optimistic text).
+                if (!t.isNullOrBlank()) {
+                    reconcileOrAddUserMessage(
+                        ConversationItem.UserMessage(uuid(obj), source(obj), sidechain(obj), t),
+                    )
+                }
                 // A new turn means any prior question resolved/aborted (AC12).
                 _pendingSheet.value = null
                 if (!backfilling) _turnPhase.value = TurnPhase.WORKING
@@ -343,10 +394,80 @@ class ConversationController(
     private fun addItem(item: ConversationItem) {
         synchronized(itemLock) {
             if (itemMap.containsKey(item.key)) return // AC6/AC22 — dedupe backfill overlap
+            // UC-45 (AC8) — a reconnect/backfill replay of a user line we already reconciled
+            // into an optimistic bubble must not re-add a second (server-keyed) bubble.
+            if (item is ConversationItem.UserMessage && reconciledServerKeys.contains(item.key)) return
             itemMap[item.key] = item
             _items.value = itemMap.values.toList()
         }
     }
+
+    /**
+     * UC-45 (AC3/AC5/AC8) — reconcile an authoritative `turn-start` user line against the
+     * oldest outstanding optimistic bubble, or add it as a fresh item if there is nothing to
+     * reconcile. Caller guarantees [serverMsg].text is non-blank.
+     *
+     * - **Live (`!backfilling`) with a pending echo** → FIFO reconcile: pop the oldest pending
+     *   local key and replace that bubble *in place* with the server's uuid/text/source/
+     *   isSidechain (localSeq preserved, so [ConversationItem.UserMessage.key] is unchanged and
+     *   Compose updates the row without flicker — AC3). The server-derived key is remembered in
+     *   [reconciledServerKeys] so a later replay is deduped (AC8). If the pending key is somehow
+     *   absent from the map (deque/map out of sync), fall through to [addItem] rather than NPE.
+     * - **Backfill with a pending echo** → text-gated reconcile: only reconcile the oldest
+     *   pending bubble whose normalized text matches, so history replay can't mis-match a
+     *   pending submission; otherwise add normally.
+     * - **Otherwise** → [addItem] as today.
+     */
+    private fun reconcileOrAddUserMessage(serverMsg: ConversationItem.UserMessage) {
+        synchronized(itemLock) {
+            if (pendingEchoes.isEmpty()) {
+                addItem(serverMsg)
+                return
+            }
+            if (!backfilling) {
+                val localKey = pendingEchoes.removeFirst()
+                reconcileInPlace(localKey, serverMsg)
+                return
+            }
+            // backfilling: only reconcile if the oldest pending bubble's text matches the
+            // server text (normalized), else treat as an ordinary (replayed) line.
+            val oldestKey = pendingEchoes.first()
+            val pending = itemMap[oldestKey] as? ConversationItem.UserMessage
+            if (pending != null && normalizeText(pending.text) == normalizeText(serverMsg.text)) {
+                pendingEchoes.removeFirst()
+                reconcileInPlace(oldestKey, serverMsg)
+            } else {
+                addItem(serverMsg)
+            }
+        }
+    }
+
+    /**
+     * UC-45 — replace the optimistic bubble at [localKey] with the server copy in place,
+     * preserving its [ConversationItem.UserMessage.localSeq] (hence its key) so the row is
+     * updated, not removed+re-added. Records the server-derived key for replay dedupe (AC8).
+     * Must be called under [itemLock]. If the key is absent (deque/map drift), falls back to
+     * [addItem] so the server line is never lost.
+     */
+    private fun reconcileInPlace(localKey: String, serverMsg: ConversationItem.UserMessage) {
+        val pending = itemMap[localKey] as? ConversationItem.UserMessage
+        if (pending == null) {
+            addItem(serverMsg)
+            return
+        }
+        itemMap[localKey] = pending.copy(
+            uuid = serverMsg.uuid,
+            text = serverMsg.text,
+            source = serverMsg.source,
+            isSidechain = serverMsg.isSidechain,
+        )
+        // The server-derived key (localSeq=null) is what a replayed server line would carry.
+        reconciledServerKeys.add("${serverMsg.uuid}|user|${serverMsg.text.hashCode()}")
+        _items.value = itemMap.values.toList()
+    }
+
+    /** UC-45 — trim + collapse internal whitespace, for tolerant text-gated reconcile (AC5). */
+    private fun normalizeText(s: String): String = s.trim().replace(Regex("\\s+"), " ")
 
     /**
      * UC-41 (AC4/AC8) — additive upsert of the `tool_use` half of a merged
@@ -446,6 +567,10 @@ class ConversationController(
     private fun clearItems() {
         synchronized(itemLock) {
             itemMap.clear()
+            // UC-45 — drop optimistic-echo bookkeeping in lockstep with the item store, so a
+            // target switch can't reconcile a new target's echo against a stale pending bubble.
+            pendingEchoes.clear()
+            reconciledServerKeys.clear()
             _items.value = emptyList()
         }
     }

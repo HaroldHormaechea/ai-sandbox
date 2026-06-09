@@ -142,4 +142,39 @@ class ConversationModelTest {
         assertThat(n.label).isEqualTo("System note")
         assertThat(n.detail).isEqualTo("housekeeping") // inline — no fetch-detail round-trip
     }
+
+    // ──────────────────────── UC-45 — optimistic local-echo key ───────────────
+
+    @Test
+    fun `an optimistic user message keys off localSeq, stable across the reconcile copy`() {
+        // AC3 — the optimistic bubble's key derives from localSeq ONLY, so reconciling the
+        // server's uuid/text/source in place (localSeq kept) leaves the key UNCHANGED.
+        // Compose then updates the existing row instead of remove+re-add → no flicker.
+        val optimistic = ConversationItem.UserMessage(
+            uuid = "", source = "main", isSidechain = false, text = "hello", localSeq = 0L,
+        )
+        assertThat(optimistic.key).isEqualTo("localuser|0")
+        val reconciled = optimistic.copy(uuid = "u1", text = "hello (server-normalized)", source = "main")
+        assertThat(reconciled.key).isEqualTo(optimistic.key) // unchanged despite uuid+text change
+        assertThat(reconciled.key).isEqualTo("localuser|0")
+    }
+
+    @Test
+    fun `a server-origin user message keys off uuid+text, distinct from the optimistic key`() {
+        // A confirmed/server line (localSeq == null) uses the original uuid+text key — and that
+        // is exactly the form the controller records in reconciledServerKeys to dedupe a replay.
+        val server = ConversationItem.UserMessage("u1", "main", false, "hello") // localSeq defaults null
+        assertThat(server.key).isEqualTo("u1|user|${"hello".hashCode()}")
+        val optimistic = ConversationItem.UserMessage("", "main", false, "hello", localSeq = 0L)
+        assertThat(server.key).isNotEqualTo(optimistic.key)
+    }
+
+    @Test
+    fun `distinct submissions get distinct optimistic keys`() {
+        // AC5 — two rapid submits with the SAME text must not collide: the monotonic localSeq
+        // disambiguates them so both bubbles survive.
+        val a = ConversationItem.UserMessage("", "main", false, "x", localSeq = 0L)
+        val b = ConversationItem.UserMessage("", "main", false, "x", localSeq = 1L)
+        assertThat(a.key).isNotEqualTo(b.key)
+    }
 }
