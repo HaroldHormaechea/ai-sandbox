@@ -940,16 +940,60 @@ function deriveConversationName(lines) {
 }
 
 /**
+ * Derive the binary working/idle signal from a transcript's complete lines
+ * (PURE — unit-testable, UC-48). Reuses the scanPending tail classifier so the
+ * list-row signal matches the AC18 switcher badging semantics:
+ *   "working" = there is ≥1 transcript entry AND the last meaningful entry is
+ *   NOT a {type:"system",subtype:"turn_duration"} turn-end (a turn is
+ *   mid-flight). A pending AskUserQuestion still awaiting its answer is treated
+ *   as at-rest IDLE (matches the conversation view's classification of a pending
+ *   question), so it returns false. THINKING/WORKING collapse to one binary.
+ * Returns true when working, false when idle (incl. empty / no-input).
+ */
+function deriveWorking(lines) {
+  if (!Array.isArray(lines) || lines.length === 0) return false;
+  const tail = lines.slice(Math.max(0, lines.length - 60));
+  let lastAsk = -1;
+  let lastTurnEnd = -1;
+  let lastLineIsTurnEnd = false;
+  for (let i = 0; i < tail.length; i++) {
+    let o;
+    try { o = JSON.parse(tail[i]); } catch (e) { continue; }
+    if (o && o.type === 'system' && o.subtype === 'turn_duration') {
+      lastTurnEnd = i;
+      lastLineIsTurnEnd = i === tail.length - 1;
+    } else {
+      lastLineIsTurnEnd = false;
+    }
+    if (o && o.type === 'assistant' && o.message && Array.isArray(o.message.content)) {
+      for (const b of o.message.content) {
+        if (b && b.type === 'tool_use' && b.name === 'AskUserQuestion') lastAsk = i;
+      }
+    }
+  }
+  // A pending question awaiting its answer is at-rest IDLE (conversation-view parity).
+  if (lastAsk >= 0 && lastAsk > lastTurnEnd) return false;
+  // Working when there is content and the last meaningful entry is not a turn-end.
+  return tail.length > 0 && !lastLineIsTurnEnd;
+}
+
+/**
  * One-shot: resolve the MAIN pane's active transcript, derive the conversation
- * name, print exactly one line (the name, or empty when none), exit 0. Any
- * no-transcript / failure path prints empty so the server falls back to tmuxTitle
- * (AC3). Never blocks.
+ * name AND the working/idle signal from the SAME readAllLines, and print exactly
+ * TWO lines, exit 0 (UC-47 line1 + UC-48 line2):
+ *   line1 = the conversation name, or empty when none (server parses it via
+ *           firstLine — unchanged from UC-47).
+ *   line2 = "working" | "idle" (server parses it via secondLine).
+ * Any no-transcript / failure path prints empty name + idle so the server falls
+ * back to tmuxTitle (AC3) and shows no spinner. Never blocks.
  */
 function conversationName() {
   const mainPath = resolveTranscriptOnce();
-  if (!mainPath) { out(''); return; }
-  const name = deriveConversationName(readAllLines(mainPath));
+  if (!mainPath) { out(''); out('idle'); return; }
+  const lines = readAllLines(mainPath);
+  const name = deriveConversationName(lines);
   out(name || '');
+  out(deriveWorking(lines) ? 'working' : 'idle');
 }
 
 // ──────────────────────── streaming mode ────────────────────────
@@ -1148,6 +1192,8 @@ module.exports = {
   isNonPromptUserLine,
   extractUserText,
   deriveConversationName,
+  // UC-48 — working/idle derivation seam (QA unit tests).
+  deriveWorking,
   CONVERSATION_NAME_MAX_CP,
   CTRL_NO_TRANSCRIPT,
   CTRL_DETAIL_NOT_FOUND,
