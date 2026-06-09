@@ -345,12 +345,7 @@ public class SessionConversationHandler implements WebSocketHandler {
             ConversationFacade.ToolDetailView view =
                     facade.fetchToolDetail(ctx.n, ctx.selectedTarget.get(), fd.toolUseId(), ctx.identity);
             frame = new ConversationServerMessage.ToolDetail(
-                    view.toolUseId(),
-                    view.toolName(),
-                    view.input(),
-                    view.result(),
-                    view.isError(),
-                    view.available());
+                    view.toolUseId(), view.toolName(), view.input(), view.result(), view.isError(), view.available());
         } catch (RuntimeException e) {
             LOG.warn("conversation fetch-detail for {} failed: {}", fd.toolUseId(), e.toString());
             frame = new ConversationServerMessage.ToolDetail(fd.toolUseId(), null, "", "", false, false);

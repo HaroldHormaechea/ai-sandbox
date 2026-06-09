@@ -34,6 +34,9 @@ commands:
   - bash
   - pwsh
   # UC03 — Java/Gradle management server build + PKI tooling.
+  # UC-42 — the `./gradlew` prefix already covers the spotless lint gate
+  # (`./gradlew :server:spotlessApply` / `:server:spotlessCheck`, the brief's
+  # build.commands.format/lint) and `:server:test`; no separate entry needed.
   - ./gradlew
   - java
   - javac

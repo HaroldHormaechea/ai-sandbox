@@ -301,7 +301,8 @@ public class ConversationEventMapper {
                 && stringContent.startsWith("<command-name>")
                 && stringContent.contains("</command-name>")
                 && stringContent.contains("<command-args>")) {
-            String name = sliceBetween(stringContent, "<command-name>", "</command-name>").strip();
+            String name = sliceBetween(stringContent, "<command-name>", "</command-name>")
+                    .strip();
             String label = "Command: " + (name.isBlank() ? "?" : name);
             return List.of(new ConversationServerMessage.SystemNote(
                     uuid, sidechain, source, label, renderContentFull(content)));

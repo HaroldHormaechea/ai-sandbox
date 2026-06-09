@@ -278,9 +278,9 @@ class SessionConversationHandlerTest {
         FakeSession session =
                 driveFetchDetail(facade, "{\"type\":\"fetch-detail\",\"toolUseId\":\"boom\",\"uuid\":\"u-line\"}");
 
-        assertThat(session.sent).anySatisfy(f -> assertThat(f)
-                .contains("\"type\":\"tool-detail\"")
-                .contains("\"available\":false"));
+        assertThat(session.sent)
+                .anySatisfy(
+                        f -> assertThat(f).contains("\"type\":\"tool-detail\"").contains("\"available\":false"));
         assertThat(session.closedWith).isNull();
     }
 

@@ -150,7 +150,8 @@ class ConversationFacadeTest {
         List<String> lines = List.of("main\t{\"some\":\"json\"}");
         when(tail.fetchDetailLines(eq(7), any(), eq("tu1"))).thenReturn(lines);
         when(mapper.renderDetail("tu1", lines))
-                .thenReturn(new ConversationEventMapper.DetailRender("Bash", "ls -la /workspace", "drwxr-xr-x", false, true));
+                .thenReturn(new ConversationEventMapper.DetailRender(
+                        "Bash", "ls -la /workspace", "drwxr-xr-x", false, true));
 
         ConversationFacade.ToolDetailView view = facade.fetchToolDetail(7, "main", "tu1", identity());
 

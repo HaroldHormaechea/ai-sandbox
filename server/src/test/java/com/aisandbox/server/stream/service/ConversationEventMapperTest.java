@@ -290,11 +290,15 @@ class ConversationEventMapperTest {
     void skill_tool_use_primaryText_falls_back_to_name_then_command_field() {
         String byName = "{\"type\":\"assistant\",\"uuid\":\"us2\",\"message\":{\"content\":["
                 + "{\"type\":\"tool_use\",\"id\":\"tuS2\",\"name\":\"Skill\",\"input\":{\"name\":\"deep-research\"}}]}}";
-        assertThat(((ConversationServerMessage.ToolUse) mapper.map("main", byName).get(0)).primaryText())
+        assertThat(((ConversationServerMessage.ToolUse)
+                                mapper.map("main", byName).get(0))
+                        .primaryText())
                 .isEqualTo("deep-research");
         String byCommand = "{\"type\":\"assistant\",\"uuid\":\"us3\",\"message\":{\"content\":["
                 + "{\"type\":\"tool_use\",\"id\":\"tuS3\",\"name\":\"Skill\",\"input\":{\"command\":\"verify\"}}]}}";
-        assertThat(((ConversationServerMessage.ToolUse) mapper.map("main", byCommand).get(0)).primaryText())
+        assertThat(((ConversationServerMessage.ToolUse)
+                                mapper.map("main", byCommand).get(0))
+                        .primaryText())
                 .isEqualTo("verify");
     }
 
@@ -489,9 +493,7 @@ class ConversationEventMapperTest {
         // message and MUST stay right-aligned (TurnStart), never a SystemNote.
         String line = "{\"type\":\"user\",\"uuid\":\"u5\",\"message\":{\"content\":"
                 + "\"please explain what the <command-name> tag means in a transcript\"}}";
-        assertThat(mapper.map("main", line))
-                .singleElement()
-                .isInstanceOf(ConversationServerMessage.TurnStart.class);
+        assertThat(mapper.map("main", line)).singleElement().isInstanceOf(ConversationServerMessage.TurnStart.class);
     }
 
     @Test
@@ -500,9 +502,7 @@ class ConversationEventMapperTest {
         // tag is not the harness's structural wrapper, so the line stays a real prompt.
         String line = "{\"type\":\"user\",\"uuid\":\"u6\",\"message\":{\"content\":"
                 + "\"<command-name>not actually a wrapper, no closing tag or args here\"}}";
-        assertThat(mapper.map("main", line))
-                .singleElement()
-                .isInstanceOf(ConversationServerMessage.TurnStart.class);
+        assertThat(mapper.map("main", line)).singleElement().isInstanceOf(ConversationServerMessage.TurnStart.class);
     }
 
     @Test
@@ -522,9 +522,7 @@ class ConversationEventMapperTest {
         // tool_result short-circuit).
         String line = "{\"type\":\"user\",\"uuid\":\"u8\",\"message\":{\"content\":["
                 + "{\"type\":\"tool_result\",\"tool_use_id\":\"tu9\",\"is_error\":false,\"content\":\"ok\"}]}}";
-        assertThat(mapper.map("main", line))
-                .singleElement()
-                .isInstanceOf(ConversationServerMessage.ToolResult.class);
+        assertThat(mapper.map("main", line)).singleElement().isInstanceOf(ConversationServerMessage.ToolResult.class);
     }
 
     @Test
@@ -542,8 +540,8 @@ class ConversationEventMapperTest {
         // main pane, and carries the isSidechain flag.
         String line = "{\"type\":\"user\",\"uuid\":\"u10\",\"isSidechain\":true,\"isMeta\":true,"
                 + "\"message\":{\"content\":\"teammate housekeeping line\"}}";
-        ConversationServerMessage.SystemNote n =
-                (ConversationServerMessage.SystemNote) mapper.map("subagent:agent-5", line).get(0);
+        ConversationServerMessage.SystemNote n = (ConversationServerMessage.SystemNote)
+                mapper.map("subagent:agent-5", line).get(0);
         assertThat(n.isSidechain()).isTrue();
         assertThat(n.source()).isEqualTo("subagent:agent-5");
         assertThat(n.label()).isEqualTo("System note");
