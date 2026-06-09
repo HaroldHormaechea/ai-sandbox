@@ -88,4 +88,32 @@ class SessionEventMessageTest {
         val msg = json.decodeFromString<SessionEventMessage>(text)
         assertThat(msg).isInstanceOf(SessionEventMessage.Delta::class.java)
     }
+
+    /**
+     * UC-47 AC2 / AC4 — the conversation name rides the UC-32 push frames (the
+     * row type is the same [SessionSummary]). A snapshot row carries the field;
+     * a delta upsert carries the UPDATED name (the live-update path); a row that
+     * omits it decodes to null (fallback to tmux title client-side).
+     */
+    @Test
+    fun snapshot_and_delta_frames_carry_the_conversation_name_field() {
+        val snapshotText = """
+            {"type":"snapshot","sessions":[
+              {"n":1,"label":"build","tmuxTitle":"vim","state":"running","uptimeSec":42,"activeStreams":2,"startedAt":null,"conversationName":"Refactor the SessionRow"},
+              {"n":2,"label":"","tmuxTitle":"(idle)","state":"running","uptimeSec":0,"activeStreams":0,"startedAt":null}
+            ]}
+        """.trimIndent()
+        val snapshot = json.decodeFromString<SessionEventMessage>(snapshotText) as SessionEventMessage.Snapshot
+        assertThat(snapshot.sessions[0].conversationName).isEqualTo("Refactor the SessionRow")
+        // Omitted field → null (server @JsonInclude(NON_NULL)); row falls back.
+        assertThat(snapshot.sessions[1].conversationName).isNull()
+
+        val deltaText = """
+            {"type":"delta",
+             "upserts":[{"n":1,"label":"build","tmuxTitle":"vim","state":"running","uptimeSec":50,"activeStreams":2,"startedAt":null,"conversationName":"Now testing UC-47"}],
+             "removed":[]}
+        """.trimIndent()
+        val delta = json.decodeFromString<SessionEventMessage>(deltaText) as SessionEventMessage.Delta
+        assertThat(delta.upserts.single().conversationName).isEqualTo("Now testing UC-47")
+    }
 }

@@ -640,4 +640,129 @@ class SessionsScreenInstrumentationTest {
         assertEquals("a paused (non-attachable) row tap must surface the open-gate hint", true, hintShown)
         assertNull("a paused row tap must NOT navigate into the session", openedN)
     }
+
+    // ── UC-47 — conversation name as the row's primary status line ───────────
+
+    private fun setBody(state: SessionsUiState) {
+        composeTestRule.setContent {
+            AiSandboxTheme {
+                SessionsBody(
+                    padding = PaddingValues(),
+                    onOpenTerminal = {},
+                    state = state,
+                    onSelectFilter = {},
+                    onOpen = {},
+                    onConfirmDelete = { _, _ -> },
+                )
+            }
+        }
+    }
+
+    /**
+     * UC-47 AC1 — when a running row has a known conversation name, the status
+     * line shows that NAME (not the raw tmux title). The tmux title is the
+     * fallback only, so with a name present it must not appear.
+     */
+    @Test
+    fun row_shows_the_conversation_name_as_the_primary_status_line() {
+        setBody(
+            SessionsUiState(
+                sessions = listOf(
+                    SessionSummary(
+                        n = 1,
+                        label = "alpha",
+                        state = "running",
+                        tmuxTitle = "(idle)",
+                        conversationName = "Refactor the SessionRow",
+                    ),
+                ),
+                filter = SessionsFilter.ALL,
+            ),
+        )
+
+        composeTestRule.onNodeWithText("Refactor the SessionRow").assertIsDisplayed()
+        // The tmux-title fallback must NOT be rendered when a name is present.
+        composeTestRule.onNodeWithText("(idle)").assertDoesNotExist()
+    }
+
+    /**
+     * UC-47 AC3 — when no conversation name is known (null), the row falls back
+     * to the existing tmux-title behavior without an empty/broken label.
+     */
+    @Test
+    fun row_falls_back_to_tmux_title_when_no_conversation_name() {
+        setBody(
+            SessionsUiState(
+                sessions = listOf(
+                    SessionSummary(
+                        n = 1,
+                        label = "alpha",
+                        state = "running",
+                        tmuxTitle = "vim src/main.rs",
+                        conversationName = null,
+                    ),
+                ),
+                filter = SessionsFilter.ALL,
+            ),
+        )
+
+        composeTestRule.onNodeWithText("vim src/main.rs").assertIsDisplayed()
+    }
+
+    /**
+     * UC-47 AC3 — a BLANK conversation name is treated as "no name" and also
+     * falls back to the tmux title (the `takeIf { isNotBlank() }` guard).
+     */
+    @Test
+    fun row_falls_back_to_tmux_title_when_conversation_name_is_blank() {
+        setBody(
+            SessionsUiState(
+                sessions = listOf(
+                    SessionSummary(
+                        n = 1,
+                        label = "alpha",
+                        state = "running",
+                        tmuxTitle = "building…",
+                        conversationName = "   ",
+                    ),
+                ),
+                filter = SessionsFilter.ALL,
+            ),
+        )
+
+        composeTestRule.onNodeWithText("building…").assertIsDisplayed()
+    }
+
+    /**
+     * UC-47 AC5 — a long conversation name is rendered single-line + ellipsized
+     * (maxLines = 1, TextOverflow.Ellipsis) so it never breaks the row layout or
+     * pushes out the StatusPill. The Text node carries the full string (ellipsis
+     * is a render-only treatment); this test pins that the long name is present
+     * and the row + its pill still render. Visual truncation is verified on the
+     * emulator (operator-run).
+     */
+    @Test
+    fun long_conversation_name_renders_without_breaking_the_row() {
+        val longName = "Investigate why the enumeration latency regressed " +
+            "after we added the conversation-name derivation to the hot path and fix it"
+        setBody(
+            SessionsUiState(
+                sessions = listOf(
+                    SessionSummary(
+                        n = 1,
+                        label = "alpha",
+                        state = "running",
+                        tmuxTitle = "(idle)",
+                        conversationName = longName,
+                    ),
+                ),
+                filter = SessionsFilter.ALL,
+            ),
+        )
+
+        // The name is shown and the card + its status pill still render.
+        composeTestRule.onNodeWithText(longName, substring = true).assertIsDisplayed()
+        composeTestRule.onNodeWithTag("session-card-1").assertIsDisplayed()
+        composeTestRule.onNodeWithText("running").assertIsDisplayed()
+    }
 }

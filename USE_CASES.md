@@ -57,5 +57,5 @@ Statuses:
 | 44 | [use-cases/44-conversation-multi-question-other-freetext-fix.md](use-cases/44-conversation-multi-question-other-freetext-fix.md) | Conversation view — multi-question "Other" free-text answers dropped (multiSelect) or break the wizard (non-last single-select) | done | 2026-06-09 |
 | 45 | [use-cases/45-local-echo-user-messages.md](use-cases/45-local-echo-user-messages.md) | Echo user messages locally in the conversation view (optimistic, reconcile on server echo) | done | 2026-06-09 |
 | 46 | [use-cases/46-server-row-lifecycle-context-menu.md](use-cases/46-server-row-lifecycle-context-menu.md) | Server-row context menu with Docker-lifecycle actions (remove/stop/start/pause/unpause), keep slide-to-remove | done | 2026-06-09 |
-| 47 | [use-cases/47-server-row-conversation-name.md](use-cases/47-server-row-conversation-name.md) | Show the Claude conversation name in each server row's status section | pending | 2026-06-09 |
+| 47 | [use-cases/47-server-row-conversation-name.md](use-cases/47-server-row-conversation-name.md) | Show the Claude conversation name in each server row's status section | done | 2026-06-09 |
 | 48 | [use-cases/48-server-row-working-spinner.md](use-cases/48-server-row-working-spinner.md) | Per-row working spinner to spot genuinely idle sessions at a glance | pending | 2026-06-09 |

@@ -99,6 +99,62 @@ class SessionEventWatcherTest {
         assertThat(delta.removed()).isEmpty();
     }
 
+    /** UC-47 — a running row carrying an explicit conversation name. */
+    private static Row rowNamed(int n, String state, String conversationName) {
+        return new Row(n, "s" + n, "(idle)", state, 0L, 0, null, conversationName);
+    }
+
+    /**
+     * UC-47 AC4 — the conversation name updates live over the UC-32 push. When
+     * ONLY the {@code conversationName} changes between two ticks (identical n /
+     * label / title / state / streams), {@link Row} record-equality still sees a
+     * difference, so the watcher emits exactly one coalesced {@link Delta}
+     * carrying the row with the NEW name — a scanning user sees the current name
+     * without a manual refresh.
+     */
+    @Test
+    void a_conversation_name_change_alone_emits_one_delta_with_the_new_name() {
+        subscribers(1);
+
+        // Tick 1 baselines [1: running, name="Initial prompt"].
+        snapshot(rowNamed(1, "running", "Initial prompt"));
+        watcher.tick();
+
+        // Tick 2 — same row in every field EXCEPT the conversation name.
+        snapshot(rowNamed(1, "running", "Refactor the SessionRow"));
+        watcher.tick();
+
+        ArgumentCaptor<SessionEventMessage> captor = ArgumentCaptor.forClass(SessionEventMessage.class);
+        verify(broadcaster, times(1)).broadcast(captor.capture());
+        Delta delta = (Delta) captor.getValue();
+        assertThat(delta.upserts()).containsExactly(rowNamed(1, "running", "Refactor the SessionRow"));
+        assertThat(delta.upserts().get(0).conversationName()).isEqualTo("Refactor the SessionRow");
+        assertThat(delta.removed()).isEmpty();
+    }
+
+    /**
+     * UC-47 AC4 — a name appearing for the first time (null → a value) is itself
+     * a change that pushes a delta; and a tick where the name is unchanged emits
+     * nothing (no spurious churn from the new field).
+     */
+    @Test
+    void name_appearing_pushes_a_delta_and_an_unchanged_name_is_silent() {
+        subscribers(1);
+
+        snapshot(rowNamed(1, "running", null)); // baseline: no name yet
+        watcher.tick();
+
+        snapshot(rowNamed(1, "running", "Now named")); // name appeared → delta
+        watcher.tick();
+
+        snapshot(rowNamed(1, "running", "Now named")); // identical → silent
+        watcher.tick();
+
+        ArgumentCaptor<SessionEventMessage> captor = ArgumentCaptor.forClass(SessionEventMessage.class);
+        verify(broadcaster, times(1)).broadcast(captor.capture());
+        assertThat(((Delta) captor.getValue()).upserts()).containsExactly(rowNamed(1, "running", "Now named"));
+    }
+
     @Test
     void unchanged_tick_broadcasts_nothing() {
         subscribers(1);

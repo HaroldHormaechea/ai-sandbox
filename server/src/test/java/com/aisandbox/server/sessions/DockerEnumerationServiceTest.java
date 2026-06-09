@@ -3,6 +3,7 @@ package com.aisandbox.server.sessions;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.argThat;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -10,6 +11,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.aisandbox.server.sessions.dto.SessionRecord;
+import com.aisandbox.server.sessions.service.ConversationNameService;
 import com.aisandbox.server.sessions.service.DockerEnumerationService;
 import com.aisandbox.server.sessions.service.ProcessExecutor;
 import com.aisandbox.server.sessions.service.TerminatingSessions;
@@ -922,5 +924,131 @@ class DockerEnumerationServiceTest {
                         any(),
                         any(),
                         any());
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // UC-47 — conversation name on the enumeration hot path
+    // ──────────────────────────────────────────────────────────────────────
+
+    /**
+     * Stub the four docker calls for a single marker-confirmed RUNNING session
+     * {@code ai-sandbox-<n>} so the conversation-name interaction is the only
+     * variable under test.
+     */
+    private static ProcessExecutor runningSession(int n) throws Exception {
+        ProcessExecutor exec = mock(ProcessExecutor.class);
+        when(exec.run(
+                        argThat(argv -> argv != null && argv.size() >= 3 && "ls".equals(argv.get(2))),
+                        any(),
+                        any(),
+                        any()))
+                .thenReturn(new ProcessExecutor.Result(0, "[{\"Name\":\"ai-sandbox-" + n + "\"}]", ""));
+        when(exec.run(argThat(argv -> argv != null && argv.contains("ps")), any(), any(), any()))
+                .thenReturn(new ProcessExecutor.Result(0, "cid\n", ""));
+        when(exec.run(argThat(argv -> argv != null && argv.contains("inspect")), any(), any()))
+                .thenReturn(new ProcessExecutor.Result(0, "lbl|running|true", ""));
+        when(exec.run(
+                        argThat(argv -> argv != null && argv.contains("test") && argv.contains("/tmp/aisandbox-ready")),
+                        any(),
+                        any()))
+                .thenReturn(new ProcessExecutor.Result(0, "", ""));
+        when(exec.run(argThat(argv -> argv != null && argv.contains("display-message")), any(), any()))
+                .thenReturn(new ProcessExecutor.Result(0, "bash", "")); // → tmuxTitle (idle)
+        return exec;
+    }
+
+    /**
+     * UC-47 AC1 — a running session whose cached conversation name is warm
+     * carries that name on its {@link SessionRecord}, and enumeration fires a
+     * fire-and-forget refresh for the NEXT tick (the cache read itself is
+     * non-blocking — AC6). The tmux title is still computed for fallback.
+     */
+    @Test
+    void running_session_carries_the_cached_conversation_name_and_refreshes() throws Exception {
+        ProcessExecutor exec = runningSession(3);
+        ConversationNameService names = mock(ConversationNameService.class);
+        when(names.cachedName(3)).thenReturn("Refactor the SessionRow");
+
+        DockerEnumerationService svc = new DockerEnumerationService(exec, new TerminatingSessions(), names);
+        SessionRecord r = svc.enumerate().get(0);
+
+        assertThat(r.n()).isEqualTo(3);
+        assertThat(r.state()).isEqualTo("running");
+        assertThat(r.conversationName()).isEqualTo("Refactor the SessionRow");
+        // tmux title still computed (the client's fallback when no name).
+        assertThat(r.tmuxTitle()).isEqualTo("(idle)");
+        // AC6 — a fire-and-forget refresh was scheduled for this running session.
+        verify(names).refreshAsync(eq(3), eq("ai-sandbox-3"));
+        // prune was invoked with the enumerated set so vanished names are dropped.
+        verify(names).prune(argThat(set -> set != null && set.contains(3)));
+    }
+
+    /**
+     * UC-47 AC3 — a running session with NO cached name yet (cold cache / first
+     * tick / lookup failure) carries a {@code null} conversationName, so the
+     * Android row falls back to the tmux title without an empty/broken label. A
+     * refresh is still scheduled so the NEXT tick warms.
+     */
+    @Test
+    void running_session_with_cold_cache_carries_null_name_and_falls_back() throws Exception {
+        ProcessExecutor exec = runningSession(4);
+        ConversationNameService names = mock(ConversationNameService.class);
+        when(names.cachedName(4)).thenReturn(null);
+
+        DockerEnumerationService svc = new DockerEnumerationService(exec, new TerminatingSessions(), names);
+        SessionRecord r = svc.enumerate().get(0);
+
+        assertThat(r.conversationName()).isNull();
+        assertThat(r.tmuxTitle()).isEqualTo("(idle)");
+        verify(names).refreshAsync(eq(4), eq("ai-sandbox-4"));
+    }
+
+    /**
+     * UC-47 AC3 / AC6 — a non-running (stopped) session never carries a
+     * conversation name and never triggers a derive: only a marker-confirmed
+     * running session can have an active conversation, and a derive into a
+     * stopped container would error and waste enumeration latency.
+     */
+    @Test
+    void stopped_session_never_reads_or_refreshes_a_conversation_name() throws Exception {
+        ProcessExecutor exec = mock(ProcessExecutor.class);
+        when(exec.run(
+                        argThat(argv -> argv != null && argv.size() >= 3 && "ls".equals(argv.get(2))),
+                        any(),
+                        any(),
+                        any()))
+                .thenReturn(new ProcessExecutor.Result(0, "[{\"Name\":\"ai-sandbox-12\"}]", ""));
+        when(exec.run(argThat(argv -> argv != null && argv.contains("ps")), any(), any(), any()))
+                .thenReturn(new ProcessExecutor.Result(0, "stopped-cid\n", ""));
+        when(exec.run(argThat(argv -> argv != null && argv.contains("inspect")), any(), any()))
+                .thenReturn(new ProcessExecutor.Result(0, "lbl|exited|false", ""));
+        ConversationNameService names = mock(ConversationNameService.class);
+
+        DockerEnumerationService svc = new DockerEnumerationService(exec, new TerminatingSessions(), names);
+        SessionRecord r = svc.enumerate().get(0);
+
+        assertThat(r.state()).isEqualTo("stopped");
+        assertThat(r.conversationName()).isNull();
+        verify(names, never()).refreshAsync(eq(12), any());
+        verify(names, never()).cachedName(12);
+        // prune still runs each enumeration so a vanished session's name is dropped.
+        verify(names).prune(any());
+    }
+
+    /**
+     * UC-47 back-compat — the 2-arg ctor substitutes a {@code null} name service
+     * (pre-UC-47 fixtures). Enumeration must not NPE; every row simply carries a
+     * {@code null} conversationName and falls back to the tmux title.
+     */
+    @Test
+    void null_name_service_back_compat_ctor_yields_null_names_without_npe() throws Exception {
+        ProcessExecutor exec = runningSession(5);
+
+        DockerEnumerationService svc = new DockerEnumerationService(exec, new TerminatingSessions());
+        SessionRecord r = svc.enumerate().get(0);
+
+        assertThat(r.n()).isEqualTo(5);
+        assertThat(r.conversationName()).isNull();
+        assertThat(r.tmuxTitle()).isEqualTo("(idle)");
     }
 }
