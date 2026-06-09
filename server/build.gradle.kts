@@ -537,7 +537,7 @@ val prepDebStaging by tasks.registering(Copy::class) {
     // UC-27 — devtools-select.sh / devtools-ui.sh are the shared raw-mode
     // selector (the Java CLI shells out to host/devtools-select.sh).
     val hostExecutables = listOf(
-        "spawn.sh", "clean.sh", "attach.sh", "lib.sh", "setup.sh", "entrypoint.sh",
+        "spawn.sh", "clean.sh", "lifecycle.sh", "attach.sh", "lib.sh", "setup.sh", "entrypoint.sh",
         "devtools-select.sh", "devtools-ui.sh")
     hostExecutables.forEach { name ->
         from(rootProject.file(name)) {

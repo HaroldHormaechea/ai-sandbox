@@ -43,6 +43,46 @@ paths:
             '*/*':
               schema:
                 type: object
+  /v1/sessions/{n}/{action}:
+    post:
+      tags:
+      - session-controller
+      summary: Drive a Docker-lifecycle action (stop/start/pause/unpause) on a session.
+      description: Runs lifecycle.sh for the target session. 204 on success; 404 session_not_found
+        for an unknown N; 409 session_state_conflict when the action is invalid for
+        the current state; 500 internal_error when lifecycle.sh exits non-zero.
+      operationId: lifecycle
+      parameters:
+      - name: "n"
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int32
+      - name: action
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        "204":
+          description: Action applied (lifecycle.sh exited 0).
+          content:
+            '*/*':
+              schema:
+                type: object
+        "404":
+          description: No session with that N.
+          content:
+            application/problem+json: {}
+        "409":
+          description: Action invalid for the session's current state.
+          content:
+            application/problem+json: {}
+        "500":
+          description: lifecycle.sh exited non-zero.
+          content:
+            application/problem+json: {}
   /v1/enrollment:
     post:
       tags:
@@ -266,17 +306,20 @@ components:
           description: "Tmux window title, or '(idle)' / '(unavailable)'"
         state:
           type: string
-          description: "running | starting | provisioning | terminating | stopped.\
-            \ provisioning (UC-27) = the container is up but still installing its\
-            \ spawn-time toolchains, shown as 'Installing prerequisites' client-side.\
+          description: "running | starting | provisioning | terminating | paused |\
+            \ stopped. provisioning (UC-27) = the container is up but still installing\
+            \ its spawn-time toolchains, shown as 'Installing prerequisites' client-side.\
             \ terminating (UC-28) = the session's teardown (clean.sh / docker compose\
             \ down) is in progress; shown with a destructive-red 'awaiting termination'\
-            \ pill client-side and blocks further delete attempts."
+            \ pill client-side and blocks further delete attempts. paused (UC-46)\
+            \ = the container is frozen via the cgroup freezer (docker compose pause);\
+            \ resumable with the Unpause lifecycle action."
           enum:
           - running
           - starting
           - provisioning
           - terminating
+          - paused
           - stopped
         uptimeSec:
           type: integer
