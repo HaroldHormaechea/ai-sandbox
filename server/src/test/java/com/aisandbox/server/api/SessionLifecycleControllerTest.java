@@ -220,8 +220,7 @@ class SessionLifecycleControllerTest {
     /** AC4 — an absent N → 404 session_not_found. */
     @Test
     void unknown_session_is_404_session_not_found() throws Exception {
-        when(facade.lifecycle(eq(99), eq("start")))
-                .thenThrow(new NoSuchElementException("session 99 not found"));
+        when(facade.lifecycle(eq(99), eq("start"))).thenThrow(new NoSuchElementException("session 99 not found"));
 
         WebTestClient client = buildClient(port);
         byte[] body = client.post()

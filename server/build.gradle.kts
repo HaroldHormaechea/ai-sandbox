@@ -355,6 +355,10 @@ val releaseBundle by tasks.registering(Zip::class) {
         into("host")
         filePermissions { unix("rwxr-xr-x") }
     }
+    from(rootProject.file("lifecycle.sh")) {
+        into("host")
+        filePermissions { unix("rwxr-xr-x") }
+    }
     from(rootProject.file("attach.sh")) {
         into("host")
         filePermissions { unix("rwxr-xr-x") }
