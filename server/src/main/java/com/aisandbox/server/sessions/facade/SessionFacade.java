@@ -194,9 +194,18 @@ public class SessionFacade {
      * concurrent delete / other lifecycle action on the same session, so two
      * overlapping requests can't corrupt container state.
      *
+     * <p>The facade owns the token→{@link LifecycleAction} parse (rather than
+     * the controller) so the {@code ..api} layer never depends on the internal
+     * {@code ..sessions.dto} type — {@code profile-java-server-architecture}
+     * rule 5, enforced by {@code LayeringTest}. The controller passes the raw
+     * regex-pinned path token straight through.
+     *
      * <p>Flow:
      *
      * <ol>
+     *   <li>Parse {@code actionToken} via {@link LifecycleAction#fromToken}
+     *       (unknown token → {@link IllegalArgumentException} → 400; the
+     *       controller's path regex makes this unreachable in practice).</li>
      *   <li>Acquire {@code perN.get(n)} (2s tryLock; timeout → {@link
      *       IOException} → 5xx).</li>
      *   <li>Read the session's current state from {@link
@@ -218,13 +227,16 @@ public class SessionFacade {
      * {@code LayeringTest} enforces that {@code @Transactional} stays off
      * everything (there is no transactional resource to join).
      *
+     * @param actionToken the wire path token {@code stop|start|pause|unpause}
      * @return {@code true} when {@code lifecycle.sh} exited 0; {@code false}
      *     when it ran but exited non-zero (mapped to 500 by the controller)
+     * @throws IllegalArgumentException for an unknown action token (→ 400)
      * @throws NoSuchElementException when no session {@code n} exists (→ 404)
      * @throws InvalidLifecycleTransitionException when the action is invalid
      *     for the current state (→ 409)
      */
-    public boolean lifecycle(int n, LifecycleAction action) throws IOException, InterruptedException {
+    public boolean lifecycle(int n, String actionToken) throws IOException, InterruptedException {
+        LifecycleAction action = LifecycleAction.fromToken(actionToken);
         ReentrantLock l = perN.get(n);
         if (!l.tryLock(2_000L, TimeUnit.MILLISECONDS)) {
             throw new IOException("Timed out acquiring per-session mutex for N=" + n);

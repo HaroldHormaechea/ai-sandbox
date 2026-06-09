@@ -4,7 +4,6 @@ import com.aisandbox.server.api.dto.ApiDtos;
 import com.aisandbox.server.api.error.ErrorCode;
 import com.aisandbox.server.api.error.ProblemDetailsAdvice;
 import com.aisandbox.server.api.mapper.ApiMappers;
-import com.aisandbox.server.sessions.dto.LifecycleAction;
 import com.aisandbox.server.sessions.dto.SpawnCommand;
 import com.aisandbox.server.sessions.facade.SessionFacade;
 import io.swagger.v3.oas.annotations.Operation;
@@ -172,8 +171,12 @@ public class SessionController {
     @PostMapping("/{n}/{action:stop|start|pause|unpause}")
     public ResponseEntity<?> lifecycle(@PathVariable int n, @PathVariable String action)
             throws IOException, InterruptedException {
-        LifecycleAction parsed = LifecycleAction.fromToken(action);
-        boolean ok = facade.lifecycle(n, parsed);
+        // The raw path token is passed straight through; the facade owns the
+        // token-to-action parse so this ..api layer never depends on the
+        // internal ..sessions.dto enum (profile-java-server-architecture rule 5;
+        // enforced by LayeringTest). The path is regex-pinned above, so the
+        // facade's parse always succeeds here.
+        boolean ok = facade.lifecycle(n, action);
         if (ok) {
             return ResponseEntity.noContent().build();
         }
