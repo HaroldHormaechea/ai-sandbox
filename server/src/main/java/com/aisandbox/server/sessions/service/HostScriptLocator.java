@@ -27,6 +27,7 @@ public class HostScriptLocator {
     private final Path spawnSh;
     private final Path cleanSh;
     private final Path attachSh;
+    private final Path lifecycleSh;
     private final Environment environment;
 
     public HostScriptLocator(ServerProperties props, Environment environment) {
@@ -34,6 +35,9 @@ public class HostScriptLocator {
         this.spawnSh = repoRoot.resolve("spawn.sh");
         this.cleanSh = repoRoot.resolve("clean.sh");
         this.attachSh = repoRoot.resolve("attach.sh");
+        // UC-46 — the new lifecycle.sh sibling drives docker compose
+        // stop/start/pause/unpause for a single session.
+        this.lifecycleSh = repoRoot.resolve("lifecycle.sh");
         this.environment = environment;
     }
 
@@ -43,7 +47,7 @@ public class HostScriptLocator {
                 && java.util.Arrays.asList(environment.getActiveProfiles()).contains("docs-only")) {
             return;
         }
-        for (Path p : new Path[] {spawnSh, cleanSh, attachSh}) {
+        for (Path p : new Path[] {spawnSh, cleanSh, attachSh, lifecycleSh}) {
             if (!Files.isRegularFile(p)) {
                 throw new IllegalStateException("Host script missing: " + p);
             }
@@ -67,5 +71,9 @@ public class HostScriptLocator {
 
     public Path attachSh() {
         return attachSh;
+    }
+
+    public Path lifecycleSh() {
+        return lifecycleSh;
     }
 }

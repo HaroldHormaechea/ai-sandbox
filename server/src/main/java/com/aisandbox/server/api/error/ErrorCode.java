@@ -36,7 +36,11 @@ public enum ErrorCode {
     // UC04 — AC37: GET /v1/sessions now also surfaces stopped containers.
     // The stream-attach guard returns this code when the client targets
     // a session whose container is not running.
-    SESSION_NOT_RUNNING;
+    SESSION_NOT_RUNNING,
+    // UC-46 — a lifecycle action (stop/start/pause/unpause) was requested
+    // for a session whose current state does not permit it (e.g. START on a
+    // running session, PAUSE on a stopped one). Mapped to 409 Conflict.
+    SESSION_STATE_CONFLICT;
 
     public String wire() {
         return name().toLowerCase();

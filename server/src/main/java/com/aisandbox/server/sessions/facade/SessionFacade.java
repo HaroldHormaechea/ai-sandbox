@@ -3,6 +3,7 @@ package com.aisandbox.server.sessions.facade;
 import com.aisandbox.server.audit.AuditAction;
 import com.aisandbox.server.audit.AuditLogger;
 import com.aisandbox.server.config.ServerProperties;
+import com.aisandbox.server.sessions.dto.LifecycleAction;
 import com.aisandbox.server.sessions.dto.SessionDetail;
 import com.aisandbox.server.sessions.dto.SessionRecord;
 import com.aisandbox.server.sessions.dto.SpawnCommand;
@@ -186,6 +187,81 @@ public class SessionFacade {
         }
     }
 
+    /**
+     * UC-46 — drive a Docker-lifecycle action (stop/start/pause/unpause) on
+     * session {@code n}. Mirrors {@link #deleteSession} for concurrency
+     * (AC8): the SAME per-N mutex serialises a lifecycle action against a
+     * concurrent delete / other lifecycle action on the same session, so two
+     * overlapping requests can't corrupt container state.
+     *
+     * <p>Flow:
+     *
+     * <ol>
+     *   <li>Acquire {@code perN.get(n)} (2s tryLock; timeout → {@link
+     *       IOException} → 5xx).</li>
+     *   <li>Read the session's current state from {@link
+     *       SessionRegistryService#list()} INSIDE the lock so the state used
+     *       for the validity check can't race a concurrent transition. An
+     *       absent {@code n} throws {@link NoSuchElementException} → 404
+     *       {@code session_not_found} (AC4 "safely rejects").</li>
+     *   <li>If {@code !action.isValidFrom(state)} throw {@link
+     *       InvalidLifecycleTransitionException} → 409 {@code
+     *       session_state_conflict} (AC3/AC4 — an out-of-state request is
+     *       rejected, never a silent no-op).</li>
+     *   <li>Run {@code lifecycle.sh} via the executor; invalidate the
+     *       registry cache + evict the per-N mutex in {@code finally} so the
+     *       next {@code GET /v1/sessions} re-enumerates the new Docker state
+     *       (AC6 reconciliation).</li>
+     * </ol>
+     *
+     * <p>No {@code @Transactional}: the project has no data store, and
+     * {@code LayeringTest} enforces that {@code @Transactional} stays off
+     * everything (there is no transactional resource to join).
+     *
+     * @return {@code true} when {@code lifecycle.sh} exited 0; {@code false}
+     *     when it ran but exited non-zero (mapped to 500 by the controller)
+     * @throws NoSuchElementException when no session {@code n} exists (→ 404)
+     * @throws InvalidLifecycleTransitionException when the action is invalid
+     *     for the current state (→ 409)
+     */
+    public boolean lifecycle(int n, LifecycleAction action) throws IOException, InterruptedException {
+        ReentrantLock l = perN.get(n);
+        if (!l.tryLock(2_000L, TimeUnit.MILLISECONDS)) {
+            throw new IOException("Timed out acquiring per-session mutex for N=" + n);
+        }
+        try {
+            String state = registry.list().stream()
+                    .filter(r -> r.n() == n)
+                    .map(SessionRecord::state)
+                    .findFirst()
+                    .orElseThrow(() -> new NoSuchElementException("session " + n + " not found"));
+            if (!action.isValidFrom(state)) {
+                throw new InvalidLifecycleTransitionException(n, action, state);
+            }
+            try {
+                ProcessExecutor.Result r = executor.lifecycle(action, n, spawnTimeout);
+                audit.logEvent(
+                        AuditAction.SESSION_LIFECYCLE,
+                        r.exitCode() == 0 ? "ok" : "fail",
+                        "action",
+                        action.flag(),
+                        "n",
+                        n,
+                        "exitCode",
+                        r.exitCode());
+                return r.exitCode() == 0;
+            } finally {
+                // The action changed (or attempted to change) the container's
+                // Docker state — drop the 1s enumeration cache so the next
+                // poll re-reads the authoritative state (AC6).
+                registry.invalidate();
+            }
+        } finally {
+            l.unlock();
+            perN.evict(n);
+        }
+    }
+
     /** Best-effort parsing of the assigned N from spawn.sh output. */
     static int parseAssignedN(String stdout, String stderr) {
         String all = (stderr == null ? "" : stderr) + "\n" + (stdout == null ? "" : stdout);
@@ -208,6 +284,26 @@ public class SessionFacade {
             this.exitCode = exitCode;
             this.stderr = stderr;
             this.consumedN = consumedN;
+        }
+    }
+
+    /**
+     * UC-46 — thrown when a lifecycle action is requested for a session whose
+     * current state does not permit it (per {@link
+     * LifecycleAction#isValidFrom(String)}). Mapped to 409 {@code
+     * session_state_conflict} by {@code ProblemDetailsAdvice}.
+     */
+    public static final class InvalidLifecycleTransitionException extends RuntimeException {
+        private static final long serialVersionUID = 1L;
+        public final int n;
+        public final transient LifecycleAction action;
+        public final String currentState;
+
+        public InvalidLifecycleTransitionException(int n, LifecycleAction action, String currentState) {
+            super("cannot " + action.flag() + " session " + n + " in state '" + currentState + "'");
+            this.n = n;
+            this.action = action;
+            this.currentState = currentState;
         }
     }
 }

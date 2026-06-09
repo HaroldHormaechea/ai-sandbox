@@ -58,7 +58,8 @@ import org.springframework.stereotype.Service;
  *   <li>{@code running} + ready marker absent  → {@code "provisioning"}
  *       ("Installing prerequisites" client-side)</li>
  *   <li>{@code created} / {@code restarting} → {@code "starting"}</li>
- *   <li>{@code exited} / {@code dead} / {@code paused} → {@code "stopped"}</li>
+ *   <li>{@code paused} → {@code "paused"} (UC-46 — frozen, resumable)</li>
+ *   <li>{@code exited} / {@code dead} → {@code "stopped"}</li>
  *   <li>anything else / no container     → {@code "stopped"}</li>
  * </ul>
  *
@@ -324,9 +325,9 @@ public class DockerEnumerationService {
 
     /**
      * Map raw {@code docker inspect .State.Status} to the wire-token model
-     * {@code running | starting | terminating | stopped}. Anything unknown
-     * becomes {@code stopped} — defensive: if Docker introduces a new state
-     * we don't want the Android UI to wedge on an unmapped value.
+     * {@code running | starting | terminating | paused | stopped}. Anything
+     * unknown becomes {@code stopped} — defensive: if Docker introduces a new
+     * state we don't want the Android UI to wedge on an unmapped value.
      *
      * <p>State table:
      * <ul>
@@ -338,7 +339,11 @@ public class DockerEnumerationService {
      *       to {@code terminating} — a legitimately stopped container is also
      *       {@code exited}; the authoritative terminating signal is the
      *       in-flight-delete registry layered on by {@link #enumerate()}.</li>
-     *   <li>{@code exited} / {@code dead} / {@code paused} → {@code "stopped"}</li>
+     *   <li>{@code paused} → {@code "paused"} (UC-46 — a frozen, resumable
+     *       container; distinct from stopped so the UI offers Unpause/Stop).
+     *       The readiness + tmux-title probes auto-skip because they only run
+     *       for {@code running}.</li>
+     *   <li>{@code exited} / {@code dead} → {@code "stopped"}</li>
      *   <li>anything else → {@code "stopped"}</li>
      * </ul>
      *
@@ -359,7 +364,12 @@ public class DockerEnumerationService {
             case "running" -> "running";
             case "created", "restarting" -> "starting";
             case "removing" -> "terminating";
-            case "exited", "dead", "paused" -> "stopped";
+                // UC-46 — `paused` is now its own first-class wire state (out of
+                // the stopped bucket) so the Android UI can offer Unpause/Stop and
+                // render the paused pill. A paused container is frozen via the
+                // cgroup freezer (SIGSTOP), not torn down.
+            case "paused" -> "paused";
+            case "exited", "dead" -> "stopped";
             default -> "stopped";
         };
     }

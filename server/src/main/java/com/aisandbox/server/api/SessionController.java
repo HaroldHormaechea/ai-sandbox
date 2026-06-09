@@ -4,6 +4,7 @@ import com.aisandbox.server.api.dto.ApiDtos;
 import com.aisandbox.server.api.error.ErrorCode;
 import com.aisandbox.server.api.error.ProblemDetailsAdvice;
 import com.aisandbox.server.api.mapper.ApiMappers;
+import com.aisandbox.server.sessions.dto.LifecycleAction;
 import com.aisandbox.server.sessions.dto.SpawnCommand;
 import com.aisandbox.server.sessions.facade.SessionFacade;
 import io.swagger.v3.oas.annotations.Operation;
@@ -126,6 +127,59 @@ public class SessionController {
         return ResponseEntity.internalServerError()
                 .body(ProblemDetailsAdvice.build(
                         HttpStatus.INTERNAL_SERVER_ERROR, ErrorCode.INTERNAL_ERROR, "clean.sh exited non-zero"));
+    }
+
+    /**
+     * UC-46 — drive a Docker-lifecycle action on a session.
+     *
+     * <p>{@code POST /v1/sessions/{n}/{action}} where {@code action} is one of
+     * {@code stop|start|pause|unpause} (the path is regex-constrained, so any
+     * other token 404s as an unmapped path). No request body.
+     *
+     * <p>Contract:
+     * <ul>
+     *   <li><b>204</b> — {@code lifecycle.sh} ran and exited 0.</li>
+     *   <li><b>404</b> {@code session_not_found} — no session with that N
+     *       (the facade's existence gate throws {@link
+     *       java.util.NoSuchElementException}).</li>
+     *   <li><b>409</b> {@code session_state_conflict} — the action is invalid
+     *       for the session's current state (e.g. START on a running
+     *       session); {@link SessionFacade.InvalidLifecycleTransitionException}.</li>
+     *   <li><b>500</b> {@code internal_error} — {@code lifecycle.sh} ran and
+     *       exited non-zero.</li>
+     * </ul>
+     */
+    @Operation(
+            summary = "Drive a Docker-lifecycle action (stop/start/pause/unpause) on a session.",
+            description = "Runs lifecycle.sh for the target session. 204 on success; 404 session_not_found for an "
+                    + "unknown N; 409 session_state_conflict when the action is invalid for the current state; "
+                    + "500 internal_error when lifecycle.sh exits non-zero.")
+    @ApiResponses({
+        @ApiResponse(responseCode = "204", description = "Action applied (lifecycle.sh exited 0)."),
+        @ApiResponse(
+                responseCode = "404",
+                description = "No session with that N.",
+                content = @Content(mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE)),
+        @ApiResponse(
+                responseCode = "409",
+                description = "Action invalid for the session's current state.",
+                content = @Content(mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE)),
+        @ApiResponse(
+                responseCode = "500",
+                description = "lifecycle.sh exited non-zero.",
+                content = @Content(mediaType = MediaType.APPLICATION_PROBLEM_JSON_VALUE)),
+    })
+    @PostMapping("/{n}/{action:stop|start|pause|unpause}")
+    public ResponseEntity<?> lifecycle(@PathVariable int n, @PathVariable String action)
+            throws IOException, InterruptedException {
+        LifecycleAction parsed = LifecycleAction.fromToken(action);
+        boolean ok = facade.lifecycle(n, parsed);
+        if (ok) {
+            return ResponseEntity.noContent().build();
+        }
+        return ResponseEntity.internalServerError()
+                .body(ProblemDetailsAdvice.build(
+                        HttpStatus.INTERNAL_SERVER_ERROR, ErrorCode.INTERNAL_ERROR, "lifecycle.sh exited non-zero"));
     }
 
     public record SpawnedDto(int n) {}

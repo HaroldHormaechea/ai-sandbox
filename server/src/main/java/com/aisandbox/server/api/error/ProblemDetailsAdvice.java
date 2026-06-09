@@ -70,6 +70,18 @@ public class ProblemDetailsAdvice {
         return pd;
     }
 
+    @ExceptionHandler(SessionFacade.InvalidLifecycleTransitionException.class)
+    @ResponseBody
+    public ProblemDetail handleInvalidLifecycleTransition(SessionFacade.InvalidLifecycleTransitionException ex) {
+        // UC-46 — an out-of-state lifecycle action (e.g. START on a running
+        // session). 409 Conflict, machine code session_state_conflict; the
+        // current state is attached so the client can reconcile / re-render.
+        ProblemDetail pd = build(HttpStatus.CONFLICT, ErrorCode.SESSION_STATE_CONFLICT, ex.getMessage());
+        pd.setProperty("n", ex.n);
+        pd.setProperty("currentState", ex.currentState);
+        return pd;
+    }
+
     @ExceptionHandler(CertificateException.class)
     @ResponseBody
     public ProblemDetail handleBadCert(CertificateException ex) {

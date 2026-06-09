@@ -20,7 +20,7 @@ import org.springframework.stereotype.Component;
  *   <li>The server key or certificate is unreadable.</li>
  *   <li>The allowlist <em>directory</em> is missing.</li>
  *   <li>UC02 scripts {@code spawn.sh}, {@code attach.sh}, {@code clean.sh}
- *       are missing or non-executable.</li>
+ *       and the UC-46 {@code lifecycle.sh} are missing or non-executable.</li>
  *   <li>The audit-log directory is missing or not writable.</li>
  * </ul>
  *
@@ -82,7 +82,7 @@ public class PropertiesValidationStartupCheck implements ApplicationListener<App
         }
 
         Path repoRoot = props.hostscripts().repoRoot();
-        for (String script : new String[] {"spawn.sh", "attach.sh", "clean.sh"}) {
+        for (String script : new String[] {"spawn.sh", "attach.sh", "clean.sh", "lifecycle.sh"}) {
             Path p = repoRoot.resolve(script);
             if (!Files.isRegularFile(p) || !Files.isExecutable(p)) {
                 throw new IllegalStateException("Required UC02 host script not present or not executable: " + p);
