@@ -195,6 +195,27 @@ public class ConversationFacade {
                 multiSelect);
     }
 
+    /**
+     * UC-43/AC11 — translate a multi-question batch answer into the wizard's
+     * selection keystrokes (one scheduled sequence resolving the whole sheet).
+     * Same audit event shape as the single {@link #injectAnswer} path, tagged with
+     * the question count.
+     */
+    public void injectAnswerBatch(
+            int n, String targetId, List<InputInjectionService.BatchAnswerSpec> answers, ClientIdentity identity)
+            throws IOException {
+        injection.injectAnswerBatch(n, toInjectTarget(resolveBridgeTarget(n, targetId)), answers);
+        audit.logEvent(
+                AuditAction.CONVERSATION_ANSWER,
+                "ok",
+                "n",
+                n,
+                "targetId",
+                targetId == null ? "main" : targetId,
+                "batch",
+                answers == null ? 0 : answers.size());
+    }
+
     /** Interrupt (ESC) the active turn on {@code targetId}'s session. */
     public void interrupt(int n, String targetId, ClientIdentity identity) throws IOException {
         injection.interrupt(n, toInjectTarget(resolveBridgeTarget(n, targetId)));

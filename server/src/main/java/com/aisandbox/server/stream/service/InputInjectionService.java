@@ -82,6 +82,16 @@ public class InputInjectionService {
     }
 
     /**
+     * UC-43 — one question's resolved selection metadata for
+     * {@link #injectAnswerBatch}. Mirrors the per-question parameters of
+     * {@link #injectAnswer}; the conversation handler derives each spec from the
+     * cached {@code AskUserQuestion}'s {@code questions[questionIndex]} plus the
+     * client's {@code answer-batch} item.
+     */
+    public record BatchAnswerSpec(
+            int optionCount, boolean multiSelect, List<Integer> selections, int otherIndex, String freeText) {}
+
+    /**
      * AC8/AC9 — inject the composer text as a prompt + submit into {@code
      * target}'s session. Multiline is delivered with {@code C-j} between lines
      * and a final {@code Enter}. A blank submit is ignored.
@@ -103,7 +113,13 @@ public class InputInjectionService {
     }
 
     /**
-     * AC11 — translate a structured answer into the option-selection keystrokes.
+     * AC11 — translate a single-question structured answer into the
+     * option-selection keystrokes for the lone {@code AskUserQuestion} sheet.
+     *
+     * <p>Resets the option cursor to the top, then delegates to the shared
+     * per-question keystroke helper ({@link #selectQuestionAnswer}) with
+     * {@code Enter} as the commit key — for a single-question sheet there is no
+     * tab to advance to, so {@code Enter} both selects/commits and submits.
      *
      * @param optionCount total options on the question (for cursor bounds)
      * @param multiSelect whether multiple options may be toggled
@@ -120,13 +136,82 @@ public class InputInjectionService {
             int otherIndex,
             String freeText)
             throws IOException {
+        resetCursorToTop(n, target);
+        selectQuestionAnswer(n, target, optionCount, multiSelect, selections, otherIndex, freeText, "Enter");
+    }
+
+    /**
+     * UC-43 — inject answers to a <b>multi-question</b> {@code AskUserQuestion}
+     * (N&gt;1) as ONE keystroke sequence that walks the live TUI's tabbed wizard.
+     *
+     * <p><b>Verified live against Claude Code {@value #PINNED_CLAUDE_VERSION}</b>
+     * (UC-43 hard gate — the runtime interaction model is unknowable from source
+     * and was driven through a real multi-question ask in tmux):
+     * <ul>
+     *   <li>The sheet opens at the top of the first question's option list, and
+     *       the option cursor <b>auto-resets to the top</b> of each subsequent
+     *       question when the wizard advances — so NO per-question
+     *       {@code resetCursorToTop} is used here (and indeed must not be: in the
+     *       wizard, {@code Up}/{@code Down} <b>wrap around</b> the option ring, so a
+     *       blind {@code Up}×N reset is not deterministic).</li>
+     *   <li><b>single-select</b> question: walk {@code Down} to the option, then
+     *       {@code Enter} — which selects it AND advances to the next tab.</li>
+     *   <li><b>multiSelect</b> question: walk the options toggling {@code Space} in
+     *       place (the cursor stays put), then {@code Tab} to advance to the next
+     *       tab — {@code Enter} on a multiSelect option only toggles it, it does
+     *       NOT advance.</li>
+     *   <li><b>free-text "Other"</b>: walk to the "Type something" row, type the
+     *       text INLINE, then {@code Enter} — typing an EMPTY "Type something" and
+     *       pressing {@code Enter} DECLINES the whole ask, so the text is always
+     *       typed before the {@code Enter}.</li>
+     *   <li>After the last question advances, the wizard lands on the "Submit" tab
+     *       with "Submit answers" highlighted; a final {@code Enter} submits the
+     *       whole batch.</li>
+     * </ul>
+     *
+     * @param answers one spec per question, already sorted by {@code questionIndex} by the caller
+     */
+    public void injectAnswerBatch(int n, InjectTarget target, List<BatchAnswerSpec> answers) throws IOException {
+        if (answers == null || answers.isEmpty()) {
+            return;
+        }
+        for (BatchAnswerSpec a : answers) {
+            // multiSelect advances with Tab; single-select advances with Enter (see method javadoc).
+            selectQuestionAnswer(
+                    n, target, a.optionCount(), a.multiSelect(), a.selections(), a.otherIndex(), a.freeText(), "Tab");
+        }
+        // Final question's advance lands on the "Submit" tab → one Enter submits the batch.
+        sendKeys(n, target, "Enter");
+    }
+
+    /**
+     * Shared per-question keystroke walk used by BOTH {@link #injectAnswer}
+     * (single-question, {@code commitKey == "Enter"}) and
+     * {@link #injectAnswerBatch} (per wizard tab, {@code commitKey == "Tab"} for a
+     * multiSelect question). Assumes the option cursor is already at the TOP of the
+     * current question's option list. Keeping this single helper prevents the two
+     * paths from drifting apart on a Claude TUI version bump.
+     *
+     * <p>{@code commitKey} is used only for multiSelect (where toggles are
+     * committed with {@code Space} and the question is then advanced/submitted with
+     * that key). single-select and free-text always finish with {@code Enter},
+     * which both selects and advances/submits.
+     */
+    private void selectQuestionAnswer(
+            int n,
+            InjectTarget target,
+            int optionCount,
+            boolean multiSelect,
+            List<Integer> selections,
+            int otherIndex,
+            String freeText,
+            String commitKey)
+            throws IOException {
         List<Integer> sel = (selections == null) ? List.of() : selections;
         boolean freeTextChosen = otherIndex >= 0 && sel.contains(otherIndex) && freeText != null && !freeText.isBlank();
 
-        resetCursorToTop(n, target);
-
         if (multiSelect) {
-            // Walk every option top→bottom, toggling Space on the selected ones.
+            // Walk every option top→bottom, toggling Space on the selected ones, then commit/advance.
             for (int p = 0; p < Math.max(optionCount, 1); p++) {
                 if (sel.contains(p)) {
                     sendKeys(n, target, "Space");
@@ -135,19 +220,21 @@ public class InputInjectionService {
                     sendKeys(n, target, "Down");
                 }
             }
+            sendKeys(n, target, commitKey);
+        } else if (freeTextChosen) {
+            // Single-select free-text: walk to the "Other"/"Type something" row, type the text
+            // INLINE (it replaces the row label), then Enter to commit + advance/submit. The text
+            // MUST be typed before the Enter — Enter on an empty "Type something" declines the ask.
+            for (int d = 0; d < otherIndex; d++) {
+                sendKeys(n, target, "Down");
+            }
+            sendLiteral(n, target, freeText);
             sendKeys(n, target, "Enter");
         } else {
             int target0 = sel.isEmpty() ? 0 : Math.max(0, sel.get(0));
             for (int d = 0; d < target0; d++) {
                 sendKeys(n, target, "Down");
             }
-            sendKeys(n, target, "Enter");
-        }
-
-        if (freeTextChosen) {
-            // After selecting the Other option, type the free text + submit. This
-            // is the most version-fragile path (proposal RISK 2) — documented.
-            sendLiteral(n, target, freeText);
             sendKeys(n, target, "Enter");
         }
     }

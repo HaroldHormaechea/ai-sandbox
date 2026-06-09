@@ -24,6 +24,7 @@ import java.util.List;
 @JsonSubTypes({
     @JsonSubTypes.Type(value = ConversationClientMessage.ComposerInput.class, name = "composer-input"),
     @JsonSubTypes.Type(value = ConversationClientMessage.Answer.class, name = "answer"),
+    @JsonSubTypes.Type(value = ConversationClientMessage.AnswerBatch.class, name = "answer-batch"),
     @JsonSubTypes.Type(value = ConversationClientMessage.SelectTarget.class, name = "select-target"),
     @JsonSubTypes.Type(value = ConversationClientMessage.Interrupt.class, name = "interrupt"),
     @JsonSubTypes.Type(value = ConversationClientMessage.EnumerateTargets.class, name = "enumerate-targets"),
@@ -33,6 +34,7 @@ import java.util.List;
 public sealed interface ConversationClientMessage
         permits ConversationClientMessage.ComposerInput,
                 ConversationClientMessage.Answer,
+                ConversationClientMessage.AnswerBatch,
                 ConversationClientMessage.SelectTarget,
                 ConversationClientMessage.Interrupt,
                 ConversationClientMessage.EnumerateTargets,
@@ -59,6 +61,31 @@ public sealed interface ConversationClientMessage
      */
     record Answer(String questionUuid, int questionIndex, List<Integer> selections, String freeText)
             implements ConversationClientMessage {}
+
+    /**
+     * UC-43 — a batched answer to a <b>multi-question</b> {@code AskUserQuestion}
+     * (N&gt;1). {@code questionUuid} echoes the pending question's {@code toolUseId}
+     * (or {@code uuid}), exactly like {@link Answer}. {@code answers} carries one
+     * {@link AnswerItem} per question in the batch; the server sorts them by
+     * {@code questionIndex} and injects them as a SINGLE scheduled keystroke
+     * sequence so the whole tabbed sheet is resolved in one tool turn (matching
+     * the live TUI wizard, where each question is its own tab and the cached
+     * {@code AskUserQuestion} is only evicted once the entire form is submitted).
+     *
+     * <p>The single-question case continues to use {@link Answer}; only N&gt;1
+     * uses this frame. See {@code server/CONVERSATION_PROTOCOL.md} for the wire
+     * shape and the verified keystroke model.
+     */
+    record AnswerBatch(String questionUuid, List<AnswerItem> answers) implements ConversationClientMessage {}
+
+    /**
+     * One question's answer within an {@link AnswerBatch} (UC-43).
+     * {@code questionIndex} is the 0-based position within the
+     * {@code AskUserQuestion}'s {@code questions[]}; {@code selections} are the
+     * chosen option indices for that question; {@code freeText} is the
+     * always-present "Other" value for that question (empty/null when unused).
+     */
+    record AnswerItem(int questionIndex, List<Integer> selections, String freeText) {}
 
     /** Switch the conversation to a different target (AC17), echoing a prior {@code targets} id. */
     record SelectTarget(String targetId) implements ConversationClientMessage {}

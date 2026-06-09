@@ -127,6 +127,17 @@ class ConversationController(
         _turnPhase.value = TurnPhase.WORKING
     }
 
+    /**
+     * UC-43 (AC2/AC3/AC4) — submit all answers of a multi-question (N>1) sheet in a
+     * single `answer-batch` frame; optimistically dismiss the sheet and show the
+     * spinner, exactly like [submitAnswer]. [items] are in `questionIndex` order.
+     */
+    fun submitAnswerBatch(questionUuid: String, items: List<AnswerItem>) {
+        client?.sendAnswerBatch(questionUuid, items)
+        _pendingSheet.value = null
+        _turnPhase.value = TurnPhase.WORKING
+    }
+
     /** AC17 — switch the tailed/inject target; clear the view for the new target's transcript. */
     fun selectTarget(targetId: String) {
         _selectedTargetId.value = targetId

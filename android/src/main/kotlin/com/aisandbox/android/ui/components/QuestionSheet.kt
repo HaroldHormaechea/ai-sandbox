@@ -33,6 +33,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.aisandbox.android.conversation.AnswerItem
 import com.aisandbox.android.conversation.ConvQuestion
 import com.aisandbox.android.conversation.PendingSheet
 import com.aisandbox.android.ui.theme.OnSurface
@@ -47,16 +48,21 @@ import com.aisandbox.android.ui.theme.SurfaceLow
  * `multiSelect`, and a free-text field for the always-present "Other" option.
  * Submitting sends a structured answer; the parent clears the sheet (AC11).
  *
- * <p>An `AskUserQuestion` may carry several questions; the TUI resolves them one
- * at a time and the server's answer frame carries a single `questionIndex`, so
- * this sheet drives the first unanswered question (index 0). The plan-approval
- * variant renders the plan text with Approve / Reject.
+ * <p>UC-43 — an `AskUserQuestion` may carry several questions. A SINGLE-question
+ * sheet (the common case) renders one question and submits the existing single
+ * `answer` frame (index 0), unchanged. A MULTI-question sheet (N&gt;1) is rendered
+ * **paged one-at-a-time** with a "X of N" progress indicator and Back/Next
+ * navigation: each question's answer is buffered locally (keyed by `questionIndex`)
+ * and the whole batch is submitted together via [onSubmitBatch] only once every
+ * question is answered. The plan-approval variant renders the plan text with
+ * Approve / Reject.
  */
 @Composable
 fun QuestionSheet(
     sheet: PendingSheet,
     onSubmit: (questionUuid: String, questionIndex: Int, selections: List<Int>, freeText: String) -> Unit,
     modifier: Modifier = Modifier,
+    onSubmitBatch: (questionUuid: String, items: List<AnswerItem>) -> Unit = { _, _ -> },
 ) {
     Surface(
         modifier = modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
@@ -66,25 +72,33 @@ fun QuestionSheet(
     ) {
         Column(modifier = Modifier.padding(16.dp)) {
             when (sheet) {
-                is PendingSheet.Questions -> QuestionBody(sheet, onSubmit)
+                is PendingSheet.Questions ->
+                    if (sheet.questions.size > 1) {
+                        PagedQuestionBody(sheet, onSubmitBatch)
+                    } else {
+                        SingleQuestionBody(sheet, onSubmit)
+                    }
                 is PendingSheet.Plan -> PlanBody(sheet, onSubmit)
             }
         }
     }
 }
 
+/**
+ * The shared rendering of ONE question — header, prompt, the option list (radio /
+ * checkbox per [ConvQuestion.multiSelect]), and the always-present "Other"
+ * free-text field (AC10). Used by both the single-question and paged
+ * (multi-question) bodies so they stay visually identical. The caller owns the
+ * selection/free-text state; this composable is pure rendering.
+ */
 @Composable
-private fun QuestionBody(
-    sheet: PendingSheet.Questions,
-    onSubmit: (String, Int, List<Int>, String) -> Unit,
+private fun QuestionContent(
+    q: ConvQuestion,
+    isChecked: (Int) -> Boolean,
+    onToggle: (Int) -> Unit,
+    otherText: String,
+    onOtherChange: (String) -> Unit,
 ) {
-    val q: ConvQuestion = sheet.questions.firstOrNull() ?: run {
-        Text("Question", color = OnSurface)
-        return
-    }
-    val selected = remember(sheet.questionUuid) { mutableStateMapOf<Int, Boolean>() }
-    var otherText by remember(sheet.questionUuid) { mutableStateOf("") }
-
     if (q.header.isNotBlank()) {
         Text(q.header, style = MaterialTheme.typography.labelMedium, color = OnSurfaceMuted)
         Spacer(Modifier.height(2.dp))
@@ -100,22 +114,15 @@ private fun QuestionBody(
             OptionRow(
                 label = opt.label,
                 description = opt.description,
-                checked = selected[idx] == true,
+                checked = isChecked(idx),
                 multiSelect = q.multiSelect,
-                onToggle = {
-                    if (q.multiSelect) {
-                        selected[idx] = !(selected[idx] ?: false)
-                    } else {
-                        selected.clear()
-                        selected[idx] = true
-                    }
-                },
+                onToggle = { onToggle(idx) },
             )
         }
         // The always-present "Other" free-text option (AC10).
         OutlinedTextField(
             value = otherText,
-            onValueChange = { otherText = it },
+            onValueChange = onOtherChange,
             modifier = Modifier.fillMaxWidth(),
             label = { Text("Other", color = OnSurfaceMuted) },
             placeholder = { Text("Type a custom answer", color = OnSurfaceMuted) },
@@ -123,6 +130,39 @@ private fun QuestionBody(
             maxLines = 3,
         )
     }
+}
+
+/**
+ * The common single-question sheet (AC5 — unchanged behavior). Submits the
+ * existing single `answer` frame with `questionIndex = 0`; the "Other" free-text,
+ * when used, occupies the option index equal to the option count.
+ */
+@Composable
+private fun SingleQuestionBody(
+    sheet: PendingSheet.Questions,
+    onSubmit: (String, Int, List<Int>, String) -> Unit,
+) {
+    val q: ConvQuestion = sheet.questions.firstOrNull() ?: run {
+        Text("Question", color = OnSurface)
+        return
+    }
+    val selected = remember(sheet.questionUuid) { mutableStateMapOf<Int, Boolean>() }
+    var otherText by remember(sheet.questionUuid) { mutableStateOf("") }
+
+    QuestionContent(
+        q = q,
+        isChecked = { selected[it] == true },
+        onToggle = { idx ->
+            if (q.multiSelect) {
+                selected[idx] = !(selected[idx] ?: false)
+            } else {
+                selected.clear()
+                selected[idx] = true
+            }
+        },
+        otherText = otherText,
+        onOtherChange = { otherText = it },
+    )
 
     Spacer(Modifier.height(12.dp))
     val selectionIndices = selected.filterValues { it }.keys.sorted().toMutableList()
@@ -138,6 +178,93 @@ private fun QuestionBody(
             },
         ) {
             Text("Send answer")
+        }
+    }
+}
+
+/**
+ * UC-43 (AC2/AC3/AC4) — the multi-question (N>1) paged sheet. Shows ONE question
+ * at a time with an "X of N" progress indicator and Back/Next navigation; each
+ * question's selections + free text are buffered locally keyed by `questionIndex`,
+ * and the batch is submitted (via [onSubmitBatch]) only once EVERY question is
+ * answered. Each question's "Other" free-text, when used, occupies that question's
+ * option-count index, exactly like the single-question path.
+ */
+@Composable
+private fun PagedQuestionBody(
+    sheet: PendingSheet.Questions,
+    onSubmitBatch: (String, List<AnswerItem>) -> Unit,
+) {
+    val questions = sheet.questions
+    val n = questions.size
+    var current by remember(sheet.questionUuid) { mutableStateOf(0) }
+    // Per-question buffered state, keyed by questionIndex.
+    val selectionsByQ = remember(sheet.questionUuid) { mutableStateMapOf<Int, Set<Int>>() }
+    val freeTextByQ = remember(sheet.questionUuid) { mutableStateMapOf<Int, String>() }
+
+    val q = questions[current]
+    val curSelections = selectionsByQ[current] ?: emptySet()
+    val curOther = freeTextByQ[current] ?: ""
+
+    fun answered(i: Int): Boolean =
+        (selectionsByQ[i]?.isNotEmpty() == true) || (freeTextByQ[i]?.isNotBlank() == true)
+
+    val allAnswered = (0 until n).all { answered(it) }
+
+    Text(
+        "Question ${current + 1} of $n",
+        style = MaterialTheme.typography.labelMedium,
+        color = OnSurfaceMuted,
+    )
+    Spacer(Modifier.height(6.dp))
+
+    QuestionContent(
+        q = q,
+        isChecked = { curSelections.contains(it) },
+        onToggle = { idx ->
+            val existing = selectionsByQ[current] ?: emptySet()
+            selectionsByQ[current] = if (q.multiSelect) {
+                if (existing.contains(idx)) existing - idx else existing + idx
+            } else {
+                setOf(idx)
+            }
+        },
+        otherText = curOther,
+        onOtherChange = { freeTextByQ[current] = it },
+    )
+
+    Spacer(Modifier.height(12.dp))
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        OutlinedButton(enabled = current > 0, onClick = { current -= 1 }) {
+            Text("Back")
+        }
+        if (current < n - 1) {
+            Button(onClick = { current += 1 }) {
+                Text("Next")
+            }
+        } else {
+            Button(
+                enabled = allAnswered,
+                onClick = {
+                    val items = (0 until n).map { i ->
+                        val sels = (selectionsByQ[i] ?: emptySet()).sorted().toMutableList()
+                        val ft = freeTextByQ[i] ?: ""
+                        if (ft.isNotBlank()) sels.add(questions[i].options.size) // Other index = optionCount
+                        AnswerItem(
+                            questionIndex = i,
+                            selections = sels,
+                            freeText = if (ft.isNotBlank()) ft else "",
+                        )
+                    }
+                    onSubmitBatch(sheet.questionUuid, items)
+                },
+            ) {
+                Text("Submit all")
+            }
         }
     }
 }

@@ -162,6 +162,20 @@ data class ConvOption(
 )
 
 /**
+ * UC-43 — one question's buffered answer within a multi-question (N>1) sheet. The
+ * paged [com.aisandbox.android.ui.components.QuestionSheet] buffers one of these
+ * per question (keyed by [questionIndex]); on the final submit they are sent
+ * together in a single `answer-batch` frame, in `questionIndex` order.
+ * [selections] are the chosen option indices; [freeText] is the always-present
+ * "Other" value for that question (empty when unused).
+ */
+data class AnswerItem(
+    val questionIndex: Int,
+    val selections: List<Int>,
+    val freeText: String,
+)
+
+/**
  * The pending interactive prompt the [com.aisandbox.android.ui.components.QuestionSheet]
  * renders. Cleared when answered or when the transcript advances past it (AC12).
  */

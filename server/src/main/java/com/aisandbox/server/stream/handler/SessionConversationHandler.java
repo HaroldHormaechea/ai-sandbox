@@ -9,11 +9,14 @@ import com.aisandbox.server.stream.facade.ConversationFacade;
 import com.aisandbox.server.stream.facade.StreamFacade;
 import com.aisandbox.server.stream.handshake.ConversationSubprotocolHandshakeInterceptor;
 import com.aisandbox.server.stream.service.ConversationEventMapper;
+import com.aisandbox.server.stream.service.InputInjectionService;
 import com.aisandbox.server.stream.service.StreamControlMessageService;
 import com.aisandbox.server.stream.service.TranscriptTailService;
 import io.netty.channel.ChannelId;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -313,6 +316,8 @@ public class SessionConversationHandler implements WebSocketHandler {
                             () -> facade.injectComposer(ctx.n, ctx.selectedTarget.get(), in.text(), ctx.identity)));
             case ConversationClientMessage.Answer a -> Schedulers.boundedElastic()
                     .schedule(() -> applyAnswer(session, ctx, a));
+            case ConversationClientMessage.AnswerBatch ab -> Schedulers.boundedElastic()
+                    .schedule(() -> applyAnswerBatch(session, ctx, ab));
             case ConversationClientMessage.Interrupt it -> Schedulers.boundedElastic()
                     .schedule(() ->
                             safe(ctx, session, () -> facade.interrupt(ctx.n, ctx.selectedTarget.get(), ctx.identity)));
@@ -356,37 +361,81 @@ public class SessionConversationHandler implements WebSocketHandler {
     private void applyAnswer(WebSocketSession session, ConvCtx ctx, ConversationClientMessage.Answer a) {
         ConversationServerMessage.Question q =
                 a.questionUuid() == null ? null : ctx.pendingQuestions.get(a.questionUuid());
+        InputInjectionService.BatchAnswerSpec spec =
+                deriveAnswerSpec(q, a.questionIndex(), a.selections(), a.freeText());
+        safe(
+                ctx,
+                session,
+                () -> facade.injectAnswer(
+                        ctx.n,
+                        ctx.selectedTarget.get(),
+                        spec.optionCount(),
+                        spec.multiSelect(),
+                        spec.selections(),
+                        spec.otherIndex(),
+                        spec.freeText(),
+                        ctx.identity));
+        if (q != null) {
+            evictCachedQuestion(ctx, q);
+        }
+    }
+
+    /**
+     * UC-43 — handle a multi-question {@code answer-batch}: resolve the single
+     * cached {@code AskUserQuestion}, derive each question's selection metadata
+     * (sorted by {@code questionIndex} so the keystroke walk matches the wizard's
+     * tab order), inject the whole batch as ONE scheduled keystroke sequence, and
+     * evict the cached question only AFTER the batch is injected (the cached
+     * question covers all N questions, so it must survive until the form submits).
+     */
+    private void applyAnswerBatch(WebSocketSession session, ConvCtx ctx, ConversationClientMessage.AnswerBatch ab) {
+        ConversationServerMessage.Question q =
+                ab.questionUuid() == null ? null : ctx.pendingQuestions.get(ab.questionUuid());
+        List<ConversationClientMessage.AnswerItem> items =
+                ab.answers() == null ? List.of() : new ArrayList<>(ab.answers());
+        items.sort(Comparator.comparingInt(ConversationClientMessage.AnswerItem::questionIndex));
+        List<InputInjectionService.BatchAnswerSpec> specs = new ArrayList<>(items.size());
+        for (ConversationClientMessage.AnswerItem item : items) {
+            specs.add(deriveAnswerSpec(q, item.questionIndex(), item.selections(), item.freeText()));
+        }
+        safe(ctx, session, () -> facade.injectAnswerBatch(ctx.n, ctx.selectedTarget.get(), specs, ctx.identity));
+        if (q != null) {
+            evictCachedQuestion(ctx, q);
+        }
+    }
+
+    /**
+     * Derive one question's {@link InputInjectionService.BatchAnswerSpec} from the
+     * cached question + the client-supplied selections/free-text. Shared by the
+     * single ({@link #applyAnswer}) and batch ({@link #applyAnswerBatch}) paths so
+     * the option-count / otherIndex derivation cannot drift between them.
+     */
+    private InputInjectionService.BatchAnswerSpec deriveAnswerSpec(
+            ConversationServerMessage.Question q, int questionIndex, List<Integer> selections, String freeText) {
         int optionCount = 0;
         boolean multiSelect = false;
         int otherIndex = -1;
-        if (q != null
-                && q.questions() != null
-                && a.questionIndex() < q.questions().size()) {
-            ConversationServerMessage.QuestionItem item = q.questions().get(Math.max(0, a.questionIndex()));
+        if (q != null && q.questions() != null && questionIndex < q.questions().size()) {
+            ConversationServerMessage.QuestionItem item = q.questions().get(Math.max(0, questionIndex));
             optionCount = item.options() == null ? 0 : item.options().size();
             multiSelect = item.multiSelect();
             // The "Other" free-text slot is presented by the client after the
             // listed options, so its option index is the option count.
             otherIndex = optionCount;
-            if (a.freeText() != null && !a.freeText().isBlank()) {
+            if (freeText != null && !freeText.isBlank()) {
                 optionCount = optionCount + 1; // include the Other row in the cursor walk
             }
         }
-        final int oc = optionCount;
-        final boolean ms = multiSelect;
-        final int oi = otherIndex;
-        safe(
-                ctx,
-                session,
-                () -> facade.injectAnswer(
-                        ctx.n, ctx.selectedTarget.get(), oc, ms, a.selections(), oi, a.freeText(), ctx.identity));
-        if (q != null) {
-            if (q.toolUseId() != null) {
-                ctx.pendingQuestions.remove(q.toolUseId());
-            }
-            if (q.uuid() != null) {
-                ctx.pendingQuestions.remove(q.uuid());
-            }
+        return new InputInjectionService.BatchAnswerSpec(optionCount, multiSelect, selections, otherIndex, freeText);
+    }
+
+    /** Evict a resolved question from the per-connection cache under both of its keys. */
+    private void evictCachedQuestion(ConvCtx ctx, ConversationServerMessage.Question q) {
+        if (q.toolUseId() != null) {
+            ctx.pendingQuestions.remove(q.toolUseId());
+        }
+        if (q.uuid() != null) {
+            ctx.pendingQuestions.remove(q.uuid());
         }
     }
 

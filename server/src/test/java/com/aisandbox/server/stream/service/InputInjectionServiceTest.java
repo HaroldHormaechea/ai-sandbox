@@ -9,9 +9,11 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.aisandbox.server.sessions.service.ProcessExecutor;
+import com.aisandbox.server.stream.service.InputInjectionService.BatchAnswerSpec;
 import com.aisandbox.server.stream.service.InputInjectionService.InjectTarget;
 import java.io.IOException;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -60,6 +62,26 @@ class InputInjectionServiceTest {
 
     private static String tail(List<String> argv, int fromEnd) {
         return argv.get(argv.size() - fromEnd);
+    }
+
+    /**
+     * Reduce each captured argv to ONE readable token in call order: a literal
+     * send ({@code -l -- <text>}) becomes {@code "LIT:<text>"}; a named key send
+     * becomes the key name (the last argv element, e.g. {@code Down}, {@code
+     * Enter}, {@code Space}, {@code Tab}). Lets a test assert the EXACT keystroke
+     * sequence — essential for UC-43 where the executor is mocked and a WRONG
+     * order would still "pass" a loose count-only assertion.
+     */
+    private static List<String> keySeq(List<List<String>> calls) {
+        List<String> seq = new ArrayList<>();
+        for (List<String> c : calls) {
+            if (c.contains("-l")) {
+                seq.add("LIT:" + c.get(c.size() - 1));
+            } else {
+                seq.add(c.get(c.size() - 1));
+            }
+        }
+        return seq;
     }
 
     // ──────────────────────── AC8 — prompt submit ────────────────────────────
@@ -131,11 +153,25 @@ class InputInjectionServiceTest {
         // otherIndex=2 is selected; free text supplied.
         svc.injectAnswer(3, InjectTarget.main(), 3, false, List.of(2), 2, "my custom answer");
 
-        List<List<String>> calls = capturedArgvs(/* 20 Up + 2 Down + Enter + literal + Enter */ 25);
-        // The free-text literal is sent verbatim as a single argv element.
+        // UC-43 bugfix (live-verified on 2.1.159): the free-text path now TYPES BEFORE Enter —
+        // walk Down to the "Type something" row, type the text INLINE, THEN a single Enter. The
+        // OLD order (Enter-on-empty, then type) DECLINED the ask. So the sequence is
+        // 20 Up (reset) + 2 Down (to otherIndex 2) + literal + Enter = 24 calls, with NO
+        // intermediate Enter between the Downs and the literal.
+        List<List<String>> calls = capturedArgvs(24);
+        long ups = calls.stream().filter(c -> "Up".equals(tail(c, 1))).count();
+        long downs = calls.stream().filter(c -> "Down".equals(tail(c, 1))).count();
+        long enters = calls.stream().filter(c -> "Enter".equals(tail(c, 1))).count();
+        assertThat(ups).isEqualTo(20);
+        assertThat(downs).isEqualTo(2);
+        assertThat(enters)
+                .as("exactly one Enter — typed text is committed once, not after an empty row")
+                .isEqualTo(1);
+        // The literal is sent verbatim as a single argv element …
         assertThat(calls).anySatisfy(c -> assertThat(c).containsSequence("-l", "--", "my custom answer"));
-        // …and the very last key submits.
-        assertThat(tail(calls.get(calls.size() - 1), 1)).isEqualTo("Enter");
+        // … and it is the LAST thing before the final Enter (type-before-Enter, the corrected order).
+        List<String> seq = keySeq(calls);
+        assertThat(seq.subList(seq.size() - 3, seq.size())).containsExactly("Down", "LIT:my custom answer", "Enter");
     }
 
     @Test
@@ -206,5 +242,99 @@ class InputInjectionServiceTest {
         List<List<String>> calls = capturedArgvs(1);
         assertThat(calls.get(0)).containsSequence("-t", "main");
         assertThat(tail(calls.get(0), 1)).isEqualTo("Escape");
+    }
+
+    // ──────────────── UC-43 — multi-question answer-batch (verified wizard model) ────────────────
+    //
+    // The executor is MOCKED, so a wrong keystroke ORDER would still pass a loose
+    // count-only assertion. Every test below pins the EXACT ordered sequence
+    // against the model the developer live-verified on Claude Code 2.1.159:
+    //   • single-select question : Down×k then Enter   (Enter selects AND advances the tab)
+    //   • multiSelect question   : Space toggles in place, Down between options, then Tab advances
+    //   • free-text "Other"      : Down to the row, type the text INLINE, then Enter
+    //   • after the last question advances → final Enter submits the whole batch
+    // and: NO 20×Up cursor reset (the wizard auto-resets each tab's option cursor;
+    // a blind Up reset is non-deterministic because Up/Down wrap the option ring).
+
+    @Test
+    void answer_batch_of_one_single_select_walks_down_then_Enter_then_submit_Enter() throws Exception {
+        // AC3 — a batch with a single single-select question (optionCount=3, choose index 2).
+        // Selection walk (Down×2, Enter) is shared with the single-question path; the trailing
+        // Enter submits the one-tab form. Crucially: NO Up reset (batch relies on auto-reset).
+        svc.injectAnswerBatch(3, InjectTarget.main(), List.of(new BatchAnswerSpec(3, false, List.of(2), 3, null)));
+
+        List<List<String>> calls = capturedArgvs(4);
+        assertThat(keySeq(calls)).containsExactly("Down", "Down", "Enter", "Enter");
+        assertThat(calls.stream().filter(c -> "Up".equals(tail(c, 1))).count())
+                .as("batch path must NOT emit the 20x Up cursor reset")
+                .isZero();
+    }
+
+    @Test
+    void answer_batch_multi_question_sequence_is_exact_per_the_verified_model() throws Exception {
+        // AC1/AC2/AC3 — two questions in one batch:
+        //   Q0 single-select, optionCount=3, choose index 1 → Down, Enter (Enter advances the tab)
+        //   Q1 multiSelect,   optionCount=2, choose index 0 → Space, Down, Tab (Tab advances the tab)
+        // then a final Enter submits the whole sheet.
+        svc.injectAnswerBatch(
+                3,
+                InjectTarget.main(),
+                List.of(
+                        new BatchAnswerSpec(3, false, List.of(1), 3, null),
+                        new BatchAnswerSpec(2, true, List.of(0), 2, null)));
+
+        List<List<String>> calls = capturedArgvs(6);
+        assertThat(keySeq(calls)).containsExactly("Down", "Enter", "Space", "Down", "Tab", "Enter");
+    }
+
+    @Test
+    void answer_batch_single_select_free_text_types_before_Enter() throws Exception {
+        // AC3 — a single-select question whose "Other" free-text is chosen. The Other row sits at
+        // otherIndex=2 (after the 2 listed options); the text is typed INLINE *before* the Enter
+        // (Enter on an empty "Type something" declines the ask — the bug the developer fixed).
+        svc.injectAnswerBatch(3, InjectTarget.main(), List.of(new BatchAnswerSpec(3, false, List.of(2), 2, "hi")));
+
+        List<List<String>> calls = capturedArgvs(5);
+        assertThat(keySeq(calls)).containsExactly("Down", "Down", "LIT:hi", "Enter", "Enter");
+    }
+
+    @Test
+    void answer_batch_multiSelect_other_free_text_is_NOT_typed_documented_limitation() throws Exception {
+        // Documented (verify-first) limitation: a multiSelect question's custom "Other" free-text
+        // is NOT typed in batch mode. The Other option row may still be toggled (Space), but the
+        // literal text is never sent. This is EXPECTED behavior per CONVERSATION_PROTOCOL.md.
+        svc.injectAnswerBatch(
+                3, InjectTarget.main(), List.of(new BatchAnswerSpec(3, true, List.of(0, 2), 2, "ignored in batch")));
+
+        List<List<String>> calls = capturedArgvs(6);
+        assertThat(keySeq(calls)).containsExactly("Space", "Down", "Down", "Space", "Tab", "Enter");
+        assertThat(calls)
+                .as("multiSelect Other free-text must NOT be injected as a literal in batch mode")
+                .noneSatisfy(c -> assertThat(c).contains("-l"));
+    }
+
+    @Test
+    void empty_or_null_answer_batch_sends_nothing() throws Exception {
+        svc.injectAnswerBatch(3, InjectTarget.main(), List.of());
+        svc.injectAnswerBatch(3, InjectTarget.main(), null);
+        verify(exec, times(0)).run(any(), any(), any(Duration.class));
+    }
+
+    @Test
+    void answer_batch_three_questions_submit_only_once_after_the_last() throws Exception {
+        // AC4 — the whole sheet resolves in ONE keystroke sequence with exactly ONE final
+        // submit Enter after the last question advances (not one submit per question). Three
+        // single-select questions choosing index 0 each → Enter advances each, last Enter submits.
+        svc.injectAnswerBatch(
+                3,
+                InjectTarget.main(),
+                List.of(
+                        new BatchAnswerSpec(2, false, List.of(0), 2, null),
+                        new BatchAnswerSpec(2, false, List.of(0), 2, null),
+                        new BatchAnswerSpec(2, false, List.of(0), 2, null)));
+
+        List<List<String>> calls = capturedArgvs(4);
+        // Q0 Enter (advance), Q1 Enter (advance), Q2 Enter (advance to Submit tab), final Enter (submit).
+        assertThat(keySeq(calls)).containsExactly("Enter", "Enter", "Enter", "Enter");
     }
 }

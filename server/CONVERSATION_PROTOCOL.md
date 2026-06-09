@@ -145,6 +145,7 @@ state, not a hard failure.
 |---------------------|-----------------------------------------------------------|----|
 | `composer-input`    | `text` (may contain newlines)                            | 8, 9 |
 | `answer`            | `questionUuid`, `questionIndex`, `selections[]` (option indices), `freeText` | 11 |
+| `answer-batch`      | `questionUuid`, `answers[]` (`questionIndex`, `selections[]`, `freeText`) — one multi-question `AskUserQuestion` (UC-43) | 43 |
 | `select-target`     | `targetId`                                                | 17 |
 | `interrupt`         | — (ESC into the session)                                  | —  |
 | `enumerate-targets` | —                                                         | 16, 18 |
@@ -166,6 +167,63 @@ single `__ctrl__\tdetail-not-found` control line; the server maps that (and any
 non-zero exit / timeout / exception) to a `tool-detail` frame with
 `available=false` (AC9). The fetch is audited as `conversation_fetch_detail`
 (`ok` / `miss`).
+
+### Multi-question answers (`answer-batch`, UC-43 AC2/AC3/AC4)
+
+A single `AskUserQuestion` may carry **N>1 questions** (in the TUI these are the
+arrow-key/tab-navigated questions). The server maps the whole ask to ONE
+`question` frame whose `questions[]` holds all N (unchanged from UC-37). The
+client renders them **paged one-at-a-time** (a "X of N" indicator + Back/Next),
+buffers each question's answer locally, and — once all are answered — submits ONE
+`answer-batch` frame:
+
+```json
+{ "type": "answer-batch", "questionUuid": "<toolUseId|uuid>",
+  "answers": [ { "questionIndex": 0, "selections": [1], "freeText": "" },
+               { "questionIndex": 1, "selections": [0, 2], "freeText": "" },
+               { "questionIndex": 2, "selections": [], "freeText": "custom" } ] }
+```
+
+The single-question case is unchanged — it still uses the `answer` frame; only
+N>1 uses `answer-batch`. **Known limitation (UC-43):** in batch mode a custom
+"Other" free-text answer is injected only for **single-select** questions; a
+multiSelect question's "Other" free-text is NOT typed into the wizard (its other
+selected options are still toggled). The covered/verified batch paths are
+single-select (incl. its free-text), plain multiSelect, and the final submit;
+multiSelect + custom free-text is intentionally not injected rather than driven
+by an unverified keystroke guess. Server-side the handler resolves the single cached
+`Question`, sorts `answers[]` by `questionIndex`, derives each question's
+option-count / "Other" index from `questions[questionIndex]`, injects the whole
+sheet as ONE scheduled keystroke sequence, and **evicts the cached question only
+after the last item is injected** (the one cache entry covers all N). The single
+and batch paths share one per-question keystroke helper (`InputInjectionService`)
+so they cannot drift on a Claude TUI version bump.
+
+**Verified TUI keystroke model (multi-question wizard).** The runtime interaction
+model is unknowable from source, so it was driven live against Claude Code
+**2.1.159** (the pinned build) through a real multi-question `AskUserQuestion`:
+
+- The sheet is a **tabbed wizard** (`← ☐ Q1  ☐ Q2 … ✔ Submit →`), ONE question
+  per screen. It opens at the top of Q1, and the option cursor **auto-resets to
+  the top** of each question when the wizard advances — so the batch path does
+  NOT (and must not) issue a per-question `Up`×N reset. Within a question,
+  `Up`/`Down` **wrap around** the option ring (real options + "Type something";
+  "Chat about this" sits outside the ring), so a blind `Up`×N reset is not
+  deterministic in the wizard.
+- **single-select** question: `Down`×k to the option, then **`Enter`** — which
+  selects it AND advances to the next tab.
+- **multiSelect** question: walk the options toggling **`Space`** in place (the
+  cursor stays put), then **`Tab`** to advance — `Enter` on a multiSelect option
+  only toggles it, it does NOT advance.
+- **free-text "Other"**: walk to the "Type something" row, **type the text
+  inline** (it replaces the row label), then **`Enter`**. Pressing `Enter` on an
+  EMPTY "Type something" row **declines the whole ask**, so the text is always
+  typed before the `Enter` (this also fixed a latent bug in the single-question
+  free-text path, which previously pressed `Enter` before typing).
+- After the last question advances, the wizard lands on the **Submit** tab with
+  "Submit answers" highlighted; a final **`Enter`** submits the whole batch.
+
+The batch is audited as `conversation_answer` with a `batch` = question-count tag.
 
 ## Backfill, reconnect, restart (AC6 / AC20 / AC22)
 
@@ -264,8 +322,12 @@ relies on long-press→tmux (AC24).
 | Submit prompt     | `-l` each text segment; `C-j` (LF) between segments → newline **without** submit (AC9 multiline); final `Enter` (CR) submits (AC8) |
 | Answer single     | reset cursor to top (`Up`×N); `Down`×k to the chosen index; `Enter`       |
 | Answer multi      | reset to top; walk options toggling `Space` on selected; `Enter`          |
-| Free-text "Other" | select Other; type the free text (`-l`); `Enter` — **most fragile path**  |
+| Free-text "Other" | `Down`×k to the "Type something" row; type the free text (`-l`); `Enter` — **most fragile path**  |
 | Interrupt         | `Escape`                                                                   |
+| Batch single-select Qᵢ (UC-43) | `Down`×k to the option; `Enter` (selects **and** advances to the next tab) — no per-question reset (auto-reset) |
+| Batch multiSelect Qᵢ (UC-43)   | walk toggling `Space` on selected; `Tab` (advances; `Enter` would only toggle) |
+| Batch free-text Qᵢ (UC-43)     | `Down`×k to "Type something"; type inline (`-l`); `Enter` (advances) |
+| Batch submit (UC-43)           | after the last question advances → "Submit" tab; final `Enter` submits all |
 
 ### Fragile edges (documented per the proposal RISKs)
 

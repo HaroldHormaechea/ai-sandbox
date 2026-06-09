@@ -80,6 +80,22 @@ class ConversationControllerTest {
     }
 
     @Test
+    fun `submitting an answer batch shows the spinner and clears the pending sheet`() {
+        // UC-43 AC4 — a multi-question batch submit behaves like the single submit: it
+        // optimistically dismisses the sheet and shows the working spinner.
+        val c = offlineController()
+        c.submitAnswerBatch(
+            "tuQ",
+            listOf(
+                AnswerItem(questionIndex = 0, selections = listOf(1), freeText = ""),
+                AnswerItem(questionIndex = 1, selections = listOf(0, 2), freeText = ""),
+            ),
+        )
+        assertThat(c.pendingSheet.value).isNull()
+        assertThat(c.turnPhase.value).isEqualTo(TurnPhase.WORKING)
+    }
+
+    @Test
     fun `selecting a target clears items and resets turn state`() {
         val c = offlineController()
         c.submitComposer("hello") // WORKING
@@ -220,6 +236,49 @@ class ConversationControllerTest {
             val sheet = c.pendingSheet.value as PendingSheet.Questions
             assertThat(sheet.questionUuid).isEqualTo("tuQ")
             assertThat(sheet.questions.first().options).hasSize(2)
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
+    fun `a multi-question sheet carries all questions and dismisses when the transcript advances`() {
+        // UC-43 AC2 — the pending sheet preserves the FULL questions[] (not just the first), and
+        // AC7 — when the ask is resolved/aborted externally (the transcript advances past it, e.g.
+        // answered in tmux → turn-end), the in-app sheet dismisses cleanly instead of lingering.
+        // Two-phase delivery (capture the server socket, send the question, ASSERT, then send the
+        // turn-end) so the dismissal is observed deterministically rather than racing the sheet.
+        val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        server.enqueue(
+            MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+                override fun onOpen(webSocket: WebSocket, response: Response) {
+                    wsRef.set(webSocket)
+                }
+            }),
+        )
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { wsRef.get() != null }).isTrue
+            wsRef.get()!!.send(
+                """{"type":"question","uuid":"uq","source":"main","isSidechain":false,"toolUseId":"tuQ",""" +
+                    """"questions":[""" +
+                    """{"question":"Q0","header":"H0","multiSelect":false,""" +
+                    """"options":[{"label":"A","description":""},{"label":"B","description":""}]},""" +
+                    """{"question":"Q1","header":"H1","multiSelect":true,""" +
+                    """"options":[{"label":"X","description":""},{"label":"Y","description":""}]},""" +
+                    """{"question":"Q2","header":"H2","multiSelect":false,""" +
+                    """"options":[{"label":"P","description":""},{"label":"Q","description":""}]}]}""",
+            )
+            // The sheet surfaces with ALL three questions reachable in-app (AC2) …
+            assertThat(
+                awaitUntil { (c.pendingSheet.value as? PendingSheet.Questions)?.questions?.size == 3 },
+            ).isTrue
+            // … then a transcript advance (turn-end) dismisses it cleanly (AC7).
+            wsRef.get()!!.send(
+                """{"type":"turn-end","uuid":"ue","source":"main","isSidechain":false,"durationMs":10,"messageCount":1}""",
+            )
+            assertThat(awaitUntil { c.pendingSheet.value == null }).isTrue
         } finally {
             c.close()
         }

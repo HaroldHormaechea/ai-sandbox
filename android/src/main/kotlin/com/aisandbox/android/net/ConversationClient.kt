@@ -84,6 +84,23 @@ class ConversationClient(
         )
     }
 
+    /**
+     * UC-43 — send a batched answer for a multi-question (N>1) `AskUserQuestion`
+     * as ONE `answer-batch` frame. [items] is one entry per question (the caller
+     * supplies them in `questionIndex` order); the server sorts by `questionIndex`
+     * defensively and injects the whole sheet as one keystroke sequence.
+     */
+    fun sendAnswerBatch(questionUuid: String, items: List<com.aisandbox.android.conversation.AnswerItem>): Boolean {
+        val answers = items.joinToString(",") { item ->
+            val sel = item.selections.joinToString(",")
+            """{"questionIndex":${item.questionIndex},"selections":[$sel],""" +
+                """"freeText":"${jsonEscape(item.freeText)}"}"""
+        }
+        return sendText(
+            """{"type":"answer-batch","questionUuid":"${jsonEscape(questionUuid)}","answers":[$answers]}""",
+        )
+    }
+
     fun close(reason: String = "client-close") {
         ws?.send("""{"type":"close","reason":"${jsonEscape(reason)}"}""")
         ws?.close(NORMAL_CLOSE_CODE, reason)
