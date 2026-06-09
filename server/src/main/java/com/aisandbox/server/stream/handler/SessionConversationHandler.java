@@ -222,7 +222,11 @@ public class SessionConversationHandler implements WebSocketHandler {
                 dispatchTailLine(session, ctx, line);
             }
         } finally {
-            ctx.outbound.tryEmitComplete();
+            // Serialize the terminal complete against any in-flight emit from an
+            // inbound-handler thread — see ConvCtx#outboundLock.
+            synchronized (ctx.outboundLock) {
+                ctx.outbound.tryEmitComplete();
+            }
         }
     }
 
@@ -489,7 +493,12 @@ public class SessionConversationHandler implements WebSocketHandler {
     }
 
     private void emit(ConvCtx ctx, WebSocketSession session, ConversationServerMessage msg) {
-        ctx.outbound.tryEmitNext(session.textMessage(new String(controlSvc.serialize(msg), StandardCharsets.UTF_8)));
+        WebSocketMessage frame = session.textMessage(new String(controlSvc.serialize(msg), StandardCharsets.UTF_8));
+        // Serialize with the pump's terminal complete and any other emitting thread —
+        // see ConvCtx#outboundLock for why a concurrent tryEmit would silently hang.
+        synchronized (ctx.outboundLock) {
+            ctx.outbound.tryEmitNext(frame);
+        }
     }
 
     private String serverErrorFrame(String code, String title, String detail) {
@@ -550,6 +559,20 @@ public class SessionConversationHandler implements WebSocketHandler {
         final int n;
         final ClientIdentity identity;
         final Sinks.Many<WebSocketMessage> outbound;
+        /**
+         * Serializes ALL access to {@link #outbound}. The sink is written from several
+         * threads — the single tail-pump thread (control/transcript frames + the terminal
+         * {@code complete} on EOF) and the {@code boundedElastic}-scheduled inbound handlers
+         * (composer / answer / answer-batch / interrupt / select-target / enumerate /
+         * fetch-detail frames). {@link Sinks.Many#tryEmitNext}/{@code tryEmitComplete} are
+         * explicitly NOT safe for concurrent invocation: a racing emit returns
+         * {@code FAIL_NON_SERIALIZED} and is dropped. If the dropped emit is the terminal
+         * {@code complete}, the downstream {@code session.send(outbound.asFlux())} never sees
+         * {@code onComplete} and the connection's {@code Mono.when(...)} never completes —
+         * a silent hang. Holding this monitor around every emit guarantees serialization.
+         */
+        final Object outboundLock = new Object();
+
         final AtomicReference<TranscriptTailService.Tail> tailRef = new AtomicReference<>();
         final AtomicInteger generation = new AtomicInteger(0);
         final AtomicReference<String> selectedTarget = new AtomicReference<>(TARGET_MAIN);
