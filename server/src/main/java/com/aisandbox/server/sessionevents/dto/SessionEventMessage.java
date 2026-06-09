@@ -79,6 +79,10 @@ public sealed interface SessionEventMessage permits SessionEventMessage.Snapshot
      * @param uptimeSec     seconds since container start, or 0 when unknown
      * @param activeStreams currently-attached terminal-stream count
      * @param startedAt     container start time, or null when unknown
+     * @param conversationName UC-47 — the Claude conversation name for the row's
+     *     main pane, or {@code null} when none is known. Carried so a name change
+     *     flips the {@link Row} record's value-equality and the UC-32 watcher emits
+     *     a Delta (AC4); the client prefers it over {@code tmuxTitle}.
      */
     record Row(
             int n,
@@ -87,5 +91,22 @@ public sealed interface SessionEventMessage permits SessionEventMessage.Snapshot
             String state,
             long uptimeSec,
             int activeStreams,
-            Instant startedAt) {}
+            Instant startedAt,
+            String conversationName) {
+
+        /**
+         * UC-47 back-compat 7-arg constructor for call sites built before this use
+         * case appended {@code conversationName}. Delegates with {@code null}.
+         */
+        public Row(
+                int n,
+                String label,
+                String tmuxTitle,
+                String state,
+                long uptimeSec,
+                int activeStreams,
+                Instant startedAt) {
+            this(n, label, tmuxTitle, state, uptimeSec, activeStreams, startedAt, null);
+        }
+    }
 }

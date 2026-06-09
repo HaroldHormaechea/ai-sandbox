@@ -114,7 +114,15 @@ public class SessionEventFacade {
     }
 
     private static Row toRow(SessionRecord r) {
-        return new Row(r.n(), r.label(), r.tmuxTitle(), r.state(), r.uptimeSec(), r.activeStreams(), r.startedAt());
+        return new Row(
+                r.n(),
+                r.label(),
+                r.tmuxTitle(),
+                r.state(),
+                r.uptimeSec(),
+                r.activeStreams(),
+                r.startedAt(),
+                r.conversationName());
     }
 
     /**

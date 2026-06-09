@@ -7,9 +7,11 @@ import java.io.IOException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.slf4j.Logger;
@@ -77,6 +79,15 @@ public class DockerEnumerationService {
     private final TerminatingSessions terminating;
 
     /**
+     * UC-47 — supplies the per-session Claude conversation name off the
+     * enumeration hot path (cached read + fire-and-forget async refresh). May be
+     * {@code null} when constructed through a pre-UC-47 back-compat ctor (test
+     * fixtures); every use is null-guarded so the row simply carries no name and
+     * falls back to {@code tmuxTitle}.
+     */
+    private final ConversationNameService conversationNames;
+
+    /**
      * UC-15 sticky flag for {@code docker compose ls --all} support on this
      * runner's docker-compose binary.
      *
@@ -99,9 +110,23 @@ public class DockerEnumerationService {
     private volatile Boolean composeListAllSupported;
 
     @Autowired
-    public DockerEnumerationService(ProcessExecutor executor, TerminatingSessions terminating) {
+    public DockerEnumerationService(
+            ProcessExecutor executor, TerminatingSessions terminating, ConversationNameService conversationNames) {
         this.executor = executor;
         this.terminating = terminating;
+        this.conversationNames = conversationNames;
+    }
+
+    /**
+     * UC-47 back-compat 2-arg constructor for fixtures built before this use case
+     * added the {@link ConversationNameService} dependency. Substitutes a
+     * {@code null} name service (every use is null-guarded), so enumeration
+     * behaves exactly as before — no session ever carries a conversation name and
+     * rows fall back to {@code tmuxTitle}. Production wiring always uses the 3-arg
+     * ctor via {@link Autowired}.
+     */
+    public DockerEnumerationService(ProcessExecutor executor, TerminatingSessions terminating) {
+        this(executor, terminating, null);
     }
 
     /**
@@ -109,13 +134,13 @@ public class DockerEnumerationService {
      * before this use case added the {@link TerminatingSessions} dependency.
      * Substitutes a fresh, empty registry so enumeration behaves exactly as
      * before (no session is ever reported {@code terminating}). Production
-     * wiring always uses the 2-arg ctor via {@link Autowired}; this overload
+     * wiring always uses the 3-arg ctor via {@link Autowired}; this overload
      * exists only so existing test code keeps compiling. Tests that exercise
      * the terminating override should use the 2-arg ctor with a registry they
      * control.
      */
     public DockerEnumerationService(ProcessExecutor executor) {
-        this(executor, new TerminatingSessions());
+        this(executor, new TerminatingSessions(), null);
     }
 
     public List<SessionRecord> enumerate() throws IOException {
@@ -231,10 +256,46 @@ public class DockerEnumerationService {
             } else {
                 title = "running".equals(state) ? tmuxTitle(project, timeout) : "(unavailable)";
             }
-            out.add(new SessionRecord(n, label, title, state, 0L, 0, Instant.EPOCH));
+            // UC-47 — only a marker-confirmed `running` session can have an active
+            // Claude conversation (provisioning/terminating/paused/stopped cannot).
+            // Read the cached name (non-blocking) and fire a fire-and-forget refresh
+            // for the NEXT enumeration (AC6 — no extra blocking exec on this path).
+            // null/blank → the row falls back to tmuxTitle (AC3).
+            String conversationName = null;
+            if ("running".equals(state)) {
+                refreshConversationName(n, project);
+                conversationName = cachedConversationName(n);
+            }
+            out.add(new SessionRecord(n, label, title, state, 0L, 0, Instant.EPOCH, conversationName));
         }
         out.sort((a, b) -> Integer.compare(a.n(), b.n()));
+        // UC-47 — drop cached names for sessions that vanished this enumeration.
+        pruneConversationNames(out);
         return out;
+    }
+
+    /** UC-47 null-safe wrapper — fire-and-forget refresh of a running session's name. */
+    private void refreshConversationName(int n, String project) {
+        if (conversationNames != null) {
+            conversationNames.refreshAsync(n, project);
+        }
+    }
+
+    /** UC-47 null-safe wrapper — non-blocking read of the cached name. */
+    private String cachedConversationName(int n) {
+        return conversationNames == null ? null : conversationNames.cachedName(n);
+    }
+
+    /** UC-47 null-safe wrapper — prune cached names to the set of enumerated sessions. */
+    private void pruneConversationNames(List<SessionRecord> records) {
+        if (conversationNames == null) {
+            return;
+        }
+        Set<Integer> activeNs = new HashSet<>();
+        for (SessionRecord r : records) {
+            activeNs.add(r.n());
+        }
+        conversationNames.prune(activeNs);
     }
 
     /**

@@ -41,7 +41,14 @@ public final class ApiDtos {
                     String state,
             long uptimeSec,
             int activeStreams,
-            Instant startedAt) {}
+            Instant startedAt,
+            @Schema(
+                            description = "UC-47 — the Claude conversation name for the session's main pane,"
+                                    + " when one is known (active conversation on a running session). The client"
+                                    + " shows it as the row's primary status line, falling back to tmuxTitle when"
+                                    + " absent. Omitted from the JSON when null (class-level @JsonInclude(NON_NULL)):"
+                                    + " an idle / between-conversations / non-running session simply has no field.")
+                    String conversationName) {}
 
     @Schema(description = "Detail returned by GET /v1/sessions/{n}.")
     public record SessionDetailDto(
