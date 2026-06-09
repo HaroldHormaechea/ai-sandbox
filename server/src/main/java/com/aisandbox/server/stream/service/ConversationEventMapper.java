@@ -188,6 +188,7 @@ public class ConversationEventMapper {
         String toolName = null;
         String input = null;
         String result = null;
+        String foldedBody = null; // UC-42 (D3) — a Skill SKILL.md body folded into this bubble
         boolean isError = false;
         boolean found = false;
         for (String entry : rawLines) {
@@ -205,6 +206,17 @@ public class ConversationEventMapper {
                 continue;
             }
             JsonNode content = root.path("message").path("content");
+            // UC-42 (D3) — a harness-injected line (e.g. a Skill SKILL.md body) carries
+            // the host tool's id at the TOP LEVEL as {@code sourceToolUseID}, NOT inside
+            // a tool_use/tool_result block. Render its FULL body and PREFER it over the
+            // tiny "Launching skill…" tool_result so the Skill bubble's tap detail shows
+            // the actual skill body (AC2). Evaluated before the per-block scan.
+            String sourceToolUseId = text(root, "sourceToolUseID");
+            if (sourceToolUseId != null && toolUseId.equals(sourceToolUseId)) {
+                foldedBody = renderContentFull(content);
+                found = true;
+                continue;
+            }
             for (JsonNode block : blocks(content)) {
                 String btype = text(block, "type");
                 if ("tool_use".equals(btype) && toolUseId.equals(text(block, "id"))) {
@@ -220,6 +232,11 @@ public class ConversationEventMapper {
         }
         if (!found) {
             return DetailRender.unavailable();
+        }
+        // UC-42 (D3) — the folded injected body wins over the host tool_result and is
+        // never an error; toolName/input still come from the Skill tool_use.
+        if (foldedBody != null) {
+            return new DetailRender(toolName, input == null ? "" : input, foldedBody, false, true);
         }
         return new DetailRender(toolName, input == null ? "" : input, result == null ? "" : result, isError, true);
     }
@@ -252,6 +269,46 @@ public class ConversationEventMapper {
         }
         if (sawToolResult) {
             return out;
+        }
+        // UC-42 (D1) — classify a non-tool_result user line. A genuine prompt → TurnStart;
+        // a harness-INJECTED line (Skill body / slash-command wrapper / local-command-stdout
+        // / isMeta system note) is NOT the user's own message and must NOT render
+        // right-aligned. Structural markers only (AC7) — no content-shape heuristics — in
+        // this exact priority order:
+        //
+        //   1. top-level sourceToolUseID nonblank → FOLD (emit nothing): the host Skill
+        //      ToolUse bubble already exists and the body is delivered as its tap detail via
+        //      the FetchDetail round-trip (D3). SAFE-BY-DEFAULT Skill-host assumption: every
+        //      observed sourceToolUseID line corresponds to a Skill tool_use bubble. If the
+        //      host ever weren't present this degrades to "detail unreachable" on tap — never
+        //      a spurious right-aligned prompt, which is strictly better than today's dump.
+        //   2. else isMeta == true → generic SystemNote.
+        //   3. else string content is a <command-name>…</command-name> + <command-args>
+        //      wrapper → SystemNote "Command: <name>".
+        //   4. else string content is a <local-command-stdout> wrapper → SystemNote
+        //      "Command output".
+        //   5. else → TurnStart (a genuine prompt), unchanged.
+        String sourceToolUseId = text(root, "sourceToolUseID");
+        if (sourceToolUseId != null && !sourceToolUseId.isBlank()) {
+            return List.of();
+        }
+        if (root.path("isMeta").asBoolean(false)) {
+            return List.of(new ConversationServerMessage.SystemNote(
+                    uuid, sidechain, source, "System note", renderContentFull(content)));
+        }
+        String stringContent = content.isTextual() ? content.asText().strip() : null;
+        if (stringContent != null
+                && stringContent.startsWith("<command-name>")
+                && stringContent.contains("</command-name>")
+                && stringContent.contains("<command-args>")) {
+            String name = sliceBetween(stringContent, "<command-name>", "</command-name>").strip();
+            String label = "Command: " + (name.isBlank() ? "?" : name);
+            return List.of(new ConversationServerMessage.SystemNote(
+                    uuid, sidechain, source, label, renderContentFull(content)));
+        }
+        if (stringContent != null && stringContent.startsWith("<local-command-stdout>")) {
+            return List.of(new ConversationServerMessage.SystemNote(
+                    uuid, sidechain, source, "Command output", renderContentFull(content)));
         }
         String prompt = extractUserText(content);
         return List.of(new ConversationServerMessage.TurnStart(uuid, sidechain, source, prompt));
@@ -438,6 +495,22 @@ public class ConversationEventMapper {
         }
         JsonNode v = node.get(field);
         return (v != null && v.isTextual()) ? v.asText() : (v != null && v.isValueNode() ? v.asText() : null);
+    }
+
+    /**
+     * UC-42 — slice the substring between the first {@code open} tag and the first
+     * {@code close} tag following it. Structural (positional), used to extract the
+     * command name from a {@code <command-name>…</command-name>} wrapper — not a
+     * substring search for content. Returns {@code ""} when either tag is absent.
+     */
+    private static String sliceBetween(String s, String open, String close) {
+        int a = s.indexOf(open);
+        if (a < 0) {
+            return "";
+        }
+        a += open.length();
+        int b = s.indexOf(close, a);
+        return b < 0 ? "" : s.substring(a, b);
     }
 
     private static String firstNonNull(String... vals) {

@@ -53,6 +53,7 @@ subagent/teammate lines), and `source` (`main` | `subagent:<agentId>`).
 | `tool-use`        | `…`, `toolName`, `toolUseId`, `inputSummary` (bounded), `primaryText` | 4, 41 |
 | `tool-result`     | `…`, `toolUseId`, `isError`, `summary`                             | 4  |
 | `tool-detail`     | `toolUseId`, `toolName`, `input`, `result`, `isError`, `available` (UC-41 on-demand, untruncated) | 41 |
+| `system-note`     | `uuid`, `isSidechain`, `source`, `label`, `detail` (UC-42 — an injected `user` line with no host bubble) | 42 |
 | `question`        | `…`, `toolUseId`, `questions[]` (`question`,`header`,`multiSelect`,`options[]{label,description}`) | 10 |
 | `plan-approval`   | `…`, `toolUseId`, `plan`                                           | 13 |
 | `turn-end`        | `…`, `durationMs`, `messageCount` (the `system:turn_duration` marker) | 15 |
@@ -85,6 +86,50 @@ paired `tool-result` (matched on `toolUseId`) into a single row. To support that
   miss/timeout) the frame is returned with **`available=false`** and empty
   `input`/`result` — the client shows a "detail unavailable" state rather than
   hanging or crashing (AC9).
+
+**UC-42 — harness-injected `user` lines never render as the user's own message.**
+Claude Code injects `user`-role transcript lines *on the user's behalf* — a skill's
+`SKILL.md` body on a `Skill` invocation, slash-command wrappers, `<local-command-stdout>`
+lines, `isMeta:true` system notes. These are NOT prompts the human typed, so they must
+not render right-aligned. `ConversationEventMapper.mapUser` classifies every
+non-`tool_result` `user` line by **structural markers only** (no content-shape
+heuristics, so a real prompt is never eaten), in this exact priority order:
+
+| # | Structural marker (read off the line root) | Outcome | Renders as |
+|---|---------------------------------------------|---------|------------|
+| 1 | top-level `sourceToolUseID` nonblank | **fold** — emit nothing | (the existing `Skill` `tool-use` bubble; body is its tap detail, see below) |
+| 2 | `isMeta == true` | `system-note`, label `System note` | collapsed, left-aligned note |
+| 3 | string content starts `<command-name>` AND contains `</command-name>` AND `<command-args>` | `system-note`, label `Command: <name>` | collapsed, left-aligned note |
+| 4 | string content starts `<local-command-stdout>` | `system-note`, label `Command output` | collapsed, left-aligned note |
+| 5 | none of the above | `turn-start` (unchanged) | right-aligned user message |
+
+`tool_result` `user` lines are unaffected — they still map to `tool-result` before this
+classifier runs. Rule 3 requires the harness's exact structural placement (whole-content
+prefix + the sibling `</command-name>`/`<command-args>` tags), not a substring match, so a
+genuine prompt that merely *mentions* `<command-name>` mid-text stays a `turn-start`.
+`[Request interrupted by user for tool use]` lines carry no structural marker and remain
+`turn-start` by design (no content-sniffing).
+
+- **Rule-1 Skill-host assumption.** A top-level `sourceToolUseID` is the id of the
+  `Skill` `tool_use` whose `SKILL.md` body this line carries; the `Skill` bubble already
+  exists, so the body is delivered as that bubble's **on-demand `tool-detail`** — the
+  helper's `fetch-detail` scan matches a line whose top-level `sourceToolUseID` equals the
+  requested `toolUseId` (in addition to the `tool_use`/`tool_result` block matches), and
+  the server renders that folded body with the full 48 KB renderer, preferring it over the
+  tiny "Launching skill…" `tool_result`. This assumes the `Skill` host bubble is present
+  (empirically always true). If it ever weren't, the fold degrades to "detail unreachable"
+  on tap — never a spurious right-aligned prompt, which is strictly better than the
+  pre-UC-42 behaviour of dumping the body as the user's own message.
+- **`system-note` carries `detail` inline.** Unlike `tool-detail` (fetched on demand),
+  the `system-note` body is small and host-less, so its full body (byte-bounded to the
+  same 48 KB cap) rides **inline** in the frame; the client expands it on tap with no
+  `fetch-detail` round-trip. **Backfill tradeoff:** because the body is inline, a
+  `system-note` is replayed verbatim on every backfill/reconnect (a folded skill body, by
+  contrast, lives only in the on-demand detail and is never replayed). `uuid` dedupe keeps
+  a backfill that overlaps already-seen notes from double-rendering, so live append and
+  backfilled history render identically (AC8).
+- `isSidechain` injected lines fold/note under their own `source` (`subagent:<agentId>`),
+  exactly like every other transcript-derived frame (AC9).
 
 The `error` frame's `code` is usually fatal-and-close (`unsupported_subprotocol`,
 `not_authorized`, `tail_failed`, `inject_failed`). The one **non-fatal** code is

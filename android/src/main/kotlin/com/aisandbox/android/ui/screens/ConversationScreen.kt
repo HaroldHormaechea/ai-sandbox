@@ -248,6 +248,39 @@ private fun ConversationItemRow(item: ConversationItem, onToolTap: (String) -> U
             body = item.questions.firstOrNull()?.question ?: "",
         )
         is ConversationItem.PlanApproval -> MetaLine(prefix = "📋 plan", body = item.plan)
+        is ConversationItem.SystemNote -> SystemNoteRow(item)
+    }
+}
+
+/**
+ * UC-42 (AC4) — a harness-injected `user` line with no host tool bubble, rendered as a
+ * collapsed, **left-aligned, non-user** "system note" (MetaLine style — like the
+ * tool/question meta rows, NOT the right-aligned user [Bubble]). Tapping toggles the
+ * inline [ConversationItem.SystemNote.detail] open/closed, reusing UC-41's
+ * collapse/expand affordance; the body is carried inline in the frame, so no
+ * `fetch-detail` round-trip is needed.
+ */
+@Composable
+internal fun SystemNoteRow(item: ConversationItem.SystemNote) {
+    var expanded by remember(item.key) { mutableStateOf(false) }
+    val prefix = if (item.isSidechain) "${item.label} · subagent" else item.label
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable { expanded = !expanded }
+            .padding(vertical = 2.dp, horizontal = 2.dp),
+    ) {
+        Text(text = prefix, style = AiSandboxMonoTypography.metadata, color = OnSurfaceVariant)
+        if (expanded && item.detail.isNotBlank()) {
+            Spacer(Modifier.height(4.dp))
+            SelectionContainer {
+                Text(
+                    text = item.detail,
+                    style = AiSandboxMonoTypography.metadata,
+                    color = OnSurfaceMuted,
+                )
+            }
+        }
     }
 }
 

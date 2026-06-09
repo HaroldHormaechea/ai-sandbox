@@ -96,6 +96,25 @@ sealed interface ConversationItem {
     ) : ConversationItem {
         override val key: String get() = "$uuid|plan|$toolUseId"
     }
+
+    /**
+     * UC-42 (AC4) — a harness-injected `user` line with NO host tool bubble to fold
+     * into: a slash-command wrapper, a `<local-command-stdout>` line, or a generic
+     * `isMeta:true` system note. Rendered **collapsed, left-aligned, non-user**
+     * (MetaLine style) — NEVER the right-aligned user [UserMessage] bubble. [label] is
+     * the short summary (`Command: /foo`, `Command output`, `System note`); [detail] is
+     * the full injected body carried **inline** in the `system-note` frame, so tapping
+     * to expand needs no `fetch-detail` round-trip (unlike a tool bubble's detail).
+     */
+    data class SystemNote(
+        override val uuid: String,
+        override val source: String,
+        override val isSidechain: Boolean,
+        val label: String,
+        val detail: String,
+    ) : ConversationItem {
+        override val key: String get() = "$uuid|systemnote|${label.hashCode()}"
+    }
 }
 
 /**
