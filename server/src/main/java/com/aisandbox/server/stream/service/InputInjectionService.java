@@ -32,9 +32,13 @@ import org.springframework.stereotype.Service;
  *       ({@code Up} ×N), {@code Down} ×k to the chosen index, {@code Enter}
  *       (AC11).</li>
  *   <li><b>Answer (multiSelect)</b> — reset to top, walk every option toggling
- *       {@code Space} on the selected ones, then {@code Enter} (AC11).</li>
- *   <li><b>Free-text "Other"</b> — select the Other option, type the free text,
- *       {@code Enter} (AC10/AC11). The most fragile path; documented as such.</li>
+ *       {@code Space} on the selected ones, then advance. With an "Other" answer
+ *       the free text is composed in (UC-44): type the literal, {@code Enter} to
+ *       commit it as a custom option, {@code Space} to select it, then
+ *       {@code Tab}+{@code Enter} to activate the in-pane Next/Submit.</li>
+ *   <li><b>Free-text "Other"</b> — single-select: walk to the Other row, type the
+ *       free text, {@code Enter} (AC10/AC11). multiSelect: see above. The most
+ *       fragile path; documented in {@code CONVERSATION_PROTOCOL.md}.</li>
  *   <li><b>Interrupt</b> — {@code Escape} (cancels the active turn).</li>
  * </ul>
  *
@@ -50,7 +54,7 @@ public class InputInjectionService {
     private static final Duration TIMEOUT = Duration.ofSeconds(10);
 
     /** The Claude Code TUI build these keystroke mappings were verified against. */
-    public static final String PINNED_CLAUDE_VERSION = "2.1.159";
+    public static final String PINNED_CLAUDE_VERSION = "2.1.169";
 
     /** Upper bound on {@code Up} presses used to deterministically reset the option cursor to the top. */
     private static final int CURSOR_RESET_PRESSES = 20;
@@ -156,17 +160,24 @@ public class InputInjectionService {
      *       blind {@code Up}×N reset is not deterministic).</li>
      *   <li><b>single-select</b> question: walk {@code Down} to the option, then
      *       {@code Enter} — which selects it AND advances to the next tab.</li>
-     *   <li><b>multiSelect</b> question: walk the options toggling {@code Space} in
-     *       place (the cursor stays put), then {@code Tab} to advance to the next
-     *       tab — {@code Enter} on a multiSelect option only toggles it, it does
-     *       NOT advance.</li>
-     *   <li><b>free-text "Other"</b>: walk to the "Type something" row, type the
-     *       text INLINE, then {@code Enter} — typing an EMPTY "Type something" and
-     *       pressing {@code Enter} DECLINES the whole ask, so the text is always
-     *       typed before the {@code Enter}.</li>
+     *   <li><b>multiSelect</b> question (no "Other"): walk the options toggling
+     *       {@code Space} in place (the cursor stays put), then {@code Tab} to
+     *       advance to the next tab — {@code Enter} on a multiSelect option only
+     *       toggles it, it does NOT advance.</li>
+     *   <li><b>single-select free-text "Other"</b>: walk to the "Type something"
+     *       row, type the text INLINE, then {@code Enter} — typing an EMPTY
+     *       "Type something" and pressing {@code Enter} DECLINES the whole ask, so
+     *       the text is always typed before the {@code Enter}.</li>
+     *   <li><b>multiSelect free-text "Other"</b> (UC-44, verified live against
+     *       2.1.169): at the "Type something" row type the literal, {@code Enter}
+     *       (commits the typed text as a custom option — the on-type checkmark is
+     *       only a non-committed preview that is otherwise DROPPED), {@code Space}
+     *       (selects it). Because the cursor then sits on that row, {@code Tab}
+     *       only FOCUSES the in-pane Next/Submit button, so {@code Enter} ACTIVATES
+     *       it to advance. (Plain multiSelect leaves the cursor on a real option,
+     *       where {@code Tab} advances directly — hence the asymmetry.)</li>
      *   <li>After the last question advances, the wizard lands on the "Submit" tab
-     *       with "Submit answers" highlighted; a final {@code Enter} submits the
-     *       whole batch.</li>
+     *       ("Review your answers"); a final {@code Enter} submits the whole batch.</li>
      * </ul>
      *
      * @param answers one spec per question, already sorted by {@code questionIndex} by the caller
@@ -192,10 +203,14 @@ public class InputInjectionService {
      * current question's option list. Keeping this single helper prevents the two
      * paths from drifting apart on a Claude TUI version bump.
      *
-     * <p>{@code commitKey} is used only for multiSelect (where toggles are
-     * committed with {@code Space} and the question is then advanced/submitted with
-     * that key). single-select and free-text always finish with {@code Enter},
-     * which both selects and advances/submits.
+     * <p>{@code commitKey} is the advance key for a <em>plain</em> multiSelect
+     * question ({@code Tab} in a batch, {@code Enter} for a single-question ask).
+     * single-select and single-select free-text always finish with {@code Enter},
+     * which both selects and advances/submits. A multiSelect free-text "Other"
+     * answer (UC-44) advances with a fixed {@code Tab}+{@code Enter} regardless of
+     * {@code commitKey} (it must focus then activate the in-pane button from the
+     * "Type something" row), plus a trailing {@code Enter} when {@code commitKey}
+     * is {@code "Enter"} (single-question) to confirm the review screen.
      */
     private void selectQuestionAnswer(
             int n,
@@ -211,16 +226,43 @@ public class InputInjectionService {
         boolean freeTextChosen = otherIndex >= 0 && sel.contains(otherIndex) && freeText != null && !freeText.isBlank();
 
         if (multiSelect) {
-            // Walk every option top→bottom, toggling Space on the selected ones, then commit/advance.
+            // Walk every option top→bottom. Toggle Space on each selected real option; at the
+            // "Other"/"Type something" row (always the LAST index — the client appends it after the
+            // listed options) inject the free text instead of a bare Space (UC-44).
             for (int p = 0; p < Math.max(optionCount, 1); p++) {
-                if (sel.contains(p)) {
+                if (freeTextChosen && p == otherIndex) {
+                    // UC-44 — multiSelect + "Other", verified live against Claude 2.1.169:
+                    //   1. type the literal INLINE — it shows as a checked PREVIEW, but the preview
+                    //      is NOT yet a committed selection (the UC-43 silent-drop: typing then
+                    //      navigating away dropped the text);
+                    //   2. Enter COMMITS the typed text as a real custom option (clears the preview
+                    //      check); 3. Space SELECTS that committed option.
+                    // The text is always typed before any Enter — Enter on an EMPTY row declines.
+                    sendLiteral(n, target, freeText);
+                    sendKeys(n, target, "Enter");
+                    sendKeys(n, target, "Space");
+                } else if (sel.contains(p)) {
                     sendKeys(n, target, "Space");
                 }
                 if (p < optionCount - 1) {
                     sendKeys(n, target, "Down");
                 }
             }
-            sendKeys(n, target, commitKey);
+            if (freeTextChosen) {
+                // The walk ends on the "Type something" row. From there a single key only FOCUSES
+                // the in-pane "Next"/"Submit" button (it does NOT advance, unlike from a real option
+                // where commitKey advances the wizard) — so press Tab to focus it then Enter to
+                // ACTIVATE it. For a single-question ask (commitKey == "Enter") the wizard then lands
+                // on its "Review your answers" screen with no caller-supplied trailing submit, so one
+                // more Enter confirms it; in a batch, injectAnswerBatch's trailing Enter does that.
+                sendKeys(n, target, "Tab");
+                sendKeys(n, target, "Enter");
+                if ("Enter".equals(commitKey)) {
+                    sendKeys(n, target, "Enter");
+                }
+            } else {
+                sendKeys(n, target, commitKey);
+            }
         } else if (freeTextChosen) {
             // Single-select free-text: walk to the "Other"/"Type something" row, type the text
             // INLINE (it replaces the row label), then Enter to commit + advance/submit. The text
