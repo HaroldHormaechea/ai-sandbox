@@ -9,6 +9,7 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.aisandbox.android.conversation.AnswerItem
 import com.aisandbox.android.conversation.ConvOption
 import com.aisandbox.android.conversation.ConvQuestion
 import com.aisandbox.android.conversation.PendingSheet
@@ -123,6 +124,124 @@ class ConversationScreenInstrumentationTest {
         // Other index = optionCount (2).
         assertEquals(listOf(2), selections)
         assertEquals("teal", freeText)
+    }
+
+    // ──────────────────────── UC-43 — multi-question paged sheet (AC9) ────────────────────────
+
+    private fun threeQuestionSheet() = PendingSheet.Questions(
+        questionUuid = "tuQ",
+        questions = listOf(
+            ConvQuestion(
+                question = "Pick a color",
+                header = "Color",
+                multiSelect = false,
+                options = listOf(ConvOption("Red", ""), ConvOption("Blue", "")),
+            ),
+            ConvQuestion(
+                question = "Pick letters",
+                header = "Letters",
+                multiSelect = true,
+                options = listOf(ConvOption("Xray", ""), ConvOption("Yankee", "")),
+            ),
+            ConvQuestion(
+                question = "Pick a city",
+                header = "City",
+                multiSelect = false,
+                options = listOf(ConvOption("Papa", ""), ConvOption("Quebec", "")),
+            ),
+        ),
+    )
+
+    @Test
+    fun multi_question_sheet_pages_navigates_gates_submit_and_batches_in_index_order() {
+        // AC2/AC3/AC4 — a 3-question ask renders paged ("X of N"); Back/Next navigate; each
+        // question is answerable (single-select, multiSelect); submit is gated until ALL are
+        // answered; the batch resolves with one item per question in questionIndex order.
+        var batchItems: List<AnswerItem>? = null
+        var singleCalled = false
+        composeTestRule.setContent {
+            AiSandboxTheme {
+                QuestionSheet(
+                    sheet = threeQuestionSheet(),
+                    onSubmit = { _, _, _, _ -> singleCalled = true },
+                    onSubmitBatch = { _, items -> batchItems = items },
+                )
+            }
+        }
+
+        // Page 1 of 3 — single-select. "Next" is shown (not "Submit all").
+        composeTestRule.onNodeWithText("Question 1 of 3").assertIsDisplayed()
+        composeTestRule.onNodeWithText("Blue").performClick() // Q0 → index 1
+        composeTestRule.onNodeWithText("Next").performClick()
+
+        // Page 2 of 3 — multiSelect, choose both.
+        composeTestRule.onNodeWithText("Question 2 of 3").assertIsDisplayed()
+        composeTestRule.onNodeWithText("Xray").performClick() // Q1 → index 0
+        composeTestRule.onNodeWithText("Yankee").performClick() // Q1 → index 1
+        composeTestRule.onNodeWithText("Next").performClick()
+
+        // Page 3 of 3 — submit is GATED (Q2 unanswered) …
+        composeTestRule.onNodeWithText("Question 3 of 3").assertIsDisplayed()
+        composeTestRule.onNodeWithText("Submit all").assertIsNotEnabled()
+
+        // … Back/Next round-trip must not lose the buffered answers …
+        composeTestRule.onNodeWithText("Back").performClick()
+        composeTestRule.onNodeWithText("Question 2 of 3").assertIsDisplayed()
+        composeTestRule.onNodeWithText("Next").performClick()
+        composeTestRule.onNodeWithText("Question 3 of 3").assertIsDisplayed()
+
+        // … answer Q2 → submit enabled → submit.
+        composeTestRule.onNodeWithText("Papa").performClick() // Q2 → index 0
+        composeTestRule.onNodeWithText("Submit all").performClick()
+
+        assertTrue("single onSubmit must not fire for a multi-question sheet", !singleCalled)
+        val items = batchItems
+        assertTrue("batch must be submitted", items != null)
+        assertEquals(3, items!!.size)
+        assertEquals(listOf(0, 1, 2), items.map { it.questionIndex })
+        assertEquals(listOf(1), items[0].selections)
+        assertEquals(listOf(0, 1), items[1].selections)
+        assertEquals(listOf(0), items[2].selections)
+        items.forEach { assertEquals("", it.freeText) }
+    }
+
+    @Test
+    fun single_question_sheet_uses_the_single_answer_path_not_the_batch_path() {
+        // AC5 regression — a single-question ask submits via the existing single `answer` path
+        // (onSubmit, questionIndex 0) and NEVER the batch path.
+        var singleSelections: List<Int>? = null
+        var singleIndex: Int? = null
+        var batchCalled = false
+        val sheet = PendingSheet.Questions(
+            questionUuid = "tuQ",
+            questions = listOf(
+                ConvQuestion(
+                    question = "Pick a color",
+                    header = "Color",
+                    multiSelect = false,
+                    options = listOf(ConvOption("Red", ""), ConvOption("Blue", "")),
+                ),
+            ),
+        )
+        composeTestRule.setContent {
+            AiSandboxTheme {
+                QuestionSheet(
+                    sheet = sheet,
+                    onSubmit = { _, idx, sel, _ ->
+                        singleIndex = idx
+                        singleSelections = sel
+                    },
+                    onSubmitBatch = { _, _ -> batchCalled = true },
+                )
+            }
+        }
+
+        composeTestRule.onNodeWithText("Blue").performClick()
+        composeTestRule.onNodeWithText("Send answer").performClick()
+
+        assertEquals(listOf(1), singleSelections)
+        assertEquals(0, singleIndex)
+        assertTrue("single-question sheet must not use the batch path", !batchCalled)
     }
 
     @Test

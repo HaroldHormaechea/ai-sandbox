@@ -2,8 +2,12 @@ package com.aisandbox.server.stream.handler;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -12,6 +16,7 @@ import com.aisandbox.server.stream.facade.ConversationFacade;
 import com.aisandbox.server.stream.facade.StreamFacade;
 import com.aisandbox.server.stream.handshake.ConversationSubprotocolHandshakeInterceptor;
 import com.aisandbox.server.stream.service.ConversationEventMapper;
+import com.aisandbox.server.stream.service.InputInjectionService;
 import com.aisandbox.server.stream.service.StreamControlMessageService;
 import com.aisandbox.server.stream.service.TranscriptTailService;
 import java.math.BigInteger;
@@ -24,6 +29,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.reactivestreams.Publisher;
 import org.springframework.http.HttpHeaders;
 import org.springframework.web.reactive.socket.CloseStatus;
@@ -281,6 +287,136 @@ class SessionConversationHandlerTest {
         assertThat(session.sent)
                 .anySatisfy(
                         f -> assertThat(f).contains("\"type\":\"tool-detail\"").contains("\"available\":false"));
+        assertThat(session.closedWith).isNull();
+    }
+
+    // ──────────────── UC-43 — answer-batch routing + per-question derivation ────────────────
+
+    /** A raw transcript line for an {@code AskUserQuestion} tool_use carrying {@code questions} (the mapper maps it to a Question frame, which the handler caches). */
+    private static String askUserQuestionLine(String questionsJson) {
+        return "{\"type\":\"assistant\",\"uuid\":\"uq\",\"isSidechain\":false,\"message\":{\"content\":["
+                + "{\"type\":\"tool_use\",\"id\":\"tuQ\",\"name\":\"AskUserQuestion\",\"input\":{\"questions\":"
+                + questionsJson + "}}]}}";
+    }
+
+    /**
+     * Drive an Allowed-path handler that (1) emits {@code questionLine} on the tail
+     * — caching the {@code AskUserQuestion} and emitting its {@code question} frame
+     * — then (2) delivers {@code clientFrame} inbound ONLY once that question frame
+     * has been emitted (so the cache is populated before the answer is applied),
+     * then EOFs once {@code applied} fires (counted down by the facade-call stub).
+     * {@code block()} returns deterministically with the facade call already made.
+     */
+    private static FakeSession driveQuestionThenClientFrame(
+            ConversationFacade facade, String questionLine, String clientFrame, CountDownLatch applied)
+            throws Exception {
+        TranscriptTailService.Tail tail = mock(TranscriptTailService.Tail.class);
+        when(tail.readLine()).thenReturn(questionLine).thenAnswer(inv -> {
+            applied.await(5, TimeUnit.SECONDS); // hold the channel open until the answer is applied …
+            return null; // … then EOF → teardown completes the sink
+        });
+
+        when(facade.authorizeOpen(eq(7), any())).thenReturn(new StreamFacade.Allowed());
+        when(facade.startTail(eq(7), any())).thenReturn(tail);
+
+        Map<String, Object> attrs = new HashMap<>();
+        attrs.put(SessionConversationHandler.IDENTITY_ATTR, identity());
+        FakeSession session = new FakeSession(URI.create("/v1/sessions/7/conversation"), subprotocolHeaders(), attrs);
+
+        CountDownLatch questionEmitted = new CountDownLatch(1);
+        session.onSent = payload -> {
+            if (payload.contains("\"type\":\"question\"")) {
+                questionEmitted.countDown();
+            }
+        };
+        // The cache is populated (cacheQuestion runs before emit), so gating on the emitted
+        // question frame guarantees the answer below resolves against a populated cache.
+        session.incoming = reactor.core.publisher.Mono.fromCallable(() -> {
+                    questionEmitted.await(5, TimeUnit.SECONDS);
+                    return session.textMessage(clientFrame);
+                })
+                .flux()
+                .subscribeOn(reactor.core.scheduler.Schedulers.boundedElastic());
+
+        newHandler(facade).handle(session).block();
+        return session;
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void answer_batch_routes_to_inject_answer_batch_sorted_and_derived_per_question() throws Exception {
+        // AC2/AC3 — a 3-question AskUserQuestion (single, multi, single). The client sends the
+        // answers OUT of questionIndex order (2,0,1); the handler must sort to 0,1,2 and derive
+        // each spec's optionCount/multiSelect/otherIndex from the cached question[questionIndex].
+        ConversationFacade facade = mock(ConversationFacade.class);
+        CountDownLatch applied = new CountDownLatch(1);
+        doAnswer(inv -> {
+                    applied.countDown();
+                    return null;
+                })
+                .when(facade)
+                .injectAnswerBatch(eq(7), any(), any(), any());
+
+        String questionLine = askUserQuestionLine("["
+                + "{\"question\":\"Q0\",\"header\":\"H0\",\"multiSelect\":false,\"options\":"
+                + "[{\"label\":\"A\",\"description\":\"\"},{\"label\":\"B\",\"description\":\"\"},{\"label\":\"C\",\"description\":\"\"}]},"
+                + "{\"question\":\"Q1\",\"header\":\"H1\",\"multiSelect\":true,\"options\":"
+                + "[{\"label\":\"X\",\"description\":\"\"},{\"label\":\"Y\",\"description\":\"\"}]},"
+                + "{\"question\":\"Q2\",\"header\":\"H2\",\"multiSelect\":false,\"options\":"
+                + "[{\"label\":\"P\",\"description\":\"\"},{\"label\":\"Q\",\"description\":\"\"}]}]");
+        String batchFrame = "{\"type\":\"answer-batch\",\"questionUuid\":\"tuQ\",\"answers\":["
+                + "{\"questionIndex\":2,\"selections\":[0],\"freeText\":\"\"},"
+                + "{\"questionIndex\":0,\"selections\":[1],\"freeText\":\"\"},"
+                + "{\"questionIndex\":1,\"selections\":[0],\"freeText\":\"\"}]}";
+
+        FakeSession session = driveQuestionThenClientFrame(facade, questionLine, batchFrame, applied);
+
+        ArgumentCaptor<List<InputInjectionService.BatchAnswerSpec>> cap = ArgumentCaptor.forClass(List.class);
+        verify(facade).injectAnswerBatch(eq(7), any(), cap.capture(), any());
+        List<InputInjectionService.BatchAnswerSpec> specs = cap.getValue();
+        assertThat(specs).hasSize(3);
+        // Sorted by questionIndex → 0,1,2; each derived from the cached AskUserQuestion. That the
+        // optionCounts are non-zero proves the cached question was STILL present when the specs
+        // were derived — i.e. eviction happens AFTER the (single) inject, never before it.
+        assertThat(specs.get(0).optionCount()).isEqualTo(3);
+        assertThat(specs.get(0).multiSelect()).isFalse();
+        assertThat(specs.get(0).selections()).containsExactly(1);
+        assertThat(specs.get(0).otherIndex()).isEqualTo(3);
+        assertThat(specs.get(1).optionCount()).isEqualTo(2);
+        assertThat(specs.get(1).multiSelect()).isTrue();
+        assertThat(specs.get(1).selections()).containsExactly(0);
+        assertThat(specs.get(2).optionCount()).isEqualTo(2);
+        assertThat(specs.get(2).multiSelect()).isFalse();
+        assertThat(specs.get(2).selections()).containsExactly(0);
+        // A multi-question batch must NOT fall through to the single-answer path.
+        verify(facade, never()).injectAnswer(anyInt(), any(), anyInt(), anyBoolean(), any(), anyInt(), any(), any());
+        assertThat(session.closedWith).isNull();
+    }
+
+    @Test
+    void single_answer_path_is_unchanged_and_does_not_use_the_batch_path() throws Exception {
+        // AC5 — a single-question AskUserQuestion still resolves via the single `answer` frame →
+        // facade.injectAnswer with the option metadata derived from the cached question, and the
+        // batch path is never touched.
+        ConversationFacade facade = mock(ConversationFacade.class);
+        CountDownLatch applied = new CountDownLatch(1);
+        doAnswer(inv -> {
+                    applied.countDown();
+                    return null;
+                })
+                .when(facade)
+                .injectAnswer(eq(7), any(), anyInt(), anyBoolean(), any(), anyInt(), any(), any());
+
+        String questionLine = askUserQuestionLine("["
+                + "{\"question\":\"Q0\",\"header\":\"H0\",\"multiSelect\":false,\"options\":"
+                + "[{\"label\":\"A\",\"description\":\"\"},{\"label\":\"B\",\"description\":\"\"}]}]");
+        String answerFrame =
+                "{\"type\":\"answer\",\"questionUuid\":\"tuQ\",\"questionIndex\":0,\"selections\":[1],\"freeText\":\"\"}";
+
+        FakeSession session = driveQuestionThenClientFrame(facade, questionLine, answerFrame, applied);
+
+        verify(facade).injectAnswer(eq(7), any(), eq(2), eq(false), eq(List.of(1)), eq(2), eq(""), any());
+        verify(facade, never()).injectAnswerBatch(anyInt(), any(), any(), any());
         assertThat(session.closedWith).isNull();
     }
 

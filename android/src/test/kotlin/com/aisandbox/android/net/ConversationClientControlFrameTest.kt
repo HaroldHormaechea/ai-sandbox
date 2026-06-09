@@ -116,6 +116,7 @@ class ConversationClientControlFrameTest {
         assertThat(c.sendInterrupt()).isFalse
         assertThat(c.sendSelectTarget("main")).isFalse
         assertThat(c.sendAnswer("uq", 0, listOf(0), "")).isFalse
+        assertThat(c.sendAnswerBatch("uq", listOf(com.aisandbox.android.conversation.AnswerItem(0, listOf(0), "")))).isFalse
         assertThat(c.sendFetchDetail("tu1", "u1")).isFalse
     }
 
@@ -172,6 +173,52 @@ class ConversationClientControlFrameTest {
 
         c.sendAnswer("u\"q", 0, emptyList(), "a\"b\\c")
         val frame = received.poll(2, TimeUnit.SECONDS)
+        assertThat(frame).contains(""""questionUuid":"u\"q"""")
+        assertThat(frame).contains(""""freeText":"a\"b\\c"""")
+        assertThat(frame).contains(""""selections":[]""")
+        c.close()
+    }
+
+    @Test
+    fun `sendAnswerBatch emits one answer-batch frame with every item in index order`() = runBlocking {
+        // UC-43 AC2/AC3 — a multi-question (N>1) submit goes out as a SINGLE answer-batch frame
+        // carrying one entry per question, in the caller-supplied questionIndex order.
+        val received = LinkedBlockingQueue<String>()
+        server.enqueue(recordingUpgrade(received))
+        val c = newClient(3)
+        c.connect()
+
+        assertThat(
+            c.sendAnswerBatch(
+                "tuQ",
+                listOf(
+                    com.aisandbox.android.conversation.AnswerItem(0, listOf(0, 2), ""),
+                    com.aisandbox.android.conversation.AnswerItem(1, listOf(1), "x"),
+                ),
+            ),
+        ).isTrue
+        assertThat(received.poll(2, TimeUnit.SECONDS))
+            .isEqualTo(
+                """{"type":"answer-batch","questionUuid":"tuQ","answers":[""" +
+                    """{"questionIndex":0,"selections":[0,2],"freeText":""},""" +
+                    """{"questionIndex":1,"selections":[1],"freeText":"x"}]}""",
+            )
+        c.close()
+    }
+
+    @Test
+    fun `sendAnswerBatch json-escapes the free text and question id`() = runBlocking {
+        val received = LinkedBlockingQueue<String>()
+        server.enqueue(recordingUpgrade(received))
+        val c = newClient(3)
+        c.connect()
+
+        c.sendAnswerBatch(
+            "u\"q",
+            listOf(com.aisandbox.android.conversation.AnswerItem(0, emptyList(), "a\"b\\c")),
+        )
+        val frame = received.poll(2, TimeUnit.SECONDS)
+        assertThat(frame).contains(""""type":"answer-batch"""")
         assertThat(frame).contains(""""questionUuid":"u\"q"""")
         assertThat(frame).contains(""""freeText":"a\"b\\c"""")
         assertThat(frame).contains(""""selections":[]""")

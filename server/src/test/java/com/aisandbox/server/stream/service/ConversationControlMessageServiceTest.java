@@ -51,6 +51,33 @@ class ConversationControlMessageServiceTest {
     }
 
     @Test
+    void parses_answer_batch_frame_with_shuffled_indices_and_special_chars() {
+        // UC-43 — a multi-question batch. The client may send the items OUT of questionIndex
+        // order (the server sorts in the handler, not the parser), free text may carry quotes /
+        // backslashes / newlines / unicode, and the parser must preserve all of it verbatim AND
+        // in the wire order it arrived (so the handler's sort is the single ordering authority).
+        ConversationClientMessage m = svc.parseConversation("{\"type\":\"answer-batch\",\"questionUuid\":\"tuQ\","
+                + "\"answers\":["
+                + "{\"questionIndex\":2,\"selections\":[1],\"freeText\":\"a\\\"b\\\\c\"},"
+                + "{\"questionIndex\":0,\"selections\":[0,2],\"freeText\":\"\"},"
+                + "{\"questionIndex\":1,\"selections\":[],\"freeText\":\"line1\\nline2 🎉\"}]}");
+        assertThat(m).isInstanceOfSatisfying(ConversationClientMessage.AnswerBatch.class, ab -> {
+            assertThat(ab.questionUuid()).isEqualTo("tuQ");
+            assertThat(ab.answers()).hasSize(3);
+            // Order preserved as-sent (NOT sorted by the parser): 2, 0, 1.
+            assertThat(ab.answers().get(0).questionIndex()).isEqualTo(2);
+            assertThat(ab.answers().get(0).selections()).containsExactly(1);
+            assertThat(ab.answers().get(0).freeText()).isEqualTo("a\"b\\c");
+            assertThat(ab.answers().get(1).questionIndex()).isZero();
+            assertThat(ab.answers().get(1).selections()).containsExactly(0, 2);
+            assertThat(ab.answers().get(1).freeText()).isEmpty();
+            assertThat(ab.answers().get(2).questionIndex()).isEqualTo(1);
+            assertThat(ab.answers().get(2).selections()).isEmpty();
+            assertThat(ab.answers().get(2).freeText()).isEqualTo("line1\nline2 🎉");
+        });
+    }
+
+    @Test
     void parses_select_target_interrupt_enumerate_and_close_frames() {
         assertThat(svc.parseConversation("{\"type\":\"select-target\",\"targetId\":\"swarm:main:0.1\"}"))
                 .isInstanceOfSatisfying(ConversationClientMessage.SelectTarget.class, st -> assertThat(st.targetId())
