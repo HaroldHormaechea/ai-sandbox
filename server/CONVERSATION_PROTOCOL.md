@@ -185,7 +185,13 @@ buffers each question's answer locally, and — once all are answered — submit
 ```
 
 The single-question case is unchanged — it still uses the `answer` frame; only
-N>1 uses `answer-batch`. Server-side the handler resolves the single cached
+N>1 uses `answer-batch`. **Known limitation (UC-43):** in batch mode a custom
+"Other" free-text answer is injected only for **single-select** questions; a
+multiSelect question's "Other" free-text is NOT typed into the wizard (its other
+selected options are still toggled). The covered/verified batch paths are
+single-select (incl. its free-text), plain multiSelect, and the final submit;
+multiSelect + custom free-text is intentionally not injected rather than driven
+by an unverified keystroke guess. Server-side the handler resolves the single cached
 `Question`, sorts `answers[]` by `questionIndex`, derives each question's
 option-count / "Other" index from `questions[questionIndex]`, injects the whole
 sheet as ONE scheduled keystroke sequence, and **evicts the cached question only
