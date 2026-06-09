@@ -285,6 +285,86 @@ class ConversationControllerTest {
     }
 
     @Test
+    fun `a tool-result matching the pending sheet toolUseId dismisses the sheet`() {
+        // UC-44 AC3a — the stuck-popup safety net. When the underlying ask is resolved/aborted
+        // server-side (e.g. an "Other" answer declined the ask, the turn proceeded), the resolving
+        // `tool-result` carries the SAME toolUseId as the sheet's questionUuid. The controller must
+        // dismiss the sheet on that matched frame so it can never linger after the ask is resolved.
+        val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        server.enqueue(
+            MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+                override fun onOpen(webSocket: WebSocket, response: Response) {
+                    wsRef.set(webSocket)
+                }
+            }),
+        )
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { wsRef.get() != null }).isTrue
+            wsRef.get()!!.send(
+                """{"type":"question","uuid":"uq","source":"main","isSidechain":false,"toolUseId":"tuQ",""" +
+                    """"questions":[{"question":"Pick","header":"H","multiSelect":false,""" +
+                    """"options":[{"label":"A","description":""},{"label":"B","description":""}]}]}""",
+            )
+            assertThat(
+                awaitUntil { (c.pendingSheet.value as? PendingSheet.Questions)?.questionUuid == "tuQ" },
+            ).isTrue
+            // The matching tool-result (toolUseId == the sheet's questionUuid) resolves the ask …
+            wsRef.get()!!.send(
+                """{"type":"tool-result","uuid":"ur","source":"main","isSidechain":false,""" +
+                    """"toolUseId":"tuQ","isError":false,"summary":"done"}""",
+            )
+            // … so the sheet dismisses cleanly (AC3a) — it never lingers once the ask is resolved.
+            assertThat(awaitUntil { c.pendingSheet.value == null }).isTrue
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
+    fun `a tool-result with a non-matching toolUseId does not dismiss an unrelated sheet`() {
+        // UC-44 AC3a (negative) — only the tool-result that RESOLVES the pending ask dismisses it.
+        // A tool-result for a DIFFERENT tool call (any other Bash/Read/etc. that finishes while the
+        // ask is still open) must NOT tear down the unrelated sheet.
+        val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        server.enqueue(
+            MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+                override fun onOpen(webSocket: WebSocket, response: Response) {
+                    wsRef.set(webSocket)
+                }
+            }),
+        )
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { wsRef.get() != null }).isTrue
+            wsRef.get()!!.send(
+                """{"type":"question","uuid":"uq","source":"main","isSidechain":false,"toolUseId":"tuQ",""" +
+                    """"questions":[{"question":"Pick","header":"H","multiSelect":false,""" +
+                    """"options":[{"label":"A","description":""},{"label":"B","description":""}]}]}""",
+            )
+            assertThat(
+                awaitUntil { (c.pendingSheet.value as? PendingSheet.Questions)?.questionUuid == "tuQ" },
+            ).isTrue
+            // An UNRELATED tool-result (different toolUseId) lands while the ask is still pending.
+            wsRef.get()!!.send(
+                """{"type":"tool-result","uuid":"ur2","source":"main","isSidechain":false,""" +
+                    """"toolUseId":"tuOTHER","isError":false,"summary":"unrelated"}""",
+            )
+            // Wait until that unrelated result is observably processed (its merged row appears) …
+            assertThat(
+                awaitUntil { c.items.value.any { it is ConversationItem.ToolActivity && it.toolUseId == "tuOTHER" } },
+            ).isTrue
+            // … and the sheet is STILL up: a non-matching result must not dismiss it.
+            assertThat(c.pendingSheet.value).isInstanceOf(PendingSheet.Questions::class.java)
+            assertThat((c.pendingSheet.value as PendingSheet.Questions).questionUuid).isEqualTo("tuQ")
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
     fun `a live turn drives the thinking spinner`() {
         enqueuePush(
             listOf(
@@ -562,6 +642,263 @@ class ConversationControllerTest {
             assertThat(awaitUntil { c.items.value.size == 1 }).isTrue
             assertThat(c.items.value.single()).isInstanceOf(ConversationItem.ToolActivity::class.java)
             assertThat(c.items.value.none { it is ConversationItem.UserMessage }).isTrue
+        } finally {
+            c.close()
+        }
+    }
+
+    // ──────────────── Part E — UC-45 optimistic local echo ───────────────────
+
+    /**
+     * AC3/AC5/AC7 server stub — records every inbound frame, and echoes a DISTINCT
+     * `turn-start` per inbound `composer-input` (a per-message uuid, reflecting back the
+     * exact typed text). The distinct uuid is load-bearing for AC5: a FIXED echo frame
+     * (same uuid+text) would dedupe via `reconciledServerKeys` and MASK a double-reconcile
+     * / cross-match bug (challenger note), so the stub must mint one per submission.
+     */
+    private fun enqueueComposerEchoer(received: java.util.concurrent.CopyOnWriteArrayList<String>) {
+        val seq = java.util.concurrent.atomic.AtomicInteger(0)
+        server.enqueue(
+            MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+                override fun onMessage(webSocket: WebSocket, text: String) {
+                    received.add(text)
+                    if (text.contains(""""type":"composer-input"""")) {
+                        val typed = Regex(""""text":"(.*?)"""").find(text)?.groupValues?.get(1) ?: ""
+                        val n = seq.incrementAndGet()
+                        webSocket.send(
+                            """{"type":"turn-start","uuid":"srv$n","source":"main",""" +
+                                """"isSidechain":false,"text":"$typed"}""",
+                        )
+                    }
+                }
+            }),
+        )
+    }
+
+    /** Capture the server WebSocket so the test can push frames at a deterministic moment. */
+    private fun enqueueCapture(wsRef: java.util.concurrent.atomic.AtomicReference<WebSocket?>) {
+        server.enqueue(
+            MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+                override fun onOpen(webSocket: WebSocket, response: Response) {
+                    wsRef.set(webSocket)
+                }
+            }),
+        )
+    }
+
+    private fun userMessages(c: ConversationController): List<ConversationItem.UserMessage> =
+        c.items.value.filterIsInstance<ConversationItem.UserMessage>()
+
+    @Test
+    fun `submit echoes an optimistic user bubble immediately with no network`() {
+        // AC1 — the bubble is present synchronously after submit, before any round-trip, and
+        // renders as a user's own line (source=main, non-sidechain → right-aligned).
+        val c = offlineController()
+        c.submitComposer("hello there")
+        val bubbles = userMessages(c)
+        assertThat(bubbles).hasSize(1)
+        assertThat(bubbles.single().text).isEqualTo("hello there")
+        assertThat(bubbles.single().localSeq).isNotNull // optimistic
+        assertThat(bubbles.single().source).isEqualTo("main")
+        assertThat(bubbles.single().isSidechain).isFalse
+    }
+
+    @Test
+    fun `a blank submit adds no optimistic bubble`() {
+        // AC2 — a blank submit neither starts the spinner (existing test) nor echoes a bubble.
+        val c = offlineController()
+        c.submitComposer("   ")
+        assertThat(userMessages(c)).isEmpty()
+    }
+
+    @Test
+    fun `a submit blocked by a pending sheet adds no optimistic bubble`() {
+        // AC2/AC12 — the composer is locked while a question sheet is pending, so submit is a
+        // no-op: no echo bubble appears.
+        val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        enqueueCapture(wsRef)
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { wsRef.get() != null }).isTrue
+            wsRef.get()!!.send(
+                """{"type":"question","uuid":"uq","source":"main","isSidechain":false,"toolUseId":"tuQ",""" +
+                    """"questions":[{"question":"Pick","header":"H","multiSelect":false,""" +
+                    """"options":[{"label":"A","description":"a"}]}]}""",
+            )
+            assertThat(awaitUntil { c.pendingSheet.value is PendingSheet.Questions }).isTrue
+            c.submitComposer("blocked")
+            Thread.sleep(150) // give any erroneous async insert a chance to land
+            assertThat(userMessages(c)).isEmpty()
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
+    fun `a server echo reconciles the optimistic bubble in place into exactly one bubble`() {
+        // AC3 — submit, observe the optimistic bubble, then the authoritative turn-start echo
+        // reconciles it IN PLACE: exactly one bubble, key stable (localSeq kept), uuid backfilled
+        // — no duplicate, no remove+re-add flicker.
+        val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        enqueueCapture(wsRef)
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { c.state.value == TerminalState.Open && wsRef.get() != null }).isTrue
+            c.submitComposer("hello")
+            assertThat(awaitUntil { userMessages(c).size == 1 }).isTrue
+            val optimistic = userMessages(c).single()
+            assertThat(optimistic.localSeq).isNotNull
+            assertThat(optimistic.uuid).isEmpty() // uuid not yet backfilled
+            val keyBefore = optimistic.key
+            wsRef.get()!!.send(
+                """{"type":"turn-start","uuid":"u1","source":"main","isSidechain":false,"text":"hello"}""",
+            )
+            assertThat(awaitUntil { userMessages(c).singleOrNull()?.uuid == "u1" }).isTrue
+            val reconciled = userMessages(c).single()
+            assertThat(userMessages(c)).hasSize(1) // no duplicate
+            assertThat(reconciled.key).isEqualTo(keyBefore) // stable → Compose updates the row
+            assertThat(reconciled.localSeq).isEqualTo(optimistic.localSeq)
+            assertThat(reconciled.text).isEqualTo("hello")
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
+    fun `with no server echo the optimistic bubble persists`() {
+        // AC4 — the echo never arrives (delayed/dropped, UC-40); the user must never lose sight
+        // of what they sent, so the optimistic bubble remains visible.
+        val c = offlineController()
+        c.submitComposer("durable")
+        assertThat(userMessages(c)).hasSize(1)
+        Thread.sleep(300) // no echo will ever come
+        val bubbles = userMessages(c)
+        assertThat(bubbles).hasSize(1)
+        assertThat(bubbles.single().text).isEqualTo("durable")
+        assertThat(bubbles.single().localSeq).isNotNull // still the optimistic bubble
+    }
+
+    @Test
+    fun `two rapid submits yield two ordered bubbles with no duplicates`() {
+        // AC5 — each submit echoes and reconciles to ITS OWN server frame, in submission order,
+        // without cross-matching. The echoer mints a DISTINCT uuid per inbound composer-input
+        // (challenger note): a fixed echo would dedupe and mask the bug this test guards.
+        val received = java.util.concurrent.CopyOnWriteArrayList<String>()
+        enqueueComposerEchoer(received)
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { c.state.value == TerminalState.Open }).isTrue
+            c.submitComposer("first")
+            c.submitComposer("second")
+            assertThat(
+                awaitUntil { userMessages(c).size == 2 && userMessages(c).all { it.uuid.startsWith("srv") } },
+            ).withFailMessage("bubbles=${userMessages(c).map { it.text to it.uuid }}").isTrue
+            val bubbles = userMessages(c)
+            assertThat(bubbles).hasSize(2) // no duplicate
+            assertThat(bubbles.map { it.text }).containsExactly("first", "second") // ordered
+            assertThat(bubbles.map { it.key }).containsExactly("localuser|0", "localuser|1") // stable keys
+            assertThat(bubbles.map { it.uuid }.toSet()).hasSize(2) // distinct frames, no cross-match
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
+    fun `the bytes injected into the session are unchanged by the local echo`() {
+        // AC7 — local echo is display-only: the composer-input frame the server receives carries
+        // the typed text byte-for-byte, exactly as before this feature.
+        val received = java.util.concurrent.CopyOnWriteArrayList<String>()
+        enqueueComposerEchoer(received)
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { c.state.value == TerminalState.Open }).isTrue
+            c.submitComposer("hello world")
+            assertThat(awaitUntil { received.any { it.contains(""""type":"composer-input"""") } }).isTrue
+            val frame = received.first { it.contains(""""type":"composer-input"""") }
+            assertThat(frame).isEqualTo("""{"type":"composer-input","text":"hello world"}""")
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
+    fun `a backfill replay of an already-reconciled line stays one bubble`() {
+        // AC8 — after a live reconcile, a reconnect/backfill replay of the SAME server line is
+        // deduped via reconciledServerKeys: no second (server-keyed) bubble appears.
+        val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        enqueueCapture(wsRef)
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { c.state.value == TerminalState.Open && wsRef.get() != null }).isTrue
+            c.submitComposer("hello")
+            assertThat(awaitUntil { userMessages(c).size == 1 }).isTrue
+            wsRef.get()!!.send(
+                """{"type":"turn-start","uuid":"u1","source":"main","isSidechain":false,"text":"hello"}""",
+            )
+            assertThat(awaitUntil { userMessages(c).singleOrNull()?.uuid == "u1" }).isTrue
+            listOf(
+                """{"type":"backfill-start","source":"main"}""",
+                """{"type":"turn-start","uuid":"u1","source":"main","isSidechain":false,"text":"hello"}""",
+                """{"type":"backfill-end","source":"main"}""",
+            ).forEach { wsRef.get()!!.send(it) }
+            Thread.sleep(200)
+            assertThat(userMessages(c)).hasSize(1) // still ONE — no phantom replay bubble
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
+    fun `a backfill-only turn-start with no prior submit yields one non-optimistic bubble`() {
+        // AC8 phantom guard — re-entering a conversation (pure history replay, no submit) must
+        // NOT mint an optimistic bubble; the line is added once, server-keyed (localSeq == null).
+        val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        enqueueCapture(wsRef)
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { wsRef.get() != null }).isTrue
+            listOf(
+                """{"type":"backfill-start","source":"main"}""",
+                """{"type":"turn-start","uuid":"u1","source":"main","isSidechain":false,"text":"replayed"}""",
+                """{"type":"backfill-end","source":"main"}""",
+            ).forEach { wsRef.get()!!.send(it) }
+            assertThat(awaitUntil { userMessages(c).size == 1 }).isTrue
+            val bubble = userMessages(c).single()
+            assertThat(bubble.localSeq).isNull() // non-optimistic, server-origin
+            assertThat(bubble.uuid).isEqualTo("u1")
+            assertThat(bubble.text).isEqualTo("replayed")
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
+    fun `switching target clears pending echoes so a later echo is not cross-matched`() {
+        // Guards the developer's clearItems() dropping pendingEchoes in lockstep: after a target
+        // switch, a turn-start echo finds no pending bubble and is added fresh (no stale match).
+        val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        enqueueCapture(wsRef)
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { c.state.value == TerminalState.Open && wsRef.get() != null }).isTrue
+            c.submitComposer("stale")
+            assertThat(awaitUntil { userMessages(c).size == 1 }).isTrue
+            c.selectTarget("swarm:main:0.1") // clears items + pendingEchoes + reconciledServerKeys
+            assertThat(c.items.value).isEmpty()
+            wsRef.get()!!.send(
+                """{"type":"turn-start","uuid":"u9","source":"main","isSidechain":false,"text":"fresh"}""",
+            )
+            assertThat(awaitUntil { userMessages(c).size == 1 }).isTrue
+            val bubble = userMessages(c).single()
+            assertThat(bubble.uuid).isEqualTo("u9")
+            assertThat(bubble.localSeq).isNull() // added fresh, not reconciled against the cleared bubble
         } finally {
             c.close()
         }

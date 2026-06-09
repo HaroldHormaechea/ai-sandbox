@@ -394,6 +394,58 @@ class SessionConversationHandlerTest {
     }
 
     @Test
+    @SuppressWarnings("unchecked")
+    void answer_batch_derives_free_text_specs_for_non_last_single_select_and_multiSelect_other() throws Exception {
+        // UC-44 AC9 (server batch derivation) — the gap that let the bug ship. A 2-question batch
+        // where BOTH questions use an "Other" free text:
+        //   Q0 single-select [A,B], "Other" "custom0" on a NON-LAST question;
+        //   Q1 multiSelect   [X,Y], option 0 + "Other" "custom1".
+        // The client appends the Other index (== the question's option count) to `selections` and
+        // carries the `freeText`. deriveAnswerSpec must, for each, set otherIndex = listed-option
+        // count and BUMP optionCount by 1 (so the keystroke walk includes the "Type something" row),
+        // while leaving multiSelect untouched. A blank freeText would NOT bump optionCount — here both
+        // are non-blank, so both specs are bumped.
+        ConversationFacade facade = mock(ConversationFacade.class);
+        CountDownLatch applied = new CountDownLatch(1);
+        doAnswer(inv -> {
+                    applied.countDown();
+                    return null;
+                })
+                .when(facade)
+                .injectAnswerBatch(eq(7), any(), any(), any());
+
+        String questionLine = askUserQuestionLine("["
+                + "{\"question\":\"Q0\",\"header\":\"H0\",\"multiSelect\":false,\"options\":"
+                + "[{\"label\":\"A\",\"description\":\"\"},{\"label\":\"B\",\"description\":\"\"}]},"
+                + "{\"question\":\"Q1\",\"header\":\"H1\",\"multiSelect\":true,\"options\":"
+                + "[{\"label\":\"X\",\"description\":\"\"},{\"label\":\"Y\",\"description\":\"\"}]}]");
+        // Q0: Other index = 2 (== option count); Q1: option 0 plus Other index 2.
+        String batchFrame = "{\"type\":\"answer-batch\",\"questionUuid\":\"tuQ\",\"answers\":["
+                + "{\"questionIndex\":0,\"selections\":[2],\"freeText\":\"custom0\"},"
+                + "{\"questionIndex\":1,\"selections\":[0,2],\"freeText\":\"custom1\"}]}";
+
+        FakeSession session = driveQuestionThenClientFrame(facade, questionLine, batchFrame, applied);
+
+        ArgumentCaptor<List<InputInjectionService.BatchAnswerSpec>> cap = ArgumentCaptor.forClass(List.class);
+        verify(facade).injectAnswerBatch(eq(7), any(), cap.capture(), any());
+        List<InputInjectionService.BatchAnswerSpec> specs = cap.getValue();
+        assertThat(specs).hasSize(2);
+        // Q0 — single-select non-last free text: optionCount bumped 2 → 3, otherIndex = 2, text carried.
+        assertThat(specs.get(0).multiSelect()).isFalse();
+        assertThat(specs.get(0).optionCount()).isEqualTo(3);
+        assertThat(specs.get(0).otherIndex()).isEqualTo(2);
+        assertThat(specs.get(0).selections()).containsExactly(2);
+        assertThat(specs.get(0).freeText()).isEqualTo("custom0");
+        // Q1 — multiSelect + free text: optionCount bumped 2 → 3, otherIndex = 2, both selections kept.
+        assertThat(specs.get(1).multiSelect()).isTrue();
+        assertThat(specs.get(1).optionCount()).isEqualTo(3);
+        assertThat(specs.get(1).otherIndex()).isEqualTo(2);
+        assertThat(specs.get(1).selections()).containsExactly(0, 2);
+        assertThat(specs.get(1).freeText()).isEqualTo("custom1");
+        assertThat(session.closedWith).isNull();
+    }
+
+    @Test
     void single_answer_path_is_unchanged_and_does_not_use_the_batch_path() throws Exception {
         // AC5 — a single-question AskUserQuestion still resolves via the single `answer` frame →
         // facade.injectAnswer with the option metadata derived from the cached question, and the

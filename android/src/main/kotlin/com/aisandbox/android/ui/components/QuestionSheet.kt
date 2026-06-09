@@ -158,10 +158,15 @@ private fun SingleQuestionBody(
             } else {
                 selected.clear()
                 selected[idx] = true
+                otherText = "" // UC-44 — single-select: a radio choice and "Other" are mutually exclusive
             }
         },
         otherText = otherText,
-        onOtherChange = { otherText = it },
+        onOtherChange = {
+            otherText = it
+            // UC-44 — single-select: typing a non-blank "Other" clears the radio choice.
+            if (!q.multiSelect && it.isNotBlank()) selected.clear()
+        },
     )
 
     Spacer(Modifier.height(12.dp))
@@ -226,11 +231,16 @@ private fun PagedQuestionBody(
             selectionsByQ[current] = if (q.multiSelect) {
                 if (existing.contains(idx)) existing - idx else existing + idx
             } else {
+                freeTextByQ[current] = "" // UC-44 — single-select: radio choice and "Other" are mutually exclusive
                 setOf(idx)
             }
         },
         otherText = curOther,
-        onOtherChange = { freeTextByQ[current] = it },
+        onOtherChange = { text ->
+            freeTextByQ[current] = text
+            // UC-44 — single-select: typing a non-blank "Other" clears the radio choice.
+            if (!q.multiSelect && text.isNotBlank()) selectionsByQ[current] = emptySet()
+        },
     )
 
     Spacer(Modifier.height(12.dp))

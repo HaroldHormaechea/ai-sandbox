@@ -38,6 +38,17 @@ import org.mockito.ArgumentCaptor;
  *   <li>safety — {@link #literal_text_is_passed_verbatim_as_a_single_argv_element()},
  *       {@link #non_zero_exit_raises_IOException()}</li>
  * </ul>
+ *
+ * <p><b>UC-44</b> — the multiSelect + "Other" free-text injection (the real bug) is
+ * now TYPED, not silently dropped. The keystroke model below is the one the
+ * developer live-verified on Claude Code {@value InputInjectionService#PINNED_CLAUDE_VERSION}:
+ * <ul>
+ *   <li>AC2 batch multiSelect+Other — {@link #answer_batch_multiSelect_other_free_text_is_typed_and_committed()}</li>
+ *   <li>AC1/AC5 non-last single-select free-text in a batch —
+ *       {@link #answer_batch_non_last_single_select_free_text_advances_with_Enter_and_next_question_still_answered()}</li>
+ *   <li>AC6 single-question multiSelect+Other (the {@code injectAnswer} review-confirm path) —
+ *       {@link #answer_single_multiSelect_other_types_commits_selects_then_confirms_review()}</li>
+ * </ul>
  */
 class InputInjectionServiceTest {
 
@@ -153,7 +164,7 @@ class InputInjectionServiceTest {
         // otherIndex=2 is selected; free text supplied.
         svc.injectAnswer(3, InjectTarget.main(), 3, false, List.of(2), 2, "my custom answer");
 
-        // UC-43 bugfix (live-verified on 2.1.159): the free-text path now TYPES BEFORE Enter —
+        // UC-43 bugfix (live-verified on 2.1.169): the free-text path now TYPES BEFORE Enter —
         // walk Down to the "Type something" row, type the text INLINE, THEN a single Enter. The
         // OLD order (Enter-on-empty, then type) DECLINED the ask. So the sequence is
         // 20 Up (reset) + 2 Down (to otherIndex 2) + literal + Enter = 24 calls, with NO
@@ -180,6 +191,36 @@ class InputInjectionServiceTest {
         svc.injectAnswer(3, InjectTarget.main(), 3, false, List.of(2), 2, "   ");
         List<List<String>> calls = capturedArgvs(/* 20 Up + 2 Down + Enter */ 23);
         assertThat(calls).noneSatisfy(c -> assertThat(c).contains("-l"));
+    }
+
+    // ──────────────── UC-44 AC6 — single-question multiSelect + "Other" (injectAnswer) ────────────────
+
+    @Test
+    void answer_single_multiSelect_other_types_commits_selects_then_confirms_review() throws Exception {
+        // AC6 — the SAME root-cause fix in the single-question `injectAnswer` path: a lone
+        // multiSelect question answered with a real option (index 0) PLUS an "Other" free text.
+        // Mirrors the handler's deriveAnswerSpec output for 2 listed options [X,Y] + "Other":
+        //   optionCount = 2 listed + 1 (the Other row, because freeText is non-blank) = 3
+        //   otherIndex  = 2 (the Other row is always last); selections = [0, 2] (client appends Other).
+        // The implemented multiSelect+Other walk (verified live on 2.1.169):
+        //   reset cursor (20×Up); Space on option 0; Down; Down to the "Type something" row; type the
+        //   literal; Enter (COMMIT the typed text as a custom option — NOT a silent preview drop);
+        //   Space (SELECT it); then from that row Tab FOCUSES + Enter ACTIVATES the in-pane Submit;
+        //   and because this is the single-question path (commitKey == "Enter") one final Enter
+        //   confirms the "Review your answers" screen.
+        svc.injectAnswer(3, InjectTarget.main(), 3, true, List.of(0, 2), 2, "custom");
+
+        List<List<String>> calls = capturedArgvs(/* 20 Up + 9 */ 29);
+        long ups = calls.stream().filter(c -> "Up".equals(tail(c, 1))).count();
+        assertThat(ups)
+                .as("single-question injectAnswer resets the cursor to the top")
+                .isEqualTo(20);
+        // The literal MUST be sent — this is the UC-44 fix (the prior code toggled Space but never typed).
+        assertThat(calls).anySatisfy(c -> assertThat(c).containsSequence("-l", "--", "custom"));
+        // Pin the EXACT post-reset sequence (drop the 20 leading Ups).
+        List<String> seq = keySeq(calls);
+        assertThat(seq.subList(20, seq.size()))
+                .containsExactly("Space", "Down", "Down", "LIT:custom", "Enter", "Space", "Tab", "Enter", "Enter");
     }
 
     // ──────────────────────── interrupt ──────────────────────────────────────
@@ -248,7 +289,7 @@ class InputInjectionServiceTest {
     //
     // The executor is MOCKED, so a wrong keystroke ORDER would still pass a loose
     // count-only assertion. Every test below pins the EXACT ordered sequence
-    // against the model the developer live-verified on Claude Code 2.1.159:
+    // against the model the developer live-verified on Claude Code 2.1.169:
     //   • single-select question : Down×k then Enter   (Enter selects AND advances the tab)
     //   • multiSelect question   : Space toggles in place, Down between options, then Tab advances
     //   • free-text "Other"      : Down to the row, type the text INLINE, then Enter
@@ -299,18 +340,58 @@ class InputInjectionServiceTest {
     }
 
     @Test
-    void answer_batch_multiSelect_other_free_text_is_NOT_typed_documented_limitation() throws Exception {
-        // Documented (verify-first) limitation: a multiSelect question's custom "Other" free-text
-        // is NOT typed in batch mode. The Other option row may still be toggled (Space), but the
-        // literal text is never sent. This is EXPECTED behavior per CONVERSATION_PROTOCOL.md.
+    void answer_batch_multiSelect_other_free_text_is_typed_and_committed() throws Exception {
+        // UC-44 AC2 — THE bug. A multiSelect question's custom "Other" free-text is now TYPED into
+        // the wizard (no longer toggled-but-dropped). This positive assertion replaces the prior
+        // `…_NOT_typed_documented_limitation` test. Spec mirrors the handler's deriveAnswerSpec for
+        // 2 listed options [X,Y] + "Other": optionCount = 2 + 1 (Other row) = 3, otherIndex = 2,
+        // selections = [0, 2] (option 0 plus the client-appended Other index).
+        // Verified live on 2.1.169: walk Space on option 0, Down, Down to the "Type something" row,
+        // type the literal, Enter (COMMIT — the on-type checkmark is only a non-committed preview),
+        // Space (SELECT the committed option); then Tab FOCUSES + Enter ACTIVATES the in-pane Next
+        // button (a single key from that row does NOT advance, unlike from a real option). A batch
+        // appends ONE final Enter to submit the whole sheet.
         svc.injectAnswerBatch(
-                3, InjectTarget.main(), List.of(new BatchAnswerSpec(3, true, List.of(0, 2), 2, "ignored in batch")));
+                3, InjectTarget.main(), List.of(new BatchAnswerSpec(3, true, List.of(0, 2), 2, "custom answer")));
 
-        List<List<String>> calls = capturedArgvs(6);
-        assertThat(keySeq(calls)).containsExactly("Space", "Down", "Down", "Space", "Tab", "Enter");
-        assertThat(calls)
-                .as("multiSelect Other free-text must NOT be injected as a literal in batch mode")
-                .noneSatisfy(c -> assertThat(c).contains("-l"));
+        List<List<String>> calls = capturedArgvs(9);
+        assertThat(keySeq(calls))
+                .containsExactly(
+                        "Space", "Down", "Down", "LIT:custom answer", "Enter", "Space", "Tab", "Enter", "Enter");
+        // The literal IS sent verbatim as a single argv element (the regression this fixes).
+        assertThat(calls).anySatisfy(c -> assertThat(c).containsSequence("-l", "--", "custom answer"));
+        // Still NO 20×Up cursor reset in the batch path (the wizard auto-resets each tab).
+        assertThat(calls.stream().filter(c -> "Up".equals(tail(c, 1))).count())
+                .as("batch path must NOT emit the 20x Up cursor reset")
+                .isZero();
+    }
+
+    @Test
+    void answer_batch_non_last_single_select_free_text_advances_with_Enter_and_next_question_still_answered()
+            throws Exception {
+        // UC-44 AC1/AC4/AC5 — a single-select "Other" free text on a NON-LAST question must be
+        // delivered verbatim, advance the wizard with a single Enter (NOT submit the batch early),
+        // and leave the next question correctly answered on its own tab. Two-question batch:
+        //   Q0 single-select "Other" "hi"  → optionCount = 1+1=… here 2 listed +1 = 3, otherIndex 2,
+        //                                      selections=[2]: Down, Down (to the Other row), type, Enter (advance)
+        //   Q1 plain single-select index 1 → Down (to index 1), Enter (advance to Submit tab)
+        // then ONE final Enter submits the whole sheet.
+        svc.injectAnswerBatch(
+                3,
+                InjectTarget.main(),
+                List.of(
+                        new BatchAnswerSpec(3, false, List.of(2), 2, "hi"),
+                        new BatchAnswerSpec(2, false, List.of(1), 2, null)));
+
+        List<List<String>> calls = capturedArgvs(7);
+        assertThat(keySeq(calls)).containsExactly("Down", "Down", "LIT:hi", "Enter", "Down", "Enter", "Enter");
+        // Exactly THREE Enters: Q0 advance, Q1 advance, final submit — no extra (early) submit.
+        assertThat(calls.stream().filter(c -> "Enter".equals(tail(c, 1))).count())
+                .as("no early submit: one Enter per question advance + one final submit")
+                .isEqualTo(3);
+        // The non-last free-text is typed BEFORE its advancing Enter (Enter on an empty row declines).
+        List<String> seq = keySeq(calls);
+        assertThat(seq.subList(0, 4)).containsExactly("Down", "Down", "LIT:hi", "Enter");
     }
 
     @Test

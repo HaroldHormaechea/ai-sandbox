@@ -20,13 +20,27 @@ sealed interface ConversationItem {
     /** Stable dedupe key — distinct per block even when blocks share a uuid. */
     val key: String
 
+    /**
+     * UC-45 — a user message bubble. When [localSeq] is non-null this is an
+     * **optimistic local echo**: the composer inserts the bubble the instant the
+     * user hits send, before the server's authoritative `turn-start` echo arrives.
+     * The [key] then derives from [localSeq] only (`localuser|<seq>`), making it
+     * uuid- and text-independent and therefore STABLE for the bubble's whole
+     * lifetime. That stability is load-bearing for AC3: when the server echo is
+     * reconciled in place (uuid/text/source backfilled via `copy`, localSeq kept),
+     * the key does not change, so Compose updates the existing row rather than
+     * removing and re-adding it (no flicker). A confirmed/server-origin bubble has
+     * `localSeq == null` and uses the original server-derived key.
+     */
     data class UserMessage(
         override val uuid: String,
         override val source: String,
         override val isSidechain: Boolean,
         val text: String,
+        val localSeq: Long? = null,
     ) : ConversationItem {
-        override val key: String get() = "$uuid|user|${text.hashCode()}"
+        override val key: String get() =
+            if (localSeq != null) "localuser|$localSeq" else "$uuid|user|${text.hashCode()}"
     }
 
     data class Thinking(
