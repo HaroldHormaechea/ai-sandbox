@@ -59,3 +59,4 @@ Statuses:
 | 46 | [use-cases/46-server-row-lifecycle-context-menu.md](use-cases/46-server-row-lifecycle-context-menu.md) | Server-row context menu with Docker-lifecycle actions (remove/stop/start/pause/unpause), keep slide-to-remove | done | 2026-06-09 |
 | 47 | [use-cases/47-server-row-conversation-name.md](use-cases/47-server-row-conversation-name.md) | Show the Claude conversation name in each server row's status section | done | 2026-06-09 |
 | 48 | [use-cases/48-server-row-working-spinner.md](use-cases/48-server-row-working-spinner.md) | Per-row working spinner to spot genuinely idle sessions at a glance | done | 2026-06-09 |
+| 49 | [use-cases/49-server-row-pending-question-indicator.md](use-cases/49-server-row-pending-question-indicator.md) | Sessions-list question-mark indicator for sessions awaiting an answer (server live turn-state; suppresses UC-48 spinner) | pending | 2026-06-09 |
