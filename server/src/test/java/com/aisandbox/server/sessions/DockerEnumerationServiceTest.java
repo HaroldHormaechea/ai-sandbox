@@ -222,6 +222,40 @@ class DockerEnumerationServiceTest {
         verify(exec, never()).run(argThat(argv -> argv != null && argv.contains("display-message")), any(), any());
     }
 
+    /**
+     * UC-46 AC5 — a Docker-{@code paused} container surfaces with the new
+     * first-class {@code paused} wire state (NOT {@code stopped}), so {@code
+     * GET /v1/sessions} reports it distinctly and the {@code StatusPill}
+     * renders the paused treatment. Like other non-{@code running} states the
+     * readiness + tmux-title probes are skipped (a frozen container can't
+     * answer an {@code exec}).
+     */
+    @Test
+    void paused_containers_surface_with_paused_state_and_no_tmux_call() throws Exception {
+        ProcessExecutor exec = mock(ProcessExecutor.class);
+        when(exec.run(
+                        argThat(argv ->
+                                argv != null && argv.size() >= 3 && "ls".equals(argv.get(2)) && argv.contains("--all")),
+                        any(),
+                        any(),
+                        any()))
+                .thenReturn(new ProcessExecutor.Result(0, "[{\"Name\":\"ai-sandbox-13\"}]", ""));
+        when(exec.run(argThat(argv -> argv != null && argv.contains("ps")), any(), any(), any()))
+                .thenReturn(new ProcessExecutor.Result(0, "paused-cid\n", ""));
+        when(exec.run(argThat(argv -> argv != null && argv.contains("inspect")), any(), any()))
+                .thenReturn(new ProcessExecutor.Result(0, "my-paused-label|paused|false", ""));
+
+        SessionRecord r = new DockerEnumerationService(exec).enumerate().get(0);
+        assertThat(r.n()).isEqualTo(13);
+        assertThat(r.label()).isEqualTo("my-paused-label");
+        assertThat(r.state())
+                .as("UC-46 — docker `paused` maps to the first-class `paused` wire state, not `stopped`")
+                .isEqualTo("paused");
+        // Readiness/title probes are run only for `running`; never for paused.
+        assertThat(r.tmuxTitle()).isEqualTo("(unavailable)");
+        verify(exec, never()).run(argThat(argv -> argv != null && argv.contains("display-message")), any(), any());
+    }
+
     @Test
     void starting_containers_map_to_starting_state() throws Exception {
         ProcessExecutor exec = mock(ProcessExecutor.class);
@@ -381,7 +415,11 @@ class DockerEnumerationServiceTest {
         table.put("removing", "terminating");
         table.put("exited", "stopped");
         table.put("dead", "stopped");
-        table.put("paused", "stopped");
+        // UC-46 — `paused` is now its OWN first-class wire state (was bucketed
+        // into `stopped` pre-UC-46) so the Android UI can offer Unpause/Stop
+        // and render the distinct paused pill. The readiness/title probes are
+        // never run for a non-`running` docker status, so it stays `paused`.
+        table.put("paused", "paused");
         // Defensive — anything unknown becomes stopped.
         table.put("zombie", "stopped");
         table.put("", "stopped");

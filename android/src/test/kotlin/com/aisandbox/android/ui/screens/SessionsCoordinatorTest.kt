@@ -922,6 +922,209 @@ class SessionsCoordinatorTest {
         }
     }
 
+    // ── UC-46 — lifecycle action: optimistic pending / reconcile / surface ───
+    //
+    // Mirrors the delete-path coverage. The optimistic `pendingActions` mark
+    // happens BEFORE the outbound POST, so a dispatcher reading state at request
+    // time observes it (AC6). On 204 → refresh reconciles to the authoritative
+    // state and pending clears; on a 409/HTTP failure → the error surfaces and
+    // pending clears in `finally` (AC7 — never a stuck disabled control).
+
+    private val runningRowBody =
+        """[{"n":1,"label":"alpha","tmuxTitle":"","state":"running","uptimeSec":10,"activeStreams":0,"startedAt":null}]"""
+    private val pausedRowBody =
+        """[{"n":1,"label":"alpha","tmuxTitle":"","state":"paused","uptimeSec":10,"activeStreams":0,"startedAt":null}]"""
+
+    /**
+     * AC6 — a lifecycle action marks the row pending BEFORE the POST leaves the
+     * client (captured server-side at dispatch time), then a 204 + post-action
+     * refresh reconciles the row to its new authoritative state (running →
+     * paused) and CLEARS the pending flag.
+     */
+    @Test
+    fun lifecycle_marks_pending_before_request_then_clears_and_reconciles_on_success(): Unit = runBlocking {
+        val listRef = AtomicReference(runningRowBody)
+        val pendingAtRequestTime = AtomicReference<Set<Int>>(emptySet())
+        lateinit var stateRef: MutableStateFlow<SessionsUiState>
+        val fx = pinnedServer(object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                val path = request.path ?: ""
+                return when {
+                    request.method == "GET" && path == "/v1/sessions" ->
+                        MockResponse().setResponseCode(200).setBody(listRef.get())
+                    request.method == "POST" && path == "/v1/sessions/1/pause" -> {
+                        // The pending mark MUST be visible by the time the POST arrives.
+                        pendingAtRequestTime.set(stateRef.value.pendingActions)
+                        listRef.set(pausedRowBody) // server now reports the row paused
+                        MockResponse().setResponseCode(204)
+                    }
+                    else -> MockResponse().setResponseCode(404).setBody("""{"code":"not_found"}""")
+                }
+            }
+        })
+        val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+        try {
+            val state = MutableStateFlow(SessionsUiState())
+            stateRef = state
+            val coordinator = SessionsCoordinator(
+                state = state,
+                scope = scope,
+                profileSupplier = { fx.profile },
+                apiFactory = apiFactory(),
+            )
+
+            coordinator.refresh()
+            withTimeout(10_000) { state.first { !it.loading && it.sessions.any { s -> s.n == 1 && s.state == "running" } } }
+
+            coordinator.lifecycle(1, com.aisandbox.android.net.LifecycleAction.PAUSE)
+            // Success → refresh re-lists with state=paused and pending cleared.
+            withTimeout(10_000) { state.first { it.sessions.any { s -> s.n == 1 && s.state == "paused" } } }
+
+            assertThat(pendingAtRequestTime.get())
+                .`as`("AC6 — the row MUST be optimistically pending before the POST is dispatched")
+                .contains(1)
+            assertThat(state.value.pendingActions)
+                .`as`("AC6 — pending clears once the action resolves (control re-enabled)")
+                .doesNotContain(1)
+            assertThat(state.value.lastError)
+                .`as`("a successful lifecycle action surfaces no error")
+                .isNull()
+        } finally {
+            scope.cancel()
+            fx.shutdown()
+        }
+    }
+
+    /**
+     * AC7 — a 409 session_state_conflict (state drifted from under the client)
+     * is surfaced as "session_state_conflict (409)", the pending flag is cleared
+     * (control re-enabled), and the row is left at its prior state — never a
+     * stuck fake state.
+     */
+    @Test
+    fun lifecycle_http_409_surfaces_error_and_clears_pending_and_keeps_state(): Unit = runBlocking {
+        val pendingAtRequestTime = AtomicReference<Set<Int>>(emptySet())
+        lateinit var stateRef: MutableStateFlow<SessionsUiState>
+        val fx = pinnedServer(object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                val path = request.path ?: ""
+                return when {
+                    request.method == "GET" && path == "/v1/sessions" ->
+                        MockResponse().setResponseCode(200).setBody(runningRowBody)
+                    request.method == "POST" && path.startsWith("/v1/sessions/1/") -> {
+                        pendingAtRequestTime.set(stateRef.value.pendingActions)
+                        MockResponse().setResponseCode(409).setBody(
+                            """{"code":"session_state_conflict","detail":"cannot start session 1 in state 'running'"}""",
+                        )
+                    }
+                    else -> MockResponse().setResponseCode(404).setBody("""{"code":"not_found"}""")
+                }
+            }
+        })
+        val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+        try {
+            val seed = SessionSummary(n = 1, label = "alpha", state = "running")
+            val state = MutableStateFlow(SessionsUiState(sessions = listOf(seed), profile = fx.profile))
+            stateRef = state
+            val coordinator = SessionsCoordinator(
+                state = state,
+                scope = scope,
+                profileSupplier = { fx.profile },
+                apiFactory = apiFactory(),
+            )
+
+            coordinator.lifecycle(1, com.aisandbox.android.net.LifecycleAction.START)
+            withTimeout(10_000) { state.first { it.lastError != null } }
+
+            assertThat(pendingAtRequestTime.get())
+                .`as`("AC6 — pending applied before the (failing) POST is dispatched")
+                .contains(1)
+            assertThat(state.value.lastError)
+                .`as`("AC7 — a 409 must surface '<code> (<status>)', never a silent no-op")
+                .isEqualTo("session_state_conflict (409)")
+            assertThat(state.value.pendingActions)
+                .`as`("AC7 — pending clears in finally so the control is re-enabled")
+                .doesNotContain(1)
+            assertThat(state.value.sessions)
+                .`as`("AC7 — the row is left at its prior state (no fake/stuck state)")
+                .anyMatch { it.n == 1 && it.state == "running" }
+        } finally {
+            scope.cancel()
+            fx.shutdown()
+        }
+    }
+
+    /**
+     * AC7 (transport branch) — a transport throw (connection refused) is
+     * single-surfaced via the full-screen NetworkEvent path and swallowed (no
+     * scope crash); pending is still cleared in `finally`.
+     */
+    @Test
+    fun lifecycle_transport_failure_is_swallowed_and_clears_pending(): Unit = runBlocking {
+        val fx = startFixture()
+        fx.shutdown() // closed port → next connect refused (IOException)
+
+        val uncaught = AtomicReference<Throwable?>(null)
+        val handler = CoroutineExceptionHandler { _, t -> uncaught.set(t) }
+        val workScope = CoroutineScope(Dispatchers.IO + SupervisorJob() + handler)
+        try {
+            val state = MutableStateFlow(
+                SessionsUiState(sessions = listOf(SessionSummary(n = 1, state = "running"))),
+            )
+            val coordinator = SessionsCoordinator(
+                state = state,
+                scope = workScope,
+                profileSupplier = { fx.profile },
+                apiFactory = apiFactory(),
+            )
+            val preExisting = workScope.coroutineContext.job.children.toSet()
+
+            coordinator.lifecycle(1, com.aisandbox.android.net.LifecycleAction.PAUSE)
+
+            // Join only the lifecycle() child so its catch+finally have finished.
+            withTimeout(15_000) {
+                (workScope.coroutineContext.job.children.toSet() - preExisting).forEach { it.join() }
+            }
+
+            assertThat(uncaught.get())
+                .`as`("lifecycle() MUST swallow the transport throwable — nothing escapes the scope")
+                .isNull()
+            assertThat(state.value.pendingActions)
+                .`as`("AC7 — pending clears in finally even when the call throws")
+                .doesNotContain(1)
+        } finally {
+            workScope.cancel()
+        }
+    }
+
+    /**
+     * No-profile path — lifecycle() flags `no_profile` and dispatches NOTHING
+     * (the api factory must never be invoked).
+     */
+    @Test
+    fun lifecycle_with_no_profile_flags_no_profile_and_dispatches_nothing(): Unit = runBlocking {
+        val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+        try {
+            val state = MutableStateFlow(
+                SessionsUiState(sessions = listOf(SessionSummary(n = 1, state = "running"))),
+            )
+            val coordinator = SessionsCoordinator(
+                state = state,
+                scope = scope,
+                profileSupplier = { null },
+                apiFactory = { error("apiFactory must not be called when there is no profile") },
+            )
+
+            coordinator.lifecycle(1, com.aisandbox.android.net.LifecycleAction.PAUSE)
+            withTimeout(10_000) { state.first { it.lastError == "no_profile" } }
+
+            assertThat(state.value.lastError).isEqualTo("no_profile")
+            assertThat(state.value.pendingActions).doesNotContain(1)
+        } finally {
+            scope.cancel()
+        }
+    }
+
     private fun spkiHex(spkiBytes: ByteArray): String =
         MessageDigest.getInstance("SHA-256").digest(spkiBytes)
             .joinToString("") { "%02x".format(it.toInt() and 0xff) }

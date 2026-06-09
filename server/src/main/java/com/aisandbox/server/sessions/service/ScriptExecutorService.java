@@ -1,6 +1,7 @@
 package com.aisandbox.server.sessions.service;
 
 import com.aisandbox.server.config.ServerProperties;
+import com.aisandbox.server.sessions.dto.LifecycleAction;
 import com.aisandbox.server.sessions.dto.SpawnCommand;
 import java.io.IOException;
 import java.nio.file.Files;
@@ -89,6 +90,32 @@ public class ScriptExecutorService {
         }
         List<String> argv =
                 List.of(locator.cleanSh().toString(), "--non-interactive", "--session", Integer.toString(n));
+        return executor.run(argv, locator.repoRoot(), composeEnv(), timeout);
+    }
+
+    /**
+     * UC-46 — drive a single Docker-lifecycle action (stop/start/pause/unpause)
+     * on session {@code n} via {@code lifecycle.sh}. Argv is built the same
+     * way as {@link #spawn} / {@link #clean} (no shell interpolation — AC24)
+     * and carries the same compose env so {@code lifecycle.sh} routes through
+     * {@code ai_sandbox_compose} against the server-pinned compose file +
+     * state root. The {@code --action} token comes from the validated
+     * {@link LifecycleAction#flag()}, never from raw client input.
+     */
+    public ProcessExecutor.Result lifecycle(LifecycleAction action, int n, Duration timeout) throws IOException {
+        if (n < 0) {
+            throw new IllegalArgumentException("session number must be >= 0");
+        }
+        if (action == null) {
+            throw new IllegalArgumentException("lifecycle action must not be null");
+        }
+        List<String> argv = List.of(
+                locator.lifecycleSh().toString(),
+                "--non-interactive",
+                "--session",
+                Integer.toString(n),
+                "--action",
+                action.flag());
         return executor.run(argv, locator.repoRoot(), composeEnv(), timeout);
     }
 

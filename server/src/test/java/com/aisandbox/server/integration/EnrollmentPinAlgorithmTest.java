@@ -253,6 +253,7 @@ class EnrollmentPinAlgorithmTest {
             writeExecutableShim(SCRIPTS_DIR.resolve("spawn.sh"));
             writeExecutableShim(SCRIPTS_DIR.resolve("attach.sh"));
             writeExecutableShim(SCRIPTS_DIR.resolve("clean.sh"));
+            writeExecutableShim(SCRIPTS_DIR.resolve("lifecycle.sh"));
 
             // Logback property handshake — logback-spring.xml reads
             // ai-sandbox.server.audit.file during

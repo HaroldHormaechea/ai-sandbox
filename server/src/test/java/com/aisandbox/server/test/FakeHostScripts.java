@@ -26,6 +26,10 @@ public final class FakeHostScripts {
         writeScript(repoRoot.resolve("spawn.sh"), defaultSpawn());
         writeScript(repoRoot.resolve("clean.sh"), defaultClean());
         writeScript(repoRoot.resolve("attach.sh"), defaultAttach());
+        // UC-46 — HostScriptLocator / PropertiesValidationStartupCheck now also
+        // require an executable lifecycle.sh, so the canonical fixture writes it
+        // too (otherwise a full-context boot fails "Host script missing").
+        writeScript(repoRoot.resolve("lifecycle.sh"), defaultLifecycle());
         return repoRoot;
     }
 
@@ -35,6 +39,20 @@ public final class FakeHostScripts {
 
     public static void replaceClean(Path repoRoot, String body) throws IOException {
         writeScript(repoRoot.resolve("clean.sh"), body);
+    }
+
+    /** UC-46 — replace lifecycle.sh with a custom body (e.g. a failing variant). */
+    public static void replaceLifecycle(Path repoRoot, String body) throws IOException {
+        writeScript(repoRoot.resolve("lifecycle.sh"), body);
+    }
+
+    /** UC-46 — default lifecycle.sh shim: echoes its args and exits 0. */
+    public static String defaultLifecycle() {
+        return """
+                #!/bin/sh
+                echo "lifecycle $@"
+                exit 0
+                """;
     }
 
     public static String defaultSpawn() {

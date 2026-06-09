@@ -286,7 +286,7 @@ jobs:
                   # AC3,AC4,AC5 — bundled host/ contents + .sh executable.
                   # UC-27 — devtools-select.sh / devtools-ui.sh are the shared
                   # raw-mode selector the Java CLI shells out to.
-                  for f in spawn.sh clean.sh attach.sh lib.sh setup.sh entrypoint.sh devtools-select.sh devtools-ui.sh; do
+                  for f in spawn.sh clean.sh lifecycle.sh attach.sh lib.sh setup.sh entrypoint.sh devtools-select.sh devtools-ui.sh; do
                       test -x "/opt/ai-sandbox-server/host/$f"
                   done
                   for f in docker-compose.yml SandboxDockerfile; do

@@ -67,4 +67,19 @@ class StatusPillInstrumentationTest {
         }
         composeTestRule.onNodeWithText("frobnicate").assertIsDisplayed()
     }
+
+    /**
+     * UC-46 AC5 — the new `paused` token renders the dedicated "paused" label
+     * (a frozen, resumable container — distinct from `stopped`). Like the
+     * UC-28 caveat above, this asserts the rendered LABEL; the subdued/hollow-
+     * dot visual treatment is pinned by the source and remains a manual
+     * emulator check.
+     */
+    @Test
+    fun paused_token_renders_paused_label() {
+        composeTestRule.setContent {
+            AiSandboxTheme { StatusPill(state = "paused") }
+        }
+        composeTestRule.onNodeWithText("paused").assertIsDisplayed()
+    }
 }

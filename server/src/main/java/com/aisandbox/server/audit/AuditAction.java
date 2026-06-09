@@ -28,6 +28,9 @@ public enum AuditAction {
     // ErrorCode wire form so dashboards can group rejections by class.
     CLIENT_ENROLL_REJECT,
     SERVER_CERT_ROTATION,
+    // UC-46 — a Docker-lifecycle action (stop/start/pause/unpause) ran for a
+    // session. Payload carries {action, n, exitCode}; result is ok / fail.
+    SESSION_LIFECYCLE,
     HEALTHZ_FAIL;
 
     public String wire() {

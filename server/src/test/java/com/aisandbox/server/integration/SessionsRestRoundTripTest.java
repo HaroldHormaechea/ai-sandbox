@@ -142,6 +142,7 @@ class SessionsRestRoundTripTest {
             writeExecutableShim(SCRIPTS_DIR.resolve("spawn.sh"));
             writeExecutableShim(SCRIPTS_DIR.resolve("attach.sh"));
             writeExecutableShim(SCRIPTS_DIR.resolve("clean.sh"));
+            writeExecutableShim(SCRIPTS_DIR.resolve("lifecycle.sh"));
 
             System.setProperty(
                     "ai-sandbox.server.audit.file",

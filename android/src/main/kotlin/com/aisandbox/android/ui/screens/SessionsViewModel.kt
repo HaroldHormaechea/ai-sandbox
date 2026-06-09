@@ -4,6 +4,7 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.aisandbox.android.AiSandboxApplication
+import com.aisandbox.android.net.LifecycleAction
 import com.aisandbox.android.net.ServerProfile
 import com.aisandbox.android.net.SessionSummary
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -77,6 +78,9 @@ class SessionsViewModel(application: Application) : AndroidViewModel(application
 
     fun delete(n: Int, force: Boolean) = coordinator.delete(n, force)
 
+    /** UC-46 — drive a Docker-lifecycle action (stop/start/pause/unpause). */
+    fun lifecycle(n: Int, action: LifecycleAction) = coordinator.lifecycle(n, action)
+
     fun clearError() = coordinator.clearError()
 
     /** UC-32 — open the live push feed; driven by the screen on foreground START (AC6). */
@@ -107,6 +111,14 @@ data class SessionsUiState(
      * [SessionsCoordinator] so the single-StateFlow render contract holds.
      */
     val terminating: Set<Int> = emptySet(),
+    /**
+     * UC-46 — session numbers with an in-flight lifecycle action
+     * (stop/start/pause/unpause). While a row is here, AC6: the row shows a
+     * pending treatment and its action control is disabled so the action
+     * can't be double-fired. The set is cleared when the call resolves; the
+     * authoritative state arrives on the next refresh / UC-32 push.
+     */
+    val pendingActions: Set<Int> = emptySet(),
 ) {
     /**
      * UC-28 — the effective state for display: the UNION of the client-side
@@ -131,7 +143,16 @@ data class SessionsUiState(
             // even though the RUNNING filter view still buckets starting in.
             s == "running" || s == "provisioning" || s == "terminating"
         }
-    val countStopped: Int get() = sessions.count { effectiveState(it) == "stopped" }
+    // UC-46 — `paused` buckets with `stopped` under the Stopped chip (both are
+    // non-running, resumable-or-restartable states the operator manages there).
+    val countStopped: Int
+        get() = sessions.count {
+            val s = effectiveState(it)
+            s == "stopped" || s == "paused"
+        }
+
+    /** UC-46 — whether a lifecycle action for [row] is currently in flight. */
+    fun isPending(row: SessionSummary): Boolean = row.n in pendingActions
 }
 
 /** Filter chip selection. */
@@ -147,6 +168,7 @@ enum class SessionsFilter {
     fun matches(state: String): Boolean = when (this) {
         ALL -> true
         RUNNING -> state == "running" || state == "starting" || state == "provisioning" || state == "terminating"
-        STOPPED -> state == "stopped"
+        // UC-46 — `paused` shows under Stopped alongside `stopped`.
+        STOPPED -> state == "stopped" || state == "paused"
     }
 }

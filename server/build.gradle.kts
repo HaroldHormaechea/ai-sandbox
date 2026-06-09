@@ -144,6 +144,15 @@ tasks.named<Test>("test") {
     // QA owns integration tests; the *.java naming convention (*IT.java)
     // discriminates so the ordinary `:test` run doesn't execute them.
     exclude("**/*IT.class")
+    // Diagnostic: print each test as it STARTS so a hang is identifiable
+    // from the CI log — the last "started" line with no matching
+    // passed/failed is the hung test. (Pairs with the per-method timeout
+    // in src/test/resources/junit-platform.properties, which fails a
+    // genuine hang fast instead of letting it eat the whole job timeout.)
+    testLogging {
+        events("started", "passed", "failed", "skipped")
+        showStandardStreams = false
+    }
 }
 
 val integrationTest by tasks.registering(Test::class) {
@@ -355,6 +364,10 @@ val releaseBundle by tasks.registering(Zip::class) {
         into("host")
         filePermissions { unix("rwxr-xr-x") }
     }
+    from(rootProject.file("lifecycle.sh")) {
+        into("host")
+        filePermissions { unix("rwxr-xr-x") }
+    }
     from(rootProject.file("attach.sh")) {
         into("host")
         filePermissions { unix("rwxr-xr-x") }
@@ -533,7 +546,7 @@ val prepDebStaging by tasks.registering(Copy::class) {
     // UC-27 — devtools-select.sh / devtools-ui.sh are the shared raw-mode
     // selector (the Java CLI shells out to host/devtools-select.sh).
     val hostExecutables = listOf(
-        "spawn.sh", "clean.sh", "attach.sh", "lib.sh", "setup.sh", "entrypoint.sh",
+        "spawn.sh", "clean.sh", "lifecycle.sh", "attach.sh", "lib.sh", "setup.sh", "entrypoint.sh",
         "devtools-select.sh", "devtools-ui.sh")
     hostExecutables.forEach { name ->
         from(rootProject.file(name)) {

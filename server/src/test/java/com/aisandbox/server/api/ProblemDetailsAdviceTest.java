@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 import com.aisandbox.server.api.error.ErrorCode;
 import com.aisandbox.server.api.error.ProblemDetailsAdvice;
+import com.aisandbox.server.sessions.dto.LifecycleAction;
 import com.aisandbox.server.sessions.facade.SessionFacade;
 import java.net.URI;
 import java.security.cert.CertificateException;
@@ -45,6 +46,23 @@ class ProblemDetailsAdviceTest {
         ProblemDetail pd = advice.handleBadCert(new CertificateException("malformed"));
         assertThat(pd.getStatus()).isEqualTo(400);
         assertThat(pd.getProperties()).containsEntry("code", "invalid_cert_pem");
+    }
+
+    /**
+     * UC-46 AC4 — an out-of-state lifecycle action maps to 409
+     * {@code session_state_conflict}, with the offending {@code n} and the
+     * {@code currentState} attached so the client can reconcile / re-render.
+     */
+    @Test
+    void invalid_lifecycle_transition_maps_to_409_session_state_conflict() {
+        ProblemDetail pd = advice.handleInvalidLifecycleTransition(
+                new SessionFacade.InvalidLifecycleTransitionException(5, LifecycleAction.START, "running"));
+        assertThat(pd.getStatus()).isEqualTo(409);
+        assertThat(pd.getProperties()).containsEntry("code", "session_state_conflict");
+        assertThat(pd.getProperties()).containsEntry("n", 5);
+        assertThat(pd.getProperties()).containsEntry("currentState", "running");
+        assertThat(pd.getType()).isEqualTo(URI.create("https://ai-sandbox.dev/problems/session_state_conflict"));
+        assertThat(pd.getDetail()).contains("start").contains("running");
     }
 
     @Test

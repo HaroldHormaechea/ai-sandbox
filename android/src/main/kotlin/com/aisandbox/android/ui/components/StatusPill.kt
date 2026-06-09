@@ -29,6 +29,7 @@ import com.aisandbox.android.ui.theme.OnSurfaceVariant
 import com.aisandbox.android.ui.theme.Outline
 import com.aisandbox.android.ui.theme.OutlineVariant
 import com.aisandbox.android.ui.theme.Success
+import com.aisandbox.android.ui.theme.SurfaceHigh
 import com.aisandbox.android.ui.theme.SurfaceLow
 import com.aisandbox.android.ui.theme.Warning
 
@@ -52,6 +53,9 @@ import com.aisandbox.android.ui.theme.Warning
  *       ([ErrorTone]); the leading dot pulses (indeterminate "spinner-dot")
  *       to signal an in-progress destructive operation. Labelled
  *       "terminating".</li>
+ *   <li><b>paused</b> (UC-46): a frozen, resumable container. Subdued on
+ *       the raised surface tone with a hollow dot — distinct from
+ *       {@code stopped} (still alive, just suspended). Labelled "paused".</li>
  *   <li><b>stopped</b>: gray subdued chip.</li>
  * </ul>
  *
@@ -71,6 +75,12 @@ fun StatusPill(state: String, modifier: Modifier = Modifier) {
             // CircularProgressIndicator, staying within the existing dot
             // vocabulary.
             Palette(bg = ErrorTone.copy(alpha = 0.18f), fg = ErrorTone, dot = ErrorTone, dotFilled = true, pulse = true)
+        "paused" ->
+            // UC-46 — a frozen, resumable container. Subdued like `stopped`
+            // but distinguished by a HOLLOW dot on the raised surface tone, so
+            // "suspended" reads differently from "torn down". OnSurfaceVariant
+            // (brighter than the muted stopped tone) signals it is still alive.
+            Palette(bg = SurfaceHigh, fg = OnSurfaceVariant, dot = OnSurfaceVariant, dotFilled = false)
         else -> Palette(bg = SurfaceLow, fg = OnSurfaceMuted, dot = OutlineVariant, dotFilled = true)
     }
     val label = when (state) {
@@ -78,6 +88,7 @@ fun StatusPill(state: String, modifier: Modifier = Modifier) {
         "starting" -> "starting"
         "provisioning" -> "installing…"
         "terminating" -> "terminating"
+        "paused" -> "paused"
         "stopped" -> "stopped"
         else -> state
     }

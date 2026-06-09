@@ -45,6 +45,18 @@
     <!-- UC20 — TalkBack description for the black-outlined trash revealed on swipe-left (AC1). -->
     <string name="delete_icon_description">Delete session</string>
 
+    <!-- UC-46 — per-row lifecycle context menu (stop/start/pause/unpause + remove). -->
+    <string name="session_menu_description">Session actions</string>
+    <string name="session_action_remove">Remove</string>
+    <string name="session_action_stop">Stop</string>
+    <string name="session_action_start">Start</string>
+    <string name="session_action_pause">Pause</string>
+    <string name="session_action_unpause">Unpause</string>
+    <!-- Shown when the operator taps/long-presses a row that isn't attachable
+         (stopped / paused / terminating) instead of navigating into a
+         guaranteed-failing connection. -->
+    <string name="session_not_running_hint">Session not running — start or unpause it first.</string>
+
     <!-- Terminal (UC04-3) -->
     <string name="terminal_back">Back</string>
     <string name="terminal_split">Toggle split pane</string>

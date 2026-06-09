@@ -297,4 +297,70 @@ class SessionsUiStateTest {
         )
         assertThat(rolledBack.sessions).containsExactly(running)
     }
+
+    // ── UC-46 — paused bucketing + pending-action gating ─────────────────────
+
+    @Test
+    fun `filter STOPPED matches paused (UC-46)`() {
+        // A paused (frozen) session is a non-running, resumable state the
+        // operator manages under the Stopped chip alongside stopped.
+        assertThat(SessionsFilter.STOPPED.matches("paused")).isTrue
+        assertThat(SessionsFilter.STOPPED.matches("stopped")).isTrue
+    }
+
+    @Test
+    fun `filter RUNNING excludes paused (UC-46)`() {
+        assertThat(SessionsFilter.RUNNING.matches("paused")).isFalse
+    }
+
+    @Test
+    fun `filter ALL matches paused (UC-46)`() {
+        assertThat(SessionsFilter.ALL.matches("paused")).isTrue
+    }
+
+    @Test
+    fun `countStopped includes paused rows (UC-46)`() {
+        val s = SessionsUiState(
+            sessions = listOf(
+                row(1, "running"),
+                row(2, "paused"),
+                row(3, "stopped"),
+                row(4, "paused"),
+            ),
+        )
+        // paused + stopped both bucket under Stopped.
+        assertThat(s.countStopped).isEqualTo(3)
+        assertThat(s.countRunning).isEqualTo(1)
+    }
+
+    @Test
+    fun `visible STOPPED shows paused alongside stopped sorted by N (UC-46)`() {
+        val s = SessionsUiState(
+            sessions = listOf(
+                row(4, "paused"),
+                row(1, "running"),
+                row(2, "stopped"),
+            ),
+            filter = SessionsFilter.STOPPED,
+        )
+        assertThat(s.visible.map { it.n }).containsExactly(2, 4)
+    }
+
+    @Test
+    fun `isPending is true only for rows in pendingActions (UC-46 AC6)`() {
+        val s = SessionsUiState(
+            sessions = listOf(row(1, "running"), row(2, "paused")),
+            pendingActions = setOf(2),
+        )
+        assertThat(s.isPending(row(2, "paused")))
+            .`as`("a row with an in-flight lifecycle action is pending (control disabled)")
+            .isTrue
+        assertThat(s.isPending(row(1, "running"))).isFalse
+    }
+
+    @Test
+    fun `isPending defaults to false with no pending actions (UC-46)`() {
+        val s = SessionsUiState(sessions = listOf(row(1, "running")))
+        assertThat(s.isPending(row(1, "running"))).isFalse
+    }
 }

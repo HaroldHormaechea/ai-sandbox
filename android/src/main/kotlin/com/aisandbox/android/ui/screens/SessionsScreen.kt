@@ -20,12 +20,15 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.FilterChip
@@ -72,6 +75,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.repeatOnLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.aisandbox.android.R
+import com.aisandbox.android.net.LifecycleAction
 import com.aisandbox.android.net.SessionSummary
 import com.aisandbox.android.ui.components.AttachedBadge
 import com.aisandbox.android.ui.components.SessionAvatar
@@ -199,6 +203,18 @@ fun SessionsScreen(
             onOpen = onOpen,
             onOpenTerminal = onOpenTerminal,
             onConfirmDelete = viewModel::delete,
+            onLifecycle = viewModel::lifecycle,
+            onBlockedOpen = {
+                // UC-46 row-open gate — a non-attachable row (stopped / paused
+                // / terminating) surfaces a hint instead of navigating into a
+                // guaranteed-failing connection.
+                coroutineScope.launch {
+                    snackbarHostState.showSnackbar(
+                        message = context.getString(R.string.session_not_running_hint),
+                        duration = SnackbarDuration.Short,
+                    )
+                }
+            },
         )
     }
 
@@ -230,6 +246,9 @@ internal fun SessionsBody(
     onOpen: (Int) -> Unit,
     onOpenTerminal: (Int) -> Unit,
     onConfirmDelete: (n: Int, force: Boolean) -> Unit,
+    // UC-46 — fire a lifecycle action for a row; surface the row-open hint.
+    onLifecycle: (n: Int, action: LifecycleAction) -> Unit = { _, _ -> },
+    onBlockedOpen: () -> Unit = {},
 ) {
     // UC20 — the swipe → confirm → delete flow lives in this internal seam
     // (the same seam UC18 used for tap-to-open) so an instrumented Compose
@@ -252,6 +271,12 @@ internal fun SessionsBody(
                 // and the server's `terminating` token (see SessionsUiState).
                 val effectiveState = state.effectiveState(row)
                 val isTerminating = effectiveState == "terminating"
+                // UC-46 — a lifecycle action is in flight for this row (AC6:
+                // disable its controls); and whether the row is attachable
+                // (tap → chat / long-press → terminal) vs. a non-running state
+                // that must redirect to the open-gate hint.
+                val isPending = state.isPending(row)
+                val attachable = isAttachable(effectiveState)
                 // Pitfall 5 — scope the dismiss state per-N inside key(row.n)
                 // so an in-flight list refresh can't carry a stale anchor onto
                 // a different row or resurrect a just-deleted one.
@@ -294,8 +319,15 @@ internal fun SessionsBody(
                         SessionRow(
                             row = row,
                             effectiveState = effectiveState,
-                            onTap = { onOpen(row.n) },
-                            onLongPress = { onOpenTerminal(row.n) },
+                            pending = isPending,
+                            // UC-46 row-open gate — only attachable states
+                            // navigate; otherwise surface the hint.
+                            onTap = { if (attachable) onOpen(row.n) else onBlockedOpen() },
+                            onLongPress = { if (attachable) onOpenTerminal(row.n) else onBlockedOpen() },
+                            // Remove routes to the EXISTING confirmed delete
+                            // path (DeleteSessionDialog) — not a second path.
+                            onRemove = { deleteTarget = row },
+                            onLifecycle = { action -> onLifecycle(row.n, action) },
                         )
                     }
                 }
@@ -391,10 +423,17 @@ private fun SessionRow(
     // UC-28 — the effective (union) state; drives the avatar + pill so the
     // optimistic terminating treatment shows before the server confirms.
     effectiveState: String = row.state,
+    // UC-46 — a lifecycle action is in flight for this row (AC6); the overflow
+    // menu is disabled while pending or terminating so it can't be double-fired.
+    pending: Boolean = false,
     onTap: () -> Unit,
     // UC-37 AC1 — long-press opens the tmux/terminal view; tap opens the
     // structured conversation view. Swipe-left (delete) is unchanged (AC2).
     onLongPress: () -> Unit = {},
+    // UC-46 — "Remove" in the overflow menu routes here (the SAME confirmed
+    // delete path as swipe-left); the four lifecycle verbs route to onLifecycle.
+    onRemove: () -> Unit = {},
+    onLifecycle: (LifecycleAction) -> Unit = {},
 ) {
     Box(
         modifier = Modifier
@@ -431,9 +470,16 @@ private fun SessionRow(
                         color = OnSurfaceMuted,
                     )
                 }
-                // AC2 — discoverable connection-mode hint.
+                // AC2 — discoverable connection-mode hint. UC-46: only show it
+                // for attachable rows; a stopped/paused/terminating row can't be
+                // opened (the row-open gate redirects to a hint), so advertising
+                // "tap to chat" would be misleading.
                 Text(
-                    text = "Tap to chat · hold for terminal",
+                    text = if (isAttachable(effectiveState)) {
+                        "Tap to chat · hold for terminal"
+                    } else {
+                        "Use ⋮ to manage this session"
+                    },
                     style = AiSandboxMonoTypography.metadata,
                     color = OnSurfaceMuted,
                 )
@@ -445,9 +491,99 @@ private fun SessionRow(
                     AttachedBadge(count = row.activeStreams)
                 }
             }
+            // UC-46 — trailing overflow context menu. Its IconButton onClick is
+            // SEPARATE from the row's combinedClickable (IconButton consumes the
+            // tap), so tap / long-press / swipe-left on the row are preserved.
+            SessionRowMenu(
+                n = row.n,
+                effectiveState = effectiveState,
+                pending = pending,
+                onRemove = onRemove,
+                onLifecycle = onLifecycle,
+            )
         }
     }
 }
+
+/**
+ * UC-46 — the per-row overflow menu. An [Icons.Filled.MoreVert] button reveals
+ * a Material3 [DropdownMenu] with Remove + the four Docker-lifecycle actions.
+ *
+ * <ul>
+ *   <li>The whole menu is disabled (greyed button) while the row is
+ *       {@code terminating} or has a lifecycle action in flight ([pending]) —
+ *       AC6, so the action can't be double-fired.</li>
+ *   <li>Each lifecycle item is enabled only when valid for the current state
+ *       ([LifecycleAction.isValidFrom]) — AC3; invalid actions are greyed, not
+ *       hidden. "Remove" is always enabled (it routes to the confirmed delete
+ *       dialog, valid from any non-terminating state).</li>
+ * </ul>
+ */
+@Composable
+private fun SessionRowMenu(
+    n: Int,
+    effectiveState: String,
+    pending: Boolean,
+    onRemove: () -> Unit,
+    onLifecycle: (LifecycleAction) -> Unit,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val menuEnabled = effectiveState != "terminating" && !pending
+    Box {
+        IconButton(
+            onClick = { expanded = true },
+            enabled = menuEnabled,
+            modifier = Modifier.testTag("session-menu-$n"),
+        ) {
+            Icon(
+                imageVector = Icons.Filled.MoreVert,
+                contentDescription = stringResource(R.string.session_menu_description),
+            )
+        }
+        DropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
+            DropdownMenuItem(
+                text = { Text(stringResource(R.string.session_action_remove)) },
+                onClick = {
+                    expanded = false
+                    onRemove()
+                },
+            )
+            // Order per the proposal: Remove, Stop, Start, Pause, Unpause.
+            for (action in listOf(
+                LifecycleAction.STOP,
+                LifecycleAction.START,
+                LifecycleAction.PAUSE,
+                LifecycleAction.UNPAUSE,
+            )) {
+                DropdownMenuItem(
+                    text = { Text(stringResource(lifecycleActionLabel(action))) },
+                    enabled = action.isValidFrom(effectiveState),
+                    onClick = {
+                        expanded = false
+                        onLifecycle(action)
+                    },
+                )
+            }
+        }
+    }
+}
+
+/** UC-46 — string resource for a lifecycle action's menu label. */
+private fun lifecycleActionLabel(action: LifecycleAction): Int = when (action) {
+    LifecycleAction.STOP -> R.string.session_action_stop
+    LifecycleAction.START -> R.string.session_action_start
+    LifecycleAction.PAUSE -> R.string.session_action_pause
+    LifecycleAction.UNPAUSE -> R.string.session_action_unpause
+}
+
+/**
+ * UC-46 row-open gate — only these states can be opened (tap → chat,
+ * long-press → terminal). {@code stopped} / {@code paused} / {@code terminating}
+ * are not attachable; opening one would navigate into a guaranteed-failing
+ * connection, so the row surfaces a hint instead.
+ */
+private fun isAttachable(state: String): Boolean =
+    state == "running" || state == "starting" || state == "provisioning"
 
 // ── UC04-2a New session sheet ───────────────────────────────────────────────
 
