@@ -100,4 +100,46 @@ class ConversationModelTest {
         assertThat(item.source).isEqualTo("subagent:agent-3")
         assertThat(item.isSidechain).isTrue
     }
+
+    // ──────────────────────── UC-42 AC4 — SystemNote item ─────────────────────
+
+    private fun note(
+        uuid: String = "u1",
+        source: String = "main",
+        sidechain: Boolean = false,
+        label: String = "Command: /clear",
+        detail: String = "<command-name>/clear</command-name>",
+    ) = ConversationItem.SystemNote(uuid, source, sidechain, label, detail)
+
+    @Test
+    fun `an identical system note dedupes to the same key (backfill overlap)`() {
+        // AC8 — a replayed injected line folds onto the live one (same uuid + label).
+        assertThat(note().key).isEqualTo(note().key)
+        assertThat(note().key).isEqualTo("u1|systemnote|${"Command: /clear".hashCode()}")
+    }
+
+    @Test
+    fun `system notes with different labels under one uuid get different keys`() {
+        assertThat(note(label = "Command: /clear").key)
+            .isNotEqualTo(note(label = "Command output").key)
+    }
+
+    @Test
+    fun `a system note key never collides with the other item kinds sharing its uuid`() {
+        val uuid = "uShared"
+        val n = note(uuid = uuid)
+        val tool = activity(uuid = uuid, toolUseId = "tuShared")
+        val text = ConversationItem.AssistantMessage(uuid, "main", false, "answer")
+        val user = ConversationItem.UserMessage(uuid, "user", false, "a real prompt")
+        assertThat(setOf(n.key, tool.key, text.key, user.key)).hasSize(4)
+    }
+
+    @Test
+    fun `system note carries its source, sidechain flag, label and inline detail (AC9)`() {
+        val n = note(source = "subagent:agent-5", sidechain = true, label = "System note", detail = "housekeeping")
+        assertThat(n.source).isEqualTo("subagent:agent-5")
+        assertThat(n.isSidechain).isTrue
+        assertThat(n.label).isEqualTo("System note")
+        assertThat(n.detail).isEqualTo("housekeeping") // inline — no fetch-detail round-trip
+    }
 }
