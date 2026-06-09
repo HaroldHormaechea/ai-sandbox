@@ -76,6 +76,10 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
     fun submitAnswer(questionUuid: String, questionIndex: Int, selections: List<Int>, freeText: String) =
         controller?.submitAnswer(questionUuid, questionIndex, selections, freeText) ?: Unit
 
+    /** UC-43 — forward a multi-question batch submit to the controller. */
+    fun submitAnswerBatch(questionUuid: String, items: List<com.aisandbox.android.conversation.AnswerItem>) =
+        controller?.submitAnswerBatch(questionUuid, items) ?: Unit
+
     fun selectTarget(targetId: String) = controller?.selectTarget(targetId) ?: Unit
 
     fun interrupt() = controller?.interrupt() ?: Unit

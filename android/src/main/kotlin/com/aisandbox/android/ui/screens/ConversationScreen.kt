@@ -139,7 +139,11 @@ fun ConversationScreen(
         bottomBar = {
             Column(modifier = Modifier.imePadding().navigationBarsPadding()) {
                 pendingSheet?.let { sheet ->
-                    QuestionSheet(sheet = sheet, onSubmit = viewModel::submitAnswer)
+                    QuestionSheet(
+                        sheet = sheet,
+                        onSubmit = viewModel::submitAnswer,
+                        onSubmitBatch = viewModel::submitAnswerBatch,
+                    )
                 }
                 Composer(
                     enabled = pendingSheet == null,
