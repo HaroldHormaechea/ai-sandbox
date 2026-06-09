@@ -294,12 +294,25 @@ class ConversationController(
                 inputSummary = str(obj, "inputSummary") ?: "",
                 primaryText = str(obj, "primaryText") ?: "",
             )
-            "tool-result" -> upsertToolResult(
-                uuid(obj), source(obj), sidechain(obj),
-                toolUseId = str(obj, "toolUseId") ?: "",
-                isError = obj["isError"]?.jsonPrimitive?.booleanOrNull ?: false,
-                summary = str(obj, "summary") ?: "",
-            )
+            "tool-result" -> {
+                val toolUseId = str(obj, "toolUseId") ?: ""
+                upsertToolResult(
+                    uuid(obj), source(obj), sidechain(obj),
+                    toolUseId = toolUseId,
+                    isError = obj["isError"]?.jsonPrimitive?.booleanOrNull ?: false,
+                    summary = str(obj, "summary") ?: "",
+                )
+                // UC-44 AC3a — the tool-result that resolves the pending ask (its
+                // toolUseId == the sheet's questionUuid) must dismiss the sheet, so it
+                // can never linger after the underlying ask is resolved — including the
+                // failure path where an "Other" answer declined/aborted the ask
+                // server-side while the conversation has already moved on. Additive: the
+                // turn-start/turn-end/select-target clears remain (AC12/AC15). Covers
+                // both Questions and Plan sheets (both carry questionUuid == toolUseId).
+                if (toolUseId.isNotBlank() && _pendingSheet.value?.questionUuid == toolUseId) {
+                    _pendingSheet.value = null
+                }
+            }
             "tool-detail" -> onToolDetail(obj)
             "system-note" -> addItem(
                 // UC-42 (AC4) — a harness-injected line with no host bubble. Render-only:

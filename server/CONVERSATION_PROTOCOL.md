@@ -185,13 +185,11 @@ buffers each question's answer locally, and — once all are answered — submit
 ```
 
 The single-question case is unchanged — it still uses the `answer` frame; only
-N>1 uses `answer-batch`. **Known limitation (UC-43):** in batch mode a custom
-"Other" free-text answer is injected only for **single-select** questions; a
-multiSelect question's "Other" free-text is NOT typed into the wizard (its other
-selected options are still toggled). The covered/verified batch paths are
-single-select (incl. its free-text), plain multiSelect, and the final submit;
-multiSelect + custom free-text is intentionally not injected rather than driven
-by an unverified keystroke guess. Server-side the handler resolves the single cached
+N>1 uses `answer-batch`. A custom "Other" free-text answer is injected for
+**both** single-select and multiSelect questions (UC-44 — the prior UC-43
+limitation, where a multiSelect question's "Other" text was toggled-but-never-typed
+and silently dropped, is fixed; see the multiSelect "Other" bullet below).
+Server-side the handler resolves the single cached
 `Question`, sorts `answers[]` by `questionIndex`, derives each question's
 option-count / "Other" index from `questions[questionIndex]`, injects the whole
 sheet as ONE scheduled keystroke sequence, and **evicts the cached question only
@@ -201,7 +199,9 @@ so they cannot drift on a Claude TUI version bump.
 
 **Verified TUI keystroke model (multi-question wizard).** The runtime interaction
 model is unknowable from source, so it was driven live against Claude Code
-**2.1.159** (the pinned build) through a real multi-question `AskUserQuestion`:
+**2.1.169** (the pinned build — `InputInjectionService.PINNED_CLAUDE_VERSION`)
+through real `AskUserQuestion` asks, confirming each answer verbatim in the
+session-transcript `tool_result`:
 
 - The sheet is a **tabbed wizard** (`← ☐ Q1  ☐ Q2 … ✔ Submit →`), ONE question
   per screen. It opens at the top of Q1, and the option cursor **auto-resets to
@@ -209,19 +209,30 @@ model is unknowable from source, so it was driven live against Claude Code
   NOT (and must not) issue a per-question `Up`×N reset. Within a question,
   `Up`/`Down` **wrap around** the option ring (real options + "Type something";
   "Chat about this" sits outside the ring), so a blind `Up`×N reset is not
-  deterministic in the wizard.
+  deterministic in the wizard. The "Type something" row is **always the last**
+  option index (`otherIndex == optionCount`).
 - **single-select** question: `Down`×k to the option, then **`Enter`** — which
-  selects it AND advances to the next tab.
-- **multiSelect** question: walk the options toggling **`Space`** in place (the
-  cursor stays put), then **`Tab`** to advance — `Enter` on a multiSelect option
-  only toggles it, it does NOT advance.
-- **free-text "Other"**: walk to the "Type something" row, **type the text
-  inline** (it replaces the row label), then **`Enter`**. Pressing `Enter` on an
-  EMPTY "Type something" row **declines the whole ask**, so the text is always
-  typed before the `Enter` (this also fixed a latent bug in the single-question
-  free-text path, which previously pressed `Enter` before typing).
-- After the last question advances, the wizard lands on the **Submit** tab with
-  "Submit answers" highlighted; a final **`Enter`** submits the whole batch.
+  selects it AND advances to the next tab. A **single-question** single-select
+  ask has **no** "Submit" tab and submits directly on that `Enter` (no review).
+- **multiSelect** question (no "Other"): walk the options toggling **`Space`** in
+  place (the cursor stays put), then **`Tab`** to advance — `Enter` on a
+  multiSelect option only toggles it, it does NOT advance. (Tab advances directly
+  here because the cursor ends on a real option.)
+- **single-select free-text "Other"**: walk to the "Type something" row, **type
+  the text inline**, then **`Enter`**. Pressing `Enter` on an EMPTY row **declines
+  the whole ask**, so the text is always typed before the `Enter`.
+- **multiSelect free-text "Other"** (UC-44): at the "Type something" row **type
+  the literal**, then **`Enter`** to COMMIT it as a custom option (the checkmark
+  shown while typing is only a non-committed PREVIEW — typing then navigating away
+  silently DROPS the text, which was the UC-43 bug), then **`Space`** to SELECT
+  the committed option. The cursor now sits on that last row, where a single key
+  only FOCUSES the in-pane Next/Submit button (unlike a real option, from which
+  `Tab` advances), so **`Tab`** focuses it and **`Enter`** activates it to advance.
+- After the last question advances, the wizard lands on the **Submit** tab
+  ("Review your answers"); a final **`Enter`** submits the whole batch. A
+  **single-question multiSelect** ask also has this Submit/review tab, so its
+  `injectAnswer` path emits the extra trailing `Enter` itself (the batch path gets
+  it from `injectAnswerBatch`'s trailing `Enter`).
 
 The batch is audited as `conversation_answer` with a `batch` = question-count tag.
 
@@ -313,21 +324,23 @@ tagged `source: subagent:<agentId>` (complementing the per-line `isSidechain`).
 ## Input injection — keystroke mapping (centralized, version-pinned)
 
 All mapping lives in `InputInjectionService`, pinned to Claude Code
-**2.1.159** (`InputInjectionService.PINNED_CLAUDE_VERSION`). A version bump is a
+**2.1.169** (`InputInjectionService.PINNED_CLAUDE_VERSION`). A version bump is a
 single-file change (RISK 3). Only well-defined cases are mapped; everything else
 relies on long-press→tmux (AC24).
 
 | Action            | Keystrokes (`tmux send-keys`)                                              |
 |-------------------|---------------------------------------------------------------------------|
 | Submit prompt     | `-l` each text segment; `C-j` (LF) between segments → newline **without** submit (AC9 multiline); final `Enter` (CR) submits (AC8) |
-| Answer single     | reset cursor to top (`Up`×N); `Down`×k to the chosen index; `Enter`       |
-| Answer multi      | reset to top; walk options toggling `Space` on selected; `Enter`          |
-| Free-text "Other" | `Down`×k to the "Type something" row; type the free text (`-l`); `Enter` — **most fragile path**  |
+| Answer single (single-select) | reset cursor to top (`Up`×N); `Down`×k to the chosen index; `Enter` (submits directly — N=1 single-select has no Submit tab) |
+| Answer single (multiSelect)   | reset to top; walk toggling `Space` on selected; `Tab`+`Enter` to the in-pane Submit, then `Enter` to confirm review |
+| Free-text "Other" (single-select) | `Down`×k to the "Type something" row; type the free text (`-l`); `Enter` — **most fragile path** |
+| Free-text "Other" (multiSelect, UC-44) | at "Type something" type (`-l`); `Enter` (commit); `Space` (select); `Tab`+`Enter` (activate in-pane Submit); `Enter` (confirm review) |
 | Interrupt         | `Escape`                                                                   |
-| Batch single-select Qᵢ (UC-43) | `Down`×k to the option; `Enter` (selects **and** advances to the next tab) — no per-question reset (auto-reset) |
-| Batch multiSelect Qᵢ (UC-43)   | walk toggling `Space` on selected; `Tab` (advances; `Enter` would only toggle) |
-| Batch free-text Qᵢ (UC-43)     | `Down`×k to "Type something"; type inline (`-l`); `Enter` (advances) |
-| Batch submit (UC-43)           | after the last question advances → "Submit" tab; final `Enter` submits all |
+| Batch single-select Qᵢ | `Down`×k to the option; `Enter` (selects **and** advances to the next tab) — no per-question reset (auto-reset) |
+| Batch multiSelect Qᵢ (no "Other") | walk toggling `Space` on selected; `Tab` (advances; cursor on a real option, so `Tab` jumps to the next tab) |
+| Batch free-text Qᵢ — single-select | `Down`×k to "Type something"; type inline (`-l`); `Enter` (advances) |
+| Batch free-text Qᵢ — multiSelect (UC-44) | walk toggling `Space`; at "Type something" type (`-l`); `Enter` (commit); `Space` (select); `Tab`+`Enter` (focus + activate in-pane Next/Submit → advance) |
+| Batch submit       | after the last question advances → "Submit"/"Review" tab; final `Enter` submits all |
 
 ### Fragile edges (documented per the proposal RISKs)
 
