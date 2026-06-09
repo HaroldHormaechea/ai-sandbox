@@ -435,4 +435,76 @@ class ConversationControllerTest {
         assertThat(c.toolDetail.value).isEqualTo(ToolDetailState.Loading)
         assertThat(awaitUntil(timeoutMs = 12_000) { c.toolDetail.value == ToolDetailState.Unavailable }).isTrue
     }
+
+    // ──────────────────── Part D — UC-42 injected-line frames ─────────────────
+
+    @Test
+    fun `a system-note frame becomes a left-aligned SystemNote item`() {
+        // AC4 — an injected line with no host bubble arrives as a `system-note` frame
+        // carrying its label + inline detail; the controller renders it as a SystemNote
+        // item (NOT a right-aligned user bubble) and does NOT advance the turn phase.
+        enqueuePush(
+            listOf(
+                """{"type":"system-note","uuid":"u1","source":"main","isSidechain":false,""" +
+                    """"label":"Command: /clear","detail":"<command-name>/clear</command-name>"}""",
+            ),
+        )
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { c.items.value.any { it is ConversationItem.SystemNote } }).isTrue
+            val note = c.items.value.single() as ConversationItem.SystemNote
+            assertThat(note.label).isEqualTo("Command: /clear")
+            assertThat(note.detail).isEqualTo("<command-name>/clear</command-name>")
+            // No real user prompt was injected → nothing renders as a right-aligned bubble.
+            assertThat(c.items.value.none { it is ConversationItem.UserMessage }).isTrue
+            // A render-only note must not start the spinner.
+            assertThat(c.turnPhase.value).isEqualTo(TurnPhase.IDLE)
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
+    fun `a sidechain system-note frame is stamped with its subagent source`() {
+        // AC9 — the teammate's injected note folds under its own source, not the main pane.
+        enqueuePush(
+            listOf(
+                """{"type":"system-note","uuid":"u2","source":"subagent:agent-3","isSidechain":true,""" +
+                    """"label":"System note","detail":"teammate housekeeping"}""",
+            ),
+        )
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { c.items.value.any { it is ConversationItem.SystemNote } }).isTrue
+            val note = c.items.value.single { it is ConversationItem.SystemNote } as ConversationItem.SystemNote
+            assertThat(note.source).isEqualTo("subagent:agent-3")
+            assertThat(note.isSidechain).isTrue
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
+    fun `a folded skill load yields only the tool row and no user bubble`() {
+        // AC1 — the server FOLDS the injected SKILL.md body (emits nothing for it), so the
+        // client only ever sees the Skill tool-use frame: exactly one bubble (the tool
+        // row), never a second right-aligned bubble carrying the skill body.
+        enqueuePush(
+            listOf(
+                """{"type":"tool-use","uuid":"u1","source":"main","isSidechain":false,"toolName":"Skill",""" +
+                    """"toolUseId":"tuS","inputSummary":"deep-research","primaryText":"deep-research"}""",
+            ),
+        )
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { c.items.value.size == 1 }).isTrue
+            assertThat(c.items.value.single()).isInstanceOf(ConversationItem.ToolActivity::class.java)
+            assertThat(c.items.value.none { it is ConversationItem.UserMessage }).isTrue
+        } finally {
+            c.close()
+        }
+    }
 }

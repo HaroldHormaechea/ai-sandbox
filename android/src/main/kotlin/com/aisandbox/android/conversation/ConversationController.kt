@@ -239,6 +239,15 @@ class ConversationController(
                 summary = str(obj, "summary") ?: "",
             )
             "tool-detail" -> onToolDetail(obj)
+            "system-note" -> addItem(
+                // UC-42 (AC4) — a harness-injected line with no host bubble. Render-only:
+                // it does NOT advance the turn phase or touch the pending sheet.
+                ConversationItem.SystemNote(
+                    uuid(obj), source(obj), sidechain(obj),
+                    label = str(obj, "label") ?: "",
+                    detail = str(obj, "detail") ?: "",
+                ),
+            )
             "question" -> {
                 val toolUseId = str(obj, "toolUseId") ?: uuid(obj)
                 val questions = parseQuestions(obj["questions"] as? JsonArray)

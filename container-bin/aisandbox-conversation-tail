@@ -768,13 +768,20 @@ function collectToolDetail(toolUseId, sources, maxBytes) {
       if (!raw) continue;
       let o;
       try { o = JSON.parse(raw); } catch (e) { continue; }
-      const content = o && o.message ? o.message.content : null;
-      if (!Array.isArray(content)) continue;
       let hit = false;
-      for (const b of content) {
-        if (!b || typeof b !== 'object') continue;
-        if (b.type === 'tool_use' && b.id === toolUseId) { hit = true; break; }
-        if (b.type === 'tool_result' && b.tool_use_id === toolUseId) { hit = true; break; }
+      // UC-42 (D3) — a harness-injected line (e.g. a Skill SKILL.md body) carries the
+      // host tool's id at the TOP LEVEL as `sourceToolUseID`, NOT inside a
+      // tool_use/tool_result block. Match it FIRST, before the array-content guard, so
+      // the folded body reaches the server as the Skill bubble's tap detail.
+      if (o && o.sourceToolUseID === toolUseId) { hit = true; }
+      if (!hit) {
+        const content = o && o.message ? o.message.content : null;
+        if (!Array.isArray(content)) continue;
+        for (const b of content) {
+          if (!b || typeof b !== 'object') continue;
+          if (b.type === 'tool_use' && b.id === toolUseId) { hit = true; break; }
+          if (b.type === 'tool_result' && b.tool_use_id === toolUseId) { hit = true; break; }
+        }
       }
       if (!hit) continue;
       const line = source + '\t' + raw;

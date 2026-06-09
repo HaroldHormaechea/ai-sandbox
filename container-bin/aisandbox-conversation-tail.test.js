@@ -984,3 +984,56 @@ test('UC-41 — collectToolDetail is robust to bad input', () => {
   // Malformed JSON lines are skipped, not thrown.
   assert.deepStrictEqual(helper.collectToolDetail('tu1', [{ source: 'main', lines: ['not-json', '{ broken'] }]), []);
 });
+
+// ════════════════════════════════════════════════════════════════════════════
+// UC-42 — collectToolDetail also correlates a harness-INJECTED user line (a Skill
+// SKILL.md body) to its host Skill `toolUseId`. The injected line carries the host
+// id at the TOP LEVEL as `sourceToolUseID` (NOT inside a tool_use/tool_result
+// block), so `--fetch-detail` re-reads the actual skill body as the bubble's detail
+// (AC2 plumbing).
+// ════════════════════════════════════════════════════════════════════════════
+
+// An injected SKILL.md body: top-level sourceToolUseID, NO tool_use/tool_result block.
+const injectedSkillBodyLine = (sourceToolUseID, body) =>
+  JSON.stringify({
+    type: 'user',
+    sourceToolUseID,
+    message: { role: 'user', content: body },
+    sessionId: SESS,
+  });
+
+test('UC-42 — collectToolDetail correlates a top-level sourceToolUseID line to the Skill toolUseId', () => {
+  const use = toolUseLine('tuSkill', 'Skill', { skill: 'deep-research' });
+  const injected = injectedSkillBodyLine('tuSkill', '# deep-research\nfull SKILL.md body here');
+  const noise = injectedSkillBodyLine('tuOTHER', 'a different skill body');
+  const sources = [{ source: 'main', lines: [use, injected, noise] }];
+
+  const matched = helper.collectToolDetail('tuSkill', sources);
+
+  // Both the Skill tool_use AND its correlated injected body are returned; noise excluded.
+  assert.strictEqual(matched.length, 2);
+  assert.ok(matched.every((l) => l.startsWith('main\t')));
+  assert.ok(matched.some((l) => l.includes('deep-research') && l.includes('tool_use')));
+  assert.ok(matched.some((l) => l.includes('full SKILL.md body here')));
+  assert.ok(!matched.some((l) => l.includes('a different skill body')));
+});
+
+test('UC-42 — collectToolDetail stamps the subagent source onto a correlated injected body', () => {
+  const sources = [
+    { source: 'main', lines: [toolUseLine('tuMain', 'Bash', { command: 'echo hi' })] },
+    {
+      source: 'subagent:agent-7',
+      lines: [
+        toolUseLine('tuSub', 'Skill', { skill: 'verify' }),
+        injectedSkillBodyLine('tuSub', 'teammate skill body'),
+      ],
+    },
+  ];
+
+  const matched = helper.collectToolDetail('tuSub', sources);
+
+  // AC9 — both lines fold under the teammate's own source, never the main pane.
+  assert.strictEqual(matched.length, 2);
+  assert.ok(matched.every((l) => l.startsWith('subagent:agent-7\t')));
+  assert.ok(matched.some((l) => l.includes('teammate skill body')));
+});

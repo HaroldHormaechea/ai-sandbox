@@ -44,6 +44,7 @@ import java.util.List;
     @JsonSubTypes.Type(value = ConversationServerMessage.ToolUse.class, name = "tool-use"),
     @JsonSubTypes.Type(value = ConversationServerMessage.ToolResult.class, name = "tool-result"),
     @JsonSubTypes.Type(value = ConversationServerMessage.ToolDetail.class, name = "tool-detail"),
+    @JsonSubTypes.Type(value = ConversationServerMessage.SystemNote.class, name = "system-note"),
     @JsonSubTypes.Type(value = ConversationServerMessage.Question.class, name = "question"),
     @JsonSubTypes.Type(value = ConversationServerMessage.PlanApproval.class, name = "plan-approval"),
     @JsonSubTypes.Type(value = ConversationServerMessage.TurnEnd.class, name = "turn-end"),
@@ -60,6 +61,7 @@ public sealed interface ConversationServerMessage
                 ConversationServerMessage.ToolUse,
                 ConversationServerMessage.ToolResult,
                 ConversationServerMessage.ToolDetail,
+                ConversationServerMessage.SystemNote,
                 ConversationServerMessage.Question,
                 ConversationServerMessage.PlanApproval,
                 ConversationServerMessage.TurnEnd,
@@ -130,6 +132,27 @@ public sealed interface ConversationServerMessage
      */
     record ToolDetail(
             String toolUseId, String toolName, String input, String result, boolean isError, boolean available)
+            implements ConversationServerMessage {}
+
+    /**
+     * UC-42 (D2) — a <em>harness-injected</em> {@code user} transcript line that is
+     * NOT a real prompt and has NO host tool-use bubble to fold into: a
+     * slash-command wrapper ({@code <command-name>…}), a {@code <local-command-stdout>}
+     * line, or a generic {@code isMeta:true} system note. Rendered as a collapsed,
+     * left-aligned, non-user "system note" — never as a right-aligned user message.
+     *
+     * <p>{@code label} is the short collapsed summary ({@code "Command: /foo"},
+     * {@code "Command output"}, {@code "System note"}); {@code detail} is the full
+     * injected line body carried <b>inline</b>, byte-bounded to {@link
+     * com.aisandbox.server.stream.service.ConversationEventMapper#CONVERSATION_DETAIL_MAX_BYTES}
+     * (48&nbsp;KB, the same cap as {@link ToolDetail}), so the client can show it as
+     * tap-to-expand detail without a {@code fetch-detail} round-trip (AC4). Injected
+     * lines that DO have a host bubble (a Skill {@code SKILL.md} body carrying a
+     * top-level {@code sourceToolUseID}) are NOT emitted as a {@code SystemNote} —
+     * they are folded into the Skill bubble's on-demand detail instead (D1 rule 1 /
+     * D3), so the wire never double-renders them.
+     */
+    record SystemNote(String uuid, boolean isSidechain, String source, String label, String detail)
             implements ConversationServerMessage {}
 
     /**

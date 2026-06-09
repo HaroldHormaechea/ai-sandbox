@@ -1,15 +1,20 @@
 package com.aisandbox.android.ui.screens
 
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTextInput
 import com.aisandbox.android.conversation.ConvOption
 import com.aisandbox.android.conversation.ConvQuestion
+import com.aisandbox.android.conversation.ConversationItem
 import com.aisandbox.android.conversation.PendingSheet
 import com.aisandbox.android.ui.components.Composer
 import com.aisandbox.android.ui.components.QuestionSheet
@@ -186,5 +191,60 @@ class ConversationUiStateTest {
 
         composeRule.onNodeWithText("Keep planning").performClick()
         assertThat(selections).containsExactly(1)
+    }
+
+    // ──────────────────────── UC-42 — SystemNote row (AC4) ────────────────────
+
+    @Test
+    fun system_note_renders_collapsed_left_aligned_and_expands_on_tap() {
+        val label = "Command: /clear"
+        val detail = "<command-name>/clear</command-name> full injected body"
+        composeRule.setContent {
+            AiSandboxTheme {
+                ConversationContent(
+                    items = listOf(
+                        ConversationItem.SystemNote(
+                            uuid = "u1", source = "main", isSidechain = false, label = label, detail = detail,
+                        ),
+                    ),
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+        }
+
+        // Collapsed: the short label shows; the body is hidden until tapped (AC4).
+        composeRule.onNodeWithText(label).assertIsDisplayed()
+        composeRule.onNodeWithText(detail).assertDoesNotExist()
+
+        // Left-aligned, non-user: the row starts near the left margin — NOT a right-aligned
+        // user bubble (AC4 — never rendered as the user's own message).
+        val w = composeRule.onRoot().getUnclippedBoundsInRoot().let { (it.right - it.left).value }
+        val b = composeRule.onNodeWithText(label).getUnclippedBoundsInRoot()
+        assertThat(b.left.value).isLessThan(w * 0.2f)
+
+        // Tapping expands the inline detail (reusing UC-41's collapse affordance) — the
+        // body is carried inline, so no fetch-detail round-trip is needed.
+        composeRule.onNodeWithText(label).performClick()
+        composeRule.onNodeWithText(detail).assertIsDisplayed()
+    }
+
+    @Test
+    fun sidechain_system_note_appends_the_subagent_marker_to_its_label() {
+        // AC9 — a teammate's injected note is visibly attributed to the subagent.
+        composeRule.setContent {
+            AiSandboxTheme {
+                ConversationContent(
+                    items = listOf(
+                        ConversationItem.SystemNote(
+                            uuid = "u2", source = "subagent:agent-3", isSidechain = true,
+                            label = "System note", detail = "teammate housekeeping",
+                        ),
+                    ),
+                    modifier = Modifier.fillMaxSize(),
+                )
+            }
+        }
+
+        composeRule.onNodeWithText("System note · subagent").assertIsDisplayed()
     }
 }
