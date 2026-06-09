@@ -56,7 +56,16 @@ public final class ApiDtos {
                                     + " status area while true (double-gated on state==running). Hysteresis-"
                                     + "debounced server-side so a brief between-turns idle does not strobe it.",
                             defaultValue = "false")
-                    boolean working) {}
+                    boolean working,
+            @Schema(
+                            description = "UC-49 — true when the session's main pane is showing an AskUserQuestion"
+                                    + " awaiting an answer (single or multi-question); false when idle, working, or"
+                                    + " non-running. Mutually exclusive with working (a pending question is"
+                                    + " 'waiting', never 'working'). The client shows a '?' badge in the row's"
+                                    + " status area while true (double-gated on state==running) and suppresses the"
+                                    + " working spinner. Derived from the visible pane, not the transcript.",
+                            defaultValue = "false")
+                    boolean pendingQuestion) {}
 
     @Schema(description = "Detail returned by GET /v1/sessions/{n}.")
     public record SessionDetailDto(

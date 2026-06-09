@@ -266,14 +266,21 @@ public class DockerEnumerationService {
             // one helper exec; read the cached working flag (non-blocking, with the
             // service's OFF-window hysteresis). Non-running → false, so a
             // stale working=true can never race a paused/terminating override (AC7).
+            // UC-49 — same running-gate for the pending-question "?" badge (AC8):
+            // read the cached pending flag (non-blocking) from the SAME warmed
+            // helper exec. Non-running → false, so the badge never shows on a
+            // paused/terminating/stopped row.
             String conversationName = null;
             boolean working = false;
+            boolean pendingQuestion = false;
             if ("running".equals(state)) {
                 refreshConversationName(n, project);
                 conversationName = cachedConversationName(n);
                 working = cachedConversationWorking(n);
+                pendingQuestion = cachedConversationPending(n);
             }
-            out.add(new SessionRecord(n, label, title, state, 0L, 0, Instant.EPOCH, conversationName, working));
+            out.add(new SessionRecord(
+                    n, label, title, state, 0L, 0, Instant.EPOCH, conversationName, working, pendingQuestion));
         }
         out.sort((a, b) -> Integer.compare(a.n(), b.n()));
         // UC-47 — drop cached names for sessions that vanished this enumeration.
@@ -296,6 +303,11 @@ public class DockerEnumerationService {
     /** UC-48 null-safe wrapper — non-blocking read of the cached (hysteresis) working flag. */
     private boolean cachedConversationWorking(int n) {
         return conversationNames != null && conversationNames.working(n);
+    }
+
+    /** UC-49 null-safe wrapper — non-blocking read of the cached pending-question flag. */
+    private boolean cachedConversationPending(int n) {
+        return conversationNames != null && conversationNames.pendingQuestion(n);
     }
 
     /** UC-47 null-safe wrapper — prune cached names to the set of enumerated sessions. */

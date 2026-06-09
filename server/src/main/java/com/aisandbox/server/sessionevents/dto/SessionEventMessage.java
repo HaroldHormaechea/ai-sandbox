@@ -88,6 +88,11 @@ public sealed interface SessionEventMessage permits SessionEventMessage.Snapshot
      *     value-equality and the UC-32 watcher emits a Delta automatically (no
      *     watcher edit needed — AC4); the client animates the working spinner while
      *     true (double-gated on {@code state==running}).
+     * @param pendingQuestion UC-49 — whether the row's main pane is showing an
+     *     {@code AskUserQuestion} awaiting an answer. Carried so a pending-state flip
+     *     flips the {@link Row} record's value-equality and the UC-32 watcher emits a
+     *     Delta automatically (no watcher edit needed — AC6); the client shows a "?"
+     *     badge and suppresses the spinner while true (double-gated on running).
      */
     record Row(
             int n,
@@ -98,11 +103,31 @@ public sealed interface SessionEventMessage permits SessionEventMessage.Snapshot
             int activeStreams,
             Instant startedAt,
             String conversationName,
-            boolean working) {
+            boolean working,
+            boolean pendingQuestion) {
+
+        /**
+         * UC-49 back-compat 9-arg constructor for call sites built after UC-48 but
+         * before this use case appended {@code pendingQuestion}. Delegates with
+         * {@code false}.
+         */
+        public Row(
+                int n,
+                String label,
+                String tmuxTitle,
+                String state,
+                long uptimeSec,
+                int activeStreams,
+                Instant startedAt,
+                String conversationName,
+                boolean working) {
+            this(n, label, tmuxTitle, state, uptimeSec, activeStreams, startedAt, conversationName, working, false);
+        }
 
         /**
          * UC-48 back-compat 8-arg constructor for call sites built after UC-47 but
-         * before this use case appended {@code working}. Delegates with {@code false}.
+         * before that use case appended {@code working}. Delegates with {@code false}
+         * (and {@code pendingQuestion=false}).
          */
         public Row(
                 int n,

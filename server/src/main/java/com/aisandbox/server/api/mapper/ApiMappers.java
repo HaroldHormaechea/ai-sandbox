@@ -27,7 +27,8 @@ public final class ApiMappers {
                 r.activeStreams(),
                 r.startedAt(),
                 r.conversationName(),
-                r.working());
+                r.working(),
+                r.pendingQuestion());
     }
 
     public static List<ApiDtos.SessionSummary> toSummaries(List<SessionRecord> rs) {

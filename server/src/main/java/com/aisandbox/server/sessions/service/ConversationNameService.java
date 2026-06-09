@@ -114,6 +114,16 @@ public class ConversationNameService {
      */
     private final ConcurrentHashMap<Integer, Long> lastWorkingNanos = new ConcurrentHashMap<>();
 
+    /**
+     * UC-49 — n → {@code true} while the session's MAIN pane is showing a pending
+     * {@code AskUserQuestion} awaiting an answer. Absence (or {@code false}) ⇒ no
+     * pending question, so the row shows no "?" badge. Set/cleared from the helper's
+     * line-3 signal; a MISSING line 3 (capture failure) leaves the prior value
+     * UNTOUCHED so the badge does not flicker off while a question is genuinely up
+     * (failure policy (b)).
+     */
+    private final ConcurrentHashMap<Integer, Boolean> pending = new ConcurrentHashMap<>();
+
     /** Sessions with a refresh currently queued or running — dedups resubmits. */
     private final Set<Integer> inFlight = ConcurrentHashMap.newKeySet();
 
@@ -173,8 +183,24 @@ public class ConversationNameService {
      * between-turns idle does not strobe the spinner (AC4 pitfall).
      */
     public boolean working(int n) {
+        // UC-49 — source-level mutual exclusion (AC5): a pending question is the
+        // session WAITING, never working. This OVERRIDES the OFF-window hysteresis,
+        // so a session that was working <2.5s ago and then put up a question reads
+        // not-working immediately — the row never shows the spinner and the "?" at once.
+        if (pendingQuestion(n)) {
+            return false;
+        }
         Long ts = lastWorkingNanos.get(n);
         return ts != null && (clock.getAsLong() - ts) < OFF_WINDOW_NANOS;
+    }
+
+    /**
+     * UC-49 — non-blocking read of the pending-question signal for session {@code n}:
+     * {@code true} iff the MAIN pane is showing an {@code AskUserQuestion} awaiting an
+     * answer. Absence ⇒ {@code false}. Safe to call on the enumeration hot path.
+     */
+    public boolean pendingQuestion(int n) {
+        return Boolean.TRUE.equals(pending.get(n));
     }
 
     /**
@@ -220,6 +246,9 @@ public class ConversationNameService {
         // re-used session number can't inherit a stale "working" from a prior
         // tenant within the OFF-window.
         lastWorkingNanos.keySet().retainAll(activeNs);
+        // UC-49 — drop the pending flag for vanished sessions too, so a re-used
+        // session number can't inherit a stale "?" from a prior tenant.
+        pending.keySet().retainAll(activeNs);
         // In-flight tasks self-clear in their finally; retaining here only trims
         // markers for sessions that vanished mid-derive (harmless if the task later
         // no-ops its remove).
@@ -268,6 +297,19 @@ public class ConversationNameService {
                 }
                 // working==false → no-op: let the existing timestamp (if any) age out
                 // of the OFF-window, giving the spinner its debounce.
+                // UC-49 — apply the pending-question signal (failure policy):
+                //   TRUE  → a question is up: set the flag (badge shows).
+                //   FALSE → screen has no question: clear the flag (badge hides).
+                //   null  → the pane capture failed (helper omitted line 3): leave the
+                //           prior value UNTOUCHED so the badge does not flicker off
+                //           mid-question (failure policy (b)).
+                if (sig.pendingQuestion() != null) {
+                    if (sig.pendingQuestion()) {
+                        pending.put(n, Boolean.TRUE);
+                    } else {
+                        pending.remove(n);
+                    }
+                }
             } catch (RuntimeException e) {
                 LOG.debug("conversation-name refresh for n={} failed: {}", n, e.toString());
             } finally {
@@ -284,16 +326,23 @@ public class ConversationNameService {
      * caller then touches neither cache. The two fields are applied independently:
      * an empty name still clears the name cache while a {@code working=true} still
      * stamps the timestamp.
+     *
+     * <p>UC-49 — {@code pendingQuestion} is a TRI-STATE {@link Boolean}: {@code TRUE}
+     * = a question is up, {@code FALSE} = the screen has no question, {@code null} =
+     * UNKNOWN (the pane capture failed, helper omitted line 3) so the caller must
+     * RETAIN the prior pending value rather than clearing it (failure policy (b)).
      */
-    record SessionSignals(String nameOrNull, boolean working) {}
+    record SessionSignals(String nameOrNull, boolean working, Boolean pendingQuestion) {}
 
     /**
      * Run the helper one-shot and return both signals, or {@code null} on an exec
      * FAILURE (exit≠0 / timeout / IOException) so the caller leaves both caches
      * untouched. On success the name (line 1) is trimmed + codepoint-capped (may be
      * null/blank) and the working flag is parsed from line 2 ({@code "working"} ⇒
-     * true, anything else incl. a missing line ⇒ false). {@code LC_ALL=C} keeps the
-     * exec environment locale-stable, mirroring the other docker calls.
+     * true, anything else incl. a missing line ⇒ false). The pending flag is parsed
+     * from line 3 ({@code "pending-question"} ⇒ TRUE, {@code "none"} ⇒ FALSE, a
+     * missing/blank line ⇒ {@code null} = unknown/retain — UC-49). {@code LC_ALL=C}
+     * keeps the exec environment locale-stable, mirroring the other docker calls.
      */
     private SessionSignals derive(int n, String project) {
         try {
@@ -305,7 +354,8 @@ public class ConversationNameService {
             }
             String name = capCodepoints(trimToNull(firstLine(r.stdout())), MAX_NAME_CODEPOINTS);
             boolean working = parseWorking(secondLine(r.stdout()));
-            return new SessionSignals(name, working);
+            Boolean pendingQuestion = parsePending(thirdLine(r.stdout()));
+            return new SessionSignals(name, working, pendingQuestion);
         } catch (IOException io) {
             // Any I/O failure (exec error, timeout) → no signals; do NOT poison either cache.
             LOG.debug("conversation-name derive for n={} project={}: {}", n, project, io.toString());
@@ -350,6 +400,52 @@ public class ConversationNameService {
      */
     static boolean parseWorking(String line) {
         return line != null && "working".equalsIgnoreCase(line.strip());
+    }
+
+    /**
+     * UC-49 — third newline-delimited line of {@code out} (the pending-question
+     * flag), or {@code null} when there is no third line (pre-UC-49 helper output,
+     * or a capture-failure path where the helper deliberately omits line 3).
+     * Null-safe.
+     */
+    static String thirdLine(String out) {
+        if (out == null) {
+            return null;
+        }
+        int nl = out.indexOf('\n');
+        if (nl < 0) {
+            return null;
+        }
+        String rest = out.substring(nl + 1);
+        int nl2 = rest.indexOf('\n');
+        if (nl2 < 0) {
+            return null;
+        }
+        String third = rest.substring(nl2 + 1);
+        int nl3 = third.indexOf('\n');
+        return nl3 < 0 ? third : third.substring(0, nl3);
+    }
+
+    /**
+     * UC-49 — parse the helper's pending flag (line 3) into a TRI-STATE:
+     * {@code "pending-question"} (case-insensitive, trimmed) ⇒ {@link Boolean#TRUE};
+     * {@code "none"} ⇒ {@link Boolean#FALSE}; a {@code null} / blank / unrecognised
+     * line ⇒ {@code null} = UNKNOWN, signalling the caller to RETAIN the prior
+     * pending value (failure policy (b)) rather than clearing it. Conservative: an
+     * unexpected token never flips the badge — it is treated as "no information".
+     */
+    static Boolean parsePending(String line) {
+        if (line == null) {
+            return null;
+        }
+        String t = line.strip();
+        if ("pending-question".equalsIgnoreCase(t)) {
+            return Boolean.TRUE;
+        }
+        if ("none".equalsIgnoreCase(t)) {
+            return Boolean.FALSE;
+        }
+        return null;
     }
 
     /** Strip and return {@code null} for an empty/blank result. */
