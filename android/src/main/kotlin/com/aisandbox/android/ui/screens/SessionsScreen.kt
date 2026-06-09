@@ -80,6 +80,7 @@ import com.aisandbox.android.R
 import com.aisandbox.android.net.LifecycleAction
 import com.aisandbox.android.net.SessionSummary
 import com.aisandbox.android.ui.components.AttachedBadge
+import com.aisandbox.android.ui.components.PendingQuestionBadge
 import com.aisandbox.android.ui.components.SessionAvatar
 import com.aisandbox.android.ui.components.StatusPill
 import com.aisandbox.android.ui.theme.AiSandboxMonoTypography
@@ -496,14 +497,29 @@ private fun SessionRow(
                 )
             }
             Column(horizontalAlignment = Alignment.End) {
-                // UC-48 — when Claude is actively working in this session, prefix the
-                // StatusPill with a small working spinner (AC1). Double-gated on
-                // running (AC7): a stale working=true must never animate on a
-                // terminating/paused/stopped row even if it races the state override.
-                // The spinner matches the conversation view's SpinnerRow exactly
-                // (16.dp / 2.dp — AC5) so the affordance is consistent. The pill stays
-                // the row's status anchor; the spinner sits to its left in one Row.
-                if (row.working && effectiveState == "running") {
+                // UC-49 / UC-48 — 3-way trailing indicator, all double-gated on a
+                // marker-confirmed `running` row (AC8 here, AC7 for the spinner): a
+                // stale working/pending must never render on a terminating/paused/
+                // stopped row even if it races the state override.
+                //   1. pendingQuestion ⇒ a "?" badge + the pill, NO spinner. PENDING
+                //      TAKES PRECEDENCE (AC5): the session is waiting on the user, not
+                //      working, so the badge replaces the spinner. (The server already
+                //      makes the two mutually exclusive, but the precedence here is the
+                //      client-side guarantee the row never shows both.)
+                //   2. else working ⇒ the working spinner + pill, exactly as UC-48
+                //      (16.dp / 2.dp matching the conversation view's SpinnerRow).
+                //   3. else ⇒ the pill alone.
+                // The pill stays the row's status anchor; the badge/spinner sits to its
+                // left in one Row, coexisting with the conversation name + UC-46 menu
+                // without a layout change (AC7).
+                val running = effectiveState == "running"
+                if (row.pendingQuestion && running) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        PendingQuestionBadge()
+                        Spacer(Modifier.width(6.dp))
+                        StatusPill(state = effectiveState)
+                    }
+                } else if (row.working && running) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
                         Spacer(Modifier.width(6.dp))

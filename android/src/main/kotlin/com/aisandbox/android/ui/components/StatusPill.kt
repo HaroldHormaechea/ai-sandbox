@@ -22,6 +22,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import com.aisandbox.android.ui.theme.ErrorTone
 import com.aisandbox.android.ui.theme.OnSurfaceMuted
@@ -176,6 +178,39 @@ fun AttachedBadge(count: Int, modifier: Modifier = Modifier) {
             text = "attached · $count",
             style = MaterialTheme.typography.labelSmall,
             color = OnSurfaceVariant,
+        )
+    }
+}
+
+/**
+ * UC-49 — the "?" badge shown in a session row's trailing status area when that
+ * session's Claude is blocked on an [AskUserQuestion] awaiting an answer (a "needs
+ * your input" affordance). Mutually exclusive with the UC-48 working spinner —
+ * [SessionsScreen]'s SessionRow shows this badge INSTEAD of the spinner when
+ * pendingQuestion is true (pending takes precedence). Styled distinctly from BOTH
+ * the running-green [StatusPill] and the (primary-toned) working spinner: a
+ * [Warning]-amber chip carrying a bold "?", so "waiting on you" reads at a glance.
+ *
+ * Carries a [contentDescription] ("awaiting your answer") for accessibility and so
+ * instrumentation/UI tests can assert the badge's presence by its semantics.
+ */
+const val PENDING_QUESTION_BADGE_DESCRIPTION = "awaiting your answer"
+
+@Composable
+fun PendingQuestionBadge(modifier: Modifier = Modifier) {
+    Box(
+        modifier = modifier
+            .semantics { contentDescription = PENDING_QUESTION_BADGE_DESCRIPTION }
+            .size(20.dp)
+            .clip(CircleShape)
+            .background(Warning.copy(alpha = 0.18f))
+            .border(width = 1.5.dp, color = Warning, shape = CircleShape),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = "?",
+            style = MaterialTheme.typography.labelMedium,
+            color = Warning,
         )
     }
 }

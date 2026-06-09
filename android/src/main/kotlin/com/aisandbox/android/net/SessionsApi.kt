@@ -181,6 +181,16 @@ data class SessionSummary(
      * and the UC-32 push (which reuses this DTO).
      */
     val working: Boolean = false,
+    /**
+     * UC-49 — true when the session's main pane is showing an AskUserQuestion
+     * awaiting an answer (single or multi-question); false when idle / working /
+     * non-running. Mutually exclusive with [working] server-side. The server
+     * defaults it false; the default here keeps decode lenient against older
+     * payloads. The row shows a "?" badge while true AND state=="running"
+     * (double-gated) and suppresses the working spinner (pending takes precedence).
+     * Covers REST and the UC-32 push (which reuses this DTO).
+     */
+    val pendingQuestion: Boolean = false,
 )
 
 @Serializable
