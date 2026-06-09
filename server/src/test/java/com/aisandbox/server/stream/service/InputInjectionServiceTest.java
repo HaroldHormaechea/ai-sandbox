@@ -212,7 +212,9 @@ class InputInjectionServiceTest {
 
         List<List<String>> calls = capturedArgvs(/* 20 Up + 9 */ 29);
         long ups = calls.stream().filter(c -> "Up".equals(tail(c, 1))).count();
-        assertThat(ups).as("single-question injectAnswer resets the cursor to the top").isEqualTo(20);
+        assertThat(ups)
+                .as("single-question injectAnswer resets the cursor to the top")
+                .isEqualTo(20);
         // The literal MUST be sent — this is the UC-44 fix (the prior code toggled Space but never typed).
         assertThat(calls).anySatisfy(c -> assertThat(c).containsSequence("-l", "--", "custom"));
         // Pin the EXACT post-reset sequence (drop the 20 leading Ups).
