@@ -16,6 +16,8 @@ import java.time.Duration;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.LongSupplier;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -165,19 +167,51 @@ class ConversationNameServiceTest {
     }
 
     @Test
-    void a_nonzero_exit_never_poisons_the_cache_and_clears_a_stale_entry() throws Exception {
+    void a_nonzero_exit_preserves_a_warmed_name_and_never_stores_blank() throws Exception {
+        // UC-48 behavior change (was: "non-zero exit CLEARS the stale entry").
+        // An exec FAILURE (exit≠0) is now a transient blip the service rides out:
+        // derive() returns null and the refresh task touches NEITHER cache, so a
+        // momentary docker hiccup no longer drops a perfectly good conversation
+        // name (it is refreshed on the next successful tick). It also never stores
+        // a blank. Clearing a name is now reserved for a SUCCESSFUL-but-empty
+        // derive (see empty_successful_derive_clears_a_stale_entry).
         ProcessExecutor exec = mock(ProcessExecutor.class);
-        // First derive succeeds (warm the cache), then subsequent derives fail.
         when(exec.run(any(), any(), any(), any()))
                 .thenReturn(new ProcessExecutor.Result(0, "warm-name", ""))
-                .thenReturn(new ProcessExecutor.Result(1, "", "boom"));
+                .thenReturn(new ProcessExecutor.Result(1, "", "boom")); // exec failure
         ConversationNameService svc = new ConversationNameService(exec);
         try {
             svc.refreshAsync(2, "ai-sandbox-2");
             await().atMost(POLL)
                     .untilAsserted(() -> assertThat(svc.cachedName(2)).isEqualTo("warm-name"));
 
-            // A later FAILED derive must clear the stale entry, never store blank.
+            // A later FAILED derive leaves the warmed name in place (touch-nothing).
+            svc.refreshAsync(2, "ai-sandbox-2");
+            await().atMost(POLL).untilAsserted(() -> verify(exec, times(2)).run(any(), any(), any(), any()));
+            assertThat(svc.cachedName(2))
+                    .as("UC-48 — an exec failure must NOT drop a good name")
+                    .isEqualTo("warm-name");
+        } finally {
+            svc.shutdown();
+        }
+    }
+
+    @Test
+    void empty_successful_derive_clears_a_stale_entry() throws Exception {
+        // UC-48 — a SUCCESSFUL derive whose name is empty/blank is the path that
+        // clears a previously-warmed entry (the session genuinely has no name now);
+        // it still never stores a blank value. (Distinct from a non-zero exit,
+        // which preserves — see a_nonzero_exit_preserves_a_warmed_name_*.)
+        ProcessExecutor exec = mock(ProcessExecutor.class);
+        when(exec.run(any(), any(), any(), any()))
+                .thenReturn(new ProcessExecutor.Result(0, "warm-name", ""))
+                .thenReturn(new ProcessExecutor.Result(0, "   \n", "")); // success, blank name
+        ConversationNameService svc = new ConversationNameService(exec);
+        try {
+            svc.refreshAsync(2, "ai-sandbox-2");
+            await().atMost(POLL)
+                    .untilAsserted(() -> assertThat(svc.cachedName(2)).isEqualTo("warm-name"));
+
             svc.refreshAsync(2, "ai-sandbox-2");
             await().atMost(POLL)
                     .untilAsserted(() -> assertThat(svc.cachedName(2)).isNull());
@@ -285,6 +319,189 @@ class ConversationNameServiceTest {
             // A null active-set is a defensive no-op.
             svc.prune(null);
             assertThat(svc.cachedName(1)).isEqualTo("alive");
+        } finally {
+            svc.shutdown();
+        }
+    }
+
+    // ── UC-48 — working-signal helpers (pure) ─────────────────────────────────
+
+    @Test
+    void secondLine_returns_the_second_newline_delimited_line_or_null() {
+        assertThat(ConversationNameService.secondLine("name\nworking")).isEqualTo("working");
+        assertThat(ConversationNameService.secondLine("name\nidle\ntrailing")).isEqualTo("idle");
+        // Blank first line is fine — the working flag still rides line 2.
+        assertThat(ConversationNameService.secondLine("\nworking")).isEqualTo("working");
+        // Single-line (legacy pre-UC-48 helper output) → no second line.
+        assertThat(ConversationNameService.secondLine("only-one-line")).isNull();
+        assertThat(ConversationNameService.secondLine(null)).isNull();
+    }
+
+    @Test
+    void parseWorking_only_the_exact_working_token_is_true() {
+        assertThat(ConversationNameService.parseWorking("working")).isTrue();
+        assertThat(ConversationNameService.parseWorking("  WORKING  ")).isTrue();
+        assertThat(ConversationNameService.parseWorking("idle")).isFalse();
+        assertThat(ConversationNameService.parseWorking("")).isFalse();
+        assertThat(ConversationNameService.parseWorking(null)).isFalse();
+        // Conservative — any unexpected token reads as idle (no stuck spinner).
+        assertThat(ConversationNameService.parseWorking("working ")).isTrue();
+        assertThat(ConversationNameService.parseWorking("workingish")).isFalse();
+    }
+
+    // ── UC-48 — working-signal hysteresis (deterministic injected clock) ──────
+
+    /**
+     * UC-48 hysteresis (b)+(c) — a {@code working=true} derivation stamps the
+     * OFF-window timestamp, and {@link ConversationNameService#working(int)}
+     * reports {@code true} only WHILE within {@link ConversationNameService#OFF_WINDOW_NANOS}
+     * of that stamp, then ages out to {@code false}. The injected monotonic clock
+     * makes the boundary deterministic (no sleeps).
+     */
+    @Test
+    void working_signal_is_true_within_the_off_window_and_false_after() throws Exception {
+        ProcessExecutor exec = mock(ProcessExecutor.class);
+        when(exec.run(any(), any(), any(), any()))
+                .thenReturn(new ProcessExecutor.Result(0, "Refactor the SessionRow\nworking\n", ""));
+        AtomicLong now = new AtomicLong(1_000_000_000L);
+        LongSupplier clock = now::get;
+        ConversationNameService svc = new ConversationNameService(exec, clock);
+        try {
+            assertThat(svc.working(3)).as("no derivation yet → not working").isFalse();
+
+            svc.refreshAsync(3, "ai-sandbox-3");
+            // The clock is frozen at the start value while we wait, so once the
+            // async derive stamps the timestamp, working(3) reads true immediately.
+            await().atMost(POLL).untilAsserted(() -> assertThat(svc.working(3)).isTrue());
+            // The name rode the SAME derivation (independent of the working flag).
+            assertThat(svc.cachedName(3)).isEqualTo("Refactor the SessionRow");
+
+            // Just inside the OFF-window → still working (debounce holds the spinner).
+            now.set(1_000_000_000L + ConversationNameService.OFF_WINDOW_NANOS - 1L);
+            assertThat(svc.working(3)).as("inside the OFF-window stays working").isTrue();
+
+            // Past the OFF-window → idle (the spinner finally turns off).
+            now.set(1_000_000_000L + ConversationNameService.OFF_WINDOW_NANOS + 1L);
+            assertThat(svc.working(3))
+                    .as("past the OFF-window ages out to idle")
+                    .isFalse();
+        } finally {
+            svc.shutdown();
+        }
+    }
+
+    /**
+     * UC-48 hysteresis (a) — an exec FAILURE (null SessionSignals) touches
+     * NEITHER cache: a previously-warmed name survives AND the working timestamp
+     * keeps aging on its own (a transient docker blip never strobes the spinner
+     * off nor drops a good name — AC3/AC4).
+     */
+    @Test
+    void an_exec_failure_leaves_name_and_working_untouched() throws Exception {
+        ProcessExecutor exec = mock(ProcessExecutor.class);
+        when(exec.run(any(), any(), any(), any()))
+                .thenReturn(new ProcessExecutor.Result(0, "warm-name\nworking\n", ""))
+                .thenReturn(new ProcessExecutor.Result(1, "", "boom")); // exec failure
+        AtomicLong now = new AtomicLong(5_000_000_000L);
+        ConversationNameService svc = new ConversationNameService(exec, now::get);
+        try {
+            svc.refreshAsync(2, "ai-sandbox-2");
+            await().atMost(POLL).untilAsserted(() -> {
+                assertThat(svc.cachedName(2)).isEqualTo("warm-name");
+                assertThat(svc.working(2)).isTrue();
+            });
+
+            // Second derive fails — wait until it has actually run.
+            svc.refreshAsync(2, "ai-sandbox-2");
+            await().atMost(POLL).untilAsserted(() -> verify(exec, times(2)).run(any(), any(), any(), any()));
+
+            // Both signals are exactly as the successful derive left them (clock
+            // unchanged, so the timestamp is still inside the OFF-window).
+            assertThat(svc.cachedName(2))
+                    .as("failure must not clear a good name")
+                    .isEqualTo("warm-name");
+            assertThat(svc.working(2))
+                    .as("failure must not strobe the spinner off")
+                    .isTrue();
+        } finally {
+            svc.shutdown();
+        }
+    }
+
+    /**
+     * UC-48 hysteresis (d) — name and working are applied INDEPENDENTLY: a
+     * success with a blank name still records the working timestamp (so a working
+     * session with no derivable name still animates), while the blank name clears
+     * the name cache (row falls back to tmuxTitle).
+     */
+    @Test
+    void a_success_with_a_blank_name_still_records_working() throws Exception {
+        ProcessExecutor exec = mock(ProcessExecutor.class);
+        when(exec.run(any(), any(), any(), any())).thenReturn(new ProcessExecutor.Result(0, "\nworking\n", ""));
+        AtomicLong now = new AtomicLong(9_000_000_000L);
+        ConversationNameService svc = new ConversationNameService(exec, now::get);
+        try {
+            svc.refreshAsync(8, "ai-sandbox-8");
+            await().atMost(POLL).untilAsserted(() -> assertThat(svc.working(8)).isTrue());
+            // Blank name → no cached name; the working flag is independent of it.
+            assertThat(svc.cachedName(8)).isNull();
+        } finally {
+            svc.shutdown();
+        }
+    }
+
+    /**
+     * UC-48 hysteresis — a success with {@code working=false} (idle line 2) does
+     * NOT stamp the timestamp: a session that was never working stays not-working
+     * (and a previously-working one is left to age out, never re-armed by an idle
+     * tick).
+     */
+    @Test
+    void an_idle_derivation_does_not_arm_the_working_signal() throws Exception {
+        ProcessExecutor exec = mock(ProcessExecutor.class);
+        when(exec.run(any(), any(), any(), any())).thenReturn(new ProcessExecutor.Result(0, "some-name\nidle\n", ""));
+        AtomicLong now = new AtomicLong(2_000_000_000L);
+        ConversationNameService svc = new ConversationNameService(exec, now::get);
+        try {
+            svc.refreshAsync(4, "ai-sandbox-4");
+            // Wait for the derive to land the name, then confirm working stayed false.
+            await().atMost(POLL)
+                    .untilAsserted(() -> assertThat(svc.cachedName(4)).isEqualTo("some-name"));
+            assertThat(svc.working(4))
+                    .as("an idle derivation never arms the spinner")
+                    .isFalse();
+        } finally {
+            svc.shutdown();
+        }
+    }
+
+    /**
+     * UC-48 hysteresis (e) — {@code prune} clears the working timestamp for a
+     * vanished session, so a re-used session number cannot inherit a stale
+     * {@code working=true} from a prior tenant within the OFF-window.
+     */
+    @Test
+    void prune_clears_the_working_state_for_vanished_sessions() throws Exception {
+        ProcessExecutor exec = mock(ProcessExecutor.class);
+        when(exec.run(any(), any(), any(), any())).thenReturn(new ProcessExecutor.Result(0, "alive\nworking\n", ""));
+        AtomicLong now = new AtomicLong(7_000_000_000L);
+        ConversationNameService svc = new ConversationNameService(exec, now::get);
+        try {
+            svc.refreshAsync(1, "ai-sandbox-1");
+            svc.refreshAsync(2, "ai-sandbox-2");
+            await().atMost(POLL).untilAsserted(() -> {
+                assertThat(svc.working(1)).isTrue();
+                assertThat(svc.working(2)).isTrue();
+            });
+
+            // Session 2 vanished — only 1 remains enumerated.
+            svc.prune(Set.of(1));
+            assertThat(svc.working(1))
+                    .as("surviving session keeps its working state")
+                    .isTrue();
+            assertThat(svc.working(2))
+                    .as("vanished session's working state is cleared")
+                    .isFalse();
         } finally {
             svc.shutdown();
         }

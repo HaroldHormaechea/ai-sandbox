@@ -83,6 +83,11 @@ public sealed interface SessionEventMessage permits SessionEventMessage.Snapshot
      *     main pane, or {@code null} when none is known. Carried so a name change
      *     flips the {@link Row} record's value-equality and the UC-32 watcher emits
      *     a Delta (AC4); the client prefers it over {@code tmuxTitle}.
+     * @param working UC-48 — whether Claude is actively working in the row's main
+     *     pane. Carried so a working-state flip flips the {@link Row} record's
+     *     value-equality and the UC-32 watcher emits a Delta automatically (no
+     *     watcher edit needed — AC4); the client animates the working spinner while
+     *     true (double-gated on {@code state==running}).
      */
     record Row(
             int n,
@@ -92,11 +97,29 @@ public sealed interface SessionEventMessage permits SessionEventMessage.Snapshot
             long uptimeSec,
             int activeStreams,
             Instant startedAt,
-            String conversationName) {
+            String conversationName,
+            boolean working) {
+
+        /**
+         * UC-48 back-compat 8-arg constructor for call sites built after UC-47 but
+         * before this use case appended {@code working}. Delegates with {@code false}.
+         */
+        public Row(
+                int n,
+                String label,
+                String tmuxTitle,
+                String state,
+                long uptimeSec,
+                int activeStreams,
+                Instant startedAt,
+                String conversationName) {
+            this(n, label, tmuxTitle, state, uptimeSec, activeStreams, startedAt, conversationName, false);
+        }
 
         /**
          * UC-47 back-compat 7-arg constructor for call sites built before this use
-         * case appended {@code conversationName}. Delegates with {@code null}.
+         * case appended {@code conversationName}. Delegates with {@code null} name
+         * (and {@code working=false}).
          */
         public Row(
                 int n,

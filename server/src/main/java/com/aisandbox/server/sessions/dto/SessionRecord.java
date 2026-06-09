@@ -33,6 +33,12 @@ import java.time.Instant;
  *     (idle / no active conversation / lookup not yet warmed / non-running). The
  *     Android row prefers it over {@code tmuxTitle} as the primary status line,
  *     falling back to {@code tmuxTitle} when null/blank (AC1, AC3).
+ * @param working UC-48 — whether Claude is actively working in this session's
+ *     MAIN pane (a turn is mid-flight), derived from the same transcript the
+ *     conversation name reads, cached + hysteresis-debounced server-side
+ *     ({@code ConversationNameService.working(int)}). Only ever {@code true} for
+ *     a {@code running} session; {@code false} for idle / pending-question /
+ *     non-running. Drives the Android row's working spinner (AC1, AC2, AC7).
  */
 public record SessionRecord(
         int n,
@@ -42,14 +48,33 @@ public record SessionRecord(
         long uptimeSec,
         int activeStreams,
         Instant startedAt,
-        String conversationName) {
+        String conversationName,
+        boolean working) {
+
+    /**
+     * UC-48 back-compat 8-arg constructor for call sites (and test fixtures)
+     * created after UC-47 but before this use case appended {@code working}.
+     * Delegates with {@code working=false}, so a session reported through the
+     * pre-UC-48 shape simply never shows the working spinner.
+     */
+    public SessionRecord(
+            int n,
+            String label,
+            String tmuxTitle,
+            String state,
+            long uptimeSec,
+            int activeStreams,
+            Instant startedAt,
+            String conversationName) {
+        this(n, label, tmuxTitle, state, uptimeSec, activeStreams, startedAt, conversationName, false);
+    }
 
     /**
      * UC-47 back-compat 7-arg constructor for call sites (and test fixtures)
      * created before this use case appended {@code conversationName}. Delegates
-     * with a {@code null} name, so a session reported through the old shape
-     * simply carries no conversation name and the row falls back to
-     * {@code tmuxTitle} — exactly the pre-UC-47 behaviour.
+     * with a {@code null} name (and {@code working=false}), so a session reported
+     * through the old shape simply carries no conversation name and the row falls
+     * back to {@code tmuxTitle} — exactly the pre-UC-47 behaviour.
      */
     public SessionRecord(
             int n, String label, String tmuxTitle, String state, long uptimeSec, int activeStreams, Instant startedAt) {

@@ -261,12 +261,19 @@ public class DockerEnumerationService {
             // Read the cached name (non-blocking) and fire a fire-and-forget refresh
             // for the NEXT enumeration (AC6 — no extra blocking exec on this path).
             // null/blank → the row falls back to tmuxTitle (AC3).
+            // UC-48 — same running-gate: only a running session can be "working".
+            // The single refreshAsync above warms BOTH signals (name + working) from
+            // one helper exec; read the cached working flag (non-blocking, with the
+            // service's OFF-window hysteresis). Non-running → false, so a
+            // stale working=true can never race a paused/terminating override (AC7).
             String conversationName = null;
+            boolean working = false;
             if ("running".equals(state)) {
                 refreshConversationName(n, project);
                 conversationName = cachedConversationName(n);
+                working = cachedConversationWorking(n);
             }
-            out.add(new SessionRecord(n, label, title, state, 0L, 0, Instant.EPOCH, conversationName));
+            out.add(new SessionRecord(n, label, title, state, 0L, 0, Instant.EPOCH, conversationName, working));
         }
         out.sort((a, b) -> Integer.compare(a.n(), b.n()));
         // UC-47 — drop cached names for sessions that vanished this enumeration.
@@ -284,6 +291,11 @@ public class DockerEnumerationService {
     /** UC-47 null-safe wrapper — non-blocking read of the cached name. */
     private String cachedConversationName(int n) {
         return conversationNames == null ? null : conversationNames.cachedName(n);
+    }
+
+    /** UC-48 null-safe wrapper — non-blocking read of the cached (hysteresis) working flag. */
+    private boolean cachedConversationWorking(int n) {
+        return conversationNames != null && conversationNames.working(n);
     }
 
     /** UC-47 null-safe wrapper — prune cached names to the set of enumerated sessions. */

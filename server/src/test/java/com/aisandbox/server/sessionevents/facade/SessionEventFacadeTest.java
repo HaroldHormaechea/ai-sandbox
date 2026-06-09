@@ -86,6 +86,34 @@ class SessionEventFacadeTest {
         assertThat(snapshot.sessions().get(1).conversationName()).isNull();
     }
 
+    /**
+     * UC-48 AC4 — the new {@code working} flag flows verbatim from the
+     * {@link SessionRecord} onto the wire {@link Row} (the same {@code Row} the
+     * UC-32 snapshot/delta push and the REST DTO carry), so a working-state flip
+     * reaches the client. The first row is working, the second is idle.
+     */
+    @Test
+    void snapshot_carries_the_working_flag_through_to_the_wire_row() throws IOException {
+        Instant started = Instant.parse("2026-06-05T10:15:30Z");
+        when(sessionFacade.listSessions())
+                .thenReturn(List.of(
+                        new SessionRecord(
+                                1, "build", "vim", "running", 42L, 2, started, "Refactor the SessionRow", true),
+                        new SessionRecord(2, "", "(idle)", "running", 0L, 0, started, null, false)));
+
+        Snapshot snapshot = facade.snapshot();
+
+        assertThat(snapshot.sessions().get(0).working())
+                .as("AC4 — working=true flows to the wire row")
+                .isTrue();
+        assertThat(snapshot.sessions().get(1).working()).isFalse();
+        // Whole-row value-equality (the field the UC-32 watcher diffs on).
+        assertThat(snapshot.sessions())
+                .containsExactly(
+                        new Row(1, "build", "vim", "running", 42L, 2, started, "Refactor the SessionRow", true),
+                        new Row(2, "", "(idle)", "running", 0L, 0, started, null, false));
+    }
+
     @Test
     void snapshot_swallows_ioexception_and_serves_an_empty_snapshot() throws IOException {
         when(sessionFacade.listSessions()).thenThrow(new IOException("docker enumeration down"));

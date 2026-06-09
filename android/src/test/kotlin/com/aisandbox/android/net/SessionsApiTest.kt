@@ -233,6 +233,44 @@ class SessionsApiTest {
         }
     }
 
+    /**
+     * UC-48 AC3 — the server-provided `working` flag decodes onto [SessionSummary]
+     * over REST: a row carrying `true`/`false` exposes it, and a row that OMITS it
+     * (older server payload) defaults to `false` (no spinner). The client reads the
+     * field — it never infers working from the tmux-title string (AC3).
+     */
+    @Test
+    fun workingField_decodesFromRestAndDefaultsToFalseWhenAbsent() = runTest {
+        val (server, profile) = startPinnedServer()
+        try {
+            server.enqueue(
+                MockResponse().setResponseCode(200).setBody(
+                    """
+                    [
+                      {"n":1,"label":"a","tmuxTitle":"(idle)","state":"running","uptimeSec":1,"activeStreams":0,"startedAt":null,"working":true},
+                      {"n":2,"label":"b","tmuxTitle":"vim","state":"running","uptimeSec":2,"activeStreams":0,"startedAt":null,"working":false},
+                      {"n":3,"label":"c","tmuxTitle":"(idle)","state":"running","uptimeSec":3,"activeStreams":0,"startedAt":null}
+                    ]
+                    """.trimIndent(),
+                ),
+            )
+
+            val result = apiFor(profile).list()
+
+            assertThat(result).isInstanceOf(ApiResult.Success::class.java)
+            val rows = (result as ApiResult.Success).value
+            assertThat(rows.map { it.n }).containsExactly(1, 2, 3)
+            // Present true → exposed verbatim (row animates the spinner).
+            assertThat(rows[0].working).isTrue()
+            // Present false → exposed verbatim (no spinner).
+            assertThat(rows[1].working).isFalse()
+            // Omitted (older server) → false default; never a stuck spinner.
+            assertThat(rows[2].working).isFalse()
+        } finally {
+            server.shutdown()
+        }
+    }
+
     @Test
     fun problemJsonError_mapsToHttpFailureWithCode() = runTest {
         val (server, profile) = startPinnedServer()

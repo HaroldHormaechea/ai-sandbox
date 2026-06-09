@@ -1050,5 +1050,86 @@ class DockerEnumerationServiceTest {
         assertThat(r.n()).isEqualTo(5);
         assertThat(r.conversationName()).isNull();
         assertThat(r.tmuxTitle()).isEqualTo("(idle)");
+        // UC-48 — the pre-UC-48 ctor leaves every row not-working (no spinner).
+        assertThat(r.working()).isFalse();
+    }
+
+    // ──────────────────────────────────────────────────────────────────────
+    // UC-48 — per-session working flag on the enumeration hot path
+    // ──────────────────────────────────────────────────────────────────────
+
+    /**
+     * UC-48 AC1 — a RUNNING session whose cached (hysteresis-debounced) working
+     * flag is true carries {@code working=true} on its {@link SessionRecord}, so
+     * the Android row animates the spinner. The cached read is non-blocking (the
+     * same warming refresh that fetches the name fetches the working flag).
+     */
+    @Test
+    void running_session_carries_the_cached_working_flag() throws Exception {
+        ProcessExecutor exec = runningSession(3);
+        ConversationNameService names = mock(ConversationNameService.class);
+        when(names.working(3)).thenReturn(true);
+
+        DockerEnumerationService svc = new DockerEnumerationService(exec, new TerminatingSessions(), names);
+        SessionRecord r = svc.enumerate().get(0);
+
+        assertThat(r.state()).isEqualTo("running");
+        assertThat(r.working())
+                .as("AC1 — a running, working session reports working=true")
+                .isTrue();
+        verify(names).working(3);
+        verify(names).refreshAsync(eq(3), eq("ai-sandbox-3"));
+    }
+
+    /**
+     * UC-48 AC2 — a RUNNING session that is idle (cached working flag false)
+     * carries {@code working=false}, so the row shows no spinner and a genuinely
+     * idle session is visually distinct.
+     */
+    @Test
+    void running_but_idle_session_carries_working_false() throws Exception {
+        ProcessExecutor exec = runningSession(6);
+        ConversationNameService names = mock(ConversationNameService.class);
+        when(names.working(6)).thenReturn(false);
+
+        DockerEnumerationService svc = new DockerEnumerationService(exec, new TerminatingSessions(), names);
+        SessionRecord r = svc.enumerate().get(0);
+
+        assertThat(r.state()).isEqualTo("running");
+        assertThat(r.working())
+                .as("AC2 — a running but idle session reports working=false")
+                .isFalse();
+    }
+
+    /**
+     * UC-48 AC7 — a NON-running (paused) session never reads the working flag and
+     * always reports {@code working=false}, regardless of any stale cached
+     * working state. The running-gate makes a stale {@code working=true} unable
+     * to race a paused/terminating/stopped override into a spinning row.
+     */
+    @Test
+    void paused_session_never_reads_working_and_reports_false() throws Exception {
+        ProcessExecutor exec = mock(ProcessExecutor.class);
+        when(exec.run(
+                        argThat(argv -> argv != null && argv.size() >= 3 && "ls".equals(argv.get(2))),
+                        any(),
+                        any(),
+                        any()))
+                .thenReturn(new ProcessExecutor.Result(0, "[{\"Name\":\"ai-sandbox-13\"}]", ""));
+        when(exec.run(argThat(argv -> argv != null && argv.contains("ps")), any(), any(), any()))
+                .thenReturn(new ProcessExecutor.Result(0, "paused-cid\n", ""));
+        when(exec.run(argThat(argv -> argv != null && argv.contains("inspect")), any(), any()))
+                .thenReturn(new ProcessExecutor.Result(0, "lbl|paused|false", ""));
+        ConversationNameService names = mock(ConversationNameService.class);
+
+        DockerEnumerationService svc = new DockerEnumerationService(exec, new TerminatingSessions(), names);
+        SessionRecord r = svc.enumerate().get(0);
+
+        assertThat(r.state()).isEqualTo("paused");
+        assertThat(r.working())
+                .as("AC7 — a non-running session never reports working=true")
+                .isFalse();
+        // The running-gate skips the working read entirely for a non-running row.
+        verify(names, never()).working(13);
     }
 }

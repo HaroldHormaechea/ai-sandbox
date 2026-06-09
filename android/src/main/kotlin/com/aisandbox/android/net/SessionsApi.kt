@@ -172,6 +172,15 @@ data class SessionSummary(
      * this DTO).
      */
     val conversationName: String? = null,
+    /**
+     * UC-48 — true when Claude is actively working in the session's main pane (a
+     * turn is mid-flight); false when idle / awaiting an answer / non-running.
+     * The server defaults it false and hysteresis-debounces it; the default here
+     * keeps decode lenient against older server payloads. The row animates a
+     * working spinner while true AND state=="running" (double-gated). Covers REST
+     * and the UC-32 push (which reuses this DTO).
+     */
+    val working: Boolean = false,
 )
 
 @Serializable
