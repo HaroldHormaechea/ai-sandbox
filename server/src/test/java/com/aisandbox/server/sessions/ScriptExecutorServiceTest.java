@@ -9,6 +9,7 @@ import static org.mockito.Mockito.when;
 
 import com.aisandbox.server.config.ServerProperties;
 import com.aisandbox.server.sessions.dto.ClaudeConfigMode;
+import com.aisandbox.server.sessions.dto.LifecycleAction;
 import com.aisandbox.server.sessions.dto.SpawnCommand;
 import com.aisandbox.server.sessions.dto.WorkspaceMode;
 import com.aisandbox.server.sessions.service.HostScriptLocator;
@@ -271,5 +272,54 @@ class ScriptExecutorServiceTest {
         ArgumentCaptor<Map<String, String>> env = ArgumentCaptor.forClass(Map.class);
         verify(exec).run(any(), any(), env.capture(), any());
         assertThat(env.getValue()).doesNotContainKey("AI_SANDBOX_RUN_AS_USER");
+    }
+
+    // ── UC-46 — lifecycle.sh invocation (AC4 / AC24) ─────────────────────────
+
+    /**
+     * UC-46 AC24 — {@code lifecycle.sh} is invoked through the same argv-array
+     * shape as {@code spawn.sh} / {@code clean.sh}: hard-wired {@code
+     * --non-interactive}, the session number as a SEPARATE {@code --session}
+     * argv entry, and the {@code --action} token sourced from the validated
+     * {@link LifecycleAction#flag()} (never raw client input — no shell
+     * interpolation). The same compose-routing env is carried so the bundled
+     * script routes through {@code ai_sandbox_compose} against the
+     * server-pinned compose file + state root.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void lifecycle_assembles_argv_with_action_flag_and_compose_env() throws Exception {
+        HostScriptLocator loc = locator();
+        when(loc.lifecycleSh()).thenReturn(REPO_ROOT.resolve("lifecycle.sh"));
+        ProcessExecutor exec = mock(ProcessExecutor.class);
+        when(exec.run(any(), any(), any(), any())).thenReturn(new ProcessExecutor.Result(0, "", ""));
+        ScriptExecutorService svc = new ScriptExecutorService(loc, exec, props());
+
+        ProcessExecutor.Result r = svc.lifecycle(LifecycleAction.PAUSE, 7, Duration.ofSeconds(5));
+
+        assertThat(r.exitCode()).isZero();
+        ArgumentCaptor<List<String>> argv = ArgumentCaptor.forClass(List.class);
+        ArgumentCaptor<Map<String, String>> env = ArgumentCaptor.forClass(Map.class);
+        verify(exec).run(argv.capture(), eq(REPO_ROOT), env.capture(), eq(Duration.ofSeconds(5)));
+        assertThat(argv.getValue())
+                .containsExactly("/fake/lifecycle.sh", "--non-interactive", "--session", "7", "--action", "pause");
+        assertThat(env.getValue())
+                .containsEntry("AI_SANDBOX_COMPOSE_FILE", "/fake/docker-compose.yml")
+                .containsEntry("AI_SANDBOX_HOST_STATE_ROOT", HOST_STATE_ROOT.toString())
+                .containsEntry("AI_SANDBOX_SECRETS_HOST_PATH", SECRETS_DIR.toString());
+    }
+
+    @Test
+    void lifecycle_rejects_null_action_and_negative_session() {
+        HostScriptLocator loc = locator();
+        when(loc.lifecycleSh()).thenReturn(REPO_ROOT.resolve("lifecycle.sh"));
+        ProcessExecutor exec = mock(ProcessExecutor.class);
+        ScriptExecutorService svc = new ScriptExecutorService(loc, exec, props());
+
+        org.assertj.core.api.Assertions.assertThatThrownBy(() -> svc.lifecycle(null, 1, Duration.ofSeconds(5)))
+                .isInstanceOf(IllegalArgumentException.class);
+        org.assertj.core.api.Assertions.assertThatThrownBy(
+                        () -> svc.lifecycle(LifecycleAction.STOP, -1, Duration.ofSeconds(5)))
+                .isInstanceOf(IllegalArgumentException.class);
     }
 }

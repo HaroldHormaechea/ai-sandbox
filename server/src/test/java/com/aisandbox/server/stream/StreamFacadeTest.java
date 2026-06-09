@@ -203,6 +203,29 @@ class StreamFacadeTest {
         });
     }
 
+    /**
+     * UC-46 — a {@code paused} container (frozen via the cgroup freezer; tmux +
+     * Claude are SIGSTOPed) is NOT attachable: opening a stream would hang on a
+     * frozen process. authorizeOpen must reject with {@code NotRunning} (mapped
+     * to 409 session_not_running), carrying the {@code paused} token. This locks
+     * the paused-not-attachable guarantee — the operator must Unpause/Start
+     * before a conversation/terminal can attach.
+     */
+    @Test
+    void attach_to_paused_returns_NotRunning() throws Exception {
+        SessionRegistryService sr = mock(SessionRegistryService.class);
+        when(sr.list()).thenReturn(List.of(recordWithState(1, "paused")));
+
+        StreamFacade f = build(sr, new StreamRegistryService(props(10, 100)));
+        AuthorizeResult r = f.authorizeOpen(1, identity());
+        assertThat(r).isInstanceOfSatisfying(StreamFacade.NotRunning.class, nr -> {
+            assertThat(nr.n()).isEqualTo(1);
+            assertThat(nr.state())
+                    .as("UC-46 — a paused (frozen) session is not attachable; 409 carries the paused state")
+                    .isEqualTo("paused");
+        });
+    }
+
     // ── UC-21 AC#13 — enumerate targets ─────────────────────────────────────
 
     @Test

@@ -1,7 +1,6 @@
 package com.aisandbox.server.api;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -11,6 +10,7 @@ import static org.mockito.Mockito.when;
 
 import com.aisandbox.server.identity.ClientIdentity;
 import com.aisandbox.server.identity.ClientIdentityExtractor;
+import com.aisandbox.server.sessions.dto.LifecycleAction;
 import com.aisandbox.server.sessions.facade.SessionFacade;
 import com.aisandbox.server.test.CertFixtures;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -45,40 +45,35 @@ import org.springframework.web.server.WebFilter;
 import reactor.netty.http.client.HttpClient;
 
 /**
- * BUG 2 (session-create-delete-fix) — controller-level pin for the
- * {@code DELETE /v1/sessions/{n}} HTTP status mapping, exercised against
- * a real {@code @SpringBootTest(RANDOM_PORT)} Netty+TLS context so the
+ * UC-46 AC4 — controller-level pin for the {@code POST
+ * /v1/sessions/{n}/{stop|start|pause|unpause}} HTTP status mapping, exercised
+ * against a real {@code @SpringBootTest(RANDOM_PORT)} Netty+TLS context so the
  * production {@code ProblemDetailsAdvice} / {@code
- * GenericProblemFallbackHandler} translation runs for real (the same
- * harness as {@link SessionEnumerationFailureControllerTest}).
+ * GenericProblemFallbackHandler} translation runs for real. Mirrors {@link
+ * SessionDeleteControllerTest}: a {@code @Primary} Mockito mock of {@link
+ * SessionFacade} isolates the controller's exception→status mapping (the
+ * facade's transition/mutex logic is pinned at the unit layer by {@link
+ * com.aisandbox.server.sessions.SessionFacadeTest}).
  *
- * <p>The seam here is a {@code @Primary} Mockito mock of
- * {@link SessionFacade}: this test isolates the controller's
- * exception→status mapping, NOT the facade's existence-gate logic
- * (that is pinned at the unit layer by
- * {@link com.aisandbox.server.sessions.SessionFacadeTest} and end-to-end
- * by {@link com.aisandbox.server.integration.SessionsRestIT}). The three
- * controller contracts:
+ * <p>Four controller contracts:
  *
  * <ul>
- *   <li>facade throws {@link NoSuchElementException} (absent N,
- *       force=false) → HTTP 404 {@code session_not_found}.</li>
- *   <li>facade returns {@code false} (clean.sh ran but exited non-zero)
+ *   <li>facade returns {@code true} (lifecycle.sh exited 0) → HTTP 204.</li>
+ *   <li>facade returns {@code false} (lifecycle.sh ran but exited non-zero)
  *       → HTTP 500 {@code internal_error}.</li>
- *   <li>facade throws {@link IOException} (enumeration outage) → a 5xx
- *       (500 {@code internal_error} via the generic fallback), and
- *       crucially NOT a 404 — an outage is "unknown", never "absent".</li>
+ *   <li>facade throws {@link NoSuchElementException} (absent N) → HTTP 404
+ *       {@code session_not_found}.</li>
+ *   <li>facade throws {@link SessionFacade.InvalidLifecycleTransitionException}
+ *       (out-of-state action) → HTTP 409 {@code session_state_conflict},
+ *       carrying {@code currentState}.</li>
  * </ul>
  *
- * <p>The {@link WebFilter} at {@link Ordered#HIGHEST_PRECEDENCE}
- * pre-stashes a non-anonymous {@link ClientIdentity} so {@code
- * MtlsEnforcementFilter} admits the request without a real client cert —
- * identical mTLS-bypass shape to
- * {@link com.aisandbox.server.stream.api.StreamExceptionRoutingTest} and
- * {@link SessionEnumerationFailureControllerTest}.
+ * <p>A bonus contract: an unmapped action token (e.g. {@code /restart}) 404s as
+ * an unmatched path (the {@code @PostMapping} path regex constrains the
+ * segment), and the facade is never consulted.
  */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
-class SessionDeleteControllerTest {
+class SessionLifecycleControllerTest {
 
     private static final Path ROOT;
     private static final Path PKI_DIR;
@@ -91,7 +86,7 @@ class SessionDeleteControllerTest {
 
     static {
         try {
-            ROOT = Files.createTempDirectory("ai-sandbox-bug2-delete-ctrl-");
+            ROOT = Files.createTempDirectory("ai-sandbox-uc46-lifecycle-ctrl-");
             PKI_DIR = Files.createDirectories(ROOT.resolve("pki"));
             CLIENTS_DIR = Files.createDirectories(ROOT.resolve("clients"));
             SCRIPTS_DIR = Files.createDirectories(ROOT.resolve("hostscripts"));
@@ -100,12 +95,14 @@ class SessionDeleteControllerTest {
             SESSIONS_DIR = Files.createDirectories(ROOT.resolve("sessions"));
             SECRETS_DIR = Files.createDirectories(ROOT.resolve("secrets"));
 
-            CertFixtures.writeServerMaterialTo(PKI_DIR, "bug2-delete-ctrl");
-            CertFixtures.writeClientPemTo(CLIENTS_DIR, "bug2-bootstrap-client");
+            CertFixtures.writeServerMaterialTo(PKI_DIR, "uc46-lifecycle-ctrl");
+            CertFixtures.writeClientPemTo(CLIENTS_DIR, "uc46-bootstrap-client");
 
             writeExecutableShim(SCRIPTS_DIR.resolve("spawn.sh"));
             writeExecutableShim(SCRIPTS_DIR.resolve("attach.sh"));
             writeExecutableShim(SCRIPTS_DIR.resolve("clean.sh"));
+            // UC-46 — lifecycle.sh must exist + be executable for the locator /
+            // startup check to admit the context.
             writeExecutableShim(SCRIPTS_DIR.resolve("lifecycle.sh"));
 
             System.setProperty(
@@ -127,7 +124,7 @@ class SessionDeleteControllerTest {
                                     // best-effort cleanup
                                 }
                             },
-                            "ai-sandbox-bug2-delete-ctrl-cleanup"));
+                            "ai-sandbox-uc46-lifecycle-ctrl-cleanup"));
         } catch (Exception e) {
             throw new ExceptionInInitializerError(e);
         }
@@ -152,12 +149,6 @@ class SessionDeleteControllerTest {
         r.add("ai-sandbox.server.shutdown.total-grace-seconds", () -> 2);
     }
 
-    /**
-     * Replaces the production {@link SessionFacade} {@code @Component}
-     * with a Mockito mock ({@code @Primary} so the controller's
-     * constructor-autowire picks it) and pre-stashes a non-anonymous
-     * {@link ClientIdentity} so the request clears the mTLS gate.
-     */
     @TestConfiguration
     static class TestSeamsConfig {
 
@@ -174,7 +165,7 @@ class SessionDeleteControllerTest {
                 exchange.getAttributes()
                         .put(
                                 ClientIdentityExtractor.ATTR,
-                                new ClientIdentity("bug2-delete-client", "deadbeef".repeat(8), BigInteger.ONE));
+                                new ClientIdentity("uc46-lifecycle-client", "deadbeef".repeat(8), BigInteger.ONE));
                 return chain.filter(exchange);
             };
         }
@@ -191,50 +182,28 @@ class SessionDeleteControllerTest {
         reset(facade);
     }
 
-    /**
-     * BUG 2 — DELETE of an absent session with the default force=false
-     * MUST be a 404 {@code session_not_found} (the facade's existence
-     * gate throws {@link NoSuchElementException}, mapped by
-     * {@code ProblemDetailsAdvice.handleNotFound}). Pre-fix this surfaced
-     * as a 500 because {@code clean.sh}'s exit-1 was treated as a failure.
-     */
+    /** AC4 — a valid action whose lifecycle.sh exits 0 returns 204. */
     @Test
-    void delete_absent_session_force_false_is_404_session_not_found() throws Exception {
-        when(facade.deleteSession(eq(99), eq(false))).thenThrow(new NoSuchElementException("session 99 not found"));
+    void valid_action_returns_204() throws Exception {
+        // The controller now passes the raw path token (String) to the facade,
+        // which parses it via LifecycleAction.fromToken (keeps the api→dto
+        // boundary clean — LayeringTest).
+        when(facade.lifecycle(eq(5), eq("stop"))).thenReturn(true);
 
         WebTestClient client = buildClient(port);
+        client.post().uri("/v1/sessions/5/stop").exchange().expectStatus().isNoContent();
 
-        byte[] body = client.delete()
-                .uri("/v1/sessions/99")
-                .exchange()
-                .expectStatus()
-                .isNotFound()
-                .expectBody()
-                .returnResult()
-                .getResponseBody();
-
-        assertThat(body).isNotNull().isNotEmpty();
-        JsonNode root = new ObjectMapper().readTree(body);
-        assertThat(root.path("code").asText())
-                .as("BUG 2 — absent N (force=false) MUST be session_not_found, not internal_error")
-                .isEqualTo("session_not_found");
-        assertThat(root.path("status").asInt()).isEqualTo(404);
+        verify(facade).lifecycle(eq(5), eq("stop"));
     }
 
-    /**
-     * A genuine {@code clean.sh} failure (the script ran and exited
-     * non-zero → facade returns {@code false}) MUST surface as 500
-     * {@code internal_error}. This is the contract the 404 path
-     * deliberately narrowed 500 down to.
-     */
+    /** AC4 — lifecycle.sh ran but exited non-zero → 500 internal_error. */
     @Test
-    void delete_clean_failure_is_500_internal_error() throws Exception {
-        when(facade.deleteSession(eq(3), eq(false))).thenReturn(false);
+    void script_nonzero_is_500_internal_error() throws Exception {
+        when(facade.lifecycle(eq(3), eq("pause"))).thenReturn(false);
 
         WebTestClient client = buildClient(port);
-
-        byte[] body = client.delete()
-                .uri("/v1/sessions/3")
+        byte[] body = client.post()
+                .uri("/v1/sessions/3/pause")
                 .exchange()
                 .expectStatus()
                 .is5xxServerError()
@@ -245,57 +214,71 @@ class SessionDeleteControllerTest {
         assertThat(body).isNotNull().isNotEmpty();
         JsonNode root = new ObjectMapper().readTree(body);
         assertThat(root.path("status").asInt()).isEqualTo(500);
-        assertThat(root.path("code").asText())
-                .as("clean.sh non-zero exit MUST be internal_error")
-                .isEqualTo("internal_error");
+        assertThat(root.path("code").asText()).isEqualTo("internal_error");
     }
 
-    /**
-     * BUG 2 — an enumeration OUTAGE (facade's {@code registry.exists}
-     * throws {@link IOException}, force=false) MUST surface as a 5xx via
-     * the generic fallback and MUST NOT be downgraded to a 404. A 404 on
-     * an outage would be a false "session doesn't exist".
-     */
+    /** AC4 — an absent N → 404 session_not_found. */
     @Test
-    void delete_enumeration_outage_force_false_is_5xx_not_404() throws Exception {
-        when(facade.deleteSession(eq(7), eq(false))).thenThrow(new IOException("docker enumeration unavailable"));
+    void unknown_session_is_404_session_not_found() throws Exception {
+        when(facade.lifecycle(eq(99), eq("start")))
+                .thenThrow(new NoSuchElementException("session 99 not found"));
 
         WebTestClient client = buildClient(port);
-
-        int status = client.delete()
-                .uri("/v1/sessions/7")
-                .exchange()
-                .returnResult(byte[].class)
-                .getStatus()
-                .value();
-
-        assertThat(status)
-                .as("BUG 2 — enumeration outage MUST be a 5xx (never a false 404)")
-                .isGreaterThanOrEqualTo(500)
-                .isLessThan(600);
-        assertThat(status).isNotEqualTo(404);
-    }
-
-    /**
-     * force=true is the operator escape hatch — it must reach the facade
-     * with {@code force=true} and, on a successful clean (facade returns
-     * true), produce a 204. Guards that the {@code ?force=true} query
-     * param is parsed and forwarded.
-     */
-    @Test
-    void delete_force_true_returns_204_and_forwards_force_flag() throws Exception {
-        when(facade.deleteSession(eq(5), eq(true))).thenReturn(true);
-
-        WebTestClient client = buildClient(port);
-
-        client.delete()
-                .uri("/v1/sessions/5?force=true")
+        byte[] body = client.post()
+                .uri("/v1/sessions/99/start")
                 .exchange()
                 .expectStatus()
-                .isNoContent();
+                .isNotFound()
+                .expectBody()
+                .returnResult()
+                .getResponseBody();
 
-        verify(facade).deleteSession(eq(5), eq(true));
-        verify(facade, never()).deleteSession(anyInt(), eq(false));
+        assertThat(body).isNotNull().isNotEmpty();
+        JsonNode root = new ObjectMapper().readTree(body);
+        assertThat(root.path("code").asText()).isEqualTo("session_not_found");
+        assertThat(root.path("status").asInt()).isEqualTo(404);
+    }
+
+    /**
+     * AC4 — an out-of-state action (e.g. START on a running session) → 409
+     * session_state_conflict, carrying the current state so the client can
+     * reconcile. Never a silent no-op.
+     */
+    @Test
+    void invalid_transition_is_409_session_state_conflict() throws Exception {
+        when(facade.lifecycle(eq(5), eq("start")))
+                .thenThrow(new SessionFacade.InvalidLifecycleTransitionException(5, LifecycleAction.START, "running"));
+
+        WebTestClient client = buildClient(port);
+        byte[] body = client.post()
+                .uri("/v1/sessions/5/start")
+                .exchange()
+                .expectStatus()
+                .isEqualTo(409)
+                .expectBody()
+                .returnResult()
+                .getResponseBody();
+
+        assertThat(body).isNotNull().isNotEmpty();
+        JsonNode root = new ObjectMapper().readTree(body);
+        assertThat(root.path("code").asText())
+                .as("an out-of-state lifecycle action MUST be session_state_conflict (409)")
+                .isEqualTo("session_state_conflict");
+        assertThat(root.path("status").asInt()).isEqualTo(409);
+        assertThat(root.path("currentState").asText()).isEqualTo("running");
+    }
+
+    /**
+     * The {@code @PostMapping} path regex constrains the action segment to
+     * {@code stop|start|pause|unpause}; any other token (e.g. {@code restart})
+     * 404s as an unmatched route and the facade is never consulted.
+     */
+    @Test
+    void unmapped_action_token_404s_and_never_reaches_facade() throws Exception {
+        WebTestClient client = buildClient(port);
+        client.post().uri("/v1/sessions/5/restart").exchange().expectStatus().isNotFound();
+
+        verify(facade, never()).lifecycle(org.mockito.ArgumentMatchers.anyInt(), org.mockito.ArgumentMatchers.any());
     }
 
     // ── helpers ────────────────────────────────────────────────────────

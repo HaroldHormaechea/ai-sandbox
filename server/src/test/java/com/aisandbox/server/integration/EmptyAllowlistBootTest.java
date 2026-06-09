@@ -96,6 +96,7 @@ class EmptyAllowlistBootTest {
             writeExecutableShim(SCRIPTS_DIR.resolve("spawn.sh"));
             writeExecutableShim(SCRIPTS_DIR.resolve("attach.sh"));
             writeExecutableShim(SCRIPTS_DIR.resolve("clean.sh"));
+            writeExecutableShim(SCRIPTS_DIR.resolve("lifecycle.sh"));
 
             // logback-spring.xml resolves ${ai-sandbox.server.audit.file}
             // during ApplicationEnvironmentPreparedEvent, before

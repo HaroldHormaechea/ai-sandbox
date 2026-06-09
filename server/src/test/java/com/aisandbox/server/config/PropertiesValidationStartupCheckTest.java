@@ -198,6 +198,7 @@ class PropertiesValidationStartupCheckTest {
         writeExecutableShim(scripts.resolve("spawn.sh"));
         writeExecutableShim(scripts.resolve("attach.sh"));
         writeExecutableShim(scripts.resolve("clean.sh"));
+        writeExecutableShim(scripts.resolve("lifecycle.sh"));
 
         Files.createDirectories(root.resolve("audit"));
     }

@@ -14,6 +14,8 @@ import static org.mockito.Mockito.when;
 import com.aisandbox.server.audit.AuditLogger;
 import com.aisandbox.server.config.ServerProperties;
 import com.aisandbox.server.sessions.dto.ClaudeConfigMode;
+import com.aisandbox.server.sessions.dto.LifecycleAction;
+import com.aisandbox.server.sessions.dto.SessionRecord;
 import com.aisandbox.server.sessions.dto.SpawnCommand;
 import com.aisandbox.server.sessions.dto.WorkspaceMode;
 import com.aisandbox.server.sessions.facade.SessionFacade;
@@ -25,8 +27,13 @@ import com.aisandbox.server.sessions.service.SessionRegistryService;
 import com.aisandbox.server.sessions.service.TerminatingSessions;
 import java.io.IOException;
 import java.nio.file.Path;
+import java.time.Instant;
+import java.util.List;
 import java.util.NoSuchElementException;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.ReentrantLock;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -366,5 +373,209 @@ class SessionFacadeTest {
                 .as("a THROWN teardown must still clear terminating in finally (AC8)")
                 .isFalse();
         verify(registry, times(2)).invalidate();
+    }
+
+    // ── UC-46 — lifecycle (stop/start/pause/unpause) facade contract ─────────
+    //
+    // AC4 — the facade reads the session's CURRENT state inside the per-N lock,
+    // gates the action on LifecycleAction.isValidFrom, runs lifecycle.sh, and
+    // maps the outcome: exit 0 → true (controller 204), exit non-zero → false
+    // (500), unknown N → NoSuchElementException (404), invalid transition →
+    // InvalidLifecycleTransitionException (409). AC6 — the registry cache is
+    // invalidated after the action so the next poll re-reads the new state.
+    // AC8 — lifecycle serialises on the SAME per-N mutex as delete.
+
+    private static SessionRecord recordWithState(int n, String state) {
+        return new SessionRecord(n, "", "(idle)", state, 0L, 0, Instant.EPOCH);
+    }
+
+    @Test
+    void lifecycle_valid_transition_runs_script_returns_true_and_invalidates_cache() throws Exception {
+        SessionRegistryService registry = mock(SessionRegistryService.class);
+        ScriptExecutorService exec = mock(ScriptExecutorService.class);
+        AuditLogger audit = mock(AuditLogger.class);
+        // PAUSE is valid from `running` (AC3).
+        when(registry.list()).thenReturn(List.of(recordWithState(5, "running")));
+        when(exec.lifecycle(eq(LifecycleAction.PAUSE), eq(5), any())).thenReturn(new ProcessExecutor.Result(0, "", ""));
+
+        SessionFacade facade = new SessionFacade(
+                registry,
+                exec,
+                new SpawnMutex(),
+                new PerSessionMutexRegistry(),
+                audit,
+                new TerminatingSessions(),
+                props());
+
+        // The facade now takes the wire token (String) and parses it via
+        // LifecycleAction.fromToken; the executor still takes the enum.
+        assertThat(facade.lifecycle(5, LifecycleAction.PAUSE.flag())).isTrue();
+        verify(exec).lifecycle(eq(LifecycleAction.PAUSE), eq(5), any());
+        // AC6 — cache invalidated after the action so the next enumeration
+        // re-reads the authoritative Docker state.
+        verify(registry).invalidate();
+    }
+
+    /**
+     * AC3/AC4 — STOP is valid from `paused` (the matrix permits stopping a
+     * frozen container, per Docker semantics). Pins that the facade honours the
+     * full STOP row, not just `running`.
+     */
+    @Test
+    void lifecycle_stop_from_paused_is_valid_and_runs_script() throws Exception {
+        SessionRegistryService registry = mock(SessionRegistryService.class);
+        ScriptExecutorService exec = mock(ScriptExecutorService.class);
+        when(registry.list()).thenReturn(List.of(recordWithState(8, "paused")));
+        when(exec.lifecycle(eq(LifecycleAction.STOP), eq(8), any())).thenReturn(new ProcessExecutor.Result(0, "", ""));
+
+        SessionFacade facade = new SessionFacade(
+                registry,
+                exec,
+                new SpawnMutex(),
+                new PerSessionMutexRegistry(),
+                mock(AuditLogger.class),
+                new TerminatingSessions(),
+                props());
+
+        assertThat(facade.lifecycle(8, LifecycleAction.STOP.flag())).isTrue();
+        verify(exec).lifecycle(eq(LifecycleAction.STOP), eq(8), any());
+    }
+
+    /**
+     * AC4 — lifecycle.sh ran but exited non-zero → the facade returns false
+     * (the controller maps this to 500 internal_error). The cache is still
+     * invalidated (finally) so a partially-applied action reconciles.
+     */
+    @Test
+    void lifecycle_script_nonzero_returns_false_and_still_invalidates() throws Exception {
+        SessionRegistryService registry = mock(SessionRegistryService.class);
+        ScriptExecutorService exec = mock(ScriptExecutorService.class);
+        when(registry.list()).thenReturn(List.of(recordWithState(5, "running")));
+        when(exec.lifecycle(eq(LifecycleAction.PAUSE), eq(5), any()))
+                .thenReturn(new ProcessExecutor.Result(3, "", "compose pause failed"));
+
+        SessionFacade facade = new SessionFacade(
+                registry,
+                exec,
+                new SpawnMutex(),
+                new PerSessionMutexRegistry(),
+                mock(AuditLogger.class),
+                new TerminatingSessions(),
+                props());
+
+        assertThat(facade.lifecycle(5, LifecycleAction.PAUSE.flag())).isFalse();
+        verify(registry).invalidate();
+    }
+
+    /**
+     * AC4 — an out-of-state action (START on a `running` session) throws
+     * {@link SessionFacade.InvalidLifecycleTransitionException} (→ 409
+     * session_state_conflict), carrying the current state, and lifecycle.sh is
+     * NOT run (the server is the final arbiter; never a silent no-op).
+     */
+    @Test
+    void lifecycle_invalid_transition_throws_conflict_and_skips_script() throws Exception {
+        SessionRegistryService registry = mock(SessionRegistryService.class);
+        ScriptExecutorService exec = mock(ScriptExecutorService.class);
+        when(registry.list()).thenReturn(List.of(recordWithState(5, "running")));
+
+        SessionFacade facade = new SessionFacade(
+                registry,
+                exec,
+                new SpawnMutex(),
+                new PerSessionMutexRegistry(),
+                mock(AuditLogger.class),
+                new TerminatingSessions(),
+                props());
+
+        assertThatThrownBy(() -> facade.lifecycle(5, LifecycleAction.START.flag()))
+                .isInstanceOf(SessionFacade.InvalidLifecycleTransitionException.class)
+                .hasFieldOrPropertyWithValue("n", 5)
+                .hasFieldOrPropertyWithValue("currentState", "running");
+
+        verify(exec, never()).lifecycle(any(), anyInt(), any());
+    }
+
+    /**
+     * AC4 — a lifecycle action for an unknown N throws {@link
+     * NoSuchElementException} (→ 404 session_not_found) and lifecycle.sh is
+     * never run.
+     */
+    @Test
+    void lifecycle_unknown_session_throws_not_found_and_skips_script() throws Exception {
+        SessionRegistryService registry = mock(SessionRegistryService.class);
+        ScriptExecutorService exec = mock(ScriptExecutorService.class);
+        when(registry.list()).thenReturn(List.of(recordWithState(1, "running")));
+
+        SessionFacade facade = new SessionFacade(
+                registry,
+                exec,
+                new SpawnMutex(),
+                new PerSessionMutexRegistry(),
+                mock(AuditLogger.class),
+                new TerminatingSessions(),
+                props());
+
+        assertThatThrownBy(() -> facade.lifecycle(99, LifecycleAction.STOP.flag()))
+                .isInstanceOf(NoSuchElementException.class)
+                .hasMessageContaining("99");
+
+        verify(exec, never()).lifecycle(any(), anyInt(), any());
+    }
+
+    /**
+     * AC8 — a lifecycle action serialises on the SAME per-N mutex the delete
+     * path uses. We hold {@code reg.get(7)} from another thread, then invoke
+     * {@code facade.lifecycle(7, …)}: the facade's 2s {@code tryLock} on the
+     * shared registry times out → {@link IOException}, proving overlapping
+     * requests on the same session can't run concurrently (and lifecycle.sh is
+     * never reached while another op holds the lock). Using the SAME {@link
+     * PerSessionMutexRegistry} instance is what makes this a delete↔lifecycle
+     * serialisation guarantee, not just self-serialisation.
+     */
+    @Test
+    void lifecycle_serialises_on_the_same_per_session_mutex_as_delete() throws Exception {
+        SessionRegistryService registry = mock(SessionRegistryService.class);
+        ScriptExecutorService exec = mock(ScriptExecutorService.class);
+        when(registry.list()).thenReturn(List.of(recordWithState(7, "running")));
+
+        PerSessionMutexRegistry sharedPerN = new PerSessionMutexRegistry();
+        SessionFacade facade = new SessionFacade(
+                registry,
+                exec,
+                new SpawnMutex(),
+                sharedPerN,
+                mock(AuditLogger.class),
+                new TerminatingSessions(),
+                props());
+
+        ReentrantLock held = sharedPerN.get(7);
+        CountDownLatch acquired = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        Thread holder = new Thread(
+                () -> {
+                    held.lock();
+                    acquired.countDown();
+                    try {
+                        release.await(10, TimeUnit.SECONDS);
+                    } catch (InterruptedException ignored) {
+                        Thread.currentThread().interrupt();
+                    } finally {
+                        held.unlock();
+                    }
+                },
+                "uc46-mutex-holder");
+        holder.start();
+        assertThat(acquired.await(5, TimeUnit.SECONDS)).isTrue();
+
+        try {
+            assertThatThrownBy(() -> facade.lifecycle(7, LifecycleAction.PAUSE.flag()))
+                    .isInstanceOf(IOException.class)
+                    .hasMessageContaining("per-session mutex");
+            verify(exec, never()).lifecycle(any(), anyInt(), any());
+        } finally {
+            release.countDown();
+            holder.join(5_000);
+        }
     }
 }

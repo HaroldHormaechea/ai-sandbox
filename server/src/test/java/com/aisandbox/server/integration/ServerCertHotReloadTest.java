@@ -102,6 +102,7 @@ class ServerCertHotReloadTest {
             writeExecutableShim(SCRIPTS_DIR.resolve("spawn.sh"));
             writeExecutableShim(SCRIPTS_DIR.resolve("attach.sh"));
             writeExecutableShim(SCRIPTS_DIR.resolve("clean.sh"));
+            writeExecutableShim(SCRIPTS_DIR.resolve("lifecycle.sh"));
 
             // Same logback property handshake as the sibling tests — the
             // audit appender resolves ai-sandbox.server.audit.file during

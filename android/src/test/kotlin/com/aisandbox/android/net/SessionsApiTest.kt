@@ -218,6 +218,81 @@ class SessionsApiTest {
         }
     }
 
+    // ── UC-46 — lifecycle() ──────────────────────────────────────────────────
+
+    /**
+     * UC-46 — [SessionsApi.lifecycle] dispatches a bodyless
+     * `POST /v1/sessions/{n}/{action}` where {action} is the action's wire
+     * token, and maps a 204 to [ApiResult.Success]. Asserts the OUTBOUND
+     * request shape (method + path + empty body), not just a handled success.
+     */
+    @Test
+    fun lifecycle_dispatches_post_to_action_path_and_204_is_success() = runTest {
+        val (server, profile) = startPinnedServer()
+        try {
+            server.enqueue(MockResponse().setResponseCode(204))
+
+            val result = apiFor(profile).lifecycle(5, LifecycleAction.STOP)
+
+            assertThat(result).isInstanceOf(ApiResult.Success::class.java)
+            val rr = server.takeRequest()
+            assertThat(rr.method).isEqualTo("POST")
+            assertThat(rr.path).isEqualTo("/v1/sessions/5/stop")
+            assertThat(rr.body.size).isEqualTo(0L)
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    /** UC-46 — each action maps to its lowercase wire token in the path. */
+    @Test
+    fun lifecycle_uses_each_actions_wire_token_in_the_path() = runTest {
+        val (server, profile) = startPinnedServer()
+        try {
+            val expected = listOf(
+                LifecycleAction.START to "start",
+                LifecycleAction.PAUSE to "pause",
+                LifecycleAction.UNPAUSE to "unpause",
+            )
+            for ((action, token) in expected) {
+                server.enqueue(MockResponse().setResponseCode(204))
+                apiFor(profile).lifecycle(8, action)
+                val rr = server.takeRequest()
+                assertThat(rr.path).`as`("%s → token %s", action, token).isEqualTo("/v1/sessions/8/$token")
+            }
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    /**
+     * UC-46 AC7 — a 409 session_state_conflict problem+json surfaces as
+     * [ApiResult.HttpFailure] carrying the parsed code + status (the coordinator
+     * turns this into the user-visible error).
+     */
+    @Test
+    fun lifecycle_409_conflict_maps_to_http_failure_with_code() = runTest {
+        val (server, profile) = startPinnedServer()
+        try {
+            server.enqueue(
+                MockResponse()
+                    .setResponseCode(409)
+                    .setBody(
+                        """{"code":"session_state_conflict","detail":"cannot start session 5 in state 'running'"}""",
+                    ),
+            )
+
+            val result = apiFor(profile).lifecycle(5, LifecycleAction.START)
+
+            assertThat(result).isInstanceOf(ApiResult.HttpFailure::class.java)
+            val failure = result as ApiResult.HttpFailure
+            assertThat(failure.status).isEqualTo(409)
+            assertThat(failure.code).isEqualTo("session_state_conflict")
+        } finally {
+            server.shutdown()
+        }
+    }
+
     private fun spkiHex(spkiBytes: ByteArray): String =
         MessageDigest.getInstance("SHA-256").digest(spkiBytes)
             .joinToString("") { "%02x".format(it.toInt() and 0xff) }

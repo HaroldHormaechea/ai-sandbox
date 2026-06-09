@@ -8,6 +8,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.longClick
 import androidx.compose.ui.test.onAllNodesWithContentDescription
@@ -19,6 +21,7 @@ import androidx.compose.ui.test.swipeLeft
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.aisandbox.android.R
+import com.aisandbox.android.net.LifecycleAction
 import com.aisandbox.android.net.SessionSummary
 import com.aisandbox.android.ui.theme.AiSandboxTheme
 import org.junit.Assert.assertEquals
@@ -472,5 +475,169 @@ class SessionsScreenInstrumentationTest {
             SessionsFilter.RUNNING,
             selectedFilter,
         )
+    }
+
+    // ── UC-46 — per-row overflow lifecycle menu (AC1 / AC2 / AC3 / AC6) ──────
+
+    /** One running row (n=1) and one paused row (n=7) for menu-state coverage. */
+    private val lifecycleState = SessionsUiState(
+        sessions = listOf(
+            SessionSummary(n = 1, label = "alpha", state = "running"),
+            SessionSummary(n = 7, label = "frozen", state = "paused"),
+        ),
+        filter = SessionsFilter.ALL,
+    )
+
+    private fun setLifecycleBody(
+        state: SessionsUiState = lifecycleState,
+        onOpen: (Int) -> Unit = {},
+        onConfirmDelete: (Int, Boolean) -> Unit = { _, _ -> },
+        onLifecycle: (Int, LifecycleAction) -> Unit = { _, _ -> },
+        onBlockedOpen: () -> Unit = {},
+    ) {
+        composeTestRule.setContent {
+            AiSandboxTheme {
+                SessionsBody(
+                    padding = PaddingValues(),
+                    state = state,
+                    onSelectFilter = {},
+                    onOpen = onOpen,
+                    onOpenTerminal = {},
+                    onConfirmDelete = onConfirmDelete,
+                    onLifecycle = onLifecycle,
+                    onBlockedOpen = onBlockedOpen,
+                )
+            }
+        }
+    }
+
+    /** AC1 — the overflow menu lists Remove + the four lifecycle actions. */
+    @Test
+    fun menu_lists_remove_and_all_lifecycle_actions() {
+        setLifecycleBody()
+        composeTestRule.onNodeWithTag("session-menu-1").performClick()
+
+        composeTestRule.onNodeWithText(ctx.getString(R.string.session_action_remove)).assertIsDisplayed()
+        composeTestRule.onNodeWithText(ctx.getString(R.string.session_action_stop)).assertIsDisplayed()
+        composeTestRule.onNodeWithText(ctx.getString(R.string.session_action_start)).assertIsDisplayed()
+        composeTestRule.onNodeWithText(ctx.getString(R.string.session_action_pause)).assertIsDisplayed()
+        composeTestRule.onNodeWithText(ctx.getString(R.string.session_action_unpause)).assertIsDisplayed()
+    }
+
+    /**
+     * AC3 — for a RUNNING row, only Pause + Stop are valid; Start + Unpause are
+     * disabled (greyed, not hidden). Remove is always enabled.
+     */
+    @Test
+    fun menu_enables_only_valid_actions_for_running_row() {
+        setLifecycleBody()
+        composeTestRule.onNodeWithTag("session-menu-1").performClick()
+
+        composeTestRule.onNodeWithText(ctx.getString(R.string.session_action_pause)).assertIsEnabled()
+        composeTestRule.onNodeWithText(ctx.getString(R.string.session_action_stop)).assertIsEnabled()
+        composeTestRule.onNodeWithText(ctx.getString(R.string.session_action_remove)).assertIsEnabled()
+        composeTestRule.onNodeWithText(ctx.getString(R.string.session_action_start)).assertIsNotEnabled()
+        composeTestRule.onNodeWithText(ctx.getString(R.string.session_action_unpause)).assertIsNotEnabled()
+    }
+
+    /**
+     * AC3 — for a PAUSED row, only Unpause + Stop are valid; Pause + Start are
+     * disabled.
+     */
+    @Test
+    fun menu_enables_only_valid_actions_for_paused_row() {
+        setLifecycleBody()
+        composeTestRule.onNodeWithTag("session-menu-7").performClick()
+
+        composeTestRule.onNodeWithText(ctx.getString(R.string.session_action_unpause)).assertIsEnabled()
+        composeTestRule.onNodeWithText(ctx.getString(R.string.session_action_stop)).assertIsEnabled()
+        composeTestRule.onNodeWithText(ctx.getString(R.string.session_action_pause)).assertIsNotEnabled()
+        composeTestRule.onNodeWithText(ctx.getString(R.string.session_action_start)).assertIsNotEnabled()
+    }
+
+    /**
+     * AC2 — "Remove" in the menu routes to the EXISTING confirmed delete dialog
+     * (the same DeleteSessionDialog the swipe opens), not a second unconfirmed
+     * delete and not a lifecycle action.
+     */
+    @Test
+    fun menu_remove_opens_the_delete_confirm_dialog_and_fires_no_lifecycle() {
+        var lifecycleFired: Pair<Int, LifecycleAction>? = null
+        setLifecycleBody(onLifecycle = { n, a -> lifecycleFired = n to a })
+
+        composeTestRule.onNodeWithTag("session-menu-1").performClick()
+        composeTestRule.onNodeWithText(ctx.getString(R.string.session_action_remove)).performClick()
+
+        composeTestRule.onNodeWithText(ctx.getString(R.string.delete_title, 1)).assertIsDisplayed()
+        assertNull("Remove must not fire a lifecycle action — it opens the confirmed delete path", lifecycleFired)
+    }
+
+    /** AC6 — clicking a valid lifecycle item fires onLifecycle(n, action). */
+    @Test
+    fun menu_valid_action_fires_onLifecycle_with_n_and_action() {
+        var fired: Pair<Int, LifecycleAction>? = null
+        setLifecycleBody(onLifecycle = { n, a -> fired = n to a })
+
+        composeTestRule.onNodeWithTag("session-menu-1").performClick()
+        composeTestRule.onNodeWithText(ctx.getString(R.string.session_action_pause)).performClick()
+
+        assertEquals("a valid menu action must fire onLifecycle with the row's N", 1, fired?.first)
+        assertEquals("a valid menu action must fire its LifecycleAction", LifecycleAction.PAUSE, fired?.second)
+    }
+
+    /**
+     * AC6 — while a lifecycle action is in flight (pendingActions) the row's
+     * overflow control is disabled so the action can't be double-fired.
+     */
+    @Test
+    fun menu_button_is_disabled_while_a_lifecycle_action_is_pending() {
+        val pending = lifecycleState.copy(pendingActions = setOf(1))
+        setLifecycleBody(state = pending)
+        composeTestRule.onNodeWithTag("session-menu-1").assertIsNotEnabled()
+        // A sibling without a pending action keeps its menu enabled.
+        composeTestRule.onNodeWithTag("session-menu-7").assertIsEnabled()
+    }
+
+    /** The overflow control is also disabled for a terminating row. */
+    @Test
+    fun menu_button_is_disabled_for_a_terminating_row() {
+        val terminating = SessionsUiState(
+            sessions = listOf(SessionSummary(n = 1, label = "alpha", state = "running")),
+            terminating = setOf(1),
+        )
+        setLifecycleBody(state = terminating)
+        composeTestRule.onNodeWithTag("session-menu-1").assertIsNotEnabled()
+    }
+
+    /**
+     * UC-46 row-open gate — tapping the overflow icon opens the MENU and does
+     * NOT navigate into the session (the IconButton consumes the tap separately
+     * from the row's tap → open). Preserves the tap/long-press affordances.
+     */
+    @Test
+    fun tapping_overflow_button_opens_menu_and_does_not_open_the_session() {
+        var openedN: Int? = null
+        setLifecycleBody(onOpen = { openedN = it })
+
+        composeTestRule.onNodeWithTag("session-menu-1").performClick()
+
+        composeTestRule.onNodeWithText(ctx.getString(R.string.session_action_remove)).assertIsDisplayed()
+        assertNull("tapping the overflow button must NOT open the session", openedN)
+    }
+
+    /**
+     * UC-46 row-open gate — tapping a NON-attachable row (paused) surfaces the
+     * hint instead of navigating into a guaranteed-failing connection.
+     */
+    @Test
+    fun tapping_a_non_attachable_paused_row_surfaces_hint_not_open() {
+        var openedN: Int? = null
+        var hintShown = false
+        setLifecycleBody(onOpen = { openedN = it }, onBlockedOpen = { hintShown = true })
+
+        composeTestRule.onNodeWithTag("session-card-7").performClick()
+
+        assertEquals("a paused (non-attachable) row tap must surface the open-gate hint", true, hintShown)
+        assertNull("a paused row tap must NOT navigate into the session", openedN)
     }
 }
