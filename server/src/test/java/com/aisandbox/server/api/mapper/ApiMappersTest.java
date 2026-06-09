@@ -75,7 +75,9 @@ class ApiMappersTest {
         assertThat(s.pendingQuestion())
                 .as("AC1 — a pending session maps pendingQuestion=true onto the REST DTO")
                 .isTrue();
-        assertThat(s.working()).as("AC5 — pending and working are mutually exclusive").isFalse();
+        assertThat(s.working())
+                .as("AC5 — pending and working are mutually exclusive")
+                .isFalse();
     }
 
     @Test

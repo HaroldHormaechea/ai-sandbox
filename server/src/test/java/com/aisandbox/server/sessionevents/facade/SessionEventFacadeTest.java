@@ -126,7 +126,8 @@ class SessionEventFacadeTest {
         Instant started = Instant.parse("2026-06-05T10:15:30Z");
         when(sessionFacade.listSessions())
                 .thenReturn(List.of(
-                        new SessionRecord(1, "build", "vim", "running", 42L, 2, started, "Pick a database", false, true),
+                        new SessionRecord(
+                                1, "build", "vim", "running", 42L, 2, started, "Pick a database", false, true),
                         new SessionRecord(2, "", "(idle)", "running", 0L, 0, started, null, false, false)));
 
         Snapshot snapshot = facade.snapshot();

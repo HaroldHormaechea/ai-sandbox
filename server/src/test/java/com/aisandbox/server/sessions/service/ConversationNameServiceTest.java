@@ -514,7 +514,8 @@ class ConversationNameServiceTest {
         assertThat(ConversationNameService.thirdLine("name\nworking\npending-question"))
                 .isEqualTo("pending-question");
         // A trailing 4th line is ignored — only line 3 is the pending token.
-        assertThat(ConversationNameService.thirdLine("name\nidle\nnone\ntrailing")).isEqualTo("none");
+        assertThat(ConversationNameService.thirdLine("name\nidle\nnone\ntrailing"))
+                .isEqualTo("none");
         // Pre-UC-49 two-line output (capture-failure path) → no third line.
         assertThat(ConversationNameService.thirdLine("name\nworking")).isNull();
         assertThat(ConversationNameService.thirdLine("only-one-line")).isNull();
@@ -557,7 +558,8 @@ class ConversationNameServiceTest {
         ConversationNameService svc = new ConversationNameService(exec, now::get);
         try {
             svc.refreshAsync(3, "ai-sandbox-3");
-            await().atMost(POLL).untilAsserted(() -> assertThat(svc.pendingQuestion(3)).isTrue());
+            await().atMost(POLL)
+                    .untilAsserted(() -> assertThat(svc.pendingQuestion(3)).isTrue());
             // The name rode the same derivation.
             assertThat(svc.cachedName(3)).isEqualTo("Pick a database");
             // AC5 — pending OVERRIDES the just-stamped working timestamp.
@@ -584,12 +586,14 @@ class ConversationNameServiceTest {
         ConversationNameService svc = new ConversationNameService(exec, now::get);
         try {
             svc.refreshAsync(5, "ai-sandbox-5");
-            await().atMost(POLL).untilAsserted(() -> assertThat(svc.pendingQuestion(5)).isTrue());
+            await().atMost(POLL)
+                    .untilAsserted(() -> assertThat(svc.pendingQuestion(5)).isTrue());
             assertThat(svc.working(5)).isFalse();
 
             // Second derive: the question is answered (line 3 "none").
             svc.refreshAsync(5, "ai-sandbox-5");
-            await().atMost(POLL).untilAsserted(() -> assertThat(svc.pendingQuestion(5)).isFalse());
+            await().atMost(POLL)
+                    .untilAsserted(() -> assertThat(svc.pendingQuestion(5)).isFalse());
             // AC2 — with pending cleared and a fresh working stamp inside the
             // OFF-window, the row reads working again.
             assertThat(svc.working(5))
@@ -615,7 +619,8 @@ class ConversationNameServiceTest {
         ConversationNameService svc = new ConversationNameService(exec);
         try {
             svc.refreshAsync(7, "ai-sandbox-7");
-            await().atMost(POLL).untilAsserted(() -> assertThat(svc.pendingQuestion(7)).isTrue());
+            await().atMost(POLL)
+                    .untilAsserted(() -> assertThat(svc.pendingQuestion(7)).isTrue());
 
             // Second derive succeeds but omits line 3 → unknown → retain.
             svc.refreshAsync(7, "ai-sandbox-7");
@@ -642,7 +647,8 @@ class ConversationNameServiceTest {
         ConversationNameService svc = new ConversationNameService(exec);
         try {
             svc.refreshAsync(8, "ai-sandbox-8");
-            await().atMost(POLL).untilAsserted(() -> assertThat(svc.pendingQuestion(8)).isTrue());
+            await().atMost(POLL)
+                    .untilAsserted(() -> assertThat(svc.pendingQuestion(8)).isTrue());
 
             svc.refreshAsync(8, "ai-sandbox-8");
             await().atMost(POLL).untilAsserted(() -> verify(exec, times(2)).run(any(), any(), any(), any()));
