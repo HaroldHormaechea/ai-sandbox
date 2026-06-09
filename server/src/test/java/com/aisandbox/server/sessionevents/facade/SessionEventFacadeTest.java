@@ -114,6 +114,50 @@ class SessionEventFacadeTest {
                         new Row(2, "", "(idle)", "running", 0L, 0, started, null, false));
     }
 
+    /**
+     * UC-49 AC3/AC6 — the new {@code pendingQuestion} flag flows verbatim from the
+     * {@link SessionRecord} onto the wire {@link Row} (the same {@code Row} the
+     * REST DTO and the UC-32 snapshot/delta push carry), and it participates in the
+     * {@code Row}'s value-equality, so a pending-state flip changes the row's hash
+     * and the UC-32 watcher emits a Delta automatically (no watcher edit needed).
+     */
+    @Test
+    void snapshot_carries_the_pending_question_flag_through_to_the_wire_row() throws IOException {
+        Instant started = Instant.parse("2026-06-05T10:15:30Z");
+        when(sessionFacade.listSessions())
+                .thenReturn(List.of(
+                        new SessionRecord(1, "build", "vim", "running", 42L, 2, started, "Pick a database", false, true),
+                        new SessionRecord(2, "", "(idle)", "running", 0L, 0, started, null, false, false)));
+
+        Snapshot snapshot = facade.snapshot();
+
+        assertThat(snapshot.sessions().get(0).pendingQuestion())
+                .as("AC3 — pendingQuestion=true flows to the wire row")
+                .isTrue();
+        assertThat(snapshot.sessions().get(1).pendingQuestion()).isFalse();
+        assertThat(snapshot.sessions())
+                .containsExactly(
+                        new Row(1, "build", "vim", "running", 42L, 2, started, "Pick a database", false, true),
+                        new Row(2, "", "(idle)", "running", 0L, 0, started, null, false, false));
+    }
+
+    /**
+     * UC-49 AC6 — a pending-question flip alone (every other field identical)
+     * changes the {@link Row}'s value-equality, which is exactly what the UC-32
+     * watcher diffs on to emit a Delta. Proves the live "?" appear/clear path needs
+     * no watcher change.
+     */
+    @Test
+    void a_pending_flip_changes_row_value_equality_so_the_watcher_emits_a_delta() {
+        Instant started = Instant.parse("2026-06-05T10:15:30Z");
+        Row notPending = new Row(1, "build", "vim", "running", 42L, 2, started, "Pick a database", false, false);
+        Row pending = new Row(1, "build", "vim", "running", 42L, 2, started, "Pick a database", false, true);
+
+        assertThat(pending)
+                .as("AC6 — a pending flip alone makes the row unequal (drives the delta)")
+                .isNotEqualTo(notPending);
+    }
+
     @Test
     void snapshot_swallows_ioexception_and_serves_an_empty_snapshot() throws IOException {
         when(sessionFacade.listSessions()).thenThrow(new IOException("docker enumeration down"));

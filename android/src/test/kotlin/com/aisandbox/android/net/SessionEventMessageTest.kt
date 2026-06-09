@@ -145,4 +145,33 @@ class SessionEventMessageTest {
         // The live transition working→idle reaches the client over a delta upsert.
         assertThat(delta.upserts.single().working).isFalse()
     }
+
+    /**
+     * UC-49 AC3 / AC6 — the `pendingQuestion` flag rides the UC-32 push frames
+     * (same [SessionSummary] row type). A snapshot row carries it; a delta upsert
+     * carries the UPDATED flag (the live "?" appear/clear path — no manual
+     * refresh); a row that omits it decodes to false (older server / no badge).
+     */
+    @Test
+    fun snapshot_and_delta_frames_carry_the_pending_question_flag() {
+        val snapshotText = """
+            {"type":"snapshot","sessions":[
+              {"n":1,"label":"build","tmuxTitle":"vim","state":"running","uptimeSec":42,"activeStreams":2,"startedAt":null,"working":false,"pendingQuestion":true},
+              {"n":2,"label":"","tmuxTitle":"(idle)","state":"running","uptimeSec":0,"activeStreams":0,"startedAt":null}
+            ]}
+        """.trimIndent()
+        val snapshot = json.decodeFromString<SessionEventMessage>(snapshotText) as SessionEventMessage.Snapshot
+        assertThat(snapshot.sessions[0].pendingQuestion).isTrue()
+        // Omitted field → false (older server payload); row shows no badge.
+        assertThat(snapshot.sessions[1].pendingQuestion).isFalse()
+
+        val deltaText = """
+            {"type":"delta",
+             "upserts":[{"n":1,"label":"build","tmuxTitle":"vim","state":"running","uptimeSec":50,"activeStreams":2,"startedAt":null,"working":false,"pendingQuestion":false}],
+             "removed":[]}
+        """.trimIndent()
+        val delta = json.decodeFromString<SessionEventMessage>(deltaText) as SessionEventMessage.Delta
+        // The live transition pending→answered reaches the client over a delta upsert.
+        assertThat(delta.upserts.single().pendingQuestion).isFalse()
+    }
 }

@@ -506,4 +506,192 @@ class ConversationNameServiceTest {
             svc.shutdown();
         }
     }
+
+    // ── UC-49 — pending-question helpers (pure) ───────────────────────────────
+
+    @Test
+    void thirdLine_returns_the_third_newline_delimited_line_or_null() {
+        assertThat(ConversationNameService.thirdLine("name\nworking\npending-question"))
+                .isEqualTo("pending-question");
+        // A trailing 4th line is ignored — only line 3 is the pending token.
+        assertThat(ConversationNameService.thirdLine("name\nidle\nnone\ntrailing")).isEqualTo("none");
+        // Pre-UC-49 two-line output (capture-failure path) → no third line.
+        assertThat(ConversationNameService.thirdLine("name\nworking")).isNull();
+        assertThat(ConversationNameService.thirdLine("only-one-line")).isNull();
+        assertThat(ConversationNameService.thirdLine(null)).isNull();
+        // A blank first line is fine — the pending token still rides line 3.
+        assertThat(ConversationNameService.thirdLine("\nworking\npending-question"))
+                .isEqualTo("pending-question");
+    }
+
+    @Test
+    void parsePending_is_a_conservative_tristate() {
+        // "pending-question" ⇒ TRUE (case-insensitive, trimmed).
+        assertThat(ConversationNameService.parsePending("pending-question")).isEqualTo(Boolean.TRUE);
+        assertThat(ConversationNameService.parsePending("  PENDING-QUESTION  ")).isEqualTo(Boolean.TRUE);
+        // "none" ⇒ FALSE.
+        assertThat(ConversationNameService.parsePending("none")).isEqualTo(Boolean.FALSE);
+        assertThat(ConversationNameService.parsePending("NONE")).isEqualTo(Boolean.FALSE);
+        // null / blank / unrecognised ⇒ null = UNKNOWN (retain prior — failure policy (b)).
+        assertThat(ConversationNameService.parsePending(null)).isNull();
+        assertThat(ConversationNameService.parsePending("")).isNull();
+        assertThat(ConversationNameService.parsePending("   ")).isNull();
+        assertThat(ConversationNameService.parsePending("garbage")).isNull();
+    }
+
+    // ── UC-49 — pending-question signal set/clear + mutual exclusion ──────────
+
+    /**
+     * UC-49 AC1/AC5 — a derive whose line 3 is {@code pending-question} sets the
+     * pending flag (the row shows the "?" badge). Even though line 2 says
+     * {@code working}, {@link ConversationNameService#working(int)} reports
+     * {@code false} while pending — the source-level mutual exclusion that
+     * guarantees the row never shows the spinner and the "?" at once.
+     */
+    @Test
+    void a_pending_derivation_sets_the_flag_and_suppresses_working() throws Exception {
+        ProcessExecutor exec = mock(ProcessExecutor.class);
+        when(exec.run(any(), any(), any(), any()))
+                .thenReturn(new ProcessExecutor.Result(0, "Pick a database\nworking\npending-question\n", ""));
+        AtomicLong now = new AtomicLong(3_000_000_000L);
+        ConversationNameService svc = new ConversationNameService(exec, now::get);
+        try {
+            svc.refreshAsync(3, "ai-sandbox-3");
+            await().atMost(POLL).untilAsserted(() -> assertThat(svc.pendingQuestion(3)).isTrue());
+            // The name rode the same derivation.
+            assertThat(svc.cachedName(3)).isEqualTo("Pick a database");
+            // AC5 — pending OVERRIDES the just-stamped working timestamp.
+            assertThat(svc.working(3))
+                    .as("AC5 — a pending question is never reported as working")
+                    .isFalse();
+        } finally {
+            svc.shutdown();
+        }
+    }
+
+    /**
+     * UC-49 AC2 — a later derive whose line 3 is {@code none} clears the pending
+     * flag (the badge hides) and, the question now answered, the row resumes its
+     * normal working/idle behaviour (the working timestamp is unmasked).
+     */
+    @Test
+    void a_none_derivation_clears_the_flag_and_unmasks_working() throws Exception {
+        ProcessExecutor exec = mock(ProcessExecutor.class);
+        when(exec.run(any(), any(), any(), any()))
+                .thenReturn(new ProcessExecutor.Result(0, "Pick a database\nworking\npending-question\n", ""))
+                .thenReturn(new ProcessExecutor.Result(0, "Pick a database\nworking\nnone\n", ""));
+        AtomicLong now = new AtomicLong(4_000_000_000L);
+        ConversationNameService svc = new ConversationNameService(exec, now::get);
+        try {
+            svc.refreshAsync(5, "ai-sandbox-5");
+            await().atMost(POLL).untilAsserted(() -> assertThat(svc.pendingQuestion(5)).isTrue());
+            assertThat(svc.working(5)).isFalse();
+
+            // Second derive: the question is answered (line 3 "none").
+            svc.refreshAsync(5, "ai-sandbox-5");
+            await().atMost(POLL).untilAsserted(() -> assertThat(svc.pendingQuestion(5)).isFalse());
+            // AC2 — with pending cleared and a fresh working stamp inside the
+            // OFF-window, the row reads working again.
+            assertThat(svc.working(5))
+                    .as("AC2 — once the question clears, working resumes")
+                    .isTrue();
+        } finally {
+            svc.shutdown();
+        }
+    }
+
+    /**
+     * UC-49 failure policy (b) — a derive that SUCCEEDS but OMITS line 3 (the
+     * helper's 2-line capture-failure output) parses to {@code null} = unknown, so
+     * the prior pending value is RETAINED rather than cleared. The badge does not
+     * flicker off while a question is genuinely up.
+     */
+    @Test
+    void a_missing_line3_retains_the_prior_pending_value() throws Exception {
+        ProcessExecutor exec = mock(ProcessExecutor.class);
+        when(exec.run(any(), any(), any(), any()))
+                .thenReturn(new ProcessExecutor.Result(0, "Pick a database\nidle\npending-question\n", ""))
+                .thenReturn(new ProcessExecutor.Result(0, "Pick a database\nidle\n", "")); // line 3 omitted
+        ConversationNameService svc = new ConversationNameService(exec);
+        try {
+            svc.refreshAsync(7, "ai-sandbox-7");
+            await().atMost(POLL).untilAsserted(() -> assertThat(svc.pendingQuestion(7)).isTrue());
+
+            // Second derive succeeds but omits line 3 → unknown → retain.
+            svc.refreshAsync(7, "ai-sandbox-7");
+            await().atMost(POLL).untilAsserted(() -> verify(exec, times(2)).run(any(), any(), any(), any()));
+            assertThat(svc.pendingQuestion(7))
+                    .as("failure policy (b) — a missing line 3 retains the prior pending value")
+                    .isTrue();
+        } finally {
+            svc.shutdown();
+        }
+    }
+
+    /**
+     * UC-49 failure policy (a) — an exec FAILURE (null SessionSignals) touches
+     * nothing, so a previously-set pending flag survives a transient docker blip
+     * (the badge does not flicker off).
+     */
+    @Test
+    void an_exec_failure_leaves_the_pending_flag_untouched() throws Exception {
+        ProcessExecutor exec = mock(ProcessExecutor.class);
+        when(exec.run(any(), any(), any(), any()))
+                .thenReturn(new ProcessExecutor.Result(0, "Pick a database\nidle\npending-question\n", ""))
+                .thenReturn(new ProcessExecutor.Result(1, "", "boom")); // exec failure
+        ConversationNameService svc = new ConversationNameService(exec);
+        try {
+            svc.refreshAsync(8, "ai-sandbox-8");
+            await().atMost(POLL).untilAsserted(() -> assertThat(svc.pendingQuestion(8)).isTrue());
+
+            svc.refreshAsync(8, "ai-sandbox-8");
+            await().atMost(POLL).untilAsserted(() -> verify(exec, times(2)).run(any(), any(), any(), any()));
+            assertThat(svc.pendingQuestion(8))
+                    .as("an exec failure must not clear a set pending flag")
+                    .isTrue();
+        } finally {
+            svc.shutdown();
+        }
+    }
+
+    @Test
+    void pendingQuestion_is_false_before_any_refresh() {
+        ProcessExecutor exec = mock(ProcessExecutor.class);
+        ConversationNameService svc = new ConversationNameService(exec);
+        try {
+            assertThat(svc.pendingQuestion(1)).isFalse();
+        } finally {
+            svc.shutdown();
+        }
+    }
+
+    /**
+     * UC-49 — {@code prune} clears the pending flag for a vanished session, so a
+     * re-used session number cannot inherit a stale "?" from a prior tenant.
+     */
+    @Test
+    void prune_clears_the_pending_flag_for_vanished_sessions() throws Exception {
+        ProcessExecutor exec = mock(ProcessExecutor.class);
+        when(exec.run(any(), any(), any(), any()))
+                .thenReturn(new ProcessExecutor.Result(0, "alive\nidle\npending-question\n", ""));
+        ConversationNameService svc = new ConversationNameService(exec);
+        try {
+            svc.refreshAsync(1, "ai-sandbox-1");
+            svc.refreshAsync(2, "ai-sandbox-2");
+            await().atMost(POLL).untilAsserted(() -> {
+                assertThat(svc.pendingQuestion(1)).isTrue();
+                assertThat(svc.pendingQuestion(2)).isTrue();
+            });
+
+            svc.prune(Set.of(1));
+            assertThat(svc.pendingQuestion(1))
+                    .as("surviving session keeps its pending flag")
+                    .isTrue();
+            assertThat(svc.pendingQuestion(2))
+                    .as("vanished session's pending flag is cleared")
+                    .isFalse();
+        } finally {
+            svc.shutdown();
+        }
+    }
 }

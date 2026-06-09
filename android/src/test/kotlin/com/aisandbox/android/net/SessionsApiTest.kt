@@ -271,6 +271,44 @@ class SessionsApiTest {
         }
     }
 
+    /**
+     * UC-49 AC3 — the server-provided `pendingQuestion` flag decodes onto
+     * [SessionSummary] over REST: a row carrying `true`/`false` exposes it, and a
+     * row that OMITS it (older server payload) defaults to `false` (no badge). The
+     * client reads the field — it never infers the pending state from the pane text.
+     */
+    @Test
+    fun pendingQuestionField_decodesFromRestAndDefaultsToFalseWhenAbsent() = runTest {
+        val (server, profile) = startPinnedServer()
+        try {
+            server.enqueue(
+                MockResponse().setResponseCode(200).setBody(
+                    """
+                    [
+                      {"n":1,"label":"a","tmuxTitle":"(idle)","state":"running","uptimeSec":1,"activeStreams":0,"startedAt":null,"working":false,"pendingQuestion":true},
+                      {"n":2,"label":"b","tmuxTitle":"vim","state":"running","uptimeSec":2,"activeStreams":0,"startedAt":null,"working":true,"pendingQuestion":false},
+                      {"n":3,"label":"c","tmuxTitle":"(idle)","state":"running","uptimeSec":3,"activeStreams":0,"startedAt":null}
+                    ]
+                    """.trimIndent(),
+                ),
+            )
+
+            val result = apiFor(profile).list()
+
+            assertThat(result).isInstanceOf(ApiResult.Success::class.java)
+            val rows = (result as ApiResult.Success).value
+            assertThat(rows.map { it.n }).containsExactly(1, 2, 3)
+            // Present true → exposed verbatim (row shows the "?" badge).
+            assertThat(rows[0].pendingQuestion).isTrue()
+            // Present false → exposed verbatim (no badge).
+            assertThat(rows[1].pendingQuestion).isFalse()
+            // Omitted (older server) → false default; never a stuck badge.
+            assertThat(rows[2].pendingQuestion).isFalse()
+        } finally {
+            server.shutdown()
+        }
+    }
+
     @Test
     fun problemJsonError_mapsToHttpFailureWithCode() = runTest {
         val (server, profile) = startPinnedServer()
