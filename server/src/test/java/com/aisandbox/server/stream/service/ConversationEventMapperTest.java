@@ -601,6 +601,117 @@ class ConversationEventMapperTest {
         assertThat(d.result()).contains("teammate skill body content");
     }
 
+    // ──────────────────────── UC-50 — pane-signal pending prompt ─────────────
+    // mapPendingPrompt maps the helper's `{kind,questions,plan,key}` JSON to a typed
+    // PendingPrompt and DECIDES `answerable` server-side: a single question and a plan
+    // approval are fully in-app answerable; a multi-question batch is visible but
+    // answerable=false (only the focused tab's options are recoverable from one pane).
+
+    @Test
+    void pending_prompt_single_question_is_answerable_with_full_structure() {
+        // AC3 — one question with options → answerable=true, structure preserved.
+        String json = "{\"kind\":\"questions\",\"key\":\"pane-abc123\",\"plan\":\"\",\"questions\":["
+                + "{\"question\":\"Which database should we use?\",\"header\":\"Database\",\"multiSelect\":false,"
+                + "\"options\":[{\"label\":\"PostgreSQL\",\"description\":\"Use PostgreSQL.\"},"
+                + "{\"label\":\"MySQL\",\"description\":\"Use MySQL.\"}]}]}";
+        ConversationServerMessage.PendingPrompt pp = mapper.mapPendingPrompt(json);
+        assertThat(pp).isNotNull();
+        assertThat(pp.promptKey()).isEqualTo("pane-abc123");
+        assertThat(pp.kind()).isEqualTo("questions");
+        assertThat(pp.answerable()).isTrue();
+        assertThat(pp.questions()).singleElement().satisfies(item -> {
+            assertThat(item.question()).isEqualTo("Which database should we use?");
+            assertThat(item.header()).isEqualTo("Database");
+            assertThat(item.multiSelect()).isFalse();
+            assertThat(item.options()).hasSize(2);
+            assertThat(item.options().get(0).label()).isEqualTo("PostgreSQL");
+            assertThat(item.options().get(0).description()).isEqualTo("Use PostgreSQL.");
+        });
+    }
+
+    @Test
+    void pending_prompt_multi_question_batch_is_NOT_answerable() {
+        // AC2 — questions.size() > 1 → answerable=false (the gate the client honours to
+        // render the not-answerable affordance). The header-only items are preserved.
+        String json = "{\"kind\":\"questions\",\"key\":\"pane-multi\",\"questions\":["
+                + "{\"question\":\"\",\"header\":\"Color\",\"multiSelect\":false,\"options\":[]},"
+                + "{\"question\":\"\",\"header\":\"Size\",\"multiSelect\":false,\"options\":[]}]}";
+        ConversationServerMessage.PendingPrompt pp = mapper.mapPendingPrompt(json);
+        assertThat(pp).isNotNull();
+        assertThat(pp.answerable()).isFalse();
+        assertThat(pp.questions()).hasSize(2);
+        assertThat(pp.questions())
+                .extracting(ConversationServerMessage.QuestionItem::header)
+                .containsExactly("Color", "Size");
+    }
+
+    @Test
+    void pending_prompt_plan_kind_is_answerable_and_carries_plan_text() {
+        // AC6 — a plan-approval prompt is answerable in-app (approve / keep planning).
+        String json = "{\"kind\":\"plan\",\"key\":\"pane-plan\",\"plan\":\"1. do a\\n2. do b\",\"questions\":[]}";
+        ConversationServerMessage.PendingPrompt pp = mapper.mapPendingPrompt(json);
+        assertThat(pp).isNotNull();
+        assertThat(pp.kind()).isEqualTo("plan");
+        assertThat(pp.answerable()).isTrue();
+        assertThat(pp.plan()).contains("do a").contains("do b");
+        assertThat(pp.questions()).isEmpty();
+    }
+
+    @Test
+    void pending_prompt_zero_questions_is_answerable_true_boundary() {
+        // size() <= 1 includes the empty case (a degraded single question with no parsed
+        // items): answerable=true so the sheet is at least dismissible/answerable, never
+        // wrongly forced into the not-answerable multi affordance.
+        String json = "{\"kind\":\"questions\",\"key\":\"pane-empty\",\"questions\":[]}";
+        ConversationServerMessage.PendingPrompt pp = mapper.mapPendingPrompt(json);
+        assertThat(pp).isNotNull();
+        assertThat(pp.answerable()).isTrue();
+        assertThat(pp.questions()).isEmpty();
+    }
+
+    @Test
+    void pending_prompt_defaults_kind_to_questions_when_absent() {
+        String json = "{\"key\":\"pane-nokind\",\"questions\":[{\"header\":\"H\",\"options\":[]}]}";
+        ConversationServerMessage.PendingPrompt pp = mapper.mapPendingPrompt(json);
+        assertThat(pp).isNotNull();
+        assertThat(pp.kind()).isEqualTo("questions");
+        assertThat(pp.plan()).isEmpty();
+    }
+
+    @Test
+    void pending_prompt_malformed_or_keyless_payload_returns_null_never_throws() {
+        // AC20 parity — a malformed / empty / keyless payload yields null so the handler
+        // skips it without crashing the tail pump.
+        assertThat(mapper.mapPendingPrompt(null)).isNull();
+        assertThat(mapper.mapPendingPrompt("")).isNull();
+        assertThat(mapper.mapPendingPrompt("   ")).isNull();
+        assertThat(mapper.mapPendingPrompt("not-json")).isNull();
+        assertThat(mapper.mapPendingPrompt("[1,2,3]")).isNull();
+        assertThat(mapper.mapPendingPrompt("\"a string\"")).isNull();
+        // object but no key → null (the key is the dedupe/clear anchor; required).
+        assertThat(mapper.mapPendingPrompt("{\"kind\":\"questions\",\"questions\":[]}"))
+                .isNull();
+        assertThat(mapper.mapPendingPrompt("{\"key\":\"  \"}")).isNull();
+    }
+
+    @Test
+    void pending_prompt_to_question_keys_uuid_and_toolUseId_to_the_prompt_key() {
+        // The synthesized Question the handler caches must key BOTH uuid and toolUseId to
+        // promptKey, so an in-app answer that echoes promptKey resolves to this question's
+        // option spec (single-writer cache keyed by toolUseId). source defaults to "main".
+        String json = "{\"kind\":\"questions\",\"key\":\"pane-xyz\",\"questions\":["
+                + "{\"question\":\"Q\",\"header\":\"H\",\"multiSelect\":false,"
+                + "\"options\":[{\"label\":\"A\",\"description\":\"\"}]}]}";
+        ConversationServerMessage.PendingPrompt pp = mapper.mapPendingPrompt(json);
+        ConversationServerMessage.Question q = mapper.pendingPromptToQuestion(pp);
+        assertThat(q.uuid()).isEqualTo("pane-xyz");
+        assertThat(q.toolUseId()).isEqualTo("pane-xyz");
+        assertThat(q.isSidechain()).isFalse();
+        assertThat(q.source()).isEqualTo("main");
+        assertThat(q.questions()).hasSize(1);
+        assertThat(q.questions().get(0).options().get(0).label()).isEqualTo("A");
+    }
+
     // ──────────────────────── helper ─────────────────────────────────────────
 
     private static String extractUuid(ConversationServerMessage m) {

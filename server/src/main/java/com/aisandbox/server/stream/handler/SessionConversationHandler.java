@@ -237,7 +237,13 @@ public class SessionConversationHandler implements WebSocketHandler {
         String payload = tab < 0 ? line : line.substring(tab + 1);
 
         if (TranscriptTailService.CTRL_SOURCE.equals(source)) {
-            switch (payload.trim()) {
+            // UC-50 — a control payload may carry a THIRD tab-delimited field (the
+            // pending-prompt JSON / promptKey). Split on the FIRST tab so a payload
+            // with no second tab dispatches byte-identically to the pre-UC-50 shape.
+            int ptab = payload.indexOf('\t');
+            String subtype = (ptab < 0 ? payload : payload.substring(0, ptab)).trim();
+            String rest = ptab < 0 ? "" : payload.substring(ptab + 1);
+            switch (subtype) {
                 case TranscriptTailService.CTRL_BACKFILL_START -> emit(
                         ctx, session, new ConversationServerMessage.BackfillStart(ctx.selectedTarget.get()));
                 case TranscriptTailService.CTRL_BACKFILL_END -> emit(
@@ -263,6 +269,8 @@ public class SessionConversationHandler implements WebSocketHandler {
                                     "No active transcript",
                                     "the live session's transcript could not be resolved yet"));
                 }
+                case TranscriptTailService.CTRL_PENDING_QUESTION -> dispatchPendingQuestion(session, ctx, rest);
+                case TranscriptTailService.CTRL_PENDING_CLEAR -> dispatchPendingClear(session, ctx, rest);
                 default -> {
                     /* unknown control — ignore */
                 }
@@ -271,11 +279,56 @@ public class SessionConversationHandler implements WebSocketHandler {
         }
 
         for (ConversationServerMessage frame : mapper.map(source, payload)) {
+            // UC-50 — transcript-vs-pane precedence: a transcript-derived Question /
+            // PlanApproval (delivered when the build DOES write the blocking turn, via
+            // the UC-40 residual idle-flush) wins over the pane PendingPrompt for this
+            // turn, so the two delivery paths never both raise a sheet. The flag is
+            // cleared on TurnStart / TurnEnd (the turn boundary).
             if (frame instanceof ConversationServerMessage.Question q) {
                 cacheQuestion(ctx, q);
+                ctx.transcriptPromptThisTurn = true;
+            } else if (frame instanceof ConversationServerMessage.PlanApproval) {
+                ctx.transcriptPromptThisTurn = true;
+            } else if (frame instanceof ConversationServerMessage.TurnStart
+                    || frame instanceof ConversationServerMessage.TurnEnd) {
+                ctx.transcriptPromptThisTurn = false;
             }
             emit(ctx, session, frame);
         }
+    }
+
+    /**
+     * UC-50 — handle a pane-signal {@code pending-question} control line: map the
+     * JSON payload to a {@link ConversationServerMessage.PendingPrompt}, cache a
+     * synthesized {@link ConversationServerMessage.Question} keyed by promptKey (so an
+     * in-app answer can derive its option spec), and emit the PendingPrompt — UNLESS a
+     * transcript-derived prompt already fired this turn ({@link
+     * ConvCtx#transcriptPromptThisTurn}), in which case the transcript path owns the
+     * sheet and the pane signal is suppressed (no double sheet). On claude 2.1.169 the
+     * transcript path never fires, so the pane signal is what delivers the question.
+     */
+    private void dispatchPendingQuestion(WebSocketSession session, ConvCtx ctx, String json) {
+        ConversationServerMessage.PendingPrompt pp = mapper.mapPendingPrompt(json);
+        if (pp == null) {
+            return; // malformed payload — skip without crashing the pump (AC20 parity)
+        }
+        cacheQuestion(ctx, mapper.pendingPromptToQuestion(pp));
+        if (!ctx.transcriptPromptThisTurn) {
+            emit(ctx, session, pp);
+        }
+    }
+
+    /**
+     * UC-50 — handle a pane-signal {@code pending-clear} control line: evict the
+     * synthesized question cached under the promptKey and tell the client to clear its
+     * pending sheet if that key matches the open sheet (it never clobbers a
+     * transcript-delivered sheet, which carries a different key).
+     */
+    private void dispatchPendingClear(WebSocketSession session, ConvCtx ctx, String promptKey) {
+        if (promptKey != null && !promptKey.isBlank()) {
+            ctx.pendingQuestions.remove(promptKey);
+        }
+        emit(ctx, session, new ConversationServerMessage.PendingClear(promptKey == null ? "" : promptKey));
     }
 
     private void cacheQuestion(ConvCtx ctx, ConversationServerMessage.Question q) {
@@ -578,6 +631,16 @@ public class SessionConversationHandler implements WebSocketHandler {
         final AtomicReference<String> selectedTarget = new AtomicReference<>(TARGET_MAIN);
         final ConcurrentHashMap<String, ConversationServerMessage.Question> pendingQuestions =
                 new ConcurrentHashMap<>();
+
+        /**
+         * UC-50 — set when a transcript-derived {@code Question}/{@code PlanApproval}
+         * frame is emitted this turn, cleared on {@code TurnStart}/{@code TurnEnd}.
+         * While set, the pane-signal {@link ConversationServerMessage.PendingPrompt} is
+         * suppressed so the two delivery paths never both raise a sheet (transcript
+         * wins). Mutated and read only on the single tail-pump thread, so a plain field
+         * is sufficient — no cross-thread visibility concern.
+         */
+        boolean transcriptPromptThisTurn = false;
 
         ConvCtx(int n, ClientIdentity identity, Sinks.Many<WebSocketMessage> outbound) {
             this.n = n;

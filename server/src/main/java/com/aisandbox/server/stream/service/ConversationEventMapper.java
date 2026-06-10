@@ -315,6 +315,53 @@ public class ConversationEventMapper {
         return List.of(new ConversationServerMessage.TurnStart(uuid, sidechain, source, prompt));
     }
 
+    /**
+     * UC-50 — pure mapper from the helper's pane-signal {@code pending-question}
+     * JSON payload ({@code {kind,questions,plan,key}}) to a typed {@link
+     * ConversationServerMessage.PendingPrompt}. The {@code answerable} flag is
+     * decided HERE (server-side, never inferred client-side): plan approval and a
+     * single question are fully in-app answerable; a multi-question batch
+     * ({@code questions.size() > 1}) is delivered visible but {@code answerable=false}
+     * (the user answers in tmux — only the focused tab's options are recoverable
+     * from one pane capture, so full in-app multi-answer is a tracked follow-up).
+     * Returns {@code null} on a malformed / empty payload so the handler can skip it
+     * without crashing the pump (mirrors {@link #map}'s AC20 robustness).
+     */
+    public ConversationServerMessage.PendingPrompt mapPendingPrompt(String rawJson) {
+        if (rawJson == null || rawJson.isBlank()) {
+            return null;
+        }
+        JsonNode root;
+        try {
+            root = json.readTree(rawJson);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException jpe) {
+            return null;
+        }
+        if (root == null || !root.isObject()) {
+            return null;
+        }
+        String key = text(root, "key");
+        if (key == null || key.isBlank()) {
+            return null;
+        }
+        String kind = firstNonNull(text(root, "kind"), "questions");
+        String plan = firstNonNull(text(root, "plan"), "");
+        List<ConversationServerMessage.QuestionItem> questions = parseQuestions(root);
+        boolean answerable = "plan".equals(kind) || questions.size() <= 1;
+        return new ConversationServerMessage.PendingPrompt(key, kind, questions, plan, answerable);
+    }
+
+    /**
+     * UC-50 — build the {@link ConversationServerMessage.Question} the handler caches
+     * for a pane-delivered {@link ConversationServerMessage.PendingPrompt}, keyed by
+     * {@code promptKey} (both {@code uuid} and {@code toolUseId}), so an in-app answer
+     * that echoes the promptKey resolves to the same per-question option metadata the
+     * single/batch answer-spec derivation reads. Pure; not a transcript frame.
+     */
+    public ConversationServerMessage.Question pendingPromptToQuestion(ConversationServerMessage.PendingPrompt pp) {
+        return new ConversationServerMessage.Question(pp.promptKey(), false, "main", pp.promptKey(), pp.questions());
+    }
+
     // ──────────────────────── helpers ────────────────────────
 
     private List<ConversationServerMessage.QuestionItem> parseQuestions(JsonNode input) {

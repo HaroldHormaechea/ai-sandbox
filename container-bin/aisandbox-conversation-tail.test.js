@@ -1554,3 +1554,300 @@ test('UC-49 — name + working + pending seams produce the expected 3-line tuple
   assert.strictEqual(working ? 'working' : 'idle', 'idle');
   assert.strictEqual(pending ? 'pending-question' : 'none', 'pending-question');
 });
+
+// ════════════════════════════════════════════════════════════════════════════
+// UC-50 — pane-signal pending-PROMPT parsing (parsePendingPrompt + its seams).
+//
+// UC-49 only needed a boolean "is a question pending?" for the sessions-list "?".
+// UC-50 must deliver the STRUCTURED prompt (kind, questions[], plan, stable key)
+// to the conversation view, because claude 2.1.169 never writes the blocking
+// assistant turn to the transcript.
+//
+// The fixtures below are RECORDED from a REAL `claude 2.1.169` session
+// (`tmux capture-pane -p`) live on the running ai-sandbox-2 backend on 2026-06-10
+// — the recorded shapes the UC-50 proposal asked us to pin. They are the exact
+// bytes the helper must parse in production (NOT the approximate, box-bordered
+// UC-49 fixtures, which only ever exercised the boolean predicate).
+// ════════════════════════════════════════════════════════════════════════════
+
+// RECORDED — single-SELECT single question. NOTE: the tab line is ` ☐ Database`
+// with NO "Submit" (single-select commits on Enter; only multiSelect adds a
+// Submit tab). Options are numbered radio rows; the free-text "Type something."
+// and the "Chat about this" escape are NOT real options.
+const UC50_REAL_SINGLE_SELECT = [
+  ' ☐ Database',
+  '',
+  'Which database should we use?',
+  '',
+  '❯ 1. PostgreSQL',
+  '     Use PostgreSQL.',
+  '  2. MySQL',
+  '     Use MySQL.',
+  '  3. SQLite',
+  '     Use SQLite.',
+  '  4. Type something.',
+  '────────────────────────────────────────────────────────────────────────────────',
+  '  5. Chat about this',
+  '',
+  'Enter to select · ↑/↓ to navigate · Esc to cancel',
+].join('\n');
+
+// RECORDED — multi-SELECT SINGLE question. The tab strip carries a Submit tab for
+// the ONE question (`←  ☐ Toppings  ✔ Submit  →`), and each OPTION row carries a
+// `[ ]` checkbox — that per-option checkbox (not the tab-strip glyph) is the true
+// multiSelect signal. The free-text affordance is `[ ] Type something`.
+const UC50_REAL_MULTI_SELECT = [
+  '←  ☐ Toppings  ✔ Submit  →',
+  '',
+  'Pick toppings',
+  '',
+  '❯ 1. [ ] Cheese',
+  '  Add cheese.',
+  '  2. [ ] Mushroom',
+  '  Add mushroom.',
+  '  3. [ ] Onion',
+  '  Add onion.',
+  '  4. [ ] Type something',
+  '     Submit',
+  '────────────────────────────────────────────────────────────────────────────────',
+  '  5. Chat about this',
+  '',
+  'Enter to select · ↑/↓ to navigate · Esc to cancel',
+].join('\n');
+
+// RECORDED — multi-QUESTION batch (≥2 questions). The wizard tab strip lists every
+// question header plus a Submit review tab; only the FOCUSED question's options are
+// on screen, so the helper recovers header-only items and the server marks the
+// whole batch answerable=false (AC2).
+const UC50_REAL_MULTI_QUESTION = [
+  '←  ☐ Color  ☐ Size  ✔ Submit  →',
+  '',
+  'What is your favorite color?',
+  '',
+  '❯ 1. Red',
+  '     The color red.',
+  '  2. Green',
+  '     The color green.',
+  '  3. Blue',
+  '     The color blue.',
+  '  4. Type something.',
+  '────────────────────────────────────────────────────────────────────────────────',
+  '  5. Chat about this',
+  '',
+  'Enter to select · Tab/Arrow keys to navigate · Esc to cancel',
+].join('\n');
+
+// A pending ExitPlanMode plan-approval prompt (AC6). Different chrome — a plan
+// approval with a "keep planning" reject option and no free-text affordance.
+const UC50_PLAN_APPROVAL = [
+  'Here is my plan:',
+  '  1. Wire the pane signal',
+  '  2. Add the DTOs',
+  '',
+  'Would you like to proceed?',
+  '',
+  '❯ 1. Yes',
+  '  2. No, keep planning',
+  '',
+  'Enter to select · Esc to cancel',
+].join('\n');
+
+// ──────────────────────── predicates: mutual exclusivity (AC1/AC6) ────────────────────────
+
+test('UC-50 looksLikePendingPlanApproval — a real plan-approval pane is pending-plan; an AskUserQuestion sheet is NOT', () => {
+  assert.strictEqual(helper.looksLikePendingPlanApproval(UC50_PLAN_APPROVAL), true);
+  // The two predicates are mutually exclusive on the SAME input: a plan prompt has
+  // no "Type something"/"Chat about this" free-text affordance, so the question
+  // predicate rejects it; an AskUserQuestion sheet has no plan marker.
+  assert.strictEqual(helper.looksLikePendingAskUserQuestion(UC50_PLAN_APPROVAL), false);
+  assert.strictEqual(helper.looksLikePendingPlanApproval(UC50_REAL_SINGLE_SELECT), false);
+  assert.strictEqual(helper.looksLikePendingPlanApproval(UC50_REAL_MULTI_QUESTION), false);
+});
+
+test('UC-50 looksLikePendingPlanApproval — empty / null / non-string is NOT pending', () => {
+  assert.strictEqual(helper.looksLikePendingPlanApproval(''), false);
+  assert.strictEqual(helper.looksLikePendingPlanApproval(null), false);
+  assert.strictEqual(helper.looksLikePendingPlanApproval(undefined), false);
+  assert.strictEqual(helper.looksLikePendingPlanApproval(42), false);
+});
+
+test('UC-50 looksLikePendingPlanApproval — "keep planning" in plain prose does NOT trip it (needs the option cursor)', () => {
+  assert.strictEqual(
+    helper.looksLikePendingPlanApproval('I will keep planning the migration before I touch anything.'),
+    false,
+  );
+});
+
+test('UC-50 predicates agree with the REAL recorded AskUserQuestion panes (single/multi-select/multi-question are all pending)', () => {
+  assert.strictEqual(helper.looksLikePendingAskUserQuestion(UC50_REAL_SINGLE_SELECT), true);
+  assert.strictEqual(helper.looksLikePendingAskUserQuestion(UC50_REAL_MULTI_SELECT), true);
+  assert.strictEqual(helper.looksLikePendingAskUserQuestion(UC50_REAL_MULTI_QUESTION), true);
+});
+
+// ──────────────────────── parseWizardHeaders (AC2) ────────────────────────
+
+test('UC-50 parseWizardHeaders — a multi-question strip yields each header, drops the Submit review tab', () => {
+  assert.deepStrictEqual(helper.parseWizardHeaders(UC50_REAL_MULTI_QUESTION), ['Color', 'Size']);
+});
+
+test('UC-50 parseWizardHeaders — a single-SELECT pane (no Submit tab) yields no headers', () => {
+  assert.deepStrictEqual(helper.parseWizardHeaders(UC50_REAL_SINGLE_SELECT), []);
+});
+
+// ──────────────────────── parseFocusedPrompt (AC1/AC3) ────────────────────────
+
+test('UC-50 parseFocusedPrompt — recovers the focused question text from each real pane', () => {
+  assert.strictEqual(helper.parseFocusedPrompt(UC50_REAL_SINGLE_SELECT), 'Which database should we use?');
+  assert.strictEqual(helper.parseFocusedPrompt(UC50_REAL_MULTI_QUESTION), 'What is your favorite color?');
+  assert.strictEqual(helper.parseFocusedPrompt(UC50_REAL_MULTI_SELECT), 'Pick toppings');
+});
+
+test('UC-50 parseFocusedPrompt — returns empty when there is no numbered option row', () => {
+  assert.strictEqual(helper.parseFocusedPrompt('just some output\nno options here'), '');
+});
+
+// ──────────────────────── parseNumberedOptions (AC3) ────────────────────────
+
+test('UC-50 parseNumberedOptions — single-select radio rows: real options + descriptions, affordance rows dropped', () => {
+  const opts = helper.parseNumberedOptions(UC50_REAL_SINGLE_SELECT);
+  // "Type something." (free-text) and "Chat about this" (escape) are NOT real options.
+  assert.deepStrictEqual(
+    opts.map((o) => o.label),
+    ['PostgreSQL', 'MySQL', 'SQLite'],
+  );
+  assert.strictEqual(opts[0].description, 'Use PostgreSQL.');
+  assert.strictEqual(opts[2].description, 'Use SQLite.');
+});
+
+test('UC-50 [BUG2b/2c] parseNumberedOptions — multi-select rows: labels stripped of the [ ] checkbox, free-text affordance dropped', () => {
+  // RED until the developer fix lands (BUG 2b/2c reported to team-lead): the parser
+  // must strip a leading `[ ] `/`[x] ` checkbox marker from the label and STILL drop
+  // the "[ ] Type something" free-text row. Today it yields labels like "[ ] Cheese"
+  // and counts "[ ] Type something" as a real 4th option (optionCount off-by-one →
+  // wrong injection walk).
+  const opts = helper.parseNumberedOptions(UC50_REAL_MULTI_SELECT);
+  assert.deepStrictEqual(
+    opts.map((o) => o.label),
+    ['Cheese', 'Mushroom', 'Onion'],
+  );
+});
+
+// ──────────────────────── parsePendingPrompt — structured payload ────────────────────────
+
+test('UC-50 parsePendingPrompt — single-select question: kind=questions, full question + options recovered (AC3)', () => {
+  const p = helper.parsePendingPrompt(UC50_REAL_SINGLE_SELECT);
+  assert.strictEqual(p.kind, 'questions');
+  assert.strictEqual(p.questions.length, 1);
+  assert.strictEqual(p.questions[0].question, 'Which database should we use?');
+  assert.deepStrictEqual(
+    p.questions[0].options.map((o) => o.label),
+    ['PostgreSQL', 'MySQL', 'SQLite'],
+  );
+  assert.ok(p.key && p.key.startsWith('pane-'));
+});
+
+test('UC-50 [BUG1] parsePendingPrompt — a single-SELECT question must be multiSelect=false', () => {
+  // RED until BUG 1 fix: the tab-line ` ☐ Database` makes the current heuristic
+  // (`headers.length===0 && /[☐☑]/.test(pane)`) report multiSelect=true for a
+  // single-SELECT question. multiSelect must be decided from per-OPTION checkboxes,
+  // which this pane has none of (numbered radio rows).
+  const p = helper.parsePendingPrompt(UC50_REAL_SINGLE_SELECT);
+  assert.strictEqual(p.questions[0].multiSelect, false);
+});
+
+test('UC-50 [BUG1b] parsePendingPrompt — a single question recovers its header (AC3 "fully recovered")', () => {
+  // RED until BUG 1b fix: the header "Database" lives in the ` ☐ Database` tab line,
+  // which parseWizardHeaders ignores (it requires "Submit"), so header is currently "".
+  const p = helper.parsePendingPrompt(UC50_REAL_SINGLE_SELECT);
+  assert.strictEqual(p.questions[0].header, 'Database');
+});
+
+test('UC-50 [BUG2a] parsePendingPrompt — a multi-SELECT single question must be multiSelect=true', () => {
+  // RED until BUG 2a fix: the Submit tab makes headers=["Toppings"] (length 1 → single
+  // branch), and the current heuristic then computes multiSelect=false. The per-option
+  // `[ ]` checkboxes are the real signal → must be multiSelect=true.
+  const p = helper.parsePendingPrompt(UC50_REAL_MULTI_SELECT);
+  assert.strictEqual(p.questions.length, 1);
+  assert.strictEqual(p.questions[0].multiSelect, true);
+});
+
+test('UC-50 parsePendingPrompt — a multi-QUESTION batch yields >1 header-only items (drives answerable=false, AC2)', () => {
+  const p = helper.parsePendingPrompt(UC50_REAL_MULTI_QUESTION);
+  assert.strictEqual(p.kind, 'questions');
+  assert.strictEqual(p.questions.length, 2);
+  assert.deepStrictEqual(
+    p.questions.map((q) => q.header),
+    ['Color', 'Size'],
+  );
+});
+
+test('UC-50 parsePendingPrompt — a plan-approval pane yields kind=plan (AC6)', () => {
+  const p = helper.parsePendingPrompt(UC50_PLAN_APPROVAL);
+  assert.strictEqual(p.kind, 'plan');
+  assert.deepStrictEqual(p.questions, []);
+  assert.ok(p.key && p.key.startsWith('pane-'));
+});
+
+test('UC-50 parsePendingPrompt — a non-pending pane (ordinary working output) returns null', () => {
+  assert.strictEqual(helper.parsePendingPrompt(UC49_WORKING_PANE), null);
+});
+
+test('UC-50 parsePendingPrompt — prose that merely MENTIONS the affordance returns null (negative, co-occurrence guard)', () => {
+  assert.strictEqual(helper.parsePendingPrompt(UC49_PROSE_MENTIONS_AFFORDANCE), null);
+  assert.strictEqual(
+    helper.parsePendingPrompt('The docs say to "Type something" then press Enter to select an option.'),
+    null,
+  );
+});
+
+test('UC-50 parsePendingPrompt — empty / null / non-string input returns null (robustness)', () => {
+  assert.strictEqual(helper.parsePendingPrompt(''), null);
+  assert.strictEqual(helper.parsePendingPrompt(null), null);
+  assert.strictEqual(helper.parsePendingPrompt(undefined), null);
+  assert.strictEqual(helper.parsePendingPrompt(42), null);
+});
+
+// ──────────────────────── stripVolatile + fnv1a + key stability (settle/emit-once) ────────────────────────
+
+test('UC-50 stripVolatile — drops spinner / nav-hint / status lines and blank lines', () => {
+  const stripped = helper.stripVolatile(UC50_REAL_SINGLE_SELECT);
+  assert.ok(!/Enter to select/.test(stripped), 'nav hint line stripped');
+  assert.ok(!/^\s*$/m.test(stripped) || stripped.split('\n').every((l) => l.trim() !== ''), 'no blank lines');
+  // The substantive prompt lines survive.
+  assert.ok(/Which database should we use\?/.test(stripped));
+  assert.ok(/PostgreSQL/.test(stripped));
+});
+
+test('UC-50 fnv1a — deterministic, stable, 32-bit hex; differs for different input', () => {
+  assert.strictEqual(helper.fnv1a('hello'), helper.fnv1a('hello'));
+  assert.notStrictEqual(helper.fnv1a('hello'), helper.fnv1a('hellp'));
+  assert.match(helper.fnv1a('anything'), /^[0-9a-f]{1,8}$/);
+});
+
+test('UC-50 prompt key is STABLE across polls while blocked — only volatile lines change (drives the settle)', () => {
+  // Two captures of the SAME pending prompt, differing ONLY in the volatile spinner /
+  // nav-hint lines, must hash to the SAME key — so streamLoop's "stable across one
+  // extra poll" settle converges and the prompt is emitted exactly once per key.
+  const poll1 = UC50_REAL_SINGLE_SELECT.replace(
+    'Enter to select · ↑/↓ to navigate · Esc to cancel',
+    '✻ Brewed for 3s',
+  );
+  const poll2 = UC50_REAL_SINGLE_SELECT.replace(
+    'Enter to select · ↑/↓ to navigate · Esc to cancel',
+    '✻ Brewed for 7s (esc to interrupt)',
+  );
+  const k1 = helper.parsePendingPrompt(poll1).key;
+  const k2 = helper.parsePendingPrompt(poll2).key;
+  assert.strictEqual(k1, k2, 'volatile-only differences must NOT change the key');
+});
+
+test('UC-50 prompt key CHANGES when the actual prompt changes (re-emit on a new question)', () => {
+  const kDb = helper.parsePendingPrompt(UC50_REAL_SINGLE_SELECT).key;
+  const kColor = helper.parsePendingPrompt(UC50_REAL_MULTI_QUESTION).key;
+  assert.notStrictEqual(kDb, kColor, 'a different prompt must yield a different key');
+});
+
+test('UC-50 CTRL constants are the exact control-kind tokens the server splits on (lock-step)', () => {
+  assert.strictEqual(helper.CTRL_PENDING_QUESTION, 'pending-question');
+  assert.strictEqual(helper.CTRL_PENDING_CLEAR, 'pending-clear');
+});

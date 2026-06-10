@@ -197,14 +197,27 @@ sealed interface PendingSheet {
     /** The question's identifier echoed back in the answer frame. */
     val questionUuid: String
 
+    /**
+     * UC-50 — whether this sheet can be answered IN-APP. `true` for a
+     * transcript-delivered sheet (today's behavior) and for a pane-delivered single
+     * question / plan approval; `false` for a pane-delivered multi-question batch,
+     * where only the focused tab's options are recoverable from the pane so the user
+     * must answer in tmux. The flag is set explicitly by the server's `answerable`
+     * field — NEVER inferred client-side. When `false` the sheet shows the questions
+     * read-only with an "answer in tmux to continue" affordance and no submit.
+     */
+    val answerable: Boolean
+
     data class Questions(
         override val questionUuid: String,
         val questions: List<ConvQuestion>,
+        override val answerable: Boolean = true,
     ) : PendingSheet
 
     data class Plan(
         override val questionUuid: String,
         val plan: String,
+        override val answerable: Boolean = true,
     ) : PendingSheet
 }
 

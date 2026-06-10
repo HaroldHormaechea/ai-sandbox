@@ -130,6 +130,13 @@ const CTRL_REBASELINE = 'rebaseline';
 const CTRL_NO_TRANSCRIPT = 'no-transcript';
 // UC-41 — emitted (instead of matched lines) when a --fetch-detail id is not found.
 const CTRL_DETAIL_NOT_FOUND = 'detail-not-found';
+// UC-50 — pane-signal pending-prompt control kinds (lock-step with
+// TranscriptTailService.CTRL_PENDING_QUESTION / CTRL_PENDING_CLEAR). The
+// pending-question line carries a THIRD tab-delimited field — the JSON prompt
+// payload (`__ctrl__\tpending-question\t<json>`); pending-clear carries the
+// last-emitted promptKey (`__ctrl__\tpending-clear\t<key>`).
+const CTRL_PENDING_QUESTION = 'pending-question';
+const CTRL_PENDING_CLEAR = 'pending-clear';
 
 // UC-41 — total byte ceiling on a --fetch-detail emission. Matched lines are kept
 // WHOLE (never truncated mid-JSON, so the server can always parse them); once the
@@ -1058,6 +1065,236 @@ function capturePaneText() {
   }
 }
 
+// ──────────────────────── pending-prompt parsing (UC-50) ────────────────────────
+
+/**
+ * UC-50 — visible-pane chrome of a LIVE, awaiting-answer {@code ExitPlanMode}
+ * plan-approval prompt. {@link looksLikePendingAskUserQuestion} deliberately
+ * EXCLUDES this prompt (it is different chrome — a plan approval, no free-text
+ * affordance); this predicate is its dedicated counterpart so the plan prompt is
+ * delivered live too (AC6). PINNED to {@link PENDING_QUESTION_CHROME.pinnedClaudeVersion}.
+ */
+const PLAN_APPROVAL_CHROME = {
+  pinnedClaudeVersion: '2.1.169',
+  // The plan-mode "proceed?" prompt markers. "keep planning" is the highly
+  // specific Reject option label; "Ready to code?"/"Would you like to proceed?"
+  // are the prompt headers across builds.
+  marker: /Would you like to proceed\?|keep planning|Ready to code\?/i,
+  // The selected-option cursor glyph — required so a mere mention of "keep
+  // planning" in prose never trips it.
+  optionCursor: /❯/,
+};
+
+/**
+ * UC-50 — PURE predicate (exported for QA): does the captured VISIBLE pane show a
+ * pending {@code ExitPlanMode} plan-approval awaiting an answer? Requires the plan
+ * marker AND the option cursor. Returns false for empty/non-string input.
+ */
+function looksLikePendingPlanApproval(paneText) {
+  if (typeof paneText !== 'string' || paneText.length === 0) return false;
+  const c = PLAN_APPROVAL_CHROME;
+  return c.marker.test(paneText) && c.optionCursor.test(paneText);
+}
+
+// Volatile pane lines (spinner / status bar / nav hints) stripped before hashing
+// a prompt into its stable key, so the key is identical across polls while the
+// session is blocked and changes ONLY when the actual prompt changes. This is
+// what makes the settle (require the key stable across one extra poll) converge.
+const PANE_VOLATILE_LINE =
+  /Brewed|esc to interrupt|bypass permissions|control this session|\/remote-control|↑↓|↑\/↓|Tab\/Arrow|to navigate|Enter to select|Esc to cancel|tokens/i;
+
+/** Drop volatile/blank lines and trailing whitespace; join. (PURE) */
+function stripVolatile(paneText) {
+  return String(paneText)
+    .split('\n')
+    .filter((l) => l.trim() !== '' && !PANE_VOLATILE_LINE.test(l))
+    .map((l) => l.replace(/\s+$/g, ''))
+    .join('\n');
+}
+
+/** FNV-1a 32-bit hash → short hex (no Date/Math.random; resume-safe). (PURE) */
+function fnv1a(s) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(16);
+}
+
+// Affordance rows that are NOT real options ("Other" free-text / chat escape) —
+// always excluded from the parsed option list and the option count.
+const AFFORDANCE_OPTION = /^(type something\.?|chat about this\.?)$/i;
+
+/**
+ * UC-50 — parse the multi-question WIZARD tab-strip headers (PURE). The wizard strip
+ * carries a "Submit" review tab (`←  ☐ Color  ☐ Size  ✔ Submit  →`); we collect each
+ * label following a box glyph and drop the "Submit" tab. The strip is identified by
+ * the box glyphs {@code ☐☑✔✓} (NOT ASCII `[ ]`/`[x]` option markers) AND the presence
+ * of "Submit", and a numbered option row is never mistaken for it. Returns [] when no
+ * Submit-bearing wizard strip is present — i.e. for a single-SELECT single question
+ * (whose lone ` ☐ Header` tab has no Submit). Its sole job is the multi-QUESTION
+ * decision in {@link parsePendingPrompt}: {@code length > 1} ⇒ a multi-question batch
+ * (answerable=false; only the focused tab's options are on screen). A single
+ * question's header is recovered separately via {@link parseSingleTabHeader}.
+ */
+function parseWizardHeaders(paneText) {
+  const lines = String(paneText).split('\n');
+  for (const l of lines) {
+    if (!/Submit/.test(l) || !/[☐☑✔✓]/.test(l)) continue;
+    if (/^\s*❯?\s*\d+\.\s/.test(l)) continue; // a numbered option row, not the tab strip
+    const headers = [];
+    const re = /[☐☑✔✓]\s*([^☐☑✔✓→←]+)/g;
+    let m;
+    while ((m = re.exec(l)) !== null) {
+      const label = m[1].trim();
+      if (label && !/^submit$/i.test(label)) headers.push(label);
+    }
+    if (headers.length > 0) return headers;
+  }
+  return [];
+}
+
+/**
+ * UC-50 — recover a SINGLE question's header from its tab line (PURE). claude renders
+ * a tab strip even for a single question — a lone ` ☐ Database` (single-select, no
+ * Submit) or `←  ☐ Toppings  ✔ Submit  →` (multi-select). This returns the first
+ * non-Submit box-glyph label (the question's header), tolerating the absence of
+ * "Submit"/arrows that {@link parseWizardHeaders} requires. A numbered option row is
+ * never matched. Returns '' when there is no tab line (e.g. a bare prompt). Used only
+ * by the single-question branch of {@link parsePendingPrompt} (BUG-1b — AC3 header).
+ */
+function parseSingleTabHeader(paneText) {
+  const lines = String(paneText).split('\n');
+  for (const l of lines) {
+    if (!/[☐☑✔✓]/.test(l)) continue;
+    if (/^\s*❯?\s*\d+\.\s/.test(l)) continue; // a numbered option row, not the tab strip
+    const m = /[☐☑✔✓]\s*([^☐☑✔✓→←]+)/.exec(l);
+    if (m) {
+      const label = m[1].trim();
+      if (label && !/^submit$/i.test(label)) return label;
+    }
+  }
+  return '';
+}
+
+/**
+ * UC-50 — parse the numbered option rows of the FOCUSED question (PURE). Each
+ * `❯? N. <label>` row, with the following indented non-numbered line taken as its
+ * description. A leading multi-select marker ({@code [ ]}/{@code [x]}/{@code ☐}/
+ * {@code ☑}) is stripped from the label BEFORE the affordance test and before
+ * storing, so "[ ] Cheese" stores as "Cheese" and "[ ] Type something" is still
+ * recognised as the affordance row. Affordance rows ("Type something." / "Chat
+ * about this") are dropped, so the option count is the count of REAL options only.
+ */
+function parseNumberedOptions(paneText) {
+  const lines = String(paneText).split('\n');
+  const opts = [];
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(/^\s*❯?\s*(\d+)\.\s+(.*\S)\s*$/);
+    if (!m) continue;
+    const label = m[2].trim().replace(/^(\[[ xX]?\]|[☐☑])\s*/, '').trim();
+    if (AFFORDANCE_OPTION.test(label)) continue;
+    let description = '';
+    for (let j = i + 1; j < lines.length; j++) {
+      const t = lines[j].trim();
+      if (t === '') break;
+      if (/^\s*❯?\s*\d+\.\s+/.test(lines[j])) break;
+      if (/^[─—-]{3,}$/.test(t)) break;
+      description = t;
+      break;
+    }
+    opts.push({ label, description });
+  }
+  return opts;
+}
+
+/**
+ * UC-50 — does the FOCUSED question's option list carry per-option checkbox markers
+ * ({@code [ ]}/{@code [x]} or {@code ☐}/{@code ☑}) — i.e. is it a multi-SELECT
+ * question (PURE)? Decided from the numbered OPTION rows ONLY, never from the tab
+ * strip (whose `☐` boxes are per-question answered-state, not per-option select).
+ * This is the correct multiSelect signal: a single-select question's numbered rows
+ * have no bracket/box marker, a multi-select question's rows do.
+ */
+function optionsHaveCheckbox(paneText) {
+  const lines = String(paneText).split('\n');
+  for (const l of lines) {
+    const m = l.match(/^\s*❯?\s*\d+\.\s+(.*)$/);
+    if (!m) continue;
+    if (/^(\[[ xX]?\]|[☐☑])/.test(m[1].trim())) return true;
+  }
+  return false;
+}
+
+/**
+ * UC-50 — the focused question's prompt text: the nearest non-blank, non-chrome
+ * line above the first numbered option row (PURE). Skips separators, tool/output
+ * markers (●/✻), and the tab strip / checkbox lines. Returns '' when no option row
+ * is found.
+ */
+function parseFocusedPrompt(paneText) {
+  const lines = String(paneText).split('\n');
+  let firstOpt = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (/^\s*❯?\s*\d+\.\s+/.test(lines[i])) {
+      firstOpt = i;
+      break;
+    }
+  }
+  if (firstOpt < 0) return '';
+  for (let i = firstOpt - 1; i >= 0; i--) {
+    const t = lines[i].trim();
+    if (t === '') continue;
+    if (/^[─—-]{3,}$/.test(t)) continue; // separator rule
+    if (/^[●✻]/.test(t)) return ''; // a tool/output marker, not a prompt
+    if (/Submit/.test(t) && /[☐☑✔✓]/.test(t)) continue; // wizard tab strip (multi-tab)
+    if (/^[☐☑✔✓←→]/.test(t)) continue; // a single-tab strip / checkbox line (` ☐ Header`)
+    return t.replace(/^❯\s*/, '').trim();
+  }
+  return '';
+}
+
+/**
+ * UC-50 — PURE: parse the structured pending prompt from a captured VISIBLE pane.
+ * Returns {@code {kind:'questions'|'plan', questions:[{header,question,multiSelect,
+ * options:[{label,description}]}], plan, key}} or null when the pane shows no
+ * pending prompt. The {@code key} is a hash of the volatile-stripped pane, so it is
+ * stable across polls while blocked and changes when the prompt changes (drives the
+ * settle + once-per-prompt emission). Single questions are recovered FULLY; a
+ * multi-question wizard is recovered as header-only items (only the focused tab's
+ * options are on screen), and the server marks those answerable=false.
+ */
+function parsePendingPrompt(paneText) {
+  if (typeof paneText !== 'string' || paneText.length === 0) return null;
+  const key = 'pane-' + fnv1a(stripVolatile(paneText));
+  if (looksLikePendingPlanApproval(paneText)) {
+    return { kind: 'plan', questions: [], plan: '', key };
+  }
+  if (!looksLikePendingAskUserQuestion(paneText)) return null;
+  const headers = parseWizardHeaders(paneText);
+  if (headers.length > 1) {
+    // MULTI-question wizard — header-only items (the other tabs' options are not
+    // captured). Server decides answerable=false from questions.length>1 (AC2 gate).
+    const questions = headers.map((h) => ({ header: h, question: '', multiSelect: false, options: [] }));
+    return { kind: 'questions', questions, plan: '', key };
+  }
+  // SINGLE question (one tab or none) — full structured recovery from one capture
+  // (AC3). multiSelect is decided from the OPTION rows' checkbox markers, NOT from
+  // the tab strip's `☐` (which is per-question answered-state); the single tab's
+  // label, when present, is this question's header.
+  const options = parseNumberedOptions(paneText);
+  const multiSelect = optionsHaveCheckbox(paneText);
+  const question = parseFocusedPrompt(paneText);
+  const header = headers[0] || parseSingleTabHeader(paneText);
+  return {
+    kind: 'questions',
+    questions: [{ header, question, multiSelect, options }],
+    plan: '',
+    key,
+  };
+}
+
 /**
  * One-shot: resolve the MAIN pane's active transcript, derive the conversation
  * name AND the working/idle signal from the SAME readAllLines, and print exactly
@@ -1143,6 +1380,12 @@ async function streamLoop() {
   const subReaders = new Map(); // filePath → reader
   let graceStart = null;
   let noTranscriptEmitted = false;
+  // UC-50 — pane-signal pending-prompt state. `emittedPendingKey` is the prompt
+  // key currently delivered as pending (null when none / cleared); `candidateKey`
+  // is a key seen once but not yet confirmed (the settle: require it stable across
+  // one extra poll before emitting, so a half-drawn frame never delivers).
+  let emittedPendingKey = null;
+  let candidatePendingKey = null;
 
   function rebaseline(newMain, announce) {
     if (announce) emitCtrl(CTRL_REBASELINE);
@@ -1225,6 +1468,55 @@ async function streamLoop() {
       if (fl) out(r.source + '\t' + fl);
     }
 
+    // UC-50 — pane-signal pending-prompt detection. The transcript CANNOT see a
+    // blocking AskUserQuestion / ExitPlanMode on claude 2.1.169 (the assistant turn
+    // is buffered in memory until the answer, never written), so the residual
+    // idle-flush above has nothing to flush. The reliable signal is the rendered
+    // pane (the same class of signal UC-49 proved for the sessions-list "?"). We
+    // capture the SAME targetSpec() pane the tail follows (so subagent panes are
+    // covered too, AC8), gate on the pending predicates, and deliver via control
+    // frames — NOT inline transcript lines, so the later transcript write (on a
+    // residual-writing build) still owns the single inline bubble (dedupe correct).
+    {
+      const paneText = capturePaneText();
+      // null ⇒ capture failed → retain prior state (no flicker), like UC-49 policy (b).
+      if (paneText != null) {
+        const pending = looksLikePendingAskUserQuestion(paneText) || looksLikePendingPlanApproval(paneText);
+        if (!pending) {
+          candidatePendingKey = null;
+          if (emittedPendingKey != null) {
+            out('__ctrl__\t' + CTRL_PENDING_CLEAR + '\t' + emittedPendingKey);
+            emittedPendingKey = null;
+          }
+        } else {
+          const parsed = parsePendingPrompt(paneText);
+          if (parsed && parsed.key) {
+            if (parsed.key === emittedPendingKey) {
+              // already delivered this exact prompt — once-per-key guard.
+            } else if (parsed.key === candidatePendingKey) {
+              // Settled (stable across one extra poll) — deliver once.
+              out(
+                '__ctrl__\t' +
+                  CTRL_PENDING_QUESTION +
+                  '\t' +
+                  JSON.stringify({
+                    kind: parsed.kind,
+                    questions: parsed.questions,
+                    plan: parsed.plan,
+                    key: parsed.key,
+                  }),
+              );
+              emittedPendingKey = parsed.key;
+              candidatePendingKey = null;
+            } else {
+              // First sighting of a new key — require one more matching poll (settle).
+              candidatePendingKey = parsed.key;
+            }
+          }
+        }
+      }
+    }
+
     await sleep(POLL_MS);
   }
 }
@@ -1296,6 +1588,19 @@ module.exports = {
   // UC-49 — pending-question predicate seam (QA unit tests against pane fixtures).
   looksLikePendingAskUserQuestion,
   PENDING_QUESTION_CHROME,
+  // UC-50 — pane-signal pending-prompt parsing seams (QA unit tests against pane fixtures).
+  looksLikePendingPlanApproval,
+  PLAN_APPROVAL_CHROME,
+  parsePendingPrompt,
+  parseWizardHeaders,
+  parseSingleTabHeader,
+  parseNumberedOptions,
+  optionsHaveCheckbox,
+  parseFocusedPrompt,
+  stripVolatile,
+  fnv1a,
+  CTRL_PENDING_QUESTION,
+  CTRL_PENDING_CLEAR,
   CONVERSATION_NAME_MAX_CP,
   CTRL_NO_TRANSCRIPT,
   CTRL_DETAIL_NOT_FOUND,

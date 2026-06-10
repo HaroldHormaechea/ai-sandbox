@@ -56,6 +56,8 @@ subagent/teammate lines), and `source` (`main` | `subagent:<agentId>`).
 | `system-note`     | `uuid`, `isSidechain`, `source`, `label`, `detail` (UC-42 — an injected `user` line with no host bubble) | 42 |
 | `question`        | `…`, `toolUseId`, `questions[]` (`question`,`header`,`multiSelect`,`options[]{label,description}`) | 10 |
 | `plan-approval`   | `…`, `toolUseId`, `plan`                                           | 13 |
+| `pending-question`| `promptKey`, `kind` (`questions`\|`plan`), `questions[]`, `plan`, `answerable` — UC-50 LIVE pane-delivered prompt (sets the sheet ONLY, NO inline item) | 50 |
+| `pending-clear`   | `promptKey` — UC-50 clears a pane-delivered sheet whose key matches | 50 |
 | `turn-end`        | `…`, `durationMs`, `messageCount` (the `system:turn_duration` marker) | 15 |
 | `targets`         | `targets[]` (incl. `pendingActivity`/`pendingQuestion`), `selectedId` | 16, 18 |
 | `target-selected` | `targetId`                                                          | 17 |
@@ -65,6 +67,41 @@ subagent/teammate lines), and `source` (`main` | `subagent:<agentId>`).
 
 `AskUserQuestion` → `question`; `ExitPlanMode` → `plan-approval`; every other
 `tool_use` → `tool-use` (internal noise summarized, not dumped).
+
+**UC-50 — live pane-delivered pending prompt (`pending-question` / `pending-clear`).**
+On claude `2.1.169` the blocking assistant turn that carries the `AskUserQuestion`
+/ `ExitPlanMode` `tool_use` is **buffered in memory until the answer is produced**
+— it is never written to the transcript while the session blocks (verified at the
+byte level: the transcript ends with a newline at the user prompt). So the UC-40
+residual idle-flush has nothing to flush and the transcript-derived `question` /
+`plan-approval` frames never fire while blocked — the conversation showed only a
+perpetual "Working…". The fix brings the **visible-pane signal** UC-49 proved for
+the sessions-list "?" into the conversation channel:
+
+- The in-container tail helper captures the SAME `targetSpec()` pane it follows
+  (so subagent panes are covered too — AC8) on EVERY poll, gates on the
+  `looksLikePendingAskUserQuestion` / `looksLikePendingPlanApproval` predicates,
+  parses the prompt structure with `parsePendingPrompt`, and — once the parsed
+  `key` is stable across one extra poll (settle) — emits
+  `__ctrl__\tpending-question\t<json>` once per new/changed prompt, and
+  `__ctrl__\tpending-clear\t<promptKey>` when the chrome disappears.
+- The server maps the JSON to a `pending-question` frame. It **sets the client
+  sheet ONLY — it adds NO inline item**, so when claude later writes the resolved
+  turn to the transcript (on a residual-writing build), the transcript path owns
+  the single inline bubble and there is no double-render (AC5 dedupe). A per-turn
+  `transcriptPromptThisTurn` guard suppresses the pane frame if a transcript
+  `question`/`plan-approval` already fired this turn (transcript wins). On
+  `2.1.169` only the pane path fires.
+- **`answerable`** is decided server-side (never inferred client-side): `true` for
+  a single question and for plan approval — fully in-app answerable; `false` for a
+  multi-question batch. Empirically, one passive `capture-pane` of the
+  multi-question wizard (`← ☐ Q1  ☐ Q2 … ✔ Submit →`) shows ONLY the focused tab's
+  options — the other tabs' options are NOT on screen — so full per-question
+  recovery is infeasible. A multi-question prompt is therefore delivered VISIBLE
+  with header-only items and `answerable=false`; the client shows the questions
+  read-only with an "answer in tmux to continue" affordance (full in-app
+  multi-answer is a tracked follow-up). This satisfies the core goal: no more
+  silent "Working…".
 
 **UC-41 — collapsed tool bubbles + on-demand detail.** The client renders one
 collapsed, type-aware bubble per tool call, merging the `tool-use` with its

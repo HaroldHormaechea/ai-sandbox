@@ -403,6 +403,187 @@ class ConversationControllerTest {
         }
     }
 
+    // ──────────────────────── UC-50 — pane-signal pending prompt ─────────────
+    // A LIVE, pane-delivered pending prompt (the transcript carried nothing for the
+    // blocking turn on claude 2.1.169). The controller raises the sheet ONLY — it adds
+    // NO inline item (so the later transcript write owns the single bubble, AC5) — and
+    // clears the perpetual "Working…" spinner (a pending prompt is at-rest waiting).
+
+    private fun questionItemCount(c: ConversationController): Int =
+        c.items.value.count { it is ConversationItem.Question }
+
+    @Test
+    fun `a pane pending-question raises the sheet, adds no inline item, and idles the spinner`() {
+        enqueuePush(
+            listOf(
+                """{"type":"pending-question","promptKey":"pane-k1","kind":"questions","plan":"",""" +
+                    """"answerable":true,"questions":[{"question":"Which database?","header":"Database",""" +
+                    """"multiSelect":false,"options":[{"label":"A","description":"a"},{"label":"B","description":"b"}]}]}""",
+            ),
+        )
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { c.pendingSheet.value is PendingSheet.Questions }).isTrue // AC1
+            val sheet = c.pendingSheet.value as PendingSheet.Questions
+            assertThat(sheet.questionUuid).isEqualTo("pane-k1")
+            assertThat(sheet.answerable).isTrue
+            assertThat(sheet.questions.first().options).hasSize(2)
+            // AC5 — the pane frame adds NO inline bubble (the transcript copy owns it).
+            assertThat(questionItemCount(c)).isEqualTo(0)
+            // The pending prompt is at-rest → the spinner must be idle, not "Working…".
+            assertThat(awaitUntil { c.turnPhase.value == TurnPhase.IDLE }).isTrue
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
+    fun `a pane pending-question with answerable=false carries the not-answerable flag (multi batch)`() {
+        // AC2 — a multi-question batch is visible but not in-app answerable; the controller
+        // faithfully carries the server-decided flag (NEVER inferred client-side).
+        enqueuePush(
+            listOf(
+                """{"type":"pending-question","promptKey":"pane-multi","kind":"questions","plan":"",""" +
+                    """"answerable":false,"questions":[{"question":"","header":"Color","multiSelect":false,"options":[]},""" +
+                    """{"question":"","header":"Size","multiSelect":false,"options":[]}]}""",
+            ),
+        )
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { (c.pendingSheet.value as? PendingSheet.Questions)?.questions?.size == 2 }).isTrue
+            assertThat((c.pendingSheet.value as PendingSheet.Questions).answerable).isFalse
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
+    fun `a pane plan pending-question raises a Plan sheet`() {
+        // AC6 — an ExitPlanMode plan approval delivered live from the pane.
+        enqueuePush(
+            listOf(
+                """{"type":"pending-question","promptKey":"pane-plan","kind":"plan",""" +
+                    """"plan":"1. step a\n2. step b","answerable":true,"questions":[]}""",
+            ),
+        )
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { c.pendingSheet.value is PendingSheet.Plan }).isTrue
+            val sheet = c.pendingSheet.value as PendingSheet.Plan
+            assertThat(sheet.questionUuid).isEqualTo("pane-plan")
+            assertThat(sheet.answerable).isTrue
+            // No inline plan-approval bubble from the pane path.
+            assertThat(c.items.value.none { it is ConversationItem.PlanApproval }).isTrue
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
+    fun `a pending-clear with a matching key clears the pane sheet`() {
+        val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        server.enqueue(
+            MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+                override fun onOpen(webSocket: WebSocket, response: Response) {
+                    wsRef.set(webSocket)
+                }
+            }),
+        )
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { wsRef.get() != null }).isTrue
+            wsRef.get()!!.send(
+                """{"type":"pending-question","promptKey":"pane-k1","kind":"questions","plan":"",""" +
+                    """"answerable":true,"questions":[{"question":"Q","header":"H","multiSelect":false,""" +
+                    """"options":[{"label":"A","description":""}]}]}""",
+            )
+            assertThat(awaitUntil { (c.pendingSheet.value as? PendingSheet.Questions)?.questionUuid == "pane-k1" }).isTrue
+            // The pane chrome disappeared (answered/dismissed in tmux) → key-matched clear.
+            wsRef.get()!!.send("""{"type":"pending-clear","promptKey":"pane-k1"}""")
+            assertThat(awaitUntil { c.pendingSheet.value == null }).isTrue
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
+    fun `a pending-clear with a non-matching key leaves the sheet up`() {
+        // The clear must never clobber a sheet it doesn't own (e.g. a transcript-delivered
+        // sheet, which carries a different key).
+        val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        server.enqueue(
+            MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+                override fun onOpen(webSocket: WebSocket, response: Response) {
+                    wsRef.set(webSocket)
+                }
+            }),
+        )
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { wsRef.get() != null }).isTrue
+            wsRef.get()!!.send(
+                """{"type":"pending-question","promptKey":"pane-k1","kind":"questions","plan":"",""" +
+                    """"answerable":true,"questions":[{"question":"Q","header":"H","multiSelect":false,""" +
+                    """"options":[{"label":"A","description":""}]}]}""",
+            )
+            assertThat(awaitUntil { (c.pendingSheet.value as? PendingSheet.Questions)?.questionUuid == "pane-k1" }).isTrue
+            wsRef.get()!!.send("""{"type":"pending-clear","promptKey":"pane-OTHER"}""")
+            // Give the frame time to be processed, then assert the sheet is STILL up.
+            Thread.sleep(150)
+            assertThat(c.pendingSheet.value).isInstanceOf(PendingSheet.Questions::class.java)
+            assertThat((c.pendingSheet.value as PendingSheet.Questions).questionUuid).isEqualTo("pane-k1")
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
+    fun `AC9 - a pane pending-question then a transcript question yields exactly one inline bubble`() {
+        // AC9 (critical) — reproduces the current-claude order: the pane delivers the
+        // pending question while the session blocks (transcript has NO assistant line for
+        // it), then claude later writes the resolved turn as a transcript `question`. The
+        // pane frame added NO inline item, so the transcript write contributes the ONE and
+        // only inline Question bubble — no double render / phantom collapsed `❓ question`.
+        val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        server.enqueue(
+            MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+                override fun onOpen(webSocket: WebSocket, response: Response) {
+                    wsRef.set(webSocket)
+                }
+            }),
+        )
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { wsRef.get() != null }).isTrue
+            // 1) Pane delivers the pending question (sheet only, no bubble).
+            wsRef.get()!!.send(
+                """{"type":"pending-question","promptKey":"pane-k1","kind":"questions","plan":"",""" +
+                    """"answerable":true,"questions":[{"question":"Pick","header":"H","multiSelect":false,""" +
+                    """"options":[{"label":"A","description":""},{"label":"B","description":""}]}]}""",
+            )
+            assertThat(awaitUntil { c.pendingSheet.value is PendingSheet.Questions }).isTrue
+            assertThat(questionItemCount(c)).isEqualTo(0)
+            // 2) Later, claude writes the resolved turn → a transcript `question` frame.
+            wsRef.get()!!.send(
+                """{"type":"question","uuid":"uq","source":"main","isSidechain":false,"toolUseId":"tuQ",""" +
+                    """"questions":[{"question":"Pick","header":"H","multiSelect":false,""" +
+                    """"options":[{"label":"A","description":""},{"label":"B","description":""}]}]}""",
+            )
+            // Exactly ONE inline Question bubble total (the transcript copy) — no double render.
+            assertThat(awaitUntil { questionItemCount(c) == 1 }).isTrue
+            Thread.sleep(150)
+            assertThat(questionItemCount(c)).isEqualTo(1)
+        } finally {
+            c.close()
+        }
+    }
+
     // ──────────────────────── Part C — UC-41 merged tool rows + detail dialog ─
 
     /** Enqueue a WS upgrade that replies with [reply] to any inbound frame containing [trigger]. */

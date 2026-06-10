@@ -87,6 +87,21 @@ public class TranscriptTailService {
      */
     public static final String CTRL_DETAIL_NOT_FOUND = "detail-not-found";
 
+    /**
+     * UC-50 — pane-signal pending-prompt control lines (lock-step with the helper's
+     * {@code CTRL_PENDING_QUESTION}/{@code CTRL_PENDING_CLEAR}). Unlike the other
+     * control lines these carry a THIRD tab-delimited field after the kind:
+     * {@code __ctrl__\tpending-question\t<json>} (the structured prompt payload
+     * {@code {kind,questions,plan,key}}) and {@code __ctrl__\tpending-clear\t<key>}
+     * (the promptKey that just left the pane). The helper emits these from the
+     * VISIBLE pane because claude 2.1.169 never writes the blocking assistant turn
+     * to the transcript, so the transcript-tail path cannot see a pending
+     * {@code AskUserQuestion}/{@code ExitPlanMode} (UC-50 root cause).
+     */
+    public static final String CTRL_PENDING_QUESTION = "pending-question";
+
+    public static final String CTRL_PENDING_CLEAR = "pending-clear";
+
     private final ProcessExecutor exec;
 
     public TranscriptTailService(ProcessExecutor exec) {
