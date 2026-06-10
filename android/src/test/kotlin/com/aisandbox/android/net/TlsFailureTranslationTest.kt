@@ -1,6 +1,11 @@
 package com.aisandbox.android.net
 
+import java.io.EOFException
 import java.io.IOException
+import java.net.ConnectException
+import java.net.SocketException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
 import java.security.cert.CertificateException
 import javax.net.ssl.SSLException
 import javax.net.ssl.SSLHandshakeException
@@ -140,9 +145,93 @@ class TlsFailureTranslationTest {
         assertThat(err.rawMessage).isEqualTo("connection reset during TLS")
     }
 
+    // ── UC-52 — connectivity vs TLS taxonomy (AC1 / AC4 / AC8) ───────────────
+    //
+    // The load-bearing security partition for UC-52: a NON-TLS IOException is a
+    // TRANSIENT connectivity failure → NetworkEvent.ServerUnreachable (never the
+    // destructive identity screen). An IOException that CARRIES an SSLException
+    // in its cause chain stays on the identity path (HandshakeError) — "when in
+    // doubt, identity wins" (AC4). The genuine-TLS cases above (pin / SAN /
+    // generic SSLException) are unchanged and MUST stay green.
+
     @Test
-    fun `plain IOException routes to HandshakeError`() {
+    fun `plain IOException now routes to ServerUnreachable, not HandshakeError (UC-52 AC1, AC8)`() {
+        // Pre-UC-52 this was the catch-all that misrouted every connectivity
+        // drop to the identity screen. Now a bare IOException with no TLS cause
+        // is transient.
         val ex = IOException("connection refused")
+        val event = TlsFailureTranslation.translate(ex, expectedPinHex, expectedHost)
+        assertThat(event)
+            .`as`("a plain IOException is a connectivity failure, never a TLS handshake error")
+            .isEqualTo(NetworkEvent.ServerUnreachable)
+    }
+
+    @Test
+    fun `ConnectException (connection refused) routes to ServerUnreachable (AC1, AC8)`() {
+        val ex = ConnectException("Connection refused")
+        val event = TlsFailureTranslation.translate(ex, expectedPinHex, expectedHost)
+        assertThat(event).isEqualTo(NetworkEvent.ServerUnreachable)
+    }
+
+    @Test
+    fun `SocketTimeoutException routes to ServerUnreachable (AC1, AC8)`() {
+        val ex = SocketTimeoutException("timeout")
+        val event = TlsFailureTranslation.translate(ex, expectedPinHex, expectedHost)
+        assertThat(event).isEqualTo(NetworkEvent.ServerUnreachable)
+    }
+
+    @Test
+    fun `UnknownHostException routes to ServerUnreachable (AC1, AC8)`() {
+        val ex = UnknownHostException("potato-server: nodename nor servname provided")
+        val event = TlsFailureTranslation.translate(ex, expectedPinHex, expectedHost)
+        assertThat(event).isEqualTo(NetworkEvent.ServerUnreachable)
+    }
+
+    @Test
+    fun `EOFException (dropped socket) routes to ServerUnreachable (AC1, AC8)`() {
+        val ex = EOFException("\\n not found: limit=0 content=…")
+        val event = TlsFailureTranslation.translate(ex, expectedPinHex, expectedHost)
+        assertThat(event).isEqualTo(NetworkEvent.ServerUnreachable)
+    }
+
+    @Test
+    fun `SocketException 'Connection reset' with NO TLS cause routes to ServerUnreachable (AC8 taxonomy)`() {
+        // The use-case pitfall: a mid-stream `Connection reset` with no TLS
+        // cause is bucketed transient (lean retry), NOT identity.
+        val ex = SocketException("Connection reset")
+        val event = TlsFailureTranslation.translate(ex, expectedPinHex, expectedHost)
+        assertThat(event).isEqualTo(NetworkEvent.ServerUnreachable)
+    }
+
+    @Test
+    fun `IOException WRAPPING an SSLException cause routes to HandshakeError (AC4 security boundary)`() {
+        // hasTlsCause() must keep a connectivity-SHAPED exception that actually
+        // carries a TLS failure on the identity path — never silently retry
+        // against a possibly-compromised endpoint.
+        val ex = IOException("io wrapper").initCause(SSLException("inner TLS failure"))
+        val event = TlsFailureTranslation.translate(ex, expectedPinHex, expectedHost)
+        assertThat(event)
+            .`as`("an IOException whose cause is an SSLException stays identity (when in doubt, identity wins)")
+            .isInstanceOf(NetworkEvent.HandshakeError::class.java)
+    }
+
+    @Test
+    fun `SocketException WRAPPING an SSLException cause routes to HandshakeError (AC4 security boundary)`() {
+        // A `Connection reset` that DID occur mid-TLS (carries an SSLException
+        // cause) must be identity, the deliberate counterpart to the no-cause
+        // transient case above.
+        val ex = SocketException("Connection reset").initCause(
+            SSLHandshakeException("Remote host terminated the handshake"),
+        )
+        val event = TlsFailureTranslation.translate(ex, expectedPinHex, expectedHost)
+        assertThat(event).isInstanceOf(NetworkEvent.HandshakeError::class.java)
+    }
+
+    @Test
+    fun `genuine SSLException is unaffected by hasTlsCause and stays HandshakeError (AC4)`() {
+        // Direct SSLException hits the `is SSLException` arm BEFORE the
+        // IOException arm — the SSL arms run first and unchanged (AC4).
+        val ex = SSLException("protocol downgrade")
         val event = TlsFailureTranslation.translate(ex, expectedPinHex, expectedHost)
         assertThat(event).isInstanceOf(NetworkEvent.HandshakeError::class.java)
     }
@@ -193,5 +282,13 @@ class TlsFailureTranslationTest {
         assertThat(TlsFailureTranslation.toMismatch(NetworkEvent.CertRevoked)).isNull()
         assertThat(TlsFailureTranslation.toMismatch(NetworkEvent.StreamReconnecting("s1", 1, 1000L))).isNull()
         assertThat(TlsFailureTranslation.toMismatch(NetworkEvent.StreamGaveUp("s1"))).isNull()
+    }
+
+    @Test
+    fun `toMismatch returns null for ServerUnreachable so it NEVER produces an identity screen (UC-52 AC4)`() {
+        // The transient connectivity signal must never become a Mismatch /
+        // ServerIdentityChangedScreen — a momentary drop is a retryable banner,
+        // not a destructive re-enroll dead-end.
+        assertThat(TlsFailureTranslation.toMismatch(NetworkEvent.ServerUnreachable)).isNull()
     }
 }
