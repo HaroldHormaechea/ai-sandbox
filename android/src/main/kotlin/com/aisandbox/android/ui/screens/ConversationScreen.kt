@@ -52,8 +52,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.aisandbox.android.conversation.ConversationItem
@@ -62,6 +66,8 @@ import com.aisandbox.android.conversation.TurnPhase
 import com.aisandbox.android.ui.components.AgentSwitcherBar
 import com.aisandbox.android.ui.components.Composer
 import com.aisandbox.android.ui.components.QuestionSheet
+import com.aisandbox.android.ui.components.bubbleTintForSource
+import com.aisandbox.android.ui.components.subtleBubbleTint
 import com.aisandbox.android.ui.theme.AiSandboxMonoTypography
 import com.aisandbox.android.ui.theme.OnSurface
 import com.aisandbox.android.ui.theme.OnSurfaceMuted
@@ -92,6 +98,9 @@ fun ConversationScreen(
     val pendingSheet by viewModel.pendingSheet.collectAsState()
     val turnPhase by viewModel.turnPhase.collectAsState()
     val toolDetail by viewModel.toolDetail.collectAsState()
+    // UC-53 — live appearance prefs scoped to this transcript only (AC2/AC3).
+    val fontScale by viewModel.fontScale.collectAsState()
+    val useAgentColor by viewModel.useAgentColor.collectAsState()
 
     var menuOpen by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
@@ -164,6 +173,8 @@ fun ConversationScreen(
                     items = items,
                     modifier = Modifier.fillMaxSize(),
                     listState = listState,
+                    fontScale = fontScale,
+                    useAgentColor = useAgentColor,
                     onToolTap = { toolUseId ->
                         // AC5 — resolve the originating tool_use line's uuid (server scoping) and fetch.
                         val uuid = items.firstOrNull {
@@ -226,6 +237,8 @@ internal fun ConversationContent(
     items: List<ConversationItem>,
     modifier: Modifier = Modifier,
     listState: LazyListState = rememberLazyListState(),
+    fontScale: Float = 1f,
+    useAgentColor: Boolean = false,
     onToolTap: (String) -> Unit = {},
 ) {
     LazyColumn(
@@ -235,24 +248,36 @@ internal fun ConversationContent(
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         items(items = items, key = { it.key }) { item ->
-            ConversationItemRow(item, onToolTap)
+            ConversationItemRow(item, onToolTap, fontScale, useAgentColor)
         }
     }
 }
 
 @Composable
-private fun ConversationItemRow(item: ConversationItem, onToolTap: (String) -> Unit) {
+private fun ConversationItemRow(
+    item: ConversationItem,
+    onToolTap: (String) -> Unit,
+    fontScale: Float,
+    useAgentColor: Boolean,
+) {
     when (item) {
-        is ConversationItem.UserMessage -> Bubble(label = null, body = item.text, isUser = true, item.isSidechain)
-        is ConversationItem.AssistantMessage -> Bubble(label = labelFor(item.source), body = item.text, isUser = false, item.isSidechain)
-        is ConversationItem.Thinking -> MetaLine(prefix = "thinking", body = item.text)
-        is ConversationItem.ToolActivity -> ToolBubble(item = item, onTap = { onToolTap(item.toolUseId) })
+        is ConversationItem.UserMessage ->
+            Bubble(label = null, body = item.text, isUser = true, isSidechain = item.isSidechain, fontScale = fontScale, tint = null)
+        is ConversationItem.AssistantMessage -> {
+            // UC-53 (AC3/AC4) — toggle ON + a non-null chromatic tint for this
+            // source → subtle background; else today's neutral SurfaceLow.
+            val tint = if (useAgentColor) bubbleTintForSource(item.source)?.let { subtleBubbleTint(it) } else null
+            Bubble(label = labelFor(item.source), body = item.text, isUser = false, isSidechain = item.isSidechain, fontScale = fontScale, tint = tint)
+        }
+        is ConversationItem.Thinking -> MetaLine(prefix = "thinking", body = item.text, fontScale = fontScale)
+        is ConversationItem.ToolActivity -> ToolBubble(item = item, onTap = { onToolTap(item.toolUseId) }, fontScale = fontScale)
         is ConversationItem.Question -> MetaLine(
             prefix = "❓ question",
             body = item.questions.firstOrNull()?.question ?: "",
+            fontScale = fontScale,
         )
-        is ConversationItem.PlanApproval -> MetaLine(prefix = "📋 plan", body = item.plan)
-        is ConversationItem.SystemNote -> SystemNoteRow(item)
+        is ConversationItem.PlanApproval -> MetaLine(prefix = "📋 plan", body = item.plan, fontScale = fontScale)
+        is ConversationItem.SystemNote -> SystemNoteRow(item, fontScale = fontScale)
     }
 }
 
@@ -265,7 +290,7 @@ private fun ConversationItemRow(item: ConversationItem, onToolTap: (String) -> U
  * `fetch-detail` round-trip is needed.
  */
 @Composable
-internal fun SystemNoteRow(item: ConversationItem.SystemNote) {
+internal fun SystemNoteRow(item: ConversationItem.SystemNote, fontScale: Float = 1f) {
     var expanded by remember(item.key) { mutableStateOf(false) }
     val prefix = if (item.isSidechain) "${item.label} · subagent" else item.label
     Column(
@@ -274,13 +299,13 @@ internal fun SystemNoteRow(item: ConversationItem.SystemNote) {
             .clickable { expanded = !expanded }
             .padding(vertical = 2.dp, horizontal = 2.dp),
     ) {
-        Text(text = prefix, style = AiSandboxMonoTypography.metadata, color = OnSurfaceVariant)
+        Text(text = prefix, style = AiSandboxMonoTypography.metadata.scaledBy(fontScale), color = OnSurfaceVariant)
         if (expanded && item.detail.isNotBlank()) {
             Spacer(Modifier.height(4.dp))
             SelectionContainer {
                 Text(
                     text = item.detail,
-                    style = AiSandboxMonoTypography.metadata,
+                    style = AiSandboxMonoTypography.metadata.scaledBy(fontScale),
                     color = OnSurfaceMuted,
                 )
             }
@@ -296,7 +321,7 @@ internal fun SystemNoteRow(item: ConversationItem.SystemNote) {
  * detail dialog (AC5) via [onTap].
  */
 @Composable
-internal fun ToolBubble(item: ConversationItem.ToolActivity, onTap: () -> Unit) {
+internal fun ToolBubble(item: ConversationItem.ToolActivity, onTap: () -> Unit, fontScale: Float = 1f) {
     val isError = item.result?.isError == true
     val awaiting = item.result == null
     Column(
@@ -309,7 +334,7 @@ internal fun ToolBubble(item: ConversationItem.ToolActivity, onTap: () -> Unit) 
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
                 text = toolBubbleLabel(item),
-                style = AiSandboxMonoTypography.metadata,
+                style = AiSandboxMonoTypography.metadata.scaledBy(fontScale),
                 color = if (isError) Warning else OnSurfaceVariant,
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis,
@@ -317,18 +342,18 @@ internal fun ToolBubble(item: ConversationItem.ToolActivity, onTap: () -> Unit) 
             )
             if (isError) {
                 Spacer(Modifier.width(6.dp))
-                Text(text = "✗", style = AiSandboxMonoTypography.metadata, color = Warning)
+                Text(text = "✗", style = AiSandboxMonoTypography.metadata.scaledBy(fontScale), color = Warning)
             }
         }
         if (awaiting) {
             Text(
                 text = "awaiting result…",
-                style = AiSandboxMonoTypography.metadata,
+                style = AiSandboxMonoTypography.metadata.scaledBy(fontScale),
                 color = OnSurfaceMuted,
             )
         }
         if (item.isSidechain) {
-            Text(text = "· subagent", style = AiSandboxMonoTypography.metadata, color = OnSurfaceMuted)
+            Text(text = "· subagent", style = AiSandboxMonoTypography.metadata.scaledBy(fontScale), color = OnSurfaceMuted)
         }
     }
 }
@@ -423,7 +448,14 @@ internal fun ToolDetailDialog(state: ToolDetailState, onDismiss: () -> Unit) {
  * keeps long unbroken tokens (URLs/code) inside the cap rather than overflowing.
  */
 @Composable
-private fun Bubble(label: String?, body: String, isUser: Boolean, isSidechain: Boolean) {
+private fun Bubble(
+    label: String?,
+    body: String,
+    isUser: Boolean,
+    isSidechain: Boolean,
+    fontScale: Float = 1f,
+    tint: Color? = null,
+) {
     BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
         val maxBubbleWidth = maxWidth * 0.8f
         Column(
@@ -433,21 +465,28 @@ private fun Bubble(label: String?, body: String, isUser: Boolean, isSidechain: B
             if (label != null) {
                 Text(
                     text = if (isSidechain) "$label · subagent" else label,
-                    style = AiSandboxMonoTypography.metadata,
+                    style = AiSandboxMonoTypography.metadata.scaledBy(fontScale),
                     color = OnSurfaceMuted,
                 )
                 Spacer(Modifier.size(2.dp))
+            }
+            // UC-53 (AC3/AC4) — assistant bubbles take the agent-color [tint] when
+            // provided; user bubbles always keep primaryContainer (AC4).
+            val background = when {
+                isUser -> MaterialTheme.colorScheme.primaryContainer
+                tint != null -> tint
+                else -> SurfaceLow
             }
             Box(
                 modifier = Modifier
                     .widthIn(max = maxBubbleWidth)
                     .clip(RoundedCornerShape(12.dp))
-                    .background(if (isUser) MaterialTheme.colorScheme.primaryContainer else SurfaceLow)
+                    .background(background)
                     .padding(12.dp),
             ) {
                 Text(
                     text = body,
-                    style = MaterialTheme.typography.bodyMedium,
+                    style = MaterialTheme.typography.bodyMedium.scaledBy(fontScale),
                     color = if (isUser) MaterialTheme.colorScheme.onPrimaryContainer else OnSurface,
                 )
             }
@@ -456,13 +495,13 @@ private fun Bubble(label: String?, body: String, isUser: Boolean, isSidechain: B
 }
 
 @Composable
-private fun MetaLine(prefix: String, body: String) {
+private fun MetaLine(prefix: String, body: String, fontScale: Float = 1f) {
     Column(modifier = Modifier.fillMaxWidth()) {
-        Text(text = prefix, style = AiSandboxMonoTypography.metadata, color = OnSurfaceVariant)
+        Text(text = prefix, style = AiSandboxMonoTypography.metadata.scaledBy(fontScale), color = OnSurfaceVariant)
         if (body.isNotBlank()) {
             Text(
                 text = body,
-                style = AiSandboxMonoTypography.metadata,
+                style = AiSandboxMonoTypography.metadata.scaledBy(fontScale),
                 color = OnSurfaceMuted,
                 maxLines = 6,
                 overflow = TextOverflow.Ellipsis,
@@ -472,3 +511,20 @@ private fun MetaLine(prefix: String, body: String) {
 }
 
 private fun labelFor(source: String): String = if (source.startsWith("subagent:")) "Agent" else "Claude"
+
+/**
+ * UC-53 (AC2) — scale a transcript [TextStyle]'s font (and line height, when
+ * specified) by [scale], leaving everything else untouched. Resolves a concrete
+ * base sp first so an `Unspecified` font size (which would otherwise throw when
+ * multiplied) falls back to the bodyMedium 14sp baseline. Scaling stays local to
+ * the conversation-view composables — never the global theme — so other screens
+ * are unaffected.
+ */
+private fun TextStyle.scaledBy(scale: Float): TextStyle {
+    if (scale == 1f) return this
+    val baseSize = if (fontSize != TextUnit.Unspecified) fontSize else 14.sp
+    return copy(
+        fontSize = (baseSize.value * scale).sp,
+        lineHeight = if (lineHeight != TextUnit.Unspecified) (lineHeight.value * scale).sp else lineHeight,
+    )
+}

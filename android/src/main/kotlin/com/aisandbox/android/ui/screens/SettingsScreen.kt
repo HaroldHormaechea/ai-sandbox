@@ -25,6 +25,9 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SegmentedButton
+import androidx.compose.material3.SegmentedButtonDefaults
+import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -48,6 +51,8 @@ import com.aisandbox.android.net.NetworkEvents
 import com.aisandbox.android.requireContainer
 import com.aisandbox.android.terminal.KeyboardSettingsStore
 import com.aisandbox.android.ui.components.ConnectedPill
+import com.aisandbox.android.ui.settings.AppearanceSettingsStore
+import com.aisandbox.android.ui.settings.ConversationFontSize
 import com.aisandbox.android.ui.theme.AiSandboxMonoTypography
 import com.aisandbox.android.ui.theme.ErrorTone
 import com.aisandbox.android.ui.theme.OnSurface
@@ -97,9 +102,17 @@ fun SettingsScreen(onBack: () -> Unit) {
                 .padding(horizontal = 16.dp, vertical = 8.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
+            // UC-53 (AC1) — Appearance group on top: the new font-size + agent-color
+            // preferences, plus the UC-36 keyboard toggle kept as a top-level pref (AC5).
+            GroupHeader(stringResource(R.string.settings_group_appearance))
+            AppearanceSection(container = container)
+            KeyboardSection(container = container)
+
+            // UC-53 (AC1) — the previously top-level read-only sections + footer are
+            // now demoted under an Info group.
+            GroupHeader(stringResource(R.string.settings_group_info))
             ServerSection(profile = profile, onCopy = { copy(context, "server pin", it) })
             IdentitySection(cert = cert, profile = profile, onCopy = { copy(context, "fingerprint", it) })
-            KeyboardSection(container = container)
             WebSocketSection()
             DiagnosticsSection(onSimulateRevoke = {
                 // Emit the CertRevoked NetworkEvent so the root composable
@@ -196,6 +209,84 @@ private fun IdentitySection(
 }
 
 /**
+ * UC-53 (AC2/AC3) — the Appearance preferences: a discrete S/M/L/XL font-size
+ * control that rescales the conversation/agent view only, and the
+ * "use agent color in bubbles" toggle (default OFF). Both are pure projections of
+ * the process-scoped [AppearanceSettingsStore]; flipping either persists
+ * immediately (AC6) and the conversation view re-reads it reactively.
+ */
+@Composable
+private fun AppearanceSection(container: com.aisandbox.android.AppContainer) {
+    val scope = rememberCoroutineScope()
+    val fontSize by container.appearanceSettings.fontSize
+        .collectAsStateWithLifecycle(initialValue = AppearanceSettingsStore.DEFAULT_FONT_SIZE)
+    val useAgentColor by container.appearanceSettings.useAgentColorInBubbles
+        .collectAsStateWithLifecycle(initialValue = AppearanceSettingsStore.DEFAULT_USE_AGENT_COLOR)
+
+    Section(title = stringResource(R.string.settings_section_appearance)) {
+        // ── Font size (AC2) ──────────────────────────────────────────────
+        Text(
+            text = stringResource(R.string.settings_appearance_font_size),
+            style = MaterialTheme.typography.titleSmall,
+            color = OnSurface,
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(
+            text = stringResource(R.string.settings_appearance_font_size_subtitle),
+            style = MaterialTheme.typography.bodySmall,
+            color = OnSurfaceMuted,
+        )
+        Spacer(Modifier.height(8.dp))
+        val options = ConversationFontSize.entries
+        SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
+            options.forEachIndexed { index, size ->
+                SegmentedButton(
+                    selected = size == fontSize,
+                    onClick = { scope.launch { container.appearanceSettings.setFontSize(size) } },
+                    shape = SegmentedButtonDefaults.itemShape(index = index, count = options.size),
+                ) {
+                    Text(stringResource(fontSizeLabelRes(size)))
+                }
+            }
+        }
+
+        Spacer(Modifier.height(16.dp))
+
+        // ── Agent color in bubbles (AC3) ─────────────────────────────────
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = stringResource(R.string.settings_appearance_agent_color),
+                    style = MaterialTheme.typography.titleSmall,
+                    color = OnSurface,
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    text = stringResource(R.string.settings_appearance_agent_color_subtitle),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = OnSurfaceMuted,
+                )
+            }
+            Spacer(Modifier.width(12.dp))
+            Switch(
+                checked = useAgentColor,
+                onCheckedChange = { enabled ->
+                    scope.launch { container.appearanceSettings.setUseAgentColorInBubbles(enabled) }
+                },
+            )
+        }
+    }
+}
+
+/** UC-53 — map a [ConversationFontSize] step to its short S/M/L/XL label string. */
+private fun fontSizeLabelRes(size: ConversationFontSize): Int = when (size) {
+    ConversationFontSize.SMALL -> R.string.settings_font_size_s
+    ConversationFontSize.MEDIUM -> R.string.settings_font_size_m
+    ConversationFontSize.LARGE -> R.string.settings_font_size_l
+    ConversationFontSize.XLARGE -> R.string.settings_font_size_xl
+}
+
+/**
  * UC-36 (AC#7) — the conversational-keyboard toggle. Pure projection of
  * [com.aisandbox.android.terminal.KeyboardSettingsStore] (held on the container);
  * flipping the switch persists immediately and the terminal screen picks it up via
@@ -279,7 +370,22 @@ private fun Footer() {
     )
 }
 
-// ── Section + row helpers ───────────────────────────────────────────────
+// ── Group + section + row helpers ───────────────────────────────────────
+
+/**
+ * UC-53 (AC1) — a top-level group divider ("Appearance" / "Info") sitting above a
+ * run of [Section]s. Larger/bolder than a [Section] title so the two reading
+ * levels (group vs. section) are visually distinct.
+ */
+@Composable
+private fun GroupHeader(title: String) {
+    Text(
+        text = title,
+        style = MaterialTheme.typography.titleMedium,
+        color = OnSurface,
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 4.dp).padding(top = 8.dp),
+    )
+}
 
 @Composable
 private fun Section(title: String, content: @Composable () -> Unit) {

@@ -13,6 +13,7 @@ import com.aisandbox.android.net.StreamClient
 import com.aisandbox.android.net.TerminatingSessionsStore
 import com.aisandbox.android.terminal.KeyboardSettingsStore
 import com.aisandbox.android.terminal.TerminalStreamController
+import com.aisandbox.android.ui.settings.AppearanceSettingsStore
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -47,6 +48,14 @@ class AppContainer(applicationContext: Context) {
      * InputConnection) and the settings screen (the toggle UI) read one source.
      */
     val keyboardSettings: KeyboardSettingsStore = KeyboardSettingsStore(appContext)
+
+    /**
+     * UC-53 — persisted conversation/agent-view appearance preferences (font size
+     * + agent-color-in-bubbles toggle, AC6). Process-scoped beside [keyboardSettings]
+     * so the settings screen (the controls) and the conversation view (which reads
+     * the values reactively) share one source.
+     */
+    val appearanceSettings: AppearanceSettingsStore = AppearanceSettingsStore(appContext)
 
     /**
      * UC-28 — process-scoped optimistic-terminating set, shared by the
