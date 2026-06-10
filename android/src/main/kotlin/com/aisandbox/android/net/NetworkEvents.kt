@@ -101,6 +101,28 @@ sealed interface NetworkEvent {
     data object CertRevoked : NetworkEvent
 
     /**
+     * UC-52 — a TRANSIENT connectivity failure: the server is briefly
+     * unreachable (connection refused, socket timeout, unknown host, a
+     * dropped socket, or any non-TLS {@link java.io.IOException}) rather
+     * than a genuine TLS / identity compromise. The fix for UC-52
+     * distinguishes this from {@link HandshakeError} so a momentary
+     * network hiccup never routes to the destructive
+     * {@code ServerIdentityChangedScreen} ("re-scan a fresh invite QR").
+     *
+     * <p><b>Transient — NEVER bus-routed.</b> Unlike every other variant,
+     * this one is intentionally NOT emitted onto the process-wide
+     * {@link NetworkEvents} bus. The {@link AiSandboxHttpClient} and
+     * {@link EnrollmentClient} catch blocks explicitly skip
+     * {@code tryEmit} for it; it is produced by
+     * {@link TlsFailureTranslation.translate} and consumed at the call
+     * site, where it drives a retryable, auto-recovering "reconnecting"
+     * banner on the sessions list (parallel to the {@code Stream*}
+     * variants, which the terminal screen consumes locally). The root
+     * composable's collector treats it as a no-op should it ever arrive.
+     */
+    data object ServerUnreachable : NetworkEvent
+
+    /**
      * AC25 also includes a 5-min reconnect cap that ends in a manual
      * "Disconnected — tap to reconnect" terminal state. The terminal
      * screen consumes this; everyone else ignores.

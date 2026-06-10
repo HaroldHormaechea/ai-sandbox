@@ -335,6 +335,37 @@ class SessionsCoordinatorTest {
     }
 
     /**
+     * UC-52 — build a pinned-HTTPS MockWebServer whose profile is pinned to the
+     * WRONG SPKI hex (all-zeros) against the real served cert. The real
+     * [SpkiPinningTrustManager] then throws a CertificateException inside
+     * {@code checkServerTrusted}, which JSSE surfaces as an SSLHandshakeException
+     * carrying the structured "SPKI pin mismatch: expected=… observed=…" message
+     * — a GENUINE TLS/identity failure (not connectivity). Used to prove the
+     * UC-52 fix did NOT weaken the identity path (AC4).
+     */
+    private fun pinnedServerWithWrongPin(dispatcher: Dispatcher): Fixture {
+        val cert = HeldCertificate.Builder()
+            .commonName("ai-sandbox-coordinator-test")
+            .addSubjectAlternativeName("127.0.0.1")
+            .rsa2048()
+            .build()
+        val handshake = HandshakeCertificates.Builder().heldCertificate(cert).build()
+        val server = MockWebServer().apply {
+            useHttps(handshake.sslSocketFactory(), false)
+            this.dispatcher = dispatcher
+            start(InetAddress.getByName("127.0.0.1"), 0)
+        }
+        val profile = ServerProfile(
+            serverUrl = "https://127.0.0.1:${server.port}",
+            // Deliberately NOT the served cert's pin → SPKI mismatch on handshake.
+            pinSha256Hex = "00".repeat(32),
+            clientCertCn = "alice-phone",
+            clientCertExpiresAtMs = 0L,
+        )
+        return Fixture(server, profile)
+    }
+
+    /**
      * AC4 — a 204 DELETE actually tears the container down: the server stops
      * enumerating the row, so the coordinator's post-delete refresh() drops it
      * from the list and it does NOT reappear. The list body flips to "[]" only
@@ -480,19 +511,23 @@ class SessionsCoordinatorTest {
     }
 
     /**
-     * AC5 (network/transport branch) — when the connection is refused the
-     * OkHttp interceptor translates the IOException to a
-     * [NetworkEvent.HandshakeError] (the full-screen ServerIdentityChanged
-     * surfacing) and re-throws. delete()'s try/catch MUST swallow the throwable
-     * (no viewModelScope crash). Because the failure is already surfaced
-     * full-screen, the coordinator deliberately does NOT also set lastError —
-     * the single-surface decision (translate(...) != null ⇒ skip the snackbar).
+     * UC-52 AC1 / AC2 / AC5 / AC6 — when the connection is refused the OkHttp
+     * interceptor now translates the IOException (ConnectException) to a
+     * TRANSIENT [NetworkEvent.ServerUnreachable] and deliberately does NOT
+     * bus-route it (so NO full-screen ServerIdentityChangedScreen), then
+     * re-throws. delete()'s try/catch swallows the throwable (no viewModelScope
+     * crash) and surfaceTransportThrow() raises the retryable
+     * {@code unreachable} banner with {@code lastError == null}
+     * (single-surface). This REPLACES the pre-UC-52 expectation that a
+     * connectivity drop emitted a [NetworkEvent.HandshakeError] identity event —
+     * the headline bug this use case fixes.
      */
     @Test
-    fun delete_transport_failure_is_single_surfaced_and_does_not_escape(): Unit = runBlocking {
+    fun delete_connectivity_failure_raises_unreachable_banner_and_does_not_escape(): Unit = runBlocking {
         // A real pinned fixture yields a valid profile (real 64-hex pin); then
         // we close the port so the next connect is refused (ConnectException,
-        // an IOException) — exercising the catch's transport branch.
+        // an IOException with no TLS cause) — exercising the catch's transient
+        // connectivity branch.
         val fx = startFixture()
         fx.shutdown()
 
@@ -528,12 +563,10 @@ class SessionsCoordinatorTest {
 
             coordinator.delete(1, force = false)
 
-            // The interceptor emits HandshakeError before re-throwing.
-            withTimeout(15_000) {
-                while (events.none { it is NetworkEvent.HandshakeError }) delay(50)
-            }
             // Join only the delete() child so its catch has finished — NOT the
-            // long-lived init mirror-collector captured in `preExisting`.
+            // long-lived init mirror-collector captured in `preExisting`. (No bus
+            // event is emitted for a transient drop, so we synchronise on the
+            // child completing, not on a NetworkEvent.)
             withTimeout(15_000) {
                 (workScope.coroutineContext.job.children.toSet() - preExisting).forEach { it.join() }
             }
@@ -542,13 +575,97 @@ class SessionsCoordinatorTest {
                 .`as`("delete() MUST swallow the transport throwable — nothing escapes viewModelScope")
                 .isNull()
             assertThat(events)
-                .`as`("a transport failure must be surfaced (AC5) — here via the full-screen NetworkEvent")
-                .anyMatch { it is NetworkEvent.HandshakeError }
+                .`as`(
+                    "AC6 — a transient connectivity drop is NEVER bus-routed (no full-screen identity event); " +
+                        "the interceptor guards `event !is ServerUnreachable` before tryEmit",
+                )
+                .noneMatch {
+                    it is NetworkEvent.HandshakeError ||
+                        it is NetworkEvent.PinMismatch ||
+                        it is NetworkEvent.HostnameMismatch
+                }
+            assertThat(state.value.unreachable)
+                .`as`("AC1/AC2 — a connectivity failure raises the retryable `unreachable` banner")
+                .isTrue()
+            assertThat(state.value.lastError)
+                .`as`("AC5 — single-surface: the banner is the surface, so lastError stays null (no snackbar)")
+                .isNull()
+        } finally {
+            workScope.cancel()
+            collectorScope.cancel()
+        }
+    }
+
+    /**
+     * UC-52 AC4 / AC5 — a GENUINE TLS/identity failure (SPKI pin mismatch) is
+     * UNCHANGED: the interceptor translates it to a real identity event
+     * ([NetworkEvent.PinMismatch] / [NetworkEvent.HandshakeError]) and bus-routes
+     * it to the full-screen ServerIdentityChangedScreen, and the coordinator's
+     * surfaceTransportThrow() leaves BOTH {@code unreachable} AND {@code lastError}
+     * untouched (no double-surface, UC-51's no-double-surface preserved). Staged
+     * by pinning the profile to the WRONG SPKI hex against a real served cert, so
+     * SpkiPinningTrustManager throws inside checkServerTrusted.
+     */
+    @Test
+    fun delete_genuine_tls_mismatch_routes_full_screen_and_suppresses_banner_and_snackbar(): Unit = runBlocking {
+        val fx = pinnedServerWithWrongPin(object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse =
+                MockResponse().setResponseCode(204)
+        })
+        val uncaught = AtomicReference<Throwable?>(null)
+        val handler = CoroutineExceptionHandler { _, t -> uncaught.set(t) }
+        val workScope = CoroutineScope(Dispatchers.IO + SupervisorJob() + handler)
+        val collectorScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+        try {
+            val events = CopyOnWriteArrayList<NetworkEvent>()
+            val subscribed = CompletableDeferred<Unit>()
+            collectorScope.launch {
+                NetworkEvents.flow
+                    .onSubscription { subscribed.complete(Unit) }
+                    .collect { events.add(it) }
+            }
+            subscribed.await()
+
+            val state = MutableStateFlow(
+                SessionsUiState(sessions = listOf(SessionSummary(n = 1, state = "running"))),
+            )
+            val coordinator = SessionsCoordinator(
+                state = state,
+                scope = workScope,
+                profileSupplier = { fx.profile },
+                apiFactory = apiFactory(),
+            )
+            val preExisting = workScope.coroutineContext.job.children.toSet()
+
+            coordinator.delete(1, force = false)
+
+            // A genuine TLS event IS bus-routed; wait for it, then join the child.
+            withTimeout(15_000) {
+                while (
+                    events.none {
+                        it is NetworkEvent.PinMismatch || it is NetworkEvent.HandshakeError
+                    }
+                ) {
+                    delay(50)
+                }
+            }
+            withTimeout(15_000) {
+                (workScope.coroutineContext.job.children.toSet() - preExisting).forEach { it.join() }
+            }
+
+            assertThat(uncaught.get())
+                .`as`("delete() MUST swallow the TLS throwable — nothing escapes viewModelScope")
+                .isNull()
+            assertThat(events)
+                .`as`("AC4 — a genuine pin mismatch is still routed full-screen (identity event on the bus)")
+                .anyMatch { it is NetworkEvent.PinMismatch || it is NetworkEvent.HandshakeError }
+            assertThat(state.value.unreachable)
+                .`as`("AC4 — a genuine TLS failure does NOT raise the transient banner")
+                .isFalse()
             assertThat(state.value.lastError)
                 .`as`(
-                    "transport/TLS failures are SINGLE-surfaced via the full-screen NetworkEvent path, " +
-                        "not ALSO via the snackbar lastError (developer's single-surface decision: " +
-                        "translate(...) != null ⇒ skip lastError)",
+                    "AC5 — single-surface preserved: a genuine TLS event is surfaced full-screen, " +
+                        "so the coordinator sets neither the banner nor the snackbar",
                 )
                 .isNull()
         } finally {
@@ -1056,8 +1173,10 @@ class SessionsCoordinatorTest {
 
     /**
      * AC7 (transport branch) — a transport throw (connection refused) is
-     * single-surfaced via the full-screen NetworkEvent path and swallowed (no
-     * scope crash); pending is still cleared in `finally`.
+     * swallowed (no scope crash) and pending is still cleared in `finally`.
+     * UC-52 — the connectivity drop now raises the transient {@code unreachable}
+     * banner (not a full-screen identity event); the pending-clear contract is
+     * unchanged.
      */
     @Test
     fun lifecycle_transport_failure_is_swallowed_and_clears_pending(): Unit = runBlocking {
@@ -1092,6 +1211,12 @@ class SessionsCoordinatorTest {
             assertThat(state.value.pendingActions)
                 .`as`("AC7 — pending clears in finally even when the call throws")
                 .doesNotContain(1)
+            assertThat(state.value.unreachable)
+                .`as`("UC-52 — the connectivity drop raises the transient unreachable banner")
+                .isTrue()
+            assertThat(state.value.lastError)
+                .`as`("UC-52 single-surface — banner only, no snackbar")
+                .isNull()
         } finally {
             workScope.cancel()
         }
@@ -1125,35 +1250,36 @@ class SessionsCoordinatorTest {
         }
     }
 
-    // ── UC-51 — refresh()/spawn() transport-throw hardening (AC1–AC7) ────────
+    // ── UC-51 + UC-52 — refresh()/spawn() transport-throw hardening ──────────
     //
     // refresh() and spawn() previously called list()/spawn(label) with NO
     // try/catch, so a transport throw (connection refused, timeout, unknown
     // host, TLS) escaped uncaught on viewModelScope (Main) → FATAL EXCEPTION:
-    // main (the "ai-sandbox keeps stopping" crash). The fix mirrors the
-    // already-hardened delete()/lifecycle() pattern EXACTLY. These two tests
-    // clone [delete_transport_failure_is_single_surfaced_and_does_not_escape]:
-    // a real pinned MockWebServer fixture (so the profile carries a valid
-    // 64-hex pin) is stood up and then shut down, so the next connect is
-    // refused with a real ConnectException (an IOException). This drives the
-    // REAL AiSandboxHttpClient interceptor — which TRANSLATES + EMITS a
-    // full-screen [NetworkEvent.HandshakeError] before re-throwing — proving
-    // the single-surface contract end to end. A throwing fake apiFactory is
-    // impossible here: SessionsApi is a final class with non-open suspend
-    // methods, so the closed-port fixture is the established way to make a real
-    // call throw.
+    // main (the "ai-sandbox keeps stopping" crash). UC-51 added the try/catch;
+    // UC-52 then RE-CLASSIFIED the connectivity throw: a real ConnectException
+    // (closed-port fixture) is an IOException with no TLS cause, so the
+    // interceptor translates it to a TRANSIENT NetworkEvent.ServerUnreachable
+    // and DOES NOT bus-route it — there is no full-screen identity event for a
+    // mere network drop (the headline UC-52 fix). The coordinator's catch then
+    // raises the retryable `unreachable` banner with lastError == null
+    // (single-surface). These tests therefore assert the banner + absence of
+    // any identity event, REPLACING the pre-UC-52 HandshakeError expectation.
+    // A throwing fake apiFactory is impossible here: SessionsApi is a final
+    // class with non-open suspend methods, so the closed-port fixture is the
+    // established way to make a real call throw.
 
     /**
-     * AC1 / AC2 / AC4 / AC5 / AC7 — a transport throw out of refresh()'s
-     * list() call is caught: nothing escapes the scope (no main-thread crash),
-     * the interceptor's full-screen [NetworkEvent.HandshakeError] is the SINGLE
-     * surface (so lastError stays null — translate(...) != null ⇒ skip the
-     * snackbar), `loading` is cleared (no stuck spinner), and the last-known
-     * `sessions` list is preserved (the screen renders it, recovering on the
-     * next successful refresh).
+     * UC-52 AC1 / AC2 / AC3(crash-safety) / AC5 — a connectivity throw out of
+     * refresh()'s list() call is caught: nothing escapes the scope (no
+     * main-thread crash), NO identity event is bus-routed (a transient drop
+     * never force-routes the identity screen), the retryable `unreachable`
+     * banner is raised with lastError == null (single-surface), `loading` is
+     * cleared (no stuck spinner), and the last-known `sessions` list is
+     * preserved (the screen renders it, recovering on the next successful
+     * refresh).
      */
     @Test
-    fun refresh_transport_failure_is_single_surfaced_and_does_not_escape(): Unit = runBlocking {
+    fun refresh_connectivity_failure_raises_unreachable_banner_and_does_not_escape(): Unit = runBlocking {
         // Real pinned fixture → valid profile (real 64-hex pin); then close the
         // port so the next connect is refused (ConnectException, an IOException).
         val fx = startFixture()
@@ -1190,33 +1316,33 @@ class SessionsCoordinatorTest {
 
             coordinator.refresh()
 
-            // The interceptor emits HandshakeError before re-throwing.
-            withTimeout(15_000) {
-                while (events.none { it is NetworkEvent.HandshakeError }) delay(50)
-            }
-            // Join only the refresh() child so its catch has finished.
+            // No bus event for a transient drop — synchronise on the refresh()
+            // child completing (its catch raises the banner before it returns).
             withTimeout(15_000) {
                 (workScope.coroutineContext.job.children.toSet() - preExisting).forEach { it.join() }
             }
 
             assertThat(uncaught.get())
-                .`as`("AC4 — refresh() MUST swallow the transport throwable; nothing escapes viewModelScope (no crash)")
+                .`as`("refresh() MUST swallow the transport throwable; nothing escapes viewModelScope (no crash)")
                 .isNull()
             assertThat(events)
-                .`as`("AC5 — a transport failure is surfaced via the full-screen NetworkEvent (HandshakeError)")
-                .anyMatch { it is NetworkEvent.HandshakeError }
+                .`as`("AC6 — a transient connectivity drop is NEVER bus-routed (no full-screen identity event)")
+                .noneMatch {
+                    it is NetworkEvent.HandshakeError ||
+                        it is NetworkEvent.PinMismatch ||
+                        it is NetworkEvent.HostnameMismatch
+                }
+            assertThat(state.value.unreachable)
+                .`as`("AC1/AC2 — refresh() raises the retryable `unreachable` banner on a connectivity drop")
+                .isTrue()
             assertThat(state.value.loading)
-                .`as`("AC4 — loading is always cleared so there's no stuck spinner")
+                .`as`("loading is always cleared so there's no stuck spinner")
                 .isFalse()
             assertThat(state.value.lastError)
-                .`as`(
-                    "AC5 — transport/TLS failures are SINGLE-surfaced via the full-screen NetworkEvent path, " +
-                        "not ALSO via the snackbar lastError (translate(...) != null ⇒ skip lastError, " +
-                        "mirroring delete()/lifecycle())",
-                )
+                .`as`("AC5 — single-surface: the banner is the surface, so lastError stays null (no snackbar)")
                 .isNull()
             assertThat(state.value.sessions)
-                .`as`("AC1 — the last-known list survives a failed refresh (sessions is NOT nulled, so the screen recovers)")
+                .`as`("the last-known list survives a failed refresh (sessions is NOT nulled, so the screen recovers)")
                 .isEqualTo(seeded)
         } finally {
             workScope.cancel()
@@ -1225,16 +1351,17 @@ class SessionsCoordinatorTest {
     }
 
     /**
-     * AC3 / AC4 / AC5 / AC7 — tapping Spawn while the server is unreachable:
-     * spawn() inserts the optimistic "starting" row, the spawn() call throws a
-     * transport exception, and the catch rolls that row back (same predicate as
-     * the HttpFailure branch) so a phantom session can't persist. Nothing
-     * escapes the scope (no crash), the interceptor's HandshakeError is the
-     * single surface (lastError stays null), and `spawning` is reset in
-     * `finally` so the FAB never sticks disabled.
+     * UC-52 AC1 / AC2 — tapping Spawn while the server is unreachable: spawn()
+     * inserts the optimistic "starting" row, the spawn() call throws a
+     * connectivity exception, and the catch rolls that row back (same predicate
+     * as the HttpFailure branch) so a phantom session can't persist. Nothing
+     * escapes the scope (no crash), NO identity event is bus-routed, the
+     * retryable `unreachable` banner is raised with lastError == null
+     * (single-surface), and `spawning` is reset in `finally` so the FAB never
+     * sticks disabled.
      */
     @Test
-    fun spawn_transport_failure_rolls_back_optimistic_row_and_does_not_escape(): Unit = runBlocking {
+    fun spawn_connectivity_failure_rolls_back_optimistic_row_and_raises_unreachable(): Unit = runBlocking {
         val fx = startFixture()
         fx.shutdown() // closed port → next connect refused (ConnectException)
 
@@ -1267,39 +1394,180 @@ class SessionsCoordinatorTest {
 
             coordinator.spawn("new-session")
 
-            // The interceptor emits HandshakeError before re-throwing.
-            withTimeout(15_000) {
-                while (events.none { it is NetworkEvent.HandshakeError }) delay(50)
-            }
-            // Join only the spawn() child so its catch + finally have finished.
+            // No bus event for a transient drop — join the spawn() child so its
+            // catch + finally have finished.
             withTimeout(15_000) {
                 (workScope.coroutineContext.job.children.toSet() - preExisting).forEach { it.join() }
             }
 
             assertThat(uncaught.get())
-                .`as`("AC3/AC4 — spawn() MUST swallow the transport throwable; nothing escapes viewModelScope (no crash)")
+                .`as`("spawn() MUST swallow the transport throwable; nothing escapes viewModelScope (no crash)")
                 .isNull()
             assertThat(events)
-                .`as`("AC5 — a transport failure is surfaced via the full-screen NetworkEvent (HandshakeError)")
-                .anyMatch { it is NetworkEvent.HandshakeError }
+                .`as`("AC6 — a transient connectivity drop is NEVER bus-routed (no full-screen identity event)")
+                .noneMatch {
+                    it is NetworkEvent.HandshakeError ||
+                        it is NetworkEvent.PinMismatch ||
+                        it is NetworkEvent.HostnameMismatch
+                }
             assertThat(state.value.sessions)
                 .`as`(
-                    "AC3 — the optimistic 'starting' row is rolled back on a transport throw (same predicate as " +
+                    "AC1 — the optimistic 'starting' row is rolled back on a transport throw (same predicate as " +
                         "the HttpFailure branch); only the seed rows remain, so no phantom session persists",
                 )
                 .isEqualTo(seeded)
             assertThat(state.value.spawning)
-                .`as`("AC3 — spawning is reset in finally so the FAB never sticks disabled")
+                .`as`("spawning is reset in finally so the FAB never sticks disabled")
                 .isFalse()
+            assertThat(state.value.unreachable)
+                .`as`("AC2 — spawn() raises the retryable `unreachable` banner on a connectivity drop")
+                .isTrue()
             assertThat(state.value.lastError)
-                .`as`(
-                    "AC5 — single-surfaced via the full-screen NetworkEvent path, not ALSO the snackbar lastError " +
-                        "(translate(...) != null ⇒ skip lastError)",
-                )
+                .`as`("AC5 — single-surface: banner only, no snackbar (lastError stays null)")
                 .isNull()
         } finally {
             workScope.cancel()
             collectorScope.cancel()
+        }
+    }
+
+    // ── UC-52 — auto-recovery: any operation that proves the server responded
+    //            clears the transient `unreachable` banner (AC3), and the
+    //            single-surface invariant (unreachable XOR lastError) holds. ──
+
+    /**
+     * AC3 — a successful list() (the server is reachable again) clears a stale
+     * `unreachable` banner WITHOUT the user re-scanning a QR. Seeds the state
+     * with unreachable=true (as if a prior drop set it) and a live fixture, then
+     * refresh() → 200 Success → banner auto-clears. This is the recovery half of
+     * the cycle whose failure half is
+     * [refresh_connectivity_failure_raises_unreachable_banner_and_does_not_escape].
+     */
+    @Test
+    fun refresh_success_clears_stale_unreachable_banner(): Unit = runBlocking {
+        val fx = startFixture()
+        val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+        try {
+            val state = MutableStateFlow(SessionsUiState(unreachable = true))
+            val coordinator = SessionsCoordinator(
+                state = state,
+                scope = scope,
+                profileSupplier = { fx.profile },
+                apiFactory = apiFactory(),
+            )
+
+            coordinator.refresh()
+            withTimeout(10_000) {
+                state.first { !it.loading && it.sessions.isNotEmpty() }
+            }
+
+            assertThat(state.value.unreachable)
+                .`as`("AC3 — a successful list proves reachability and auto-clears the banner (no re-scan needed)")
+                .isFalse()
+            assertThat(state.value.lastError).isNull()
+        } finally {
+            scope.cancel()
+            fx.shutdown()
+        }
+    }
+
+    /**
+     * AC3 / single-surface — an HTTP status (even a 500 error) proves the server
+     * ANSWERED, so refresh() clears the `unreachable` banner and surfaces the
+     * error via lastError instead. Asserts the two surfaces are mutually
+     * exclusive (never unreachable && lastError simultaneously).
+     */
+    @Test
+    fun refresh_http_failure_clears_unreachable_and_surfaces_snackbar(): Unit = runBlocking {
+        val fx = pinnedServer(object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse =
+                MockResponse().setResponseCode(500).setBody("""{"code":"boom","detail":"x"}""")
+        })
+        val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+        try {
+            val state = MutableStateFlow(SessionsUiState(unreachable = true))
+            val coordinator = SessionsCoordinator(
+                state = state,
+                scope = scope,
+                profileSupplier = { fx.profile },
+                apiFactory = apiFactory(),
+            )
+
+            coordinator.refresh()
+            withTimeout(10_000) { state.first { !it.loading && it.lastError != null } }
+
+            assertThat(state.value.unreachable)
+                .`as`("an HTTP answer proves reachability → the banner clears")
+                .isFalse()
+            assertThat(state.value.lastError)
+                .`as`("the HTTP error is surfaced as a snackbar instead ('<code> (<status>)')")
+                .isEqualTo("boom (500)")
+            // Single-surface invariant.
+            assertThat(state.value.unreachable && state.value.lastError != null)
+                .`as`("single-surface — never `unreachable` AND `lastError` simultaneously")
+                .isFalse()
+        } finally {
+            scope.cancel()
+            fx.shutdown()
+        }
+    }
+
+    /**
+     * AC3 — a UC-32 push Snapshot proves the server is reachable, so
+     * applySnapshot() auto-clears the `unreachable` banner even without a manual
+     * Retry (the live feed recovering is a valid recovery path). Pure/synchronous
+     * (no scope.launch), so the assertion is immediate.
+     */
+    @Test
+    fun applySnapshot_clears_unreachable_banner(): Unit = runBlocking {
+        val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+        try {
+            val state = MutableStateFlow(SessionsUiState(unreachable = true))
+            val coordinator = SessionsCoordinator(
+                state = state,
+                scope = scope,
+                profileSupplier = { null },
+                apiFactory = { error("apiFactory must not be called by applySnapshot") },
+            )
+
+            coordinator.applySnapshot(listOf(SessionSummary(n = 1, state = "running")))
+
+            assertThat(state.value.unreachable)
+                .`as`("AC3 — an inbound push Snapshot proves reachability and clears the banner")
+                .isFalse()
+            assertThat(state.value.sessions).anyMatch { it.n == 1 }
+        } finally {
+            scope.cancel()
+        }
+    }
+
+    /**
+     * AC3 — a UC-32 push Delta likewise proves reachability and clears the
+     * `unreachable` banner. Pure/synchronous.
+     */
+    @Test
+    fun applyDelta_clears_unreachable_banner(): Unit = runBlocking {
+        val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+        try {
+            val state = MutableStateFlow(SessionsUiState(unreachable = true))
+            val coordinator = SessionsCoordinator(
+                state = state,
+                scope = scope,
+                profileSupplier = { null },
+                apiFactory = { error("apiFactory must not be called by applyDelta") },
+            )
+
+            coordinator.applyDelta(
+                upserts = listOf(SessionSummary(n = 2, state = "running")),
+                removed = emptyList(),
+            )
+
+            assertThat(state.value.unreachable)
+                .`as`("AC3 — an inbound push Delta proves reachability and clears the banner")
+                .isFalse()
+            assertThat(state.value.sessions).anyMatch { it.n == 2 }
+        } finally {
+            scope.cancel()
         }
     }
 

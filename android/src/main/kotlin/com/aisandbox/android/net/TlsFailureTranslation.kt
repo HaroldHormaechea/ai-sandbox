@@ -150,16 +150,61 @@ object TlsFailureTranslation {
                 rawMessage = rawMessage,
             )
             is SSLException -> NetworkEvent.HandshakeError(rawMessage = rawMessage)
-            is IOException -> NetworkEvent.HandshakeError(rawMessage = rawMessage)
+            // UC-52 — the SSLException arms above run FIRST and unchanged, so
+            // every genuine TLS failure (pin / hostname / handshake) keeps its
+            // existing identity routing (AC4). Only NON-TLS IOExceptions reach
+            // here. A plain connectivity failure (ConnectException /
+            // SocketTimeoutException / UnknownHostException / dropped socket)
+            // is now a TRANSIENT ServerUnreachable, NOT a HandshakeError, so it
+            // no longer force-routes to ServerIdentityChangedScreen (AC1, AC6).
+            // SECURITY (AC4): an IOException / SocketException that CARRIES an
+            // SSLException somewhere in its cause chain is forced back onto the
+            // identity path via hasTlsCause() — when in doubt, identity wins.
+            is IOException ->
+                if (hasTlsCause(throwable)) {
+                    NetworkEvent.HandshakeError(rawMessage = rawMessage)
+                } else {
+                    NetworkEvent.ServerUnreachable
+                }
             else -> null
         }
     }
 
     /**
+     * UC-52 — does [t]'s cause chain carry a TLS-layer failure? Used by
+     * [translate] to keep a connectivity-shaped exception (e.g. a
+     * {@code SocketException: Connection reset} or generic {@code IOException})
+     * that actually WRAPS an {@link SSLException} on the identity path rather
+     * than silently re-bucketing it as transient against a possibly-compromised
+     * endpoint (the "when in doubt, identity wins" rule, AC4).
+     *
+     * <p>Iterative walk (no recursion) with the same [MAX_CAUSE_DEPTH] guard as
+     * [extractObservedSpkiHex] against pathological / circular chains. This
+     * predicates on {@link SSLException}; do NOT conflate it with
+     * [extractObservedSpkiHex], which predicates on {@link CertificateException}
+     * for the SPKI-pin message.
+     */
+    private fun hasTlsCause(t: Throwable?): Boolean {
+        var current: Throwable? = t
+        var depth = 0
+        while (current != null && depth < MAX_CAUSE_DEPTH) {
+            if (current is SSLException) {
+                return true
+            }
+            current = current.cause
+            depth++
+        }
+        return false
+    }
+
+    /**
      * Convert a [NetworkEvent] error variant into the screen-facing
      * [Mismatch] payload. Returns {@code null} for non-error variants
-     * (StreamReconnecting, StreamGaveUp, CertRevoked) — the caller is
-     * expected to filter to error variants before invoking.
+     * (StreamReconnecting, StreamGaveUp, CertRevoked) and — UC-52 — for
+     * the transient [NetworkEvent.ServerUnreachable] connectivity signal,
+     * which must NEVER produce a Mismatch / identity screen (AC4): a
+     * momentary network drop is a retryable banner, not a re-enroll
+     * dead-end. The caller filters to error variants before invoking.
      */
     fun toMismatch(event: NetworkEvent): Mismatch? = when (event) {
         is NetworkEvent.PinMismatch -> Mismatch.Pin(
@@ -175,6 +220,7 @@ object TlsFailureTranslation {
             rawMessage = event.rawMessage,
         )
         NetworkEvent.CertRevoked,
+        NetworkEvent.ServerUnreachable,
         is NetworkEvent.StreamReconnecting,
         is NetworkEvent.StreamGaveUp,
         -> null

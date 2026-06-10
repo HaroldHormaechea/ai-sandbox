@@ -3,6 +3,7 @@ package com.aisandbox.android.ui.screens
 import android.util.Log
 import com.aisandbox.android.net.ApiResult
 import com.aisandbox.android.net.LifecycleAction
+import com.aisandbox.android.net.NetworkEvent
 import com.aisandbox.android.net.ServerProfile
 import com.aisandbox.android.net.SessionSummary
 import com.aisandbox.android.net.SessionsApi
@@ -84,17 +85,24 @@ class SessionsCoordinator(
                         // UC-28 — race-safe reconcile of the optimistic-terminating
                         // set against the fresh server list (shared with the UC-32
                         // push-apply paths via reconcileTerminating).
+                        // UC-52 — the server responded, so it is reachable: clear
+                        // the transient unreachable banner (AC3 auto-recovery).
                         state.value = state.value.copy(
                             loading = false,
                             sessions = r.value,
                             profile = profile,
                             terminating = reconcileTerminating(r.value),
+                            unreachable = false,
                         )
                     }
                     is ApiResult.HttpFailure -> {
+                        // UC-52 — an HTTP status (even an error) proves the server
+                        // answered: clear unreachable so a stale banner can't sit
+                        // alongside the snackbar (single-surface invariant).
                         state.value = state.value.copy(
                             loading = false,
                             lastError = "${r.code} (${r.status})",
+                            unreachable = false,
                         )
                     }
                 }
@@ -102,22 +110,16 @@ class SessionsCoordinator(
                 // UC-51 — refresh() previously had no try/catch, so a transport
                 // throw (connection refused, timeout, unknown host, TLS) from
                 // list() escaped uncaught on viewModelScope (Main) → FATAL
-                // EXCEPTION: main. Mirror delete()/lifecycle() EXACTLY: the
-                // AiSandboxHttpClient interceptor already TRANSLATED + EMITTED a
-                // NetworkEvent (full-screen ServerIdentityChangedScreen) for any
-                // SSL/IO failure before re-throwing, so we only raise a snackbar
-                // for throwables it did NOT surface — avoids double-surfacing
-                // (AC5). ALWAYS clear loading so there's no stuck spinner (AC4);
-                // do NOT touch `sessions` so the last-known list survives (AC1).
+                // EXCEPTION: main. ALWAYS clear loading so there's no stuck
+                // spinner (AC4); do NOT touch `sessions` so the last-known list
+                // survives (AC1). UC-52 — classify the throw three ways via
+                // surfaceTransportThrow: transient connectivity → unreachable
+                // banner; ordinary error → snackbar; genuine TLS/identity →
+                // leave both (the interceptor already bus-routed the identity
+                // screen — no double-surface, AC5).
                 Log.w(TAG, "Refresh threw: ${t.message}", t)
                 state.value = state.value.copy(loading = false)
-                val host = profile.serverUrl
-                    .substringAfter("://")
-                    .substringBefore('/')
-                    .substringBefore(':')
-                if (TlsFailureTranslation.translate(t, profile.pinSha256Hex, host) == null) {
-                    state.value = state.value.copy(lastError = t.message ?: "refresh_failed")
-                }
+                surfaceTransportThrow(t, profile, "refresh_failed")
             }
         }
     }
@@ -136,9 +138,13 @@ class SessionsCoordinator(
      * off `sessions`.
      */
     fun applySnapshot(rows: List<SessionSummary>) {
+        // UC-52 — a UC-32 push frame proves the server is reachable again, so
+        // clear the transient unreachable banner: the feed auto-recovering is a
+        // valid recovery path even without a manual Retry (AC3 auto-recovery).
         state.value = state.value.copy(
             sessions = rows,
             terminating = reconcileTerminating(rows),
+            unreachable = false,
         )
     }
 
@@ -155,9 +161,12 @@ class SessionsCoordinator(
         upserts.forEach { byN[it.n] = it }
         removed.forEach { byN.remove(it) }
         val merged = byN.values.toList()
+        // UC-52 — like applySnapshot, an inbound delta proves reachability →
+        // clear the transient unreachable banner (AC3 auto-recovery).
         state.value = state.value.copy(
             sessions = merged,
             terminating = reconcileTerminating(merged),
+            unreachable = false,
         )
     }
 
@@ -229,32 +238,29 @@ class SessionsCoordinator(
                     }
                     is ApiResult.HttpFailure -> {
                         // Roll back the optimistic insertion + surface the error.
+                        // UC-52 — the server answered, so clear any stale
+                        // unreachable banner (single-surface invariant).
                         state.value = state.value.copy(
                             sessions = state.value.sessions.filterNot { it.n == optimisticN && it === optimistic },
                             lastError = "${r.code} (${r.status})",
+                            unreachable = false,
                         )
                     }
                 }
             } catch (t: Throwable) {
                 // UC-51 — spawn() previously had no try/catch, so a transport
                 // throw on spawn() escaped uncaught on viewModelScope (Main) →
-                // FATAL EXCEPTION: main. Mirror delete()/lifecycle(): roll back
-                // the optimistic "starting" row with the SAME predicate the
-                // HttpFailure branch uses so a phantom session can't persist
-                // (AC3), and only raise a snackbar for throwables the
-                // AiSandboxHttpClient interceptor did NOT already surface
-                // (translate(...) == null), avoiding a double surface (AC5).
+                // FATAL EXCEPTION: main. Roll back the optimistic "starting" row
+                // with the SAME predicate the HttpFailure branch uses so a
+                // phantom session can't persist (AC3). UC-52 — classify the
+                // throw three ways (transient banner / snackbar / leave-for-
+                // identity-screen) via surfaceTransportThrow, avoiding a double
+                // surface (AC5).
                 Log.w(TAG, "Spawn threw: ${t.message}", t)
                 state.value = state.value.copy(
                     sessions = state.value.sessions.filterNot { it.n == optimisticN && it === optimistic },
                 )
-                val host = profile.serverUrl
-                    .substringAfter("://")
-                    .substringBefore('/')
-                    .substringBefore(':')
-                if (TlsFailureTranslation.translate(t, profile.pinSha256Hex, host) == null) {
-                    state.value = state.value.copy(lastError = t.message ?: "spawn_failed")
-                }
+                surfaceTransportThrow(t, profile, "spawn_failed")
             } finally {
                 // Always clear spawning so the FAB never sticks disabled (AC3) —
                 // moved into finally because the old trailing assignment sat
@@ -286,7 +292,12 @@ class SessionsCoordinator(
                         // the row reverts to its real server status.
                         terminatingSessions.clear(n)
                         Log.w(TAG, "Delete $n failed: ${r.code} (${r.status}) ${r.detail}")
-                        state.value = state.value.copy(lastError = "${r.code} (${r.status})")
+                        // UC-52 — the server answered → clear any stale
+                        // unreachable banner (single-surface invariant).
+                        state.value = state.value.copy(
+                            lastError = "${r.code} (${r.status})",
+                            unreachable = false,
+                        )
                     }
                 }
             } catch (t: Throwable) {
@@ -295,20 +306,13 @@ class SessionsCoordinator(
                 terminatingSessions.clear(n)
                 // MANDATORY — delete() previously had no try/catch, so a
                 // transport throw (connection drop, TLS) escaped uncaught on
-                // viewModelScope (crash risk). The AiSandboxHttpClient
-                // interceptor already TRANSLATED + EMITTED a NetworkEvent
-                // (full-screen ServerIdentityChangedScreen) for any SSL/IO
-                // failure before re-throwing, so we only raise a snackbar for
-                // throwables it did NOT surface — avoids double-surfacing the
-                // same error (AC5).
+                // viewModelScope (crash risk). UC-52 — classify three ways via
+                // surfaceTransportThrow: transient connectivity → retryable
+                // banner; ordinary error → snackbar; genuine TLS/identity →
+                // leave both (the interceptor already bus-routed the identity
+                // screen — no double-surface, AC5).
                 Log.w(TAG, "Delete $n threw: ${t.message}", t)
-                val host = profile.serverUrl
-                    .substringAfter("://")
-                    .substringBefore('/')
-                    .substringBefore(':')
-                if (TlsFailureTranslation.translate(t, profile.pinSha256Hex, host) == null) {
-                    state.value = state.value.copy(lastError = t.message ?: "delete_failed")
-                }
+                surfaceTransportThrow(t, profile, "delete_failed")
             }
         }
     }
@@ -342,26 +346,60 @@ class SessionsCoordinator(
                     is ApiResult.Success -> refresh()
                     is ApiResult.HttpFailure -> {
                         Log.w(TAG, "Lifecycle ${action.token} $n failed: ${r.code} (${r.status}) ${r.detail}")
-                        state.value = state.value.copy(lastError = "${r.code} (${r.status})")
+                        // UC-52 — the server answered → clear any stale
+                        // unreachable banner (single-surface invariant).
+                        state.value = state.value.copy(
+                            lastError = "${r.code} (${r.status})",
+                            unreachable = false,
+                        )
                     }
                 }
             } catch (t: Throwable) {
-                // Mirror delete(): the http-client interceptor already
-                // translated + surfaced any SSL/IO failure (full-screen
-                // identity-changed dialog) before re-throwing, so only raise a
-                // snackbar for throwables it did NOT surface (avoid double).
+                // UC-52 — classify three ways via surfaceTransportThrow:
+                // transient connectivity → retryable banner; ordinary error →
+                // snackbar; genuine TLS/identity → leave both (the interceptor
+                // already bus-routed the identity screen — no double, AC5).
                 Log.w(TAG, "Lifecycle ${action.token} $n threw: ${t.message}", t)
-                val host = profile.serverUrl
-                    .substringAfter("://")
-                    .substringBefore('/')
-                    .substringBefore(':')
-                if (TlsFailureTranslation.translate(t, profile.pinSha256Hex, host) == null) {
-                    state.value = state.value.copy(lastError = t.message ?: "lifecycle_failed")
-                }
+                surfaceTransportThrow(t, profile, "lifecycle_failed")
             } finally {
                 // AC6/AC7 — release the control; refresh() / the next push
                 // carries the authoritative state.
                 state.value = state.value.copy(pendingActions = state.value.pendingActions - n)
+            }
+        }
+    }
+
+    /**
+     * UC-52 — single point that classifies a transport throwable caught around
+     * an API call and updates the single-surface (`unreachable` XOR
+     * [SessionsUiState.lastError]) invariant. Shared by every
+     * [refresh]/[spawn]/[delete]/[lifecycle] catch so the three-way decision
+     * stays identical:
+     *
+     *   • [NetworkEvent.ServerUnreachable] — a transient connectivity failure:
+     *     raise the retryable, auto-recovering banner and CLEAR `lastError`
+     *     (no snackbar). This is the non-identity, non-destructive path (AC1,
+     *     AC2) — the [AiSandboxHttpClient] interceptor deliberately did NOT
+     *     bus-route it, so there is no full-screen identity screen.
+     *   • `null` — an ordinary non-identity error the translator doesn't own:
+     *     surface it as a snackbar and clear `unreachable`.
+     *   • anything else (a genuine TLS/identity event) — the interceptor
+     *     already TRANSLATED + EMITTED it (full-screen ServerIdentityChanged),
+     *     so leave BOTH `unreachable` and `lastError` untouched to avoid a
+     *     double surface (AC5) and to keep genuine TLS routing intact (AC4).
+     */
+    private fun surfaceTransportThrow(t: Throwable, profile: ServerProfile, fallbackCode: String) {
+        val host = profile.serverUrl
+            .substringAfter("://")
+            .substringBefore('/')
+            .substringBefore(':')
+        when (TlsFailureTranslation.translate(t, profile.pinSha256Hex, host)) {
+            is NetworkEvent.ServerUnreachable ->
+                state.value = state.value.copy(unreachable = true, lastError = null)
+            null ->
+                state.value = state.value.copy(lastError = t.message ?: fallbackCode, unreachable = false)
+            else -> {
+                // Genuine TLS/identity — already surfaced full-screen; no-op here.
             }
         }
     }

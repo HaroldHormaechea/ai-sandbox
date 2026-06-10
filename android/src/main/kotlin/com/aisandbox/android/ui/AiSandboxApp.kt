@@ -105,6 +105,14 @@ fun AiSandboxApp() {
                 is NetworkEvent.StreamGaveUp -> {
                     // Handled inside TerminalScreen — root composable is a no-op.
                 }
+                NetworkEvent.ServerUnreachable -> {
+                    // UC-52 — transient connectivity signal. It is consumed at
+                    // the call site (the sessions-list "reconnecting" banner /
+                    // onboarding inline failure) and is NEVER emitted onto this
+                    // bus, so this arm only exists to keep the `when` exhaustive.
+                    // A momentary network drop must NOT route to the identity
+                    // screen, so the root composable does nothing here (AC1/AC6).
+                }
             }
         }
     }
