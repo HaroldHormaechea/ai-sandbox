@@ -87,22 +87,27 @@ class SessionsCoordinator(
                         // push-apply paths via reconcileTerminating).
                         // UC-52 — the server responded, so it is reachable: clear
                         // the transient unreachable banner (AC3 auto-recovery).
+                        // UC-54 — and record that the server has answered, so the
+                        // dot reads green (REACHABLE) rather than yellow (UNKNOWN).
                         state.value = state.value.copy(
                             loading = false,
                             sessions = r.value,
                             profile = profile,
                             terminating = reconcileTerminating(r.value),
                             unreachable = false,
+                            serverResponded = true,
                         )
                     }
                     is ApiResult.HttpFailure -> {
                         // UC-52 — an HTTP status (even an error) proves the server
                         // answered: clear unreachable so a stale banner can't sit
                         // alongside the snackbar (single-surface invariant).
+                        // UC-54 — an HTTP status also means the server is reachable.
                         state.value = state.value.copy(
                             loading = false,
                             lastError = "${r.code} (${r.status})",
                             unreachable = false,
+                            serverResponded = true,
                         )
                     }
                 }
@@ -145,6 +150,7 @@ class SessionsCoordinator(
             sessions = rows,
             terminating = reconcileTerminating(rows),
             unreachable = false,
+            serverResponded = true,
         )
     }
 
@@ -167,6 +173,7 @@ class SessionsCoordinator(
             sessions = merged,
             terminating = reconcileTerminating(merged),
             unreachable = false,
+            serverResponded = true,
         )
     }
 
@@ -240,10 +247,12 @@ class SessionsCoordinator(
                         // Roll back the optimistic insertion + surface the error.
                         // UC-52 — the server answered, so clear any stale
                         // unreachable banner (single-surface invariant).
+                        // UC-54 — the server answered → it is reachable.
                         state.value = state.value.copy(
                             sessions = state.value.sessions.filterNot { it.n == optimisticN && it === optimistic },
                             lastError = "${r.code} (${r.status})",
                             unreachable = false,
+                            serverResponded = true,
                         )
                     }
                 }
@@ -294,9 +303,11 @@ class SessionsCoordinator(
                         Log.w(TAG, "Delete $n failed: ${r.code} (${r.status}) ${r.detail}")
                         // UC-52 — the server answered → clear any stale
                         // unreachable banner (single-surface invariant).
+                        // UC-54 — the server answered → it is reachable.
                         state.value = state.value.copy(
                             lastError = "${r.code} (${r.status})",
                             unreachable = false,
+                            serverResponded = true,
                         )
                     }
                 }
@@ -348,9 +359,11 @@ class SessionsCoordinator(
                         Log.w(TAG, "Lifecycle ${action.token} $n failed: ${r.code} (${r.status}) ${r.detail}")
                         // UC-52 — the server answered → clear any stale
                         // unreachable banner (single-surface invariant).
+                        // UC-54 — the server answered → it is reachable.
                         state.value = state.value.copy(
                             lastError = "${r.code} (${r.status})",
                             unreachable = false,
+                            serverResponded = true,
                         )
                     }
                 }

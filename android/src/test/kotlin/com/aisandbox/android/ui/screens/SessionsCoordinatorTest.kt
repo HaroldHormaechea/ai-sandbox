@@ -1571,6 +1571,176 @@ class SessionsCoordinatorTest {
         }
     }
 
+    // ── UC-54 — tri-state connectivity wired through the real client stack ───
+    //
+    // These extend the live MockWebServer fixture suite (startFixture / the
+    // unreachable scaffolding) to prove the coordinator flips
+    // SessionsUiState.serverResponded at exactly the server-answered sites and
+    // that the derived `connectivity` reads REACHABLE/UNREACHABLE end-to-end
+    // (AC2/AC4). The pure precedence/recovery matrix lives in
+    // SessionsUiStateTest; here we assert the coordinator drives the inputs.
+
+    /**
+     * UC-54 AC2 — a successful (HTTP-answered) refresh flips
+     * `serverResponded = true`, leaving the derived dot at REACHABLE (green).
+     * Seeds from the default UNKNOWN state to prove the transition.
+     */
+    @Test
+    fun refresh_success_marks_server_responded_and_dot_is_reachable(): Unit = runBlocking {
+        val fx = startFixture()
+        val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+        try {
+            val state = MutableStateFlow(SessionsUiState())
+            // Pre-condition: a brand-new state derives UNKNOWN (yellow).
+            assertThat(state.value.connectivity).isEqualTo(Connectivity.UNKNOWN)
+
+            val coordinator = SessionsCoordinator(
+                state = state,
+                scope = scope,
+                profileSupplier = { fx.profile },
+                apiFactory = apiFactory(),
+            )
+
+            coordinator.refresh()
+            withTimeout(10_000) { state.first { !it.loading && it.sessions.isNotEmpty() } }
+
+            assertThat(state.value.serverResponded)
+                .`as`("AC2 — a 200 list proves the server answered → serverResponded is latched true")
+                .isTrue()
+            assertThat(state.value.connectivity)
+                .`as`("AC2 — server answered, not in-flight, not unreachable → REACHABLE (green)")
+                .isEqualTo(Connectivity.REACHABLE)
+        } finally {
+            scope.cancel()
+            fx.shutdown()
+        }
+    }
+
+    /**
+     * UC-54 AC4 — a connectivity drop (port closed → ConnectException, a
+     * non-TLS IOException classified ServerUnreachable) leaves the derived dot
+     * at UNREACHABLE (red). Reuses the connectivity-drop scaffolding from
+     * [refresh_connectivity_failure_raises_unreachable_banner_and_does_not_escape].
+     */
+    @Test
+    fun refresh_connectivity_drop_dot_is_unreachable(): Unit = runBlocking {
+        val fx = startFixture()
+        fx.shutdown() // close the port → next connect refused
+
+        val workScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+        try {
+            val state = MutableStateFlow(SessionsUiState())
+            val coordinator = SessionsCoordinator(
+                state = state,
+                scope = workScope,
+                profileSupplier = { fx.profile },
+                apiFactory = apiFactory(),
+            )
+            val preExisting = workScope.coroutineContext.job.children.toSet()
+
+            coordinator.refresh()
+            withTimeout(15_000) {
+                (workScope.coroutineContext.job.children.toSet() - preExisting).forEach { it.join() }
+            }
+
+            assertThat(state.value.unreachable)
+                .`as`("a transient connectivity drop sets unreachable")
+                .isTrue()
+            assertThat(state.value.connectivity)
+                .`as`("AC4 — last interaction failed (unreachable), not in-flight → UNREACHABLE (red)")
+                .isEqualTo(Connectivity.UNREACHABLE)
+        } finally {
+            workScope.cancel()
+        }
+    }
+
+    /**
+     * UC-54 null-branch guard — an ordinary, translator-UNOWNED throw (a
+     * non-IOException → `TlsFailureTranslation.translate` returns null) goes
+     * through surfaceTransportThrow's `null` arm, which sets `lastError`,
+     * clears `unreachable`, and DELIBERATELY does NOT touch `serverResponded`.
+     * Proven from BOTH seeds:
+     *   • serverResponded=false → stays false → dot stays UNKNOWN (not green);
+     *   • serverResponded=true  → stays true  → dot stays REACHABLE.
+     * The injected factory throws an IllegalStateException (via `error(...)`),
+     * exactly the non-TLS, non-IO throwable the translator does not own.
+     */
+    @Test
+    fun ordinary_throw_does_not_flip_server_responded_from_unknown_seed(): Unit = runBlocking {
+        val workScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+        val profile = ServerProfile(
+            serverUrl = "https://127.0.0.1:1",
+            pinSha256Hex = "00".repeat(32),
+            clientCertCn = "alice-phone",
+            clientCertExpiresAtMs = 0L,
+        )
+        try {
+            // Seed A: nothing answered yet (UNKNOWN). An ordinary throw must
+            // NOT promote the dot to green.
+            val state = MutableStateFlow(SessionsUiState())
+            val coordinator = SessionsCoordinator(
+                state = state,
+                scope = workScope,
+                profileSupplier = { profile },
+                // IllegalStateException — not an SSL/IO exception → translate() → null.
+                apiFactory = { error("ordinary boom") },
+            )
+
+            coordinator.refresh()
+            withTimeout(10_000) { state.first { !it.loading && it.lastError != null } }
+
+            assertThat(state.value.serverResponded)
+                .`as`("null-branch — an ordinary throw never proves the server answered")
+                .isFalse()
+            assertThat(state.value.unreachable)
+                .`as`("null-branch clears unreachable (ordinary error → snackbar, not banner)")
+                .isFalse()
+            assertThat(state.value.connectivity)
+                .`as`("serverResponded still false, not in-flight, not unreachable → stays UNKNOWN (not green)")
+                .isEqualTo(Connectivity.UNKNOWN)
+        } finally {
+            workScope.cancel()
+        }
+    }
+
+    @Test
+    fun ordinary_throw_does_not_clear_server_responded_from_reachable_seed(): Unit = runBlocking {
+        val workScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+        val profile = ServerProfile(
+            serverUrl = "https://127.0.0.1:1",
+            pinSha256Hex = "00".repeat(32),
+            clientCertCn = "alice-phone",
+            clientCertExpiresAtMs = 0L,
+        )
+        try {
+            // Seed B: the server had answered before (REACHABLE). An ordinary
+            // throw surfaces a snackbar but must NOT downgrade the dot — only a
+            // genuine connectivity drop (unreachable) does that.
+            val state = MutableStateFlow(SessionsUiState(serverResponded = true))
+            assertThat(state.value.connectivity).isEqualTo(Connectivity.REACHABLE)
+
+            val coordinator = SessionsCoordinator(
+                state = state,
+                scope = workScope,
+                profileSupplier = { profile },
+                apiFactory = { error("ordinary boom") },
+            )
+
+            coordinator.refresh()
+            withTimeout(10_000) { state.first { !it.loading && it.lastError != null } }
+
+            assertThat(state.value.serverResponded)
+                .`as`("null-branch — serverResponded is never cleared once set")
+                .isTrue()
+            assertThat(state.value.unreachable).isFalse()
+            assertThat(state.value.connectivity)
+                .`as`("an ordinary error keeps the dot REACHABLE (green); only unreachable turns it red")
+                .isEqualTo(Connectivity.REACHABLE)
+        } finally {
+            workScope.cancel()
+        }
+    }
+
     private fun spkiHex(spkiBytes: ByteArray): String =
         MessageDigest.getInstance("SHA-256").digest(spkiBytes)
             .joinToString("") { "%02x".format(it.toInt() and 0xff) }

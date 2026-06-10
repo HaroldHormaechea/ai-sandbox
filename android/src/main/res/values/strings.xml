@@ -29,12 +29,12 @@
     <string name="sessions_error_snackbar">Request failed: %1$s</string>
     <string name="sessions_error_dismiss">Dismiss</string>
 
-    <!-- UC-52 — transient connectivity banner. Distinct from the identity
-         screen and the error snackbar: a momentary network drop is retryable
-         and auto-recovers when the server is reachable again. Tone aligned with
-         the terminal stream's "Reconnecting…". -->
-    <string name="sessions_unreachable_banner">Can\'t reach the server — reconnecting…</string>
-    <string name="sessions_unreachable_retry">Retry</string>
+    <!-- UC-54 — TalkBack descriptions for the tri-state connectivity dot next
+         to the server URL. Color is the sole connectivity signal, so these
+         carry the state for screen readers. -->
+    <string name="sessions_connectivity_reachable">Server reachable</string>
+    <string name="sessions_connectivity_checking">Checking server connectivity</string>
+    <string name="sessions_connectivity_unreachable">Server unreachable</string>
 
     <!-- New session sheet (UC04-2a) -->
     <string name="new_session_label_hint">e.g. release-build, scratch</string>

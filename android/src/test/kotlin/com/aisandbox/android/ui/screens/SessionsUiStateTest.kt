@@ -363,4 +363,80 @@ class SessionsUiStateTest {
         val s = SessionsUiState(sessions = listOf(row(1, "running")))
         assertThat(s.isPending(row(1, "running"))).isFalse
     }
+
+    // ── UC-54 — tri-state connectivity derivation (AC1/AC2/AC3/AC4/AC6/AC7) ───
+    //
+    // Pure derivation on SessionsUiState.connectivity — no Android, no
+    // Robolectric, no network. This is the AC#7 core: the color-state mapping
+    // is JVM-unit-tested on state. (AC#1 — the dot binding to this value — is
+    // covered transitively: the screen reads state.connectivity and the
+    // testTag "sessions_connectivity_dot" pins the wiring.)
+
+    @Test
+    fun `connectivity is UNKNOWN for the default pre-first-call state (UC-54 AC3)`() {
+        // Nothing has resolved yet: not in-flight, not unreachable, the server
+        // has never answered → UNKNOWN (rendered yellow). Distinguishes
+        // "never reached yet" from "last call succeeded".
+        assertThat(SessionsUiState().connectivity).isEqualTo(Connectivity.UNKNOWN)
+    }
+
+    @Test
+    fun `connectivity is CHECKING while loading (UC-54 AC3)`() {
+        assertThat(SessionsUiState(loading = true).connectivity)
+            .isEqualTo(Connectivity.CHECKING)
+    }
+
+    @Test
+    fun `connectivity is CHECKING while spawning (UC-54 AC3)`() {
+        assertThat(SessionsUiState(spawning = true).connectivity)
+            .isEqualTo(Connectivity.CHECKING)
+    }
+
+    @Test
+    fun `connectivity is CHECKING while a lifecycle action is pending (UC-54 AC3)`() {
+        assertThat(SessionsUiState(pendingActions = setOf(1)).connectivity)
+            .isEqualTo(Connectivity.CHECKING)
+    }
+
+    @Test
+    fun `connectivity is REACHABLE when the server answered and nothing is in flight (UC-54 AC2)`() {
+        // serverResponded=true, not loading/spawning/pending, not unreachable
+        // → REACHABLE (green): the last interaction succeeded.
+        val s = SessionsUiState(serverResponded = true)
+        assertThat(s.connectivity).isEqualTo(Connectivity.REACHABLE)
+    }
+
+    @Test
+    fun `connectivity is UNREACHABLE when the last interaction failed (UC-54 AC4)`() {
+        // unreachable=true, not in-flight → UNREACHABLE (red). Holds even once
+        // the server has answered before (a later drop dominates a prior
+        // success).
+        assertThat(SessionsUiState(unreachable = true).connectivity)
+            .isEqualTo(Connectivity.UNREACHABLE)
+        assertThat(SessionsUiState(unreachable = true, serverResponded = true).connectivity)
+            .isEqualTo(Connectivity.UNREACHABLE)
+    }
+
+    @Test
+    fun `connectivity precedence — CHECKING outranks UNREACHABLE while a refresh is in flight (UC-54)`() {
+        // The deliberate CHECKING > UNREACHABLE design decision: a foreground
+        // ON_RESUME fires refresh(), so a persistently-down server flickers
+        // red→yellow→red ("retrying now") rather than sitting flat red.
+        val s = SessionsUiState(unreachable = true, loading = true)
+        assertThat(s.connectivity).isEqualTo(Connectivity.CHECKING)
+    }
+
+    @Test
+    fun `connectivity recovers to REACHABLE after an unreachable drop is cleared (UC-54 AC6)`() {
+        // The full recovery cycle on state: a drop sets unreachable=true (red);
+        // a later successful operation clears unreachable and sets
+        // serverResponded → REACHABLE (green) with no manual retry.
+        val dropped = SessionsUiState(unreachable = true)
+        assertThat(dropped.connectivity).isEqualTo(Connectivity.UNREACHABLE)
+
+        val recovered = dropped.copy(unreachable = false, serverResponded = true)
+        assertThat(recovered.connectivity)
+            .`as`("AC6 — a successful operation auto-returns the dot to green (no manual retry)")
+            .isEqualTo(Connectivity.REACHABLE)
+    }
 }

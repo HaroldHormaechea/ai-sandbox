@@ -70,6 +70,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
@@ -84,6 +86,7 @@ import com.aisandbox.android.ui.components.PendingQuestionBadge
 import com.aisandbox.android.ui.components.SessionAvatar
 import com.aisandbox.android.ui.components.StatusPill
 import com.aisandbox.android.ui.theme.AiSandboxMonoTypography
+import com.aisandbox.android.ui.theme.ErrorTone
 import com.aisandbox.android.ui.theme.OnSurface
 import com.aisandbox.android.ui.theme.OnSurfaceMuted
 import com.aisandbox.android.ui.theme.OnSurfaceVariant
@@ -168,11 +171,31 @@ fun SessionsScreen(
                             color = OnSurface,
                         )
                         Row(verticalAlignment = Alignment.CenterVertically) {
+                            // UC-54 — tri-state connectivity dot: green when the
+                            // last interaction succeeded, red when it failed, yellow
+                            // while a check is in flight or before the first call
+                            // resolves. Color is the sole signal, so a
+                            // contentDescription carries the state for TalkBack.
+                            val dotColor = when (state.connectivity) {
+                                Connectivity.REACHABLE -> Success
+                                Connectivity.UNREACHABLE -> ErrorTone
+                                Connectivity.CHECKING, Connectivity.UNKNOWN -> Warning
+                            }
+                            val dotDescription = when (state.connectivity) {
+                                Connectivity.REACHABLE ->
+                                    stringResource(R.string.sessions_connectivity_reachable)
+                                Connectivity.UNREACHABLE ->
+                                    stringResource(R.string.sessions_connectivity_unreachable)
+                                Connectivity.CHECKING, Connectivity.UNKNOWN ->
+                                    stringResource(R.string.sessions_connectivity_checking)
+                            }
                             Box(
                                 modifier = Modifier
                                     .size(8.dp)
                                     .clip(CircleShape)
-                                    .background(Success),
+                                    .background(dotColor)
+                                    .testTag("sessions_connectivity_dot")
+                                    .semantics { contentDescription = dotDescription },
                             )
                             Spacer(Modifier.width(6.dp))
                             Text(
@@ -200,24 +223,12 @@ fun SessionsScreen(
         },
     ) { innerPadding ->
         Column(modifier = Modifier.fillMaxSize().padding(innerPadding)) {
-            // UC-52 — inline, retryable "reconnecting" banner for a TRANSIENT
-            // connectivity failure. Distinct from the full-screen identity
-            // screen (genuine TLS/pin/hostname compromise) and from the error
-            // snackbar (ordinary HTTP failures): a momentary network drop is
-            // recoverable, so we offer a Retry and auto-clear on recovery
-            // (AC2/AC3). Retry pairs a REST refresh() with reconnectEvents() so
-            // the UC-32 push feed is revived even after it hit its back-off cap.
-            if (state.unreachable) {
-                UnreachableBanner(
-                    onRetry = {
-                        viewModel.refresh()
-                        viewModel.reconnectEvents()
-                    },
-                )
-            }
+            // UC-54 — the transient-connectivity signal is now the tri-state
+            // dot in the top bar (replacing the UC-52 "reconnecting" banner), so
+            // a server outage degrades gracefully without a disruptive surface.
             SessionsBody(
                 // Outer Column already consumed the scaffold inset; the body
-                // fills the remaining space below the banner.
+                // fills the remaining space.
                 padding = PaddingValues(0.dp),
                 state = state,
                 onSelectFilter = viewModel::selectFilter,
@@ -254,45 +265,6 @@ fun SessionsScreen(
                     viewModel.spawn(label.takeIf { it.isNotBlank() })
                     coroutineScope.launch { sheetState.hide(); showNewSheet = false }
                 },
-            )
-        }
-    }
-}
-
-/**
- * UC-52 — the transient-connectivity banner. Rendered above [SessionsBody]
- * only while [SessionsUiState.unreachable] is set. It is deliberately a thin
- * inline strip (NOT a full-screen takeover like ServerIdentityChangedScreen and
- * NOT the transient error snackbar): the server is momentarily unreachable, so
- * the user keeps their last-known list and gets a [onRetry] affordance. The
- * banner clears automatically when any operation proves the server responded
- * (refresh / push frame), so [onRetry] is a convenience, not the only path
- * (AC2/AC3). Black-on-Warning mirrors the UC20 swipe-delete contrast rule.
- */
-@Composable
-private fun UnreachableBanner(onRetry: () -> Unit) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(Warning)
-            .padding(start = 16.dp, end = 8.dp, top = 8.dp, bottom = 8.dp)
-            .testTag("sessions_unreachable_banner"),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Text(
-            text = stringResource(R.string.sessions_unreachable_banner),
-            style = MaterialTheme.typography.bodyMedium,
-            color = Color.Black,
-            modifier = Modifier.weight(1f),
-        )
-        Spacer(Modifier.width(8.dp))
-        TextButton(
-            onClick = onRetry,
-            modifier = Modifier.testTag("sessions_unreachable_retry"),
-        ) {
-            Text(
-                text = stringResource(R.string.sessions_unreachable_retry),
-                color = Color.Black,
             )
         }
     }
