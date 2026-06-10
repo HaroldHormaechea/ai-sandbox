@@ -89,29 +89,19 @@ class SessionsViewModel(application: Application) : AndroidViewModel(application
     /** UC-32 — close the live push feed; driven by the screen on foreground STOP (AC6). */
     fun disconnectEvents() = eventsController.disconnect()
 
-    /**
-     * UC-52 — full feed revival for the "reconnecting" banner's Retry action
-     * (AC2/AC3). A bare [connectEvents] is NOT enough: once the UC-32 feed hits
-     * its 5-min cumulative back-off cap, [SessionEventsController]'s loop returns
-     * WITHOUT resetting its [com.aisandbox.android.net.ReconnectController]
-     * (stale `firstFailureAtMs`), so a plain reconnect re-trips `shouldGiveUp()`
-     * immediately and dies. [SessionEventsController.disconnect] calls
-     * `reconnect.reset()`, so disconnect-then-connect revives the push feed
-     * cleanly. Reuses the existing controller machinery — no parallel recovery
-     * path. The screen pairs this with a [refresh] so REST recovery and feed
-     * revival happen together.
-     */
-    fun reconnectEvents() {
-        eventsController.disconnect("uc52-retry")
-        eventsController.connect()
-    }
-
     override fun onCleared() {
         // Permanent teardown of the push feed's scope when the ViewModel dies.
         eventsController.close()
         super.onCleared()
     }
 }
+
+/**
+ * UC-54 — tri-state server connectivity for the Sessions-screen dot.
+ * UNKNOWN and CHECKING both render yellow; they are kept distinct so the two
+ * sub-cases (never-reached vs. a check in flight) are independently testable.
+ */
+enum class Connectivity { UNKNOWN, CHECKING, REACHABLE, UNREACHABLE }
 
 /** Read-only state surfaced to the Compose layer. */
 data class SessionsUiState(
@@ -131,6 +121,15 @@ data class SessionsUiState(
      * (Success, an HTTP failure, or a UC-32 push frame) clears it (AC2/AC3).
      */
     val unreachable: Boolean = false,
+    /**
+     * UC-54 — true once the server has answered at least once this session
+     * (any Success, any HTTP failure, or any UC-32 push frame). Lets the
+     * tri-state [connectivity] dot tell "never reached yet" (UNKNOWN → yellow)
+     * apart from "last interaction succeeded" (REACHABLE → green) when
+     * [unreachable] is false. Set by [SessionsCoordinator] at every site where
+     * the server demonstrably responded; never cleared once set.
+     */
+    val serverResponded: Boolean = false,
     /**
      * UC-28 — session numbers the operator has optimistically marked as
      * terminating (delete confirmed, not yet resolved). Mirrored from the
@@ -180,6 +179,25 @@ data class SessionsUiState(
 
     /** UC-46 — whether a lifecycle action for [row] is currently in flight. */
     fun isPending(row: SessionSummary): Boolean = row.n in pendingActions
+
+    /**
+     * UC-54 — the tri-state connectivity the Sessions-screen dot binds to.
+     * Precedence (highest first):
+     *   • a check/refresh/spawn in flight → CHECKING (yellow);
+     *   • else the last interaction failed → UNREACHABLE (red);
+     *   • else the server has answered before → REACHABLE (green);
+     *   • else nothing has resolved yet → UNKNOWN (yellow).
+     * CHECKING is deliberately ABOVE UNREACHABLE — a foreground ON_RESUME fires
+     * refresh(), so a persistently-down server intentionally flickers
+     * red→yellow→red ("retrying now") rather than sitting flat red.
+     */
+    val connectivity: Connectivity
+        get() = when {
+            loading || spawning || pendingActions.isNotEmpty() -> Connectivity.CHECKING
+            unreachable -> Connectivity.UNREACHABLE
+            serverResponded -> Connectivity.REACHABLE
+            else -> Connectivity.UNKNOWN
+        }
 }
 
 /** Filter chip selection. */
