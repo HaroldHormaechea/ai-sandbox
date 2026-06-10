@@ -78,23 +78,45 @@ class SessionsCoordinator(
             // failed first fetch (e.g. the Fix B decode bug) left the host
             // line blank.
             state.value = state.value.copy(profile = profile)
-            when (val r = apiFactory(profile).list()) {
-                is ApiResult.Success -> {
-                    // UC-28 — race-safe reconcile of the optimistic-terminating
-                    // set against the fresh server list (shared with the UC-32
-                    // push-apply paths via reconcileTerminating).
-                    state.value = state.value.copy(
-                        loading = false,
-                        sessions = r.value,
-                        profile = profile,
-                        terminating = reconcileTerminating(r.value),
-                    )
+            try {
+                when (val r = apiFactory(profile).list()) {
+                    is ApiResult.Success -> {
+                        // UC-28 — race-safe reconcile of the optimistic-terminating
+                        // set against the fresh server list (shared with the UC-32
+                        // push-apply paths via reconcileTerminating).
+                        state.value = state.value.copy(
+                            loading = false,
+                            sessions = r.value,
+                            profile = profile,
+                            terminating = reconcileTerminating(r.value),
+                        )
+                    }
+                    is ApiResult.HttpFailure -> {
+                        state.value = state.value.copy(
+                            loading = false,
+                            lastError = "${r.code} (${r.status})",
+                        )
+                    }
                 }
-                is ApiResult.HttpFailure -> {
-                    state.value = state.value.copy(
-                        loading = false,
-                        lastError = "${r.code} (${r.status})",
-                    )
+            } catch (t: Throwable) {
+                // UC-51 — refresh() previously had no try/catch, so a transport
+                // throw (connection refused, timeout, unknown host, TLS) from
+                // list() escaped uncaught on viewModelScope (Main) → FATAL
+                // EXCEPTION: main. Mirror delete()/lifecycle() EXACTLY: the
+                // AiSandboxHttpClient interceptor already TRANSLATED + EMITTED a
+                // NetworkEvent (full-screen ServerIdentityChangedScreen) for any
+                // SSL/IO failure before re-throwing, so we only raise a snackbar
+                // for throwables it did NOT surface — avoids double-surfacing
+                // (AC5). ALWAYS clear loading so there's no stuck spinner (AC4);
+                // do NOT touch `sessions` so the last-known list survives (AC1).
+                Log.w(TAG, "Refresh threw: ${t.message}", t)
+                state.value = state.value.copy(loading = false)
+                val host = profile.serverUrl
+                    .substringAfter("://")
+                    .substringBefore('/')
+                    .substringBefore(':')
+                if (TlsFailureTranslation.translate(t, profile.pinSha256Hex, host) == null) {
+                    state.value = state.value.copy(lastError = t.message ?: "refresh_failed")
                 }
             }
         }
@@ -195,21 +217,50 @@ class SessionsCoordinator(
                 )
                 return@launch
             }
-            when (val r = apiFactory(profile).spawn(label)) {
-                is ApiResult.Success -> {
-                    // Replace the optimistic row with the server's
-                    // authoritative summary on the next refresh.
-                    refresh()
+            try {
+                when (val r = apiFactory(profile).spawn(label)) {
+                    is ApiResult.Success -> {
+                        // Replace the optimistic row with the server's
+                        // authoritative summary on the next refresh. The nested
+                        // refresh() is itself now guarded (UC-51), so a spawn
+                        // that succeeds server-side but whose follow-up refresh
+                        // hits a transport throw does not crash.
+                        refresh()
+                    }
+                    is ApiResult.HttpFailure -> {
+                        // Roll back the optimistic insertion + surface the error.
+                        state.value = state.value.copy(
+                            sessions = state.value.sessions.filterNot { it.n == optimisticN && it === optimistic },
+                            lastError = "${r.code} (${r.status})",
+                        )
+                    }
                 }
-                is ApiResult.HttpFailure -> {
-                    // Roll back the optimistic insertion + surface the error.
-                    state.value = state.value.copy(
-                        sessions = state.value.sessions.filterNot { it.n == optimisticN && it === optimistic },
-                        lastError = "${r.code} (${r.status})",
-                    )
+            } catch (t: Throwable) {
+                // UC-51 — spawn() previously had no try/catch, so a transport
+                // throw on spawn() escaped uncaught on viewModelScope (Main) →
+                // FATAL EXCEPTION: main. Mirror delete()/lifecycle(): roll back
+                // the optimistic "starting" row with the SAME predicate the
+                // HttpFailure branch uses so a phantom session can't persist
+                // (AC3), and only raise a snackbar for throwables the
+                // AiSandboxHttpClient interceptor did NOT already surface
+                // (translate(...) == null), avoiding a double surface (AC5).
+                Log.w(TAG, "Spawn threw: ${t.message}", t)
+                state.value = state.value.copy(
+                    sessions = state.value.sessions.filterNot { it.n == optimisticN && it === optimistic },
+                )
+                val host = profile.serverUrl
+                    .substringAfter("://")
+                    .substringBefore('/')
+                    .substringBefore(':')
+                if (TlsFailureTranslation.translate(t, profile.pinSha256Hex, host) == null) {
+                    state.value = state.value.copy(lastError = t.message ?: "spawn_failed")
                 }
+            } finally {
+                // Always clear spawning so the FAB never sticks disabled (AC3) —
+                // moved into finally because the old trailing assignment sat
+                // after the `when`, so a throw skipped it → stuck FAB.
+                state.value = state.value.copy(spawning = false)
             }
-            state.value = state.value.copy(spawning = false)
         }
     }
 

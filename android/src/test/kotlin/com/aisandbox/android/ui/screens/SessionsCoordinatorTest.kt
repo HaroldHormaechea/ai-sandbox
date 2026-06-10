@@ -1125,6 +1125,184 @@ class SessionsCoordinatorTest {
         }
     }
 
+    // ── UC-51 — refresh()/spawn() transport-throw hardening (AC1–AC7) ────────
+    //
+    // refresh() and spawn() previously called list()/spawn(label) with NO
+    // try/catch, so a transport throw (connection refused, timeout, unknown
+    // host, TLS) escaped uncaught on viewModelScope (Main) → FATAL EXCEPTION:
+    // main (the "ai-sandbox keeps stopping" crash). The fix mirrors the
+    // already-hardened delete()/lifecycle() pattern EXACTLY. These two tests
+    // clone [delete_transport_failure_is_single_surfaced_and_does_not_escape]:
+    // a real pinned MockWebServer fixture (so the profile carries a valid
+    // 64-hex pin) is stood up and then shut down, so the next connect is
+    // refused with a real ConnectException (an IOException). This drives the
+    // REAL AiSandboxHttpClient interceptor — which TRANSLATES + EMITS a
+    // full-screen [NetworkEvent.HandshakeError] before re-throwing — proving
+    // the single-surface contract end to end. A throwing fake apiFactory is
+    // impossible here: SessionsApi is a final class with non-open suspend
+    // methods, so the closed-port fixture is the established way to make a real
+    // call throw.
+
+    /**
+     * AC1 / AC2 / AC4 / AC5 / AC7 — a transport throw out of refresh()'s
+     * list() call is caught: nothing escapes the scope (no main-thread crash),
+     * the interceptor's full-screen [NetworkEvent.HandshakeError] is the SINGLE
+     * surface (so lastError stays null — translate(...) != null ⇒ skip the
+     * snackbar), `loading` is cleared (no stuck spinner), and the last-known
+     * `sessions` list is preserved (the screen renders it, recovering on the
+     * next successful refresh).
+     */
+    @Test
+    fun refresh_transport_failure_is_single_surfaced_and_does_not_escape(): Unit = runBlocking {
+        // Real pinned fixture → valid profile (real 64-hex pin); then close the
+        // port so the next connect is refused (ConnectException, an IOException).
+        val fx = startFixture()
+        fx.shutdown()
+
+        val uncaught = AtomicReference<Throwable?>(null)
+        val handler = CoroutineExceptionHandler { _, t -> uncaught.set(t) }
+        val workScope = CoroutineScope(Dispatchers.IO + SupervisorJob() + handler)
+        val collectorScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+        try {
+            val events = CopyOnWriteArrayList<NetworkEvent>()
+            val subscribed = CompletableDeferred<Unit>()
+            collectorScope.launch {
+                NetworkEvents.flow
+                    .onSubscription { subscribed.complete(Unit) }
+                    .collect { events.add(it) }
+            }
+            subscribed.await()
+
+            val seeded = listOf(
+                SessionSummary(n = 1, label = "existing", state = "running"),
+                SessionSummary(n = 2, label = "other", state = "running"),
+            )
+            val state = MutableStateFlow(SessionsUiState(sessions = seeded))
+            val coordinator = SessionsCoordinator(
+                state = state,
+                scope = workScope,
+                profileSupplier = { fx.profile },
+                apiFactory = apiFactory(),
+            )
+            // Snapshot the init {} mirror-collector child so we join only the
+            // refresh() child below (see the delete-transport test for why).
+            val preExisting = workScope.coroutineContext.job.children.toSet()
+
+            coordinator.refresh()
+
+            // The interceptor emits HandshakeError before re-throwing.
+            withTimeout(15_000) {
+                while (events.none { it is NetworkEvent.HandshakeError }) delay(50)
+            }
+            // Join only the refresh() child so its catch has finished.
+            withTimeout(15_000) {
+                (workScope.coroutineContext.job.children.toSet() - preExisting).forEach { it.join() }
+            }
+
+            assertThat(uncaught.get())
+                .`as`("AC4 — refresh() MUST swallow the transport throwable; nothing escapes viewModelScope (no crash)")
+                .isNull()
+            assertThat(events)
+                .`as`("AC5 — a transport failure is surfaced via the full-screen NetworkEvent (HandshakeError)")
+                .anyMatch { it is NetworkEvent.HandshakeError }
+            assertThat(state.value.loading)
+                .`as`("AC4 — loading is always cleared so there's no stuck spinner")
+                .isFalse()
+            assertThat(state.value.lastError)
+                .`as`(
+                    "AC5 — transport/TLS failures are SINGLE-surfaced via the full-screen NetworkEvent path, " +
+                        "not ALSO via the snackbar lastError (translate(...) != null ⇒ skip lastError, " +
+                        "mirroring delete()/lifecycle())",
+                )
+                .isNull()
+            assertThat(state.value.sessions)
+                .`as`("AC1 — the last-known list survives a failed refresh (sessions is NOT nulled, so the screen recovers)")
+                .isEqualTo(seeded)
+        } finally {
+            workScope.cancel()
+            collectorScope.cancel()
+        }
+    }
+
+    /**
+     * AC3 / AC4 / AC5 / AC7 — tapping Spawn while the server is unreachable:
+     * spawn() inserts the optimistic "starting" row, the spawn() call throws a
+     * transport exception, and the catch rolls that row back (same predicate as
+     * the HttpFailure branch) so a phantom session can't persist. Nothing
+     * escapes the scope (no crash), the interceptor's HandshakeError is the
+     * single surface (lastError stays null), and `spawning` is reset in
+     * `finally` so the FAB never sticks disabled.
+     */
+    @Test
+    fun spawn_transport_failure_rolls_back_optimistic_row_and_does_not_escape(): Unit = runBlocking {
+        val fx = startFixture()
+        fx.shutdown() // closed port → next connect refused (ConnectException)
+
+        val uncaught = AtomicReference<Throwable?>(null)
+        val handler = CoroutineExceptionHandler { _, t -> uncaught.set(t) }
+        val workScope = CoroutineScope(Dispatchers.IO + SupervisorJob() + handler)
+        val collectorScope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+        try {
+            val events = CopyOnWriteArrayList<NetworkEvent>()
+            val subscribed = CompletableDeferred<Unit>()
+            collectorScope.launch {
+                NetworkEvents.flow
+                    .onSubscription { subscribed.complete(Unit) }
+                    .collect { events.add(it) }
+            }
+            subscribed.await()
+
+            val seeded = listOf(
+                SessionSummary(n = 1, label = "a", state = "running"),
+                SessionSummary(n = 2, label = "b", state = "running"),
+            )
+            val state = MutableStateFlow(SessionsUiState(sessions = seeded))
+            val coordinator = SessionsCoordinator(
+                state = state,
+                scope = workScope,
+                profileSupplier = { fx.profile },
+                apiFactory = apiFactory(),
+            )
+            val preExisting = workScope.coroutineContext.job.children.toSet()
+
+            coordinator.spawn("new-session")
+
+            // The interceptor emits HandshakeError before re-throwing.
+            withTimeout(15_000) {
+                while (events.none { it is NetworkEvent.HandshakeError }) delay(50)
+            }
+            // Join only the spawn() child so its catch + finally have finished.
+            withTimeout(15_000) {
+                (workScope.coroutineContext.job.children.toSet() - preExisting).forEach { it.join() }
+            }
+
+            assertThat(uncaught.get())
+                .`as`("AC3/AC4 — spawn() MUST swallow the transport throwable; nothing escapes viewModelScope (no crash)")
+                .isNull()
+            assertThat(events)
+                .`as`("AC5 — a transport failure is surfaced via the full-screen NetworkEvent (HandshakeError)")
+                .anyMatch { it is NetworkEvent.HandshakeError }
+            assertThat(state.value.sessions)
+                .`as`(
+                    "AC3 — the optimistic 'starting' row is rolled back on a transport throw (same predicate as " +
+                        "the HttpFailure branch); only the seed rows remain, so no phantom session persists",
+                )
+                .isEqualTo(seeded)
+            assertThat(state.value.spawning)
+                .`as`("AC3 — spawning is reset in finally so the FAB never sticks disabled")
+                .isFalse()
+            assertThat(state.value.lastError)
+                .`as`(
+                    "AC5 — single-surfaced via the full-screen NetworkEvent path, not ALSO the snackbar lastError " +
+                        "(translate(...) != null ⇒ skip lastError)",
+                )
+                .isNull()
+        } finally {
+            workScope.cancel()
+            collectorScope.cancel()
+        }
+    }
+
     private fun spkiHex(spkiBytes: ByteArray): String =
         MessageDigest.getInstance("SHA-256").digest(spkiBytes)
             .joinToString("") { "%02x".format(it.toInt() and 0xff) }
