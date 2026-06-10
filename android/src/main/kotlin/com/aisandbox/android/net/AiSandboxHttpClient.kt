@@ -110,7 +110,13 @@ class AiSandboxHttpClient(
                 expectedPinHex = profile.pinSha256Hex,
                 expectedHost = request.url.host,
             )
-            if (event != null) {
+            // UC-52 — only bus-route GENUINE identity/TLS events. A transient
+            // ServerUnreachable is consumed at the call site (sessions banner /
+            // onboarding inline failure), NEVER on the global bus, so a momentary
+            // connectivity drop can't force-route to ServerIdentityChangedScreen
+            // (AC6). We still re-throw t so the call fails and the call site's
+            // catch can surface the retryable state.
+            if (event != null && event !is NetworkEvent.ServerUnreachable) {
                 NetworkEvents.tryEmit(event)
             }
             throw t

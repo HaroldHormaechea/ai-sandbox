@@ -102,7 +102,11 @@ class EnrollmentClient(private val payload: QrPayload) {
                 expectedPinHex = payload.pinSha256Hex,
                 expectedHost = expectedHost,
             )
-            if (event != null) {
+            // UC-52 — never bus-route the transient ServerUnreachable signal
+            // (no full-screen identity screen for a momentary network drop);
+            // it is rendered inline by onboarding as a retryable io_error via
+            // failureCodeFor() below. Genuine TLS/identity events still emit.
+            if (event != null && event !is NetworkEvent.ServerUnreachable) {
                 NetworkEvents.tryEmit(event)
             }
             Outcome.Failure(
@@ -162,6 +166,10 @@ class EnrollmentClient(private val payload: QrPayload) {
         is NetworkEvent.PinMismatch -> "pin_mismatch"
         is NetworkEvent.HostnameMismatch -> "hostname_mismatch"
         is NetworkEvent.HandshakeError -> "handshake_error"
+        // UC-52 — a transient connectivity failure renders as the existing
+        // retryable `io_error` (NOT an identity/handshake code), so onboarding
+        // shows an inline retry rather than pushing re-enrollment.
+        is NetworkEvent.ServerUnreachable -> "io_error"
         else -> "io_error"
     }
 
