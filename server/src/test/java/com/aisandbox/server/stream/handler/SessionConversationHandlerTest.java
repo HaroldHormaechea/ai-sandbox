@@ -206,6 +206,136 @@ class SessionConversationHandlerTest {
         verify(facade).startTail(eq(7), eq(SessionConversationHandler.TARGET_MAIN));
     }
 
+    // ──────────────── UC-50 — pane-signal pending-prompt control dispatch ────────────────
+    // The helper emits TWO new control lines, each carrying a THIRD tab-delimited field:
+    //   __ctrl__\tpending-question\t<json>   and   __ctrl__\tpending-clear\t<key>
+    // The handler splits the control payload on the FIRST tab (so legacy 2-field control
+    // lines still dispatch byte-identically), maps the JSON, caches a synthesized Question,
+    // and emits PendingPrompt — UNLESS a transcript-derived prompt already fired this turn.
+
+    private static String pendingQuestionCtrl(String json) {
+        return TranscriptTailService.CTRL_SOURCE + "\t" + TranscriptTailService.CTRL_PENDING_QUESTION + "\t" + json;
+    }
+
+    private static final String SINGLE_PENDING_JSON =
+            "{\"kind\":\"questions\",\"key\":\"pane-k1\",\"plan\":\"\",\"questions\":["
+                    + "{\"question\":\"Which database?\",\"header\":\"Database\",\"multiSelect\":false,"
+                    + "\"options\":[{\"label\":\"PostgreSQL\",\"description\":\"\"},"
+                    + "{\"label\":\"MySQL\",\"description\":\"\"}]}]}";
+
+    private static final String MULTI_PENDING_JSON = "{\"kind\":\"questions\",\"key\":\"pane-k2\",\"questions\":["
+            + "{\"header\":\"Color\",\"options\":[]},{\"header\":\"Size\",\"options\":[]}]}";
+
+    private static long countPendingPrompt(List<String> sent) {
+        return sent.stream()
+                .filter(f -> f.contains("\"type\":\"pending-question\""))
+                .count();
+    }
+
+    @Test
+    void pending_question_control_emits_PendingPrompt_and_is_answerable_for_a_single_question() throws Exception {
+        // AC1/AC3 — a live, pane-delivered single question is emitted as a PendingPrompt
+        // (answerable=true) while the session blocks, with no transcript line at all.
+        FakeSession session = driveAllowedTail(pendingQuestionCtrl(SINGLE_PENDING_JSON));
+
+        assertThat(session.sent).anySatisfy(f -> assertThat(f)
+                .contains("\"type\":\"pending-question\"")
+                .contains("\"promptKey\":\"pane-k1\"")
+                .contains("\"answerable\":true"));
+        assertThat(countPendingPrompt(session.sent)).isEqualTo(1L);
+        assertThat(session.closedWith).isNull();
+    }
+
+    @Test
+    void pending_question_control_for_a_multi_batch_is_visible_but_answerable_false() throws Exception {
+        // AC2 — a multi-question batch is delivered (visible) but answerable=false, since
+        // only the focused tab's options are recoverable from one pane capture.
+        FakeSession session = driveAllowedTail(pendingQuestionCtrl(MULTI_PENDING_JSON));
+
+        assertThat(session.sent).anySatisfy(f -> assertThat(f)
+                .contains("\"type\":\"pending-question\"")
+                .contains("\"promptKey\":\"pane-k2\"")
+                .contains("\"answerable\":false"));
+        assertThat(session.closedWith).isNull();
+    }
+
+    @Test
+    void pending_clear_control_emits_a_PendingClear_frame_with_the_key() throws Exception {
+        // The pane chrome disappeared (answered/dismissed in tmux) with no resolving
+        // transcript line → a key-carrying PendingClear so the client clears ONLY its own
+        // pane-delivered sheet.
+        FakeSession session = driveAllowedTail(
+                TranscriptTailService.CTRL_SOURCE + "\t" + TranscriptTailService.CTRL_PENDING_CLEAR + "\tpane-k1");
+
+        assertThat(session.sent)
+                .anySatisfy(f ->
+                        assertThat(f).contains("\"type\":\"pending-clear\"").contains("\"promptKey\":\"pane-k1\""));
+        assertThat(session.closedWith).isNull();
+    }
+
+    @Test
+    void transcript_prompt_this_turn_suppresses_a_following_pane_pending_prompt() throws Exception {
+        // Transcript-vs-pane precedence: on a build that DOES write the blocking turn, the
+        // transcript Question fires FIRST (sets transcriptPromptThisTurn), so a later pane
+        // pending-question must NOT raise a second sheet — the transcript path owns it.
+        FakeSession session = driveAllowedTail(
+                askUserQuestionLine("[{\"question\":\"Pick\",\"header\":\"H\","
+                        + "\"multiSelect\":false,\"options\":[{\"label\":\"A\",\"description\":\"\"}]}]"),
+                pendingQuestionCtrl(SINGLE_PENDING_JSON));
+
+        // The transcript question frame is emitted …
+        assertThat(session.sent).anySatisfy(f -> assertThat(f).contains("\"type\":\"question\""));
+        // … but the pane PendingPrompt is suppressed for this turn.
+        assertThat(countPendingPrompt(session.sent)).isEqualTo(0L);
+        assertThat(session.closedWith).isNull();
+    }
+
+    @Test
+    void AC9_pane_pending_first_then_transcript_question_emits_pending_once_and_does_not_resuppress() throws Exception {
+        // AC9 (critical, current-claude order) — the pane delivers the pending question
+        // FIRST (the blocking turn is NOT in the transcript), THEN claude later writes the
+        // resolved turn. The PendingPrompt is emitted exactly ONCE (it preceded any
+        // transcript prompt, so it is not suppressed), and the later transcript Question
+        // is still emitted. The no-double-RENDER guarantee (the pane frame adds no inline
+        // bubble) is enforced client-side and covered in ConversationControllerTest.
+        FakeSession session = driveAllowedTail(
+                pendingQuestionCtrl(SINGLE_PENDING_JSON),
+                askUserQuestionLine("[{\"question\":\"Pick\",\"header\":\"H\","
+                        + "\"multiSelect\":false,\"options\":[{\"label\":\"A\",\"description\":\"\"}]}]"));
+
+        assertThat(countPendingPrompt(session.sent)).isEqualTo(1L);
+        assertThat(session.sent).anySatisfy(f -> assertThat(f).contains("\"type\":\"question\""));
+        assertThat(session.closedWith).isNull();
+    }
+
+    @Test
+    void malformed_pending_question_payload_is_skipped_without_crashing_the_pump() throws Exception {
+        // AC20 parity — a malformed JSON payload yields no PendingPrompt and does NOT close
+        // the channel; a subsequent backfill marker still flows on the same open channel.
+        FakeSession session =
+                driveAllowedTail(pendingQuestionCtrl("not-json"), "__ctrl__\tbackfill-start", "__ctrl__\tbackfill-end");
+
+        assertThat(countPendingPrompt(session.sent)).isEqualTo(0L);
+        assertThat(session.sent).anySatisfy(f -> assertThat(f).contains("backfill-start"));
+        assertThat(session.sent).anySatisfy(f -> assertThat(f).contains("backfill-end"));
+        assertThat(session.closedWith).isNull();
+    }
+
+    @Test
+    void legacy_two_field_control_lines_still_dispatch_byte_identically_after_the_split_on_first_tab()
+            throws Exception {
+        // Back-compat guard for the split-on-first-tab change: the pre-UC-50 control lines
+        // that carry NO third field (rebaseline, backfill-start/end) must still route
+        // exactly as before. rebaseline is a server-side no-op (no frame), so we assert the
+        // surrounding backfill markers flow and the channel stays open.
+        FakeSession session =
+                driveAllowedTail("__ctrl__\trebaseline", "__ctrl__\tbackfill-start", "__ctrl__\tbackfill-end");
+
+        assertThat(session.sent).anySatisfy(f -> assertThat(f).contains("\"type\":\"backfill-start\""));
+        assertThat(session.sent).anySatisfy(f -> assertThat(f).contains("\"type\":\"backfill-end\""));
+        assertThat(session.closedWith).isNull();
+    }
+
     // ──────────────── UC-41 AC5/AC9 — fetch-detail → tool-detail ────────────────
 
     /**

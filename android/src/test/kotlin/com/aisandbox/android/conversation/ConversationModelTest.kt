@@ -177,4 +177,25 @@ class ConversationModelTest {
         val b = ConversationItem.UserMessage("", "main", false, "x", localSeq = 1L)
         assertThat(a.key).isNotEqualTo(b.key)
     }
+
+    // ──────────────────────── UC-50 — PendingSheet.answerable ─────────────────
+
+    @Test
+    fun `PendingSheet answerable defaults to true (back-compat for transcript-delivered sheets)`() {
+        // A transcript-delivered sheet (today's behaviour) constructs without the flag and
+        // MUST remain answerable — the field defaults true so the UC-37/40/43 paths are
+        // unchanged; only the pane multi-batch path passes answerable=false explicitly.
+        val q = PendingSheet.Questions("tuQ", emptyList())
+        val p = PendingSheet.Plan("tuP", "plan text")
+        assertThat(q.answerable).isTrue
+        assertThat(p.answerable).isTrue
+        assertThat((q as PendingSheet).answerable).isTrue // reachable via the interface member
+    }
+
+    @Test
+    fun `PendingSheet carries answerable=false when set explicitly (pane multi batch)`() {
+        val q = PendingSheet.Questions("pane-multi", emptyList(), answerable = false)
+        assertThat(q.answerable).isFalse
+        assertThat(q.questionUuid).isEqualTo("pane-multi")
+    }
 }
