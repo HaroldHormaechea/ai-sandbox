@@ -47,6 +47,8 @@ import java.util.List;
     @JsonSubTypes.Type(value = ConversationServerMessage.SystemNote.class, name = "system-note"),
     @JsonSubTypes.Type(value = ConversationServerMessage.Question.class, name = "question"),
     @JsonSubTypes.Type(value = ConversationServerMessage.PlanApproval.class, name = "plan-approval"),
+    @JsonSubTypes.Type(value = ConversationServerMessage.PendingPrompt.class, name = "pending-question"),
+    @JsonSubTypes.Type(value = ConversationServerMessage.PendingClear.class, name = "pending-clear"),
     @JsonSubTypes.Type(value = ConversationServerMessage.TurnEnd.class, name = "turn-end"),
     @JsonSubTypes.Type(value = ConversationServerMessage.Targets.class, name = "targets"),
     @JsonSubTypes.Type(value = ConversationServerMessage.TargetSelected.class, name = "target-selected"),
@@ -64,6 +66,8 @@ public sealed interface ConversationServerMessage
                 ConversationServerMessage.SystemNote,
                 ConversationServerMessage.Question,
                 ConversationServerMessage.PlanApproval,
+                ConversationServerMessage.PendingPrompt,
+                ConversationServerMessage.PendingClear,
                 ConversationServerMessage.TurnEnd,
                 ConversationServerMessage.Targets,
                 ConversationServerMessage.TargetSelected,
@@ -174,6 +178,42 @@ public sealed interface ConversationServerMessage
      */
     record PlanApproval(String uuid, boolean isSidechain, String source, String toolUseId, String plan)
             implements ConversationServerMessage {}
+
+    /**
+     * UC-50 — a LIVE, pane-derived pending prompt delivered while the session is
+     * still blocked, for the case the transcript carries NOTHING for the blocking
+     * turn (claude 2.1.169 buffers the assistant {@code AskUserQuestion}/{@code
+     * ExitPlanMode} turn in memory until the answer, so the UC-40 residual
+     * idle-flush has nothing to flush — UC-50 root cause). Unlike {@link Question}/
+     * {@link PlanApproval} (transcript {@code tool_use} frames that ALSO add the
+     * single inline bubble), this frame sets the client's pending SHEET ONLY — it
+     * adds NO inline item — so when the resolved turn is later written to the
+     * transcript, the transcript path owns the one inline bubble and there is no
+     * double-render (AC5 dedupe).
+     *
+     * <p>{@code promptKey} is the stable, pane-derived key the client echoes in its
+     * answer and matches against a later {@link PendingClear}. {@code kind} is
+     * {@code "questions"} or {@code "plan"}. {@code questions} carries the structured
+     * items (FULLY recovered for a single question — AC3; header-only for a
+     * multi-question wizard, since only the focused tab's options are on screen).
+     * {@code plan} is the proposed plan text for a {@code plan} prompt (best-effort,
+     * may be empty). {@code answerable} is the explicit, server-decided flag the
+     * client MUST honour rather than infer: {@code true} for a single question and
+     * for plan approval (fully in-app answerable); {@code false} for a
+     * multi-question batch (visible, but the user answers in tmux — full in-app
+     * multi-answer is a tracked follow-up).
+     */
+    record PendingPrompt(String promptKey, String kind, List<QuestionItem> questions, String plan, boolean answerable)
+            implements ConversationServerMessage {}
+
+    /**
+     * UC-50 — clears a previously delivered {@link PendingPrompt} when its pane
+     * chrome disappears (the question/plan was answered or dismissed in tmux while
+     * no transcript line resolved it). {@code promptKey} is the key of the prompt
+     * to clear; the client clears its pending sheet only when the open sheet's key
+     * matches (so it never clobbers a transcript-delivered sheet).
+     */
+    record PendingClear(String promptKey) implements ConversationServerMessage {}
 
     /**
      * A {@code system:turn_duration} line (AC15) — the explicit end-of-turn

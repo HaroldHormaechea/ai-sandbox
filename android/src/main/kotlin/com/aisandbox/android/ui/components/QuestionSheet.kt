@@ -73,7 +73,11 @@ fun QuestionSheet(
         Column(modifier = Modifier.padding(16.dp)) {
             when (sheet) {
                 is PendingSheet.Questions ->
-                    if (sheet.questions.size > 1) {
+                    if (!sheet.answerable) {
+                        // UC-50 — a pane-delivered multi-question batch: visible but not
+                        // in-app answerable (answer in tmux). No submit control.
+                        NotAnswerableBody(sheet)
+                    } else if (sheet.questions.size > 1) {
                         PagedQuestionBody(sheet, onSubmitBatch)
                     } else {
                         SingleQuestionBody(sheet, onSubmit)
@@ -82,6 +86,43 @@ fun QuestionSheet(
             }
         }
     }
+}
+
+/**
+ * UC-50 — a pane-delivered MULTI-question batch that cannot be answered in-app
+ * ([PendingSheet.answerable] == false): only the focused tab's options are
+ * recoverable from one pane capture, so the server marks the whole batch
+ * not-answerable. The sheet stays VISIBLE (so the user is no longer stuck on a
+ * silent "Working…") and shows the question headers read-only with an explicit
+ * "answer in tmux to continue" affordance and NO submit control. Full in-app
+ * multi-answer is a tracked follow-up, not part of this UC.
+ */
+@Composable
+private fun NotAnswerableBody(sheet: PendingSheet.Questions) {
+    Text("Question pending", style = MaterialTheme.typography.labelMedium, color = OnSurfaceMuted)
+    Spacer(Modifier.height(6.dp))
+    Text(
+        "Claude is asking ${sheet.questions.size} questions.",
+        style = MaterialTheme.typography.titleSmall,
+        color = OnSurface,
+        fontWeight = FontWeight.SemiBold,
+    )
+    Spacer(Modifier.height(8.dp))
+    Column(
+        modifier = Modifier.fillMaxWidth().heightIn(max = 200.dp).verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        sheet.questions.forEachIndexed { i, q ->
+            val label = q.header.ifBlank { q.question }.ifBlank { "Question ${i + 1}" }
+            Text("• $label", style = MaterialTheme.typography.bodyMedium, color = OnSurfaceVariant)
+        }
+    }
+    Spacer(Modifier.height(12.dp))
+    Text(
+        "⌨  Answer in tmux to continue",
+        style = MaterialTheme.typography.bodyMedium,
+        color = OnSurfaceMuted,
+    )
 }
 
 /**

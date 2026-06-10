@@ -335,6 +335,30 @@ class ConversationController(
                 addItem(ConversationItem.PlanApproval(uuid(obj), source(obj), sidechain(obj), toolUseId, plan))
                 _pendingSheet.value = PendingSheet.Plan(toolUseId, plan)
             }
+            // UC-50 — a LIVE, pane-delivered pending prompt (the transcript carried
+            // nothing for the blocking turn). Set the sheet ONLY — add NO inline item,
+            // so the later transcript write owns the single inline bubble (dedupe). Also
+            // clear the perpetual "Working…" spinner: a pending prompt is at-rest waiting.
+            "pending-question" -> {
+                val promptKey = str(obj, "promptKey") ?: return
+                val kind = str(obj, "kind") ?: "questions"
+                val answerable = obj["answerable"]?.jsonPrimitive?.booleanOrNull ?: true
+                _pendingSheet.value = if (kind == "plan") {
+                    PendingSheet.Plan(promptKey, str(obj, "plan") ?: "", answerable)
+                } else {
+                    PendingSheet.Questions(promptKey, parseQuestions(obj["questions"] as? JsonArray), answerable)
+                }
+                _turnPhase.value = TurnPhase.IDLE
+            }
+            // UC-50 — the pane prompt's chrome disappeared (answered/dismissed in tmux
+            // with no resolving transcript line). Clear ONLY our own pane-delivered sheet
+            // (key match), never a transcript-delivered one.
+            "pending-clear" -> {
+                val promptKey = str(obj, "promptKey") ?: ""
+                if (_pendingSheet.value?.questionUuid == promptKey) {
+                    _pendingSheet.value = null
+                }
+            }
             "turn-end" -> {
                 if (!backfilling) _turnPhase.value = TurnPhase.IDLE
                 // The transcript advanced past any pending question (AC12/AC15).
