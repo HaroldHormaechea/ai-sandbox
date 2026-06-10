@@ -199,26 +199,45 @@ fun SessionsScreen(
             )
         },
     ) { innerPadding ->
-        SessionsBody(
-            padding = innerPadding,
-            state = state,
-            onSelectFilter = viewModel::selectFilter,
-            onOpen = onOpen,
-            onOpenTerminal = onOpenTerminal,
-            onConfirmDelete = viewModel::delete,
-            onLifecycle = viewModel::lifecycle,
-            onBlockedOpen = {
-                // UC-46 row-open gate — a non-attachable row (stopped / paused
-                // / terminating) surfaces a hint instead of navigating into a
-                // guaranteed-failing connection.
-                coroutineScope.launch {
-                    snackbarHostState.showSnackbar(
-                        message = context.getString(R.string.session_not_running_hint),
-                        duration = SnackbarDuration.Short,
-                    )
-                }
-            },
-        )
+        Column(modifier = Modifier.fillMaxSize().padding(innerPadding)) {
+            // UC-52 — inline, retryable "reconnecting" banner for a TRANSIENT
+            // connectivity failure. Distinct from the full-screen identity
+            // screen (genuine TLS/pin/hostname compromise) and from the error
+            // snackbar (ordinary HTTP failures): a momentary network drop is
+            // recoverable, so we offer a Retry and auto-clear on recovery
+            // (AC2/AC3). Retry pairs a REST refresh() with reconnectEvents() so
+            // the UC-32 push feed is revived even after it hit its back-off cap.
+            if (state.unreachable) {
+                UnreachableBanner(
+                    onRetry = {
+                        viewModel.refresh()
+                        viewModel.reconnectEvents()
+                    },
+                )
+            }
+            SessionsBody(
+                // Outer Column already consumed the scaffold inset; the body
+                // fills the remaining space below the banner.
+                padding = PaddingValues(0.dp),
+                state = state,
+                onSelectFilter = viewModel::selectFilter,
+                onOpen = onOpen,
+                onOpenTerminal = onOpenTerminal,
+                onConfirmDelete = viewModel::delete,
+                onLifecycle = viewModel::lifecycle,
+                onBlockedOpen = {
+                    // UC-46 row-open gate — a non-attachable row (stopped /
+                    // paused / terminating) surfaces a hint instead of
+                    // navigating into a guaranteed-failing connection.
+                    coroutineScope.launch {
+                        snackbarHostState.showSnackbar(
+                            message = context.getString(R.string.session_not_running_hint),
+                            duration = SnackbarDuration.Short,
+                        )
+                    }
+                },
+            )
+        }
     }
 
     if (showNewSheet) {
@@ -235,6 +254,45 @@ fun SessionsScreen(
                     viewModel.spawn(label.takeIf { it.isNotBlank() })
                     coroutineScope.launch { sheetState.hide(); showNewSheet = false }
                 },
+            )
+        }
+    }
+}
+
+/**
+ * UC-52 — the transient-connectivity banner. Rendered above [SessionsBody]
+ * only while [SessionsUiState.unreachable] is set. It is deliberately a thin
+ * inline strip (NOT a full-screen takeover like ServerIdentityChangedScreen and
+ * NOT the transient error snackbar): the server is momentarily unreachable, so
+ * the user keeps their last-known list and gets a [onRetry] affordance. The
+ * banner clears automatically when any operation proves the server responded
+ * (refresh / push frame), so [onRetry] is a convenience, not the only path
+ * (AC2/AC3). Black-on-Warning mirrors the UC20 swipe-delete contrast rule.
+ */
+@Composable
+private fun UnreachableBanner(onRetry: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(Warning)
+            .padding(start = 16.dp, end = 8.dp, top = 8.dp, bottom = 8.dp)
+            .testTag("sessions_unreachable_banner"),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = stringResource(R.string.sessions_unreachable_banner),
+            style = MaterialTheme.typography.bodyMedium,
+            color = Color.Black,
+            modifier = Modifier.weight(1f),
+        )
+        Spacer(Modifier.width(8.dp))
+        TextButton(
+            onClick = onRetry,
+            modifier = Modifier.testTag("sessions_unreachable_retry"),
+        ) {
+            Text(
+                text = stringResource(R.string.sessions_unreachable_retry),
+                color = Color.Black,
             )
         }
     }

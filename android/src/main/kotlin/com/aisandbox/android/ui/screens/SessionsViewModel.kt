@@ -89,6 +89,23 @@ class SessionsViewModel(application: Application) : AndroidViewModel(application
     /** UC-32 — close the live push feed; driven by the screen on foreground STOP (AC6). */
     fun disconnectEvents() = eventsController.disconnect()
 
+    /**
+     * UC-52 — full feed revival for the "reconnecting" banner's Retry action
+     * (AC2/AC3). A bare [connectEvents] is NOT enough: once the UC-32 feed hits
+     * its 5-min cumulative back-off cap, [SessionEventsController]'s loop returns
+     * WITHOUT resetting its [com.aisandbox.android.net.ReconnectController]
+     * (stale `firstFailureAtMs`), so a plain reconnect re-trips `shouldGiveUp()`
+     * immediately and dies. [SessionEventsController.disconnect] calls
+     * `reconnect.reset()`, so disconnect-then-connect revives the push feed
+     * cleanly. Reuses the existing controller machinery — no parallel recovery
+     * path. The screen pairs this with a [refresh] so REST recovery and feed
+     * revival happen together.
+     */
+    fun reconnectEvents() {
+        eventsController.disconnect("uc52-retry")
+        eventsController.connect()
+    }
+
     override fun onCleared() {
         // Permanent teardown of the push feed's scope when the ViewModel dies.
         eventsController.close()
@@ -104,6 +121,16 @@ data class SessionsUiState(
     val filter: SessionsFilter = SessionsFilter.ALL,
     val profile: ServerProfile? = null,
     val lastError: String? = null,
+    /**
+     * UC-52 — the server is transiently UNREACHABLE (a connectivity failure,
+     * NOT a TLS/identity compromise): the sessions list shows an inline,
+     * retryable, auto-recovering "reconnecting" banner instead of the
+     * destructive ServerIdentityChangedScreen. Single-surface invariant
+     * maintained by [SessionsCoordinator]: `unreachable` and [lastError] are
+     * mutually exclusive — any operation that proves the server responded
+     * (Success, an HTTP failure, or a UC-32 push frame) clears it (AC2/AC3).
+     */
+    val unreachable: Boolean = false,
     /**
      * UC-28 — session numbers the operator has optimistically marked as
      * terminating (delete confirmed, not yet resolved). Mirrored from the
