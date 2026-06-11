@@ -249,13 +249,7 @@ class ConversationControllerTest {
         // Two-phase delivery (capture the server socket, send the question, ASSERT, then send the
         // turn-end) so the dismissal is observed deterministically rather than racing the sheet.
         val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
-        server.enqueue(
-            MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
-                override fun onOpen(webSocket: WebSocket, response: Response) {
-                    wsRef.set(webSocket)
-                }
-            }),
-        )
+        enqueueCapture(wsRef)
         val c = networkedController()
         c.attach(7)
         try {
@@ -291,13 +285,7 @@ class ConversationControllerTest {
         // `tool-result` carries the SAME toolUseId as the sheet's questionUuid. The controller must
         // dismiss the sheet on that matched frame so it can never linger after the ask is resolved.
         val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
-        server.enqueue(
-            MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
-                override fun onOpen(webSocket: WebSocket, response: Response) {
-                    wsRef.set(webSocket)
-                }
-            }),
-        )
+        enqueueCapture(wsRef)
         val c = networkedController()
         c.attach(7)
         try {
@@ -328,13 +316,7 @@ class ConversationControllerTest {
         // A tool-result for a DIFFERENT tool call (any other Bash/Read/etc. that finishes while the
         // ask is still open) must NOT tear down the unrelated sheet.
         val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
-        server.enqueue(
-            MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
-                override fun onOpen(webSocket: WebSocket, response: Response) {
-                    wsRef.set(webSocket)
-                }
-            }),
-        )
+        enqueueCapture(wsRef)
         val c = networkedController()
         c.attach(7)
         try {
@@ -485,13 +467,7 @@ class ConversationControllerTest {
     @Test
     fun `a pending-clear with a matching key clears the pane sheet`() {
         val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
-        server.enqueue(
-            MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
-                override fun onOpen(webSocket: WebSocket, response: Response) {
-                    wsRef.set(webSocket)
-                }
-            }),
-        )
+        enqueueCapture(wsRef)
         val c = networkedController()
         c.attach(7)
         try {
@@ -515,13 +491,7 @@ class ConversationControllerTest {
         // The clear must never clobber a sheet it doesn't own (e.g. a transcript-delivered
         // sheet, which carries a different key).
         val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
-        server.enqueue(
-            MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
-                override fun onOpen(webSocket: WebSocket, response: Response) {
-                    wsRef.set(webSocket)
-                }
-            }),
-        )
+        enqueueCapture(wsRef)
         val c = networkedController()
         c.attach(7)
         try {
@@ -550,13 +520,7 @@ class ConversationControllerTest {
         // pane frame added NO inline item, so the transcript write contributes the ONE and
         // only inline Question bubble — no double render / phantom collapsed `❓ question`.
         val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
-        server.enqueue(
-            MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
-                override fun onOpen(webSocket: WebSocket, response: Response) {
-                    wsRef.set(webSocket)
-                }
-            }),
-        )
+        enqueueCapture(wsRef)
         val c = networkedController()
         c.attach(7)
         try {
@@ -856,12 +820,24 @@ class ConversationControllerTest {
         )
     }
 
-    /** Capture the server WebSocket so the test can push frames at a deterministic moment. */
+    /**
+     * Capture the server WebSocket so the test can push frames at a deterministic moment.
+     *
+     * De-flake (test-only): the capture is gated ~300ms (the file's enqueuePush convention)
+     * before [wsRef] is set, so the controller's pump has subscribed to the `replay=0`
+     * `incoming` SharedFlow (ConversationController.kt:630) before any test's first send.
+     * A frame sent pre-subscription is dropped, not queued. Every caller waits on
+     * `wsRef.get() != null` before sending, so this gates exactly the first send. No
+     * production change (do NOT make `_incoming` replay=1; that is a production decision).
+     */
     private fun enqueueCapture(wsRef: java.util.concurrent.atomic.AtomicReference<WebSocket?>) {
         server.enqueue(
             MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
                 override fun onOpen(webSocket: WebSocket, response: Response) {
-                    wsRef.set(webSocket)
+                    Thread {
+                        Thread.sleep(300)
+                        wsRef.set(webSocket)
+                    }.start()
                 }
             }),
         )
