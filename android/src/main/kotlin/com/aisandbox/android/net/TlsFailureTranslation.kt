@@ -2,6 +2,7 @@ package com.aisandbox.android.net
 
 import java.io.EOFException
 import java.io.IOException
+import java.net.ConnectException
 import java.net.SocketException
 import java.net.SocketTimeoutException
 import java.security.cert.CertificateException
@@ -223,12 +224,14 @@ object TlsFailureTranslation {
      *       return {@link NetworkEvent.HandshakeError} REGARDLESS of message.
      *       A real identity failure must never be reclassified as transient
      *       (AC5, "when in doubt, identity wins").</li>
-     *   <li><b>Transient check</b> — a socket-level cause
-     *       ({@link SocketException} / {@link SocketTimeoutException} /
-     *       {@link EOFException}) is the PRIMARY signal; a narrow socket-drop
-     *       message ("connection reset" / "connection closed" / …) is the
-     *       SECONDARY signal. Either → {@link NetworkEvent.ServerUnreachable}
-     *       (transient, never bus-routed; AC4).</li>
+     *   <li><b>Transient check</b> — see [isTransientTransportSslException]:
+     *       a socket-level cause ({@link SocketException} /
+     *       {@link ConnectException} / {@link SocketTimeoutException} /
+     *       {@link EOFException} / Conscrypt's {@code ErrnoException}) is the
+     *       PRIMARY signal; a narrow socket-drop message ("connection reset" /
+     *       "connection closed" / …) is the SECONDARY signal. Either →
+     *       {@link NetworkEvent.ServerUnreachable} (transient, never
+     *       bus-routed; AC4).</li>
      *   <li><b>Default</b> — an unclassified bare TLS failure (protocol
      *       downgrade, unknown TLS error) stays on the identity path as
      *       {@link NetworkEvent.HandshakeError}.</li>
@@ -237,10 +240,21 @@ object TlsFailureTranslation {
     private fun classifyBareSslException(throwable: Throwable, rawMessage: String): NetworkEvent =
         when {
             hasIdentityCause(throwable) -> NetworkEvent.HandshakeError(rawMessage = rawMessage)
-            hasSocketLevelCause(throwable) || hasSocketDropMessage(throwable) ->
-                NetworkEvent.ServerUnreachable
+            isTransientTransportSslException(throwable) -> NetworkEvent.ServerUnreachable
             else -> NetworkEvent.HandshakeError(rawMessage = rawMessage)
         }
+
+    /**
+     * UC-56 — is this bare [SSLException] really a TRANSIENT transport drop
+     * rather than a TLS/identity failure? True iff the cause chain carries a
+     * socket-level transport failure (PRIMARY signal — [hasSocketLevelCause])
+     * OR, failing that, a narrow socket-drop message signature (SECONDARY
+     * signal — [hasSocketDropMessage]). Callers MUST run the identity-cause
+     * guard ([hasIdentityCause]) FIRST so a genuine identity failure wrapped in
+     * a transport-shaped SSLException is never swept in here (AC5).
+     */
+    private fun isTransientTransportSslException(t: Throwable?): Boolean =
+        hasSocketLevelCause(t) || hasSocketDropMessage(t)
 
     /**
      * UC-56 — does [t]'s cause chain carry a genuine TLS/identity signal?
@@ -269,16 +283,26 @@ object TlsFailureTranslation {
     /**
      * UC-56 — does [t]'s cause chain carry a socket-level transport failure?
      * The PRIMARY transient signal: Conscrypt typically wraps a dropped TCP
-     * connection's {@link SocketException} / {@link SocketTimeoutException} /
-     * {@link EOFException} inside the bare SSLException. Same depth guard.
+     * connection's {@link SocketException} (incl. its {@link ConnectException}
+     * subclass), {@link SocketTimeoutException}, {@link EOFException}, or — on
+     * the native path — an {@code android.system.ErrnoException} (e.g.
+     * {@code recvfrom failed: ECONNRESET}) inside the bare SSLException.
+     *
+     * <p>{@code ErrnoException} is matched by simple class name rather than an
+     * {@code is} check so this translator keeps ZERO {@code android.*} imports
+     * and stays JVM-unit-testable (the {@code android.system.ErrnoException}
+     * SDK stub throws on construction in unit tests). Same [MAX_CAUSE_DEPTH]
+     * guard against pathological / circular chains.
      */
     private fun hasSocketLevelCause(t: Throwable?): Boolean {
         var current: Throwable? = t
         var depth = 0
         while (current != null && depth < MAX_CAUSE_DEPTH) {
             if (current is SocketException ||
+                current is ConnectException ||
                 current is SocketTimeoutException ||
-                current is EOFException
+                current is EOFException ||
+                current.javaClass.simpleName == "ErrnoException"
             ) {
                 return true
             }

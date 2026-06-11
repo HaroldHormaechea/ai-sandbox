@@ -95,26 +95,36 @@ fun AiSandboxApp() {
     val identityRouteActive = remember { mutableStateOf(false) }
     LaunchedEffect(Unit) {
         NetworkEvents.flow.collect { event ->
+            // CertRevoked targets its own destination (separate single-top
+            // de-dup) and is not part of the UC-56 identity single-shot logic,
+            // so it is handled directly rather than via decideNetworkRoute.
+            if (event == NetworkEvent.CertRevoked) {
+                certRevokedState.value = true
+                navController.navigate(Routes.CertRevoked) {
+                    launchSingleTop = true
+                }
+                return@collect
+            }
             when (decideNetworkRoute(event, identityRouteActive.value)) {
-                RouteToIdentity -> {
-                    mismatchState.value = TlsFailureTranslation.toMismatch(event)
+                NetworkRouteDecision.Navigate -> {
+                    // UC-56 — set the single-shot flag BEFORE navigating, in
+                    // this same branch, so a same-frame burst of identity
+                    // events cannot double-navigate.
                     identityRouteActive.value = true
+                    mismatchState.value = TlsFailureTranslation.toMismatch(event)
                     navController.navigate(Routes.ServerIdentityChanged) {
                         launchSingleTop = true
                     }
                 }
-                RouteToCertRevoked -> {
-                    certRevokedState.value = true
-                    navController.navigate(Routes.CertRevoked) {
-                        launchSingleTop = true
-                    }
+                NetworkRouteDecision.Suppress -> {
+                    // UC-56 single-shot guard: a genuine identity event arrived
+                    // while ServerIdentityChangedScreen is already on top. Do
+                    // nothing — this is what kills the re-push flicker loop.
                 }
-                NoNavigation -> {
-                    // No routing. Either the identity route is already active
-                    // (single-shot guard — UC-56), the transient
-                    // ServerUnreachable signal (consumed at the call site —
-                    // UC-52/UC-54), or a terminal-local Stream* event handled
-                    // inside TerminalScreen. Root composable does nothing.
+                NetworkRouteDecision.NoOp -> {
+                    // Irrelevant to identity routing: transient ServerUnreachable
+                    // (consumed at the call site — UC-52/UC-54) or a
+                    // terminal-local Stream* event (handled in TerminalScreen).
                 }
             }
         }
