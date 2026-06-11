@@ -1520,7 +1520,17 @@ class SessionsCoordinatorTest {
      */
     @Test
     fun applySnapshot_clears_unreachable_banner(): Unit = runBlocking {
-        val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+        // De-flake (test-only): run the coordinator's init collector inline on
+        // Dispatchers.Unconfined instead of Dispatchers.IO. The init collector
+        // (terminatingSessions.flow → state.value = state.value.copy(...)) and
+        // the synchronous applySnapshot() below both read-modify-write the same
+        // MutableStateFlow. On Dispatchers.IO the collector runs on a separate
+        // thread, so its copy() could clobber the banner-clear from a stale
+        // read (the flake). Unconfined makes the collector consume its initial
+        // emission inline during construction (then suspend), so applySnapshot
+        // runs single-threaded — no cross-thread race. Production is unaffected:
+        // SessionsViewModel uses viewModelScope (Main.immediate), single-threaded.
+        val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
         try {
             val state = MutableStateFlow(SessionsUiState(unreachable = true))
             val coordinator = SessionsCoordinator(
@@ -1547,7 +1557,15 @@ class SessionsCoordinatorTest {
      */
     @Test
     fun applyDelta_clears_unreachable_banner(): Unit = runBlocking {
-        val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+        // De-flake (test-only): run the coordinator's init collector inline on
+        // Dispatchers.Unconfined instead of Dispatchers.IO. See the sibling
+        // applySnapshot_clears_unreachable_banner for the full rationale — the
+        // init collector and the synchronous applyDelta() below both
+        // read-modify-write the shared MutableStateFlow, and an IO-thread
+        // collector could clobber the banner-clear (the flake). Unconfined makes
+        // the collector run inline, so applyDelta runs single-threaded.
+        // Production is unaffected (viewModelScope / Main.immediate).
+        val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
         try {
             val state = MutableStateFlow(SessionsUiState(unreachable = true))
             val coordinator = SessionsCoordinator(
