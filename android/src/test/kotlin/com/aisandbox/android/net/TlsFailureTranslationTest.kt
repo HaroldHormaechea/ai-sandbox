@@ -137,12 +137,21 @@ class TlsFailureTranslationTest {
     }
 
     @Test
-    fun `generic SSLException routes to HandshakeError`() {
+    fun `bare SSLException carrying a connection-reset message routes to ServerUnreachable (UC-56 AC4)`() {
+        // UC-56 — pre-fix this asserted HandshakeError. A bare SSLException
+        // (neither SSLHandshakeException nor SSLPeerUnverifiedException) whose
+        // message is a transport-drop signature ("connection reset") is now a
+        // TRANSIENT transport drop, not a destructive identity failure: the old
+        // unconditional HandshakeError mapping force-routed Conscrypt's
+        // mid-stream connection-reset to the re-scan-QR screen (the flicker
+        // loop). It now routes to ServerUnreachable, which never reaches the
+        // identity screen. Genuine TLS arms (handshake / peer-unverified / pin)
+        // run BEFORE this and are unchanged — see the AC5 guard tests below.
         val ex = SSLException("connection reset during TLS")
         val event = TlsFailureTranslation.translate(ex, expectedPinHex, expectedHost)
-        assertThat(event).isInstanceOf(NetworkEvent.HandshakeError::class.java)
-        val err = event as NetworkEvent.HandshakeError
-        assertThat(err.rawMessage).isEqualTo("connection reset during TLS")
+        assertThat(event)
+            .`as`("a bare SSLException with a transport-drop message is transient, not identity")
+            .isEqualTo(NetworkEvent.ServerUnreachable)
     }
 
     // ── UC-52 — connectivity vs TLS taxonomy (AC1 / AC4 / AC8) ───────────────
@@ -291,4 +300,182 @@ class TlsFailureTranslationTest {
         // not a destructive re-enroll dead-end.
         assertThat(TlsFailureTranslation.toMismatch(NetworkEvent.ServerUnreachable)).isNull()
     }
+
+    // ── UC-56 — bare-SSLException transport-drop reclassification (AC1 / AC4 / AC5) ──
+    //
+    // The UC-56 fix narrows the bare `is SSLException` arm (one that is NEITHER
+    // an SSLHandshakeException NOR an SSLPeerUnverifiedException — those run
+    // first, above, and keep their identity routing). Conscrypt wraps a
+    // mid-stream TCP drop in a plain SSLException; pre-fix that unconditionally
+    // became a HandshakeError and force-routed the conversation→list transient
+    // drop to the destructive re-scan-QR screen (the flicker loop). The arm is
+    // now a strict two-step decision:
+    //   1. identity-cause guard FIRST  → HandshakeError (AC5, "identity wins")
+    //   2. transient transport check   → ServerUnreachable (AC1/AC4)
+    //   3. default                     → HandshakeError (unknown bare TLS error)
+    //
+    // These tests pin BOTH the SECONDARY message signal (the exact
+    // SOCKET_DROP_MESSAGES strings) and the PRIMARY socket-level-cause signal,
+    // plus the guard-wins regression that protects genuine identity failures.
+
+    @Test
+    fun `bare SSLException with a SocketException cause routes to ServerUnreachable (AC4 primary signal)`() {
+        // PRIMARY transient signal: a socket-level cause inside the bare SSL
+        // exception. This is the canonical Conscrypt "mid-stream drop" shape.
+        val ex = SSLException("Read error").initCause(SocketException("Connection reset by peer"))
+        val event = TlsFailureTranslation.translate(ex, expectedPinHex, expectedHost)
+        assertThat(event).isEqualTo(NetworkEvent.ServerUnreachable)
+    }
+
+    @Test
+    fun `bare SSLException with a ConnectException cause routes to ServerUnreachable (AC4 primary signal)`() {
+        val ex = SSLException("ssl wrapper").initCause(ConnectException("Connection refused"))
+        val event = TlsFailureTranslation.translate(ex, expectedPinHex, expectedHost)
+        assertThat(event).isEqualTo(NetworkEvent.ServerUnreachable)
+    }
+
+    @Test
+    fun `bare SSLException with a SocketTimeoutException cause routes to ServerUnreachable (AC4 primary signal)`() {
+        val ex = SSLException("ssl wrapper").initCause(SocketTimeoutException("Read timed out"))
+        val event = TlsFailureTranslation.translate(ex, expectedPinHex, expectedHost)
+        assertThat(event).isEqualTo(NetworkEvent.ServerUnreachable)
+    }
+
+    @Test
+    fun `bare SSLException with an EOFException cause routes to ServerUnreachable (AC4 primary signal)`() {
+        val ex = SSLException("ssl wrapper").initCause(EOFException("\\n not found: limit=0"))
+        val event = TlsFailureTranslation.translate(ex, expectedPinHex, expectedHost)
+        assertThat(event).isEqualTo(NetworkEvent.ServerUnreachable)
+    }
+
+    @Test
+    fun `bare SSLException with an ErrnoException-named cause routes to ServerUnreachable (AC4 native path)`() {
+        // The native Conscrypt path wraps android.system.ErrnoException
+        // (e.g. recvfrom failed: ECONNRESET). The translator matches it by
+        // SIMPLE CLASS NAME so the production file keeps ZERO android.* imports
+        // (the SDK stub for ErrnoException throws on construction under JVM unit
+        // tests). We reproduce that contract with a local class of the same
+        // simple name, confirming the by-name match works.
+        val ex = SSLException("Read error").initCause(ErrnoException("recvfrom failed: ECONNRESET (Connection reset by peer)"))
+        val event = TlsFailureTranslation.translate(ex, expectedPinHex, expectedHost)
+        assertThat(event)
+            .`as`("an ErrnoException cause (matched by simple class name) is a transient transport drop")
+            .isEqualTo(NetworkEvent.ServerUnreachable)
+    }
+
+    @Test
+    fun `bare SSLException 'Connection reset by peer' message routes to ServerUnreachable (AC4 secondary signal)`() {
+        // SECONDARY signal: no structured socket-level cause, only the
+        // Conscrypt transport-drop message. Pin the exact phrasing.
+        val ex = SSLException("Read error: ssl=0x...: Connection reset by peer")
+        val event = TlsFailureTranslation.translate(ex, expectedPinHex, expectedHost)
+        assertThat(event).isEqualTo(NetworkEvent.ServerUnreachable)
+    }
+
+    @Test
+    fun `bare SSLException 'Software caused connection abort' message routes to ServerUnreachable (AC4 secondary signal)`() {
+        val ex = SSLException("Write error: Software caused connection abort")
+        val event = TlsFailureTranslation.translate(ex, expectedPinHex, expectedHost)
+        assertThat(event).isEqualTo(NetworkEvent.ServerUnreachable)
+    }
+
+    @Test
+    fun `bare SSLException 'Socket closed' message routes to ServerUnreachable (AC4 secondary signal)`() {
+        val ex = SSLException("Socket closed")
+        val event = TlsFailureTranslation.translate(ex, expectedPinHex, expectedHost)
+        assertThat(event).isEqualTo(NetworkEvent.ServerUnreachable)
+    }
+
+    @Test
+    fun `bare SSLException 'broken pipe' message routes to ServerUnreachable (AC4 secondary signal)`() {
+        val ex = SSLException("Write error: ssl=0x...: I/O error during system call, Broken pipe")
+        val event = TlsFailureTranslation.translate(ex, expectedPinHex, expectedHost)
+        assertThat(event).isEqualTo(NetworkEvent.ServerUnreachable)
+    }
+
+    @Test
+    fun `bare SSLException 'unexpected end of stream' message routes to ServerUnreachable (AC4 secondary signal)`() {
+        val ex = SSLException("unexpected end of stream on https://potato-server/")
+        val event = TlsFailureTranslation.translate(ex, expectedPinHex, expectedHost)
+        assertThat(event).isEqualTo(NetworkEvent.ServerUnreachable)
+    }
+
+    @Test
+    fun `bare SSLException with a CertificateException cause and a connection-reset message stays HandshakeError (AC5 guard wins)`() {
+        // THE load-bearing UC-56 regression: a genuine identity failure
+        // (CertificateException in the cause chain) that ALSO happens to carry a
+        // transport-drop message MUST stay on the identity path. The identity-
+        // cause guard runs BEFORE the transient message check, so "when in doubt
+        // identity wins" (AC5) — the transport-drop reclassification must never
+        // swallow a real cert compromise.
+        val ex = SSLException("connection reset").initCause(
+            CertificateException("SPKI pin mismatch: expected=${"a".repeat(64)} observed=${"b".repeat(64)}"),
+        )
+        val event = TlsFailureTranslation.translate(ex, expectedPinHex, expectedHost)
+        assertThat(event)
+            .`as`("an identity cause beats a transport-drop message — identity wins (AC5)")
+            .isInstanceOf(NetworkEvent.HandshakeError::class.java)
+    }
+
+    @Test
+    fun `bare SSLException wrapping an SSLHandshakeException cause stays HandshakeError (AC5 guard)`() {
+        val ex = SSLException("connection reset").initCause(
+            SSLHandshakeException("Remote host terminated the handshake"),
+        )
+        val event = TlsFailureTranslation.translate(ex, expectedPinHex, expectedHost)
+        assertThat(event).isInstanceOf(NetworkEvent.HandshakeError::class.java)
+    }
+
+    @Test
+    fun `bare SSLException wrapping an SSLPeerUnverifiedException cause stays HandshakeError (AC5 guard)`() {
+        val ex = SSLException("socket closed").initCause(
+            SSLPeerUnverifiedException("Hostname potato-server not verified"),
+        )
+        val event = TlsFailureTranslation.translate(ex, expectedPinHex, expectedHost)
+        assertThat(event).isInstanceOf(NetworkEvent.HandshakeError::class.java)
+    }
+
+    @Test
+    fun `bare SSLException with an unrelated (non-transport) message defaults to HandshakeError (AC5 default)`() {
+        // No identity cause, no socket-level cause, and a message that is NOT a
+        // socket-drop signature → the bare TLS error stays on the identity path
+        // by default. This is the deliberate conservative fallback: only the
+        // narrow SOCKET_DROP_MESSAGES set is reclassified as transient.
+        val ex = SSLException("protocol downgrade detected")
+        val event = TlsFailureTranslation.translate(ex, expectedPinHex, expectedHost)
+        assertThat(event)
+            .`as`("an unclassified bare TLS failure stays identity by default")
+            .isInstanceOf(NetworkEvent.HandshakeError::class.java)
+        assertThat((event as NetworkEvent.HandshakeError).rawMessage).isEqualTo("protocol downgrade detected")
+    }
+
+    @Test
+    fun `pin-mismatch SSLHandshakeException is unaffected by UC-56 and still routes to PinMismatch (AC5 regression)`() {
+        // Guard: the genuine-identity arms run BEFORE the bare-SSLException arm,
+        // so UC-56 cannot regress pin-mismatch identity routing — even though
+        // the message below contains a transport-drop phrase.
+        val observedHex = "c".repeat(64)
+        val ex = SSLHandshakeException("connection reset").initCause(
+            CertificateException("SPKI pin mismatch: expected=${"a".repeat(64)} observed=$observedHex"),
+        )
+        val event = TlsFailureTranslation.translate(ex, expectedPinHex, expectedHost)
+        assertThat(event).isInstanceOf(NetworkEvent.PinMismatch::class.java)
+        assertThat((event as NetworkEvent.PinMismatch).observedPinHex).isEqualTo(observedHex)
+    }
+
+    @Test
+    fun `SAN-mismatch SSLPeerUnverifiedException is unaffected by UC-56 and still routes to HostnameMismatch (AC5 regression)`() {
+        // Even with a transport-drop message, the peer-unverified arm runs first.
+        val ex = SSLPeerUnverifiedException("socket closed before SAN check")
+        val event = TlsFailureTranslation.translate(ex, expectedPinHex, expectedHost)
+        assertThat(event).isInstanceOf(NetworkEvent.HostnameMismatch::class.java)
+    }
+
+    /**
+     * UC-56 — local stand-in for {@code android.system.ErrnoException}, matched
+     * by the translator on simple class name (so production keeps zero
+     * {@code android.*} imports and stays JVM-unit-testable). Only the simple
+     * name {@code "ErrnoException"} matters for the match.
+     */
+    private class ErrnoException(message: String) : Exception(message)
 }
