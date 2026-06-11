@@ -4,6 +4,7 @@ import android.app.Activity
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -84,34 +85,36 @@ fun AiSandboxApp() {
     // surfaced to the ServerIdentityChanged composable below.
     val mismatchState = remember { mutableStateOf<Mismatch?>(null) }
     val certRevokedState = remember { mutableStateOf(false) }
+    // UC-56 — single-shot guard for the destructive server-identity route.
+    // `true` while ServerIdentityChangedScreen is on top of the back stack;
+    // the DisposableEffect inside that composable clears it when the screen
+    // LEAVES composition (covers system-back, not just Scan-new-QR / Quit).
+    // The pure [decideNetworkRoute] reads this flag so a second identity event
+    // arriving while the screen is already shown is a no-op — killing the
+    // conversation→sessions-list re-push flicker loop (AC1, AC2).
+    val identityRouteActive = remember { mutableStateOf(false) }
     LaunchedEffect(Unit) {
         NetworkEvents.flow.collect { event ->
-            when (event) {
-                is NetworkEvent.PinMismatch,
-                is NetworkEvent.HostnameMismatch,
-                is NetworkEvent.HandshakeError -> {
+            when (decideNetworkRoute(event, identityRouteActive.value)) {
+                RouteToIdentity -> {
                     mismatchState.value = TlsFailureTranslation.toMismatch(event)
+                    identityRouteActive.value = true
                     navController.navigate(Routes.ServerIdentityChanged) {
                         launchSingleTop = true
                     }
                 }
-                NetworkEvent.CertRevoked -> {
+                RouteToCertRevoked -> {
                     certRevokedState.value = true
                     navController.navigate(Routes.CertRevoked) {
                         launchSingleTop = true
                     }
                 }
-                is NetworkEvent.StreamReconnecting,
-                is NetworkEvent.StreamGaveUp -> {
-                    // Handled inside TerminalScreen — root composable is a no-op.
-                }
-                NetworkEvent.ServerUnreachable -> {
-                    // UC-52 — transient connectivity signal. It is consumed at
-                    // the call site (the sessions-list "reconnecting" banner /
-                    // onboarding inline failure) and is NEVER emitted onto this
-                    // bus, so this arm only exists to keep the `when` exhaustive.
-                    // A momentary network drop must NOT route to the identity
-                    // screen, so the root composable does nothing here (AC1/AC6).
+                NoNavigation -> {
+                    // No routing. Either the identity route is already active
+                    // (single-shot guard — UC-56), the transient
+                    // ServerUnreachable signal (consumed at the call site —
+                    // UC-52/UC-54), or a terminal-local Stream* event handled
+                    // inside TerminalScreen. Root composable does nothing.
                 }
             }
         }
@@ -200,6 +203,16 @@ fun AiSandboxApp() {
             }
 
             composable(Routes.ServerIdentityChanged) {
+                // UC-56 — clear the single-shot guard the moment this screen
+                // leaves composition, for ANY exit path: Scan-new-QR, Quit, OR
+                // a system-back gesture. Doing it here (rather than only in the
+                // button callbacks) means a back-press also re-arms routing, so
+                // a LATER genuine identity failure can still surface the screen,
+                // while the re-push loop stays suppressed for as long as the
+                // screen is actually on top.
+                DisposableEffect(Unit) {
+                    onDispose { identityRouteActive.value = false }
+                }
                 // Defensive fallback: routing here without a Mismatch loaded
                 // shouldn't happen, but render the generic handshake-error
                 // variant rather than crashing if it does.
