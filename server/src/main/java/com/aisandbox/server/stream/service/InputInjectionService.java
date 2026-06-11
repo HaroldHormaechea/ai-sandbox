@@ -56,9 +56,6 @@ public class InputInjectionService {
     /** The Claude Code TUI build these keystroke mappings were verified against. */
     public static final String PINNED_CLAUDE_VERSION = "2.1.169";
 
-    /** Upper bound on {@code Up} presses used to deterministically reset the option cursor to the top. */
-    private static final int CURSOR_RESET_PRESSES = 20;
-
     private final ProcessExecutor exec;
 
     public InputInjectionService(ProcessExecutor exec) {
@@ -120,10 +117,19 @@ public class InputInjectionService {
      * AC11 — translate a single-question structured answer into the
      * option-selection keystrokes for the lone {@code AskUserQuestion} sheet.
      *
-     * <p>Resets the option cursor to the top, then delegates to the shared
-     * per-question keystroke helper ({@link #selectQuestionAnswer}) with
-     * {@code Enter} as the commit key — for a single-question sheet there is no
-     * tab to advance to, so {@code Enter} both selects/commits and submits.
+     * <p>Delegates to the shared per-question keystroke helper
+     * ({@link #selectQuestionAnswer}) with {@code Enter} as the commit key — for
+     * a single-question sheet there is no tab to advance to, so {@code Enter}
+     * both selects/commits and submits.
+     *
+     * <p><b>No blind cursor reset.</b> The sheet opens with the option cursor
+     * already at the top (index 0), so the helper's {@code Down}×selectedIndex
+     * walk reaches the target directly — exactly as the multi-question
+     * {@link #injectAnswerBatch} path does. A prior {@code Up}×N "reset" was
+     * <em>removed</em> (UC-57): the TUI option ring <b>wraps</b>, so pressing
+     * {@code Up} a fixed number of times from an unknown position landed at a
+     * non-deterministic option {@code (currentIndex − N) mod ringSize} and sent
+     * the wrong selection.
      *
      * @param optionCount total options on the question (for cursor bounds)
      * @param multiSelect whether multiple options may be toggled
@@ -140,7 +146,6 @@ public class InputInjectionService {
             int otherIndex,
             String freeText)
             throws IOException {
-        resetCursorToTop(n, target);
         selectQuestionAnswer(n, target, optionCount, multiSelect, selections, otherIndex, freeText, "Enter");
     }
 
@@ -154,10 +159,13 @@ public class InputInjectionService {
      * <ul>
      *   <li>The sheet opens at the top of the first question's option list, and
      *       the option cursor <b>auto-resets to the top</b> of each subsequent
-     *       question when the wizard advances — so NO per-question
-     *       {@code resetCursorToTop} is used here (and indeed must not be: in the
-     *       wizard, {@code Up}/{@code Down} <b>wrap around</b> the option ring, so a
-     *       blind {@code Up}×N reset is not deterministic).</li>
+     *       question when the wizard advances — so NO per-question blind cursor
+     *       reset is used here (and indeed must not be: in the wizard,
+     *       {@code Up}/{@code Down} <b>wrap around</b> the option ring, so a blind
+     *       {@code Up}×N reset is not deterministic). The single-question
+     *       {@link #injectAnswer} path relies on the same top-of-list assumption
+     *       (UC-57 removed its former {@code Up}×N reset, which wrapped the ring
+     *       and sent the wrong option).</li>
      *   <li><b>single-select</b> question: walk {@code Down} to the option, then
      *       {@code Enter} — which selects it AND advances to the next tab.</li>
      *   <li><b>multiSelect</b> question (no "Other"): walk the options toggling
@@ -287,12 +295,6 @@ public class InputInjectionService {
     }
 
     // ──────────────────────── internals ────────────────────────
-
-    private void resetCursorToTop(int n, InjectTarget target) throws IOException {
-        for (int i = 0; i < CURSOR_RESET_PRESSES; i++) {
-            sendKeys(n, target, "Up");
-        }
-    }
 
     /** {@code tmux send-keys -t <spec> -l -- <literal>} — sends bytes verbatim (no key interpretation). */
     private void sendLiteral(int n, InjectTarget target, String literal) throws IOException {
