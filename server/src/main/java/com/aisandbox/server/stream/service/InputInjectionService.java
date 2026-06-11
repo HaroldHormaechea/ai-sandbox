@@ -28,11 +28,13 @@ import org.springframework.stereotype.Service;
  *   <li><b>Submit</b> — {@code send-keys -l -- <line>} for each text segment,
  *       {@code C-j} (LF) between segments to insert a newline WITHOUT submitting
  *       (AC9 multiline), then {@code Enter} (CR) to submit the turn (AC8).</li>
- *   <li><b>Answer (single-select)</b> — reset the option cursor to the top
- *       ({@code Up} ×N), {@code Down} ×k to the chosen index, {@code Enter}
- *       (AC11).</li>
- *   <li><b>Answer (multiSelect)</b> — reset to top, walk every option toggling
- *       {@code Space} on the selected ones, then advance. With an "Other" answer
+ *   <li><b>Answer (single-select)</b> — the sheet opens with the option cursor
+ *       at the top (index 0), so {@code Down} ×k walks to the chosen index, then
+ *       {@code Enter} (AC11). No blind {@code Up} reset — the option ring wraps,
+ *       so a fixed {@code Up} ×N is non-deterministic (UC-57); this mirrors the
+ *       verified batch path (see {@link #injectAnswerBatch}).</li>
+ *   <li><b>Answer (multiSelect)</b> — from the top-open cursor, walk every option
+ *       toggling {@code Space} on the selected ones, then advance. With an "Other" answer
  *       the free text is composed in (UC-44): type the literal, {@code Enter} to
  *       commit it as a custom option, {@code Space} to select it, then
  *       {@code Tab}+{@code Enter} to activate the in-pane Next/Submit.</li>
