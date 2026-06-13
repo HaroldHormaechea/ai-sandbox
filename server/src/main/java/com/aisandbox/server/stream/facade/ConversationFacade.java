@@ -4,6 +4,7 @@ import com.aisandbox.server.audit.AuditAction;
 import com.aisandbox.server.audit.AuditLogger;
 import com.aisandbox.server.config.ServerProperties;
 import com.aisandbox.server.identity.ClientIdentity;
+import com.aisandbox.server.stream.dto.ConversationServerMessage;
 import com.aisandbox.server.stream.dto.StreamServerMessage.TargetInfo;
 import com.aisandbox.server.stream.facade.StreamFacade.AuthorizeResult;
 import com.aisandbox.server.stream.service.ConversationEventMapper;
@@ -16,6 +17,7 @@ import com.aisandbox.server.stream.service.TranscriptTailService.TailTarget;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.ConcurrentHashMap;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -53,6 +55,18 @@ public class ConversationFacade {
     private final ConversationEventMapper mapper;
     private final AuditLogger audit;
     private final ServerProperties props;
+
+    /**
+     * UC-55 — per-session ({@code n}) pane lock. The wizard-option recovery walk
+     * ({@link #recoverWizardOptions}) and answer injection ({@link #injectAnswer} /
+     * {@link #injectAnswerBatch}) both drive {@code tmux send-keys} into the SAME live
+     * pane; serializing them per session guarantees a recovery's transient tab-stepping
+     * can never interleave with an answer's keystroke walk (the single-writer rule from
+     * the proposal). Keyed by {@code n} so it also serializes across two clients viewing
+     * the same session. A plain {@code Object} monitor is sufficient — these are short,
+     * bounded {@code docker exec} sequences, never held across a network wait.
+     */
+    private final ConcurrentHashMap<Integer, Object> paneLocks = new ConcurrentHashMap<>();
 
     public ConversationFacade(
             StreamFacade streamFacade,
@@ -176,14 +190,11 @@ public class ConversationFacade {
             String freeText,
             ClientIdentity identity)
             throws IOException {
-        injection.injectAnswer(
-                n,
-                toInjectTarget(resolveBridgeTarget(n, targetId)),
-                optionCount,
-                multiSelect,
-                selections,
-                otherIndex,
-                freeText);
+        InjectTarget target = toInjectTarget(resolveBridgeTarget(n, targetId));
+        // UC-55 — serialize with any in-flight wizard-option recovery on the same pane.
+        synchronized (paneLock(n)) {
+            injection.injectAnswer(n, target, optionCount, multiSelect, selections, otherIndex, freeText);
+        }
         audit.logEvent(
                 AuditAction.CONVERSATION_ANSWER,
                 "ok",
@@ -204,7 +215,11 @@ public class ConversationFacade {
     public void injectAnswerBatch(
             int n, String targetId, List<InputInjectionService.BatchAnswerSpec> answers, ClientIdentity identity)
             throws IOException {
-        injection.injectAnswerBatch(n, toInjectTarget(resolveBridgeTarget(n, targetId)), answers);
+        InjectTarget target = toInjectTarget(resolveBridgeTarget(n, targetId));
+        // UC-55 — serialize with any in-flight wizard-option recovery on the same pane.
+        synchronized (paneLock(n)) {
+            injection.injectAnswerBatch(n, target, answers);
+        }
         audit.logEvent(
                 AuditAction.CONVERSATION_ANSWER,
                 "ok",
@@ -214,6 +229,76 @@ public class ConversationFacade {
                 targetId == null ? "main" : targetId,
                 "batch",
                 answers == null ? 0 : answers.size());
+    }
+
+    /**
+     * UC-55 — recover the FULL per-tab option set of a multi-question pane-derived
+     * {@code AskUserQuestion} so the whole batch becomes in-app answerable (AC2/AC5/AC10).
+     * UC-50 delivers a multi-question wizard header-only (one pane capture shows only the
+     * FOCUSED tab's options). Here the server, holding the per-session pane lock (so it
+     * can never interleave with an answer injection), steps the live pane through every
+     * tab with the read-only {@code Right} arrow, captures+parses each focused tab via the
+     * helper's {@code --parse-pane} mode, then restores the original tab with {@code Left}
+     * — leaving the pane exactly as found (load-bearing: {@code injectAnswerBatch} assumes
+     * the wizard opens at tab 0). The recovered items carry each tab's real options; a tab
+     * that fails to recover is left header-only, so {@link ConversationEventMapper#answerable}
+     * keeps the batch {@code answerable=false} (the narrow genuinely-unrecoverable exception)
+     * rather than rendering a tab with no options. {@code headerOnly} with ≤1 question is
+     * returned unchanged (a single question is already fully recovered by UC-50). Never
+     * throws — a stepping failure degrades to the best-effort partial recovery.
+     */
+    public List<ConversationServerMessage.QuestionItem> recoverWizardOptions(
+            int n, String targetId, List<ConversationServerMessage.QuestionItem> headerOnly) {
+        if (headerOnly == null || headerOnly.size() <= 1) {
+            return headerOnly;
+        }
+        BridgeTarget bt = resolveBridgeTarget(n, targetId);
+        InjectTarget it = toInjectTarget(bt);
+        TailTarget tt = toTailTarget(bt);
+        int tabs = headerOnly.size();
+        List<ConversationServerMessage.QuestionItem> full = new ArrayList<>(tabs);
+        int recovered = 0;
+        synchronized (paneLock(n)) {
+            int stepped = 0;
+            try {
+                for (int k = 0; k < tabs; k++) {
+                    if (k > 0) {
+                        injection.stepWizardForward(n, it);
+                        stepped++;
+                    }
+                    String json = tail.captureFocusedTabJson(n, tt);
+                    ConversationServerMessage.QuestionItem item =
+                            mapper.parseFocusedTab(json, headerOnly.get(k).header());
+                    if (item != null) {
+                        full.add(item);
+                        recovered++;
+                    } else {
+                        full.add(headerOnly.get(k)); // unrecovered tab stays header-only
+                    }
+                }
+            } catch (IOException io) {
+                LOG.info("recoverWizardOptions stepping failed for n={} target={}: {}", n, targetId, io.toString());
+                for (int k = full.size(); k < tabs; k++) {
+                    full.add(headerOnly.get(k));
+                }
+            } finally {
+                // Restore focus to tab 0 (Left × the number of forward steps actually taken).
+                for (int k = 0; k < stepped; k++) {
+                    try {
+                        injection.stepWizardBack(n, it);
+                    } catch (IOException io) {
+                        LOG.warn("recoverWizardOptions restore step-back failed for n={}: {}", n, io.toString());
+                        break;
+                    }
+                }
+            }
+        }
+        LOG.debug("recoverWizardOptions n={} recovered {}/{} tabs", n, recovered, tabs);
+        return full;
+    }
+
+    private Object paneLock(int n) {
+        return paneLocks.computeIfAbsent(n, k -> new Object());
     }
 
     /** Interrupt (ESC) the active turn on {@code targetId}'s session. */

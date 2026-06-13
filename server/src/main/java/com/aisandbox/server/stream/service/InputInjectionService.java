@@ -296,6 +296,33 @@ public class InputInjectionService {
         sendKeys(n, target, "Escape");
     }
 
+    /**
+     * UC-55 — advance the multi-question {@code AskUserQuestion} wizard to the NEXT tab
+     * for READING ONLY (the {@code Right} arrow). Verified live against Claude Code
+     * (Phase-0 spike): {@code Right} moves the focused tab and reveals that tab's full
+     * option list <b>without committing any selection</b> (the per-tab answer boxes stay
+     * unchecked) and without moving the option cursor. The server uses this — paired with
+     * a {@code --parse-pane} capture per tab and a matching {@link #stepWizardBack} walk to
+     * restore the original tab — to recover every tab's options so the whole batch becomes
+     * in-app answerable. {@code Right}/{@code Left} are pure navigation here; they are NOT
+     * the {@code Tab}/{@code Enter} commit keys {@link #injectAnswerBatch} uses to answer.
+     */
+    public void stepWizardForward(int n, InjectTarget target) throws IOException {
+        sendKeys(n, target, "Right");
+    }
+
+    /**
+     * UC-55 — step the wizard BACK one tab (the {@code Left} arrow), used to restore the
+     * focused tab to its original position after a read-only per-tab option-recovery walk
+     * (Phase-0 verified: {@code Left} returns to the prior tab with its option cursor at the
+     * top and no answer state mutated). Restoration is load-bearing: {@link #injectAnswerBatch}
+     * assumes the wizard opens at the first question's option list, so recovery must leave the
+     * pane exactly as it found it.
+     */
+    public void stepWizardBack(int n, InjectTarget target) throws IOException {
+        sendKeys(n, target, "Left");
+    }
+
     // ──────────────────────── internals ────────────────────────
 
     /** {@code tmux send-keys -t <spec> -l -- <literal>} — sends bytes verbatim (no key interpretation). */

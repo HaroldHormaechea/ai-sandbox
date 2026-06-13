@@ -347,8 +347,42 @@ public class ConversationEventMapper {
         String kind = firstNonNull(text(root, "kind"), "questions");
         String plan = firstNonNull(text(root, "plan"), "");
         List<ConversationServerMessage.QuestionItem> questions = parseQuestions(root);
-        boolean answerable = "plan".equals(kind) || questions.size() <= 1;
-        return new ConversationServerMessage.PendingPrompt(key, kind, questions, plan, answerable);
+        return new ConversationServerMessage.PendingPrompt(key, kind, questions, plan, answerable(kind, questions));
+    }
+
+    /**
+     * UC-55 — the server-side, single-sourced decision of whether a pending prompt is
+     * in-app answerable. {@code answerable=false} is reserved strictly for genuinely
+     * unrecoverable prompts: a plan approval is always answerable; an {@code
+     * AskUserQuestion} is answerable iff EVERY question carries a recoverable option
+     * set ({@link #allQuestionsHaveOptions}). This replaces the UC-50 {@code
+     * questions.size() <= 1} gate that hardcoded a multi-question batch to non-answerable
+     * — under UC-55 the handler recovers all tabs' options (stepping the live pane) and
+     * re-maps the prompt through this same predicate, so a multi-question wizard whose
+     * options have been recovered flips to {@code answerable=true} (AC2/AC5/AC10).
+     * Both the initial map and the post-recovery re-map go through here so the rule can
+     * never drift between the two call sites.
+     */
+    public boolean answerable(String kind, List<ConversationServerMessage.QuestionItem> questions) {
+        return "plan".equals(kind) || allQuestionsHaveOptions(questions);
+    }
+
+    /**
+     * UC-55 — true iff there is at least one question and EVERY question carries a
+     * non-empty option list. A header-only multi-question batch (UC-50's pane recovery
+     * before stepping) has empty option lists → false (so it is NOT shown as in-app
+     * answerable until the options are recovered); a fully recovered batch → true.
+     */
+    private static boolean allQuestionsHaveOptions(List<ConversationServerMessage.QuestionItem> questions) {
+        if (questions == null || questions.isEmpty()) {
+            return false;
+        }
+        for (ConversationServerMessage.QuestionItem q : questions) {
+            if (q.options() == null || q.options().isEmpty()) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**
@@ -360,6 +394,47 @@ public class ConversationEventMapper {
      */
     public ConversationServerMessage.Question pendingPromptToQuestion(ConversationServerMessage.PendingPrompt pp) {
         return new ConversationServerMessage.Question(pp.promptKey(), false, "main", pp.promptKey(), pp.questions());
+    }
+
+    /**
+     * UC-55 — parse ONE wizard tab's recovered content from the helper's {@code
+     * --parse-pane} JSON ({@code {question,multiSelect,options:[{label,description}]}})
+     * into a {@link ConversationServerMessage.QuestionItem}, stamping the {@code header}
+     * the caller already knows (the server owns the tab order from the initial header-only
+     * payload, so it pairs each stepped capture with its header — {@code --parse-pane}
+     * deliberately does not try to identify the focused tab's header from plain pane text).
+     * Returns {@code null} for a blank / malformed payload OR an empty option list (an
+     * unrecovered tab, e.g. {@code {}} from a capture miss) so the caller leaves that tab
+     * header-only and the whole batch correctly stays {@code answerable=false} rather than
+     * rendering a tab with no options. Never throws (mirrors {@link #mapPendingPrompt}).
+     */
+    public ConversationServerMessage.QuestionItem parseFocusedTab(String tabJson, String header) {
+        if (tabJson == null || tabJson.isBlank()) {
+            return null;
+        }
+        JsonNode root;
+        try {
+            root = json.readTree(tabJson);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException jpe) {
+            return null;
+        }
+        if (root == null || !root.isObject()) {
+            return null;
+        }
+        JsonNode opts = root.path("options");
+        if (!opts.isArray() || opts.isEmpty()) {
+            return null; // unrecovered tab — no options to render
+        }
+        List<ConversationServerMessage.Option> options = new ArrayList<>();
+        for (JsonNode o : opts) {
+            options.add(new ConversationServerMessage.Option(
+                    firstNonNull(text(o, "label"), ""), firstNonNull(text(o, "description"), "")));
+        }
+        return new ConversationServerMessage.QuestionItem(
+                firstNonNull(text(root, "question"), ""),
+                header == null ? "" : header,
+                root.path("multiSelect").asBoolean(false),
+                options);
     }
 
     // ──────────────────────── helpers ────────────────────────
