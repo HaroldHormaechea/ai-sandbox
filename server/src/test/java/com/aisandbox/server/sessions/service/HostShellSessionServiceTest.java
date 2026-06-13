@@ -133,11 +133,20 @@ class HostShellSessionServiceTest {
 
     @Test
     void ensureCreated_runs_bare_host_tmux_new_session_with_explicit_path_and_term() throws Exception {
-        // has-session → absent (exit 1); new-session → success (exit 0).
+        // has-session is STATEFUL (UC-63): absent (exit 1) for the pre-create
+        // exists-gate, present (exit 0) once new-session has run. An honest tmux
+        // models this — and the new UC-63 post-create has-session probe then
+        // confirms presence, so the happy path no longer throws.
+        AtomicBoolean present = new AtomicBoolean(false);
         ProcessExecutor exec = mock(ProcessExecutor.class);
         when(exec.run(any(), any(), any(), any())).thenAnswer(inv -> {
             List<String> argv = inv.getArgument(0);
-            return new ProcessExecutor.Result(argv.contains("has-session") ? 1 : 0, "", "");
+            if (argv.contains("has-session")) {
+                return new ProcessExecutor.Result(present.get() ? 0 : 1, "", "");
+            }
+            // new-session succeeds AND really brings the session up (honest tmux).
+            present.set(true);
+            return new ProcessExecutor.Result(0, "", "");
         });
 
         new HostShellSessionService(exec, enabledProps()).ensureCreated();
@@ -148,8 +157,9 @@ class HostShellSessionServiceTest {
         ArgumentCaptor<Path> wd = ArgumentCaptor.forClass(Path.class);
         @SuppressWarnings("unchecked")
         ArgumentCaptor<Map<String, String>> env = ArgumentCaptor.forClass(Map.class);
-        // 2 calls: has-session (exists gate) then new-session.
-        verify(exec, org.mockito.Mockito.times(2)).run(argv.capture(), wd.capture(), env.capture(), any());
+        // 3 calls (UC-63): has-session (exists gate) → new-session → has-session
+        // (post-create presence probe — the exit-code-lie guard).
+        verify(exec, org.mockito.Mockito.times(3)).run(argv.capture(), wd.capture(), env.capture(), any());
 
         List<String> newSession = argv.getAllValues().stream()
                 .filter(a -> a.contains("new-session"))
@@ -213,6 +223,39 @@ class HostShellSessionServiceTest {
         assertThatThrownBy(() -> new HostShellSessionService(exec, enabledProps()).ensureCreated())
                 .isInstanceOf(IOException.class)
                 .hasMessageContaining("tmux new-session for server-ssh failed");
+    }
+
+    @Test
+    void ensureCreated_throws_when_new_session_exits_zero_but_session_absent() throws Exception {
+        // UC-63 AC8b/AC3 — the tmux exit-code LIE. `tmux new-session` against a
+        // missing socket-parent dir writes "error creating <sock> (No such file
+        // or directory)" to stderr yet exits 0. ensureCreated() MUST NOT trust
+        // that 0: its post-create has-session probe stays absent (exit 1), so it
+        // throws IOException and exists() stays false — POST /v1/sessions/server-ssh
+        // then surfaces a 5xx rather than a false 200.
+        ProcessExecutor exec = mock(ProcessExecutor.class);
+        when(exec.run(any(), any(), any(), any())).thenAnswer(inv -> {
+            List<String> argv = inv.getArgument(0);
+            if (argv.contains("has-session")) {
+                // The session NEVER actually comes up — both the pre-create gate
+                // and the post-create probe report absent.
+                return new ProcessExecutor.Result(1, "", "");
+            }
+            // new-session LIES: exit 0 with the tmux "error creating" stderr.
+            return new ProcessExecutor.Result(0, "", "error creating " + SOCK + " (No such file or directory)");
+        });
+
+        HostShellSessionService svc = new HostShellSessionService(exec, enabledProps());
+
+        assertThatThrownBy(svc::ensureCreated)
+                .as("AC3 — a 0-exit new-session that did not actually create the session must still throw")
+                .isInstanceOf(IOException.class)
+                .hasMessageContaining("reported success but the session is not present");
+
+        // AC8b — no false-positive: exists() stays false after the lie.
+        assertThat(svc.exists())
+                .as("AC8b — exists() stays false when new-session lied (no false 200)")
+                .isFalse();
     }
 
     @Test

@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import com.aisandbox.server.config.ServerProperties;
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -111,6 +112,51 @@ class HostShellSessionLiveTmuxTest {
         assertThat(hasSession())
                 .as("raw tmux has-session confirms destruction (AC11)")
                 .isFalse();
+    }
+
+    @Test
+    @DisplayName("ensureCreated auto-creates a MISSING socket-parent dir and brings up a reachable tmux (UC-63 AC8a)")
+    void ensureCreated_autoCreatesMissingSocketParentDir_freshInstall() throws Exception {
+        assumeTrue(tmuxAvailable(), "host tmux not available — skipping live host-tmux check");
+        // UC-63 AC8a — the exact fresh-install gap. The socket's parent dir does
+        // NOT exist yet: the other live tests point at the @TempDir root (always
+        // present), which is precisely why the shipped bug went unnoticed. Here we
+        // point the socket at a NON-pre-created subdir and DELIBERATELY do not
+        // create it — ensureCreated() must provision it itself (AC1) and still
+        // bring up a reachable host tmux (AC8a / AC4).
+        sessionName = "uc63-freshinstall-" + ProcessHandle.current().pid();
+        Path sessionsDir = tmp.resolve("sessions"); // intentionally NOT pre-created
+        socket = sessionsDir.resolve("server-ssh.sock"); // tracked for teardown
+        assertThat(Files.exists(sessionsDir))
+                .as("precondition — the socket-parent dir MUST be absent before ensureCreated (the fresh-install gap)")
+                .isFalse();
+
+        ServerProperties props = new ServerProperties(
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                new ServerProperties.ServerSsh(true, socket, sessionName, "/bin/bash", tmp));
+        HostShellSessionService svc = new HostShellSessionService(exec, props);
+
+        svc.ensureCreated();
+
+        assertThat(Files.isDirectory(sessionsDir))
+                .as("AC1 — ensureCreated auto-created the missing socket-parent dir")
+                .isTrue();
+        assertThat(svc.exists())
+                .as("AC8a — the host tmux is reachable after the dir was auto-created (no exit-code lie)")
+                .isTrue();
+        assertThat(hasSession())
+                .as("AC8a — raw tmux has-session confirms a live session on the auto-created socket dir")
+                .isTrue();
     }
 
     @Test

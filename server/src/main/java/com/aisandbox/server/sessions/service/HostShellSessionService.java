@@ -4,6 +4,7 @@ import com.aisandbox.server.config.ServerProperties;
 import com.aisandbox.server.config.SpecialSessions;
 import com.aisandbox.server.sessions.dto.SessionRecord;
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.time.Instant;
@@ -120,7 +121,11 @@ public class HostShellSessionService {
      * {@link #createLock} so two concurrent creates produce exactly one tmux
      * and one row (server-side singleton, AC13). No-op when disabled.
      *
-     * @throws IOException if {@code tmux new-session} fails (non-zero exit).
+     * @throws IOException if the socket-parent directory cannot be created, if
+     *     {@code tmux new-session} exits non-zero, or if the session is not
+     *     actually present afterwards (tmux exits {@code 0} but writes
+     *     {@code error creating <socket>} to stderr when the socket-parent dir
+     *     is missing — UC-63).
      */
     public void ensureCreated() throws IOException {
         if (!cfg.enabled()) {
@@ -132,6 +137,16 @@ public class HostShellSessionService {
             if (exists()) {
                 return; // singleton — focusing the existing session is a client-side concern
             }
+            // UC-63 AC1 — provision the socket's parent directory before
+            // new-session. On a fresh install the sessions/ dir is otherwise
+            // created lazily by spawn.sh only on the first Docker session, so a
+            // server that has only ever opened the host shell would have no
+            // parent dir. Confined to the host-state tree (the systemd unit's
+            // ReadWritePaths), so this succeeds at runtime. Idempotent.
+            Path parent = socketPath.getParent();
+            if (parent != null) {
+                Files.createDirectories(parent);
+            }
             // tmux -S <sock> new-session -d -s <name> <shell> -l
             // Running detached as the server's own user/cwd. PATH/TERM are set
             // explicitly: under a systemd unit with a minimal environment, a
@@ -141,6 +156,16 @@ public class HostShellSessionService {
             if (r.exitCode() != 0) {
                 throw new IOException(
                         "tmux new-session for server-ssh failed (exit " + r.exitCode() + "): " + r.stderr());
+            }
+            // UC-63 AC2/AC3 — do NOT trust the exit code alone. tmux exits 0
+            // even when it fails to create the socket (e.g. a missing parent
+            // dir: "error creating <socket> (No such file or directory)" on
+            // stderr). Confirm the session is actually present via the live
+            // has-session probe and throw on a false success, so
+            // POST /v1/sessions/server-ssh returns 5xx rather than a false 200.
+            if (!exists()) {
+                throw new IOException("tmux new-session for server-ssh reported success but the session is not present"
+                        + " (exit " + r.exitCode() + "): " + r.stderr());
             }
             LOG.info(
                     "Created server-ssh host tmux '{}' on socket {} (shell={}, cwd={})",
