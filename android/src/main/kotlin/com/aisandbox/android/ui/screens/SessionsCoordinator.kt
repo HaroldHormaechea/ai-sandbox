@@ -437,6 +437,47 @@ class SessionsCoordinator(
     }
 
     /**
+     * UC-62 — create (or focus) the singleton server host-shell session, then
+     * invoke [onReady] with its reserved id so the screen can navigate straight
+     * into the terminal (AC1, AC2). The server enforces the singleton, so a
+     * second tap returns the same row and [onReady] re-opens it (AC2 "second tap
+     * focuses the existing row"). Errors surface like the other operations — an
+     * HTTP failure as a snackbar (`lastError`), a transport throw via
+     * [surfaceTransportThrow] — and [onReady] is NOT called, so no dead terminal
+     * is opened.
+     */
+    fun openServerSsh(onReady: (Int) -> Unit) {
+        scope.launch {
+            val profile = profileSupplier() ?: run {
+                state.value = state.value.copy(lastError = "no_profile")
+                return@launch
+            }
+            try {
+                when (val r = apiFactory(profile).createServerSsh()) {
+                    is ApiResult.Success -> {
+                        // The server responded → reachable; refresh so the pinned
+                        // row appears in the list, then open its terminal.
+                        state.value = state.value.copy(unreachable = false, serverResponded = true)
+                        refresh()
+                        onReady(r.value.n)
+                    }
+                    is ApiResult.HttpFailure -> {
+                        Log.w(TAG, "createServerSsh failed: ${r.code} (${r.status}) ${r.detail}")
+                        state.value = state.value.copy(
+                            lastError = "${r.code} (${r.status})",
+                            unreachable = false,
+                            serverResponded = true,
+                        )
+                    }
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "createServerSsh threw: ${t.message}", t)
+                surfaceTransportThrow(t, profile, "server_ssh_failed")
+            }
+        }
+    }
+
+    /**
      * UC-52 — single point that classifies a transport throwable caught around
      * an API call and updates the single-surface (`unreachable` XOR
      * [SessionsUiState.lastError]) invariant. Shared by every

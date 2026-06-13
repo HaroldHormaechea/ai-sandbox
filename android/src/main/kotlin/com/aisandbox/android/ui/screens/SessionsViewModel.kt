@@ -81,6 +81,13 @@ class SessionsViewModel(application: Application) : AndroidViewModel(application
     /** UC-46 — drive a Docker-lifecycle action (stop/start/pause/unpause). */
     fun lifecycle(n: Int, action: LifecycleAction) = coordinator.lifecycle(n, action)
 
+    /**
+     * UC-62 — create (or focus) the singleton server host-shell session and
+     * open its terminal via [onReady]. Driven by the sessions-list top-bar
+     * shell icon.
+     */
+    fun openServerSsh(onReady: (Int) -> Unit) = coordinator.openServerSsh(onReady)
+
     fun clearError() = coordinator.clearError()
 
     /** UC-32 — open the live push feed; driven by the screen on foreground START (AC6). */
@@ -155,14 +162,29 @@ data class SessionsUiState(
     fun effectiveState(row: SessionSummary): String =
         if (row.n in terminating || row.state == "terminating") "terminating" else row.state
 
-    /** The list filtered + sorted by N for display (filter sees the effective state). */
+    /**
+     * The list filtered + sorted by N for display (filter sees the effective
+     * state). UC-62 — the server host-shell row (`type == server-ssh`) is
+     * partitioned out and PREPENDED unconditionally, so it stays pinned to the
+     * top of the list above every Claude row (AC3) and survives every filter
+     * chip (AC3 — it is not a "running/stopped" Claude session and must always
+     * be reachable). Only the ordinary Claude rows are filtered + n-sorted.
+     */
     val visible: List<SessionSummary>
-        get() = sessions.filter { filter.matches(effectiveState(it)) }.sortedBy { it.n }
+        get() {
+            val (ssh, claude) = sessions.partition { it.isServerSsh }
+            return ssh + claude.filter { filter.matches(effectiveState(it)) }.sortedBy { it.n }
+        }
 
-    /** Counts for the chip badges — computed on the effective state (UC-28). */
-    val countAll: Int get() = sessions.size
+    /**
+     * Counts for the chip badges — computed on the effective state (UC-28).
+     * UC-62 — the host-shell row is excluded from all three counts: it is not a
+     * Claude session and the chips describe the Claude session population.
+     */
+    private val claudeSessions: List<SessionSummary> get() = sessions.filterNot { it.isServerSsh }
+    val countAll: Int get() = claudeSessions.size
     val countRunning: Int
-        get() = sessions.count {
+        get() = claudeSessions.count {
             val s = effectiveState(it)
             // UC-28 adds `terminating`; `starting` is intentionally EXCLUDED —
             // the UC-04/UC-27 badge contract counts running only (not starting),
@@ -172,7 +194,7 @@ data class SessionsUiState(
     // UC-46 — `paused` buckets with `stopped` under the Stopped chip (both are
     // non-running, resumable-or-restartable states the operator manages there).
     val countStopped: Int
-        get() = sessions.count {
+        get() = claudeSessions.count {
             val s = effectiveState(it)
             s == "stopped" || s == "paused"
         }

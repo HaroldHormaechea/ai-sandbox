@@ -77,6 +77,24 @@ class SessionsApi(private val http: AiSandboxHttpClient) {
         }
     }
 
+    /**
+     * UC-62 — create (or focus) the singleton server host-shell session via
+     * `POST /v1/sessions/server-ssh` (no body). The server enforces the
+     * singleton, so a second call returns the SAME row (200) rather than a
+     * second session. Returns the row as a [SessionSummary] (it carries
+     * `type == "server-ssh"` and the reserved id [SERVER_SSH_N]). Transport
+     * failures bubble as a [Throwable] exactly like [spawn].
+     */
+    suspend fun createServerSsh(): ApiResult<SessionSummary> = withContext(Dispatchers.IO) {
+        val req = Request.Builder()
+            .url("$base/v1/sessions/server-ssh")
+            .post(ByteArray(0).toRequestBody(null))
+            .build()
+        client.newCall(req).execute().use { resp ->
+            mapResponse(resp) { JSON.decodeFromString(SessionSummary.serializer(), it) }
+        }
+    }
+
     suspend fun delete(n: Int, force: Boolean): ApiResult<Unit> = withContext(Dispatchers.IO) {
         val url = if (force) "$base/v1/sessions/$n?force=true" else "$base/v1/sessions/$n"
         val req = Request.Builder().url(url).delete().build()
@@ -136,6 +154,21 @@ class SessionsApi(private val http: AiSandboxHttpClient) {
     companion object {
         private val JSON = Json { ignoreUnknownKeys = true; isLenient = true }
         private val JSON_MEDIA_TYPE = "application/json; charset=utf-8".toMediaType()
+
+        /**
+         * UC-62 — reserved id for the singleton server host-shell session.
+         * MUST equal the server's `SpecialSessions.SERVER_SSH_N` (0): it is a
+         * sentinel outside the real `ai-sandbox-<N≥1>` Docker numbering, so it
+         * reuses the existing `GET`/`DELETE /v1/sessions/{n}` + `{n}/stream`
+         * plumbing without colliding with a real session.
+         */
+        const val SERVER_SSH_N: Int = 0
+
+        /** UC-62 — the `type` value the server tags the host-shell row with. */
+        const val TYPE_SERVER_SSH: String = "server-ssh"
+
+        /** UC-62 — the `type` value for an ordinary Claude/Docker session row. */
+        const val TYPE_CLAUDE: String = "claude"
     }
 }
 
@@ -206,7 +239,21 @@ data class SessionSummary(
      */
     @Transient
     val optimistic: Boolean = false,
-)
+    /**
+     * UC-62 — session kind: `claude` (an ordinary sandbox/Docker session) or
+     * `server-ssh` (the single always-on server host-shell row, reserved id
+     * [SessionsApi.SERVER_SSH_N]). Defaults to `claude` so the field decodes
+     * leniently against older server payloads and so every existing row is an
+     * ordinary session. The list view pins a `server-ssh` row to the top,
+     * badges it "SERVER SSH SESSION", offers only Remove, and routes its taps
+     * to the terminal (never the Claude conversation view). Covers REST and the
+     * UC-32 push (which reuses this DTO).
+     */
+    val type: String = "claude",
+) {
+    /** UC-62 — true when this row is the server host-shell session. */
+    val isServerSsh: Boolean get() = type == SessionsApi.TYPE_SERVER_SSH
+}
 
 @Serializable
 data class SpawnRequest(

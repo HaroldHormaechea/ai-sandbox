@@ -24,6 +24,7 @@ import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -83,6 +84,7 @@ import com.aisandbox.android.net.LifecycleAction
 import com.aisandbox.android.net.SessionSummary
 import com.aisandbox.android.ui.components.AttachedBadge
 import com.aisandbox.android.ui.components.PendingQuestionBadge
+import com.aisandbox.android.ui.components.ServerSshBadge
 import com.aisandbox.android.ui.components.SessionAvatar
 import com.aisandbox.android.ui.components.StatusPill
 import com.aisandbox.android.ui.theme.AiSandboxMonoTypography
@@ -207,6 +209,21 @@ fun SessionsScreen(
                     }
                 },
                 actions = {
+                    // UC-62 (AC1) — shell icon immediately to the LEFT of the
+                    // gear: actions render left→right, so placing this IconButton
+                    // BEFORE Settings puts it on Settings' left. Tapping it
+                    // creates-or-focuses the singleton server host-shell session
+                    // and opens its terminal (the server enforces the singleton,
+                    // so a second tap focuses the same row — AC2).
+                    IconButton(
+                        onClick = { viewModel.openServerSsh { n -> onOpenTerminal(n) } },
+                        modifier = Modifier.testTag("sessions_server_ssh_action"),
+                    ) {
+                        Icon(
+                            Icons.Outlined.Terminal,
+                            contentDescription = stringResource(R.string.server_ssh_action_description),
+                        )
+                    }
                     IconButton(onClick = onOpenSettings) {
                         Icon(Icons.Outlined.Settings, contentDescription = "Settings")
                     }
@@ -309,7 +326,11 @@ internal fun SessionsBody(
                 // (tap → chat / long-press → terminal) vs. a non-running state
                 // that must redirect to the open-gate hint.
                 val isPending = state.isPending(row)
-                val attachable = isAttachable(effectiveState)
+                // UC-62 — the server host-shell row is ALWAYS attachable and
+                // ALWAYS opens the terminal (never the Claude conversation view),
+                // both on tap and long-press (AC5).
+                val isSsh = row.isServerSsh
+                val attachable = isSsh || isAttachable(effectiveState)
                 // Pitfall 5 — scope the dismiss state per-N inside key(row.n)
                 // so an in-flight list refresh can't carry a stale anchor onto
                 // a different row or resurrect a just-deleted one.
@@ -353,9 +374,18 @@ internal fun SessionsBody(
                             row = row,
                             effectiveState = effectiveState,
                             pending = isPending,
-                            // UC-46 row-open gate — only attachable states
-                            // navigate; otherwise surface the hint.
-                            onTap = { if (attachable) onOpen(row.n) else onBlockedOpen() },
+                            isServerSsh = isSsh,
+                            // UC-62 — the SSH row routes BOTH tap and long-press
+                            // to the terminal (never the conversation view). For
+                            // Claude rows the UC-46 row-open gate is unchanged:
+                            // tap → chat, long-press → terminal, else hint.
+                            onTap = {
+                                when {
+                                    isSsh -> onOpenTerminal(row.n)
+                                    attachable -> onOpen(row.n)
+                                    else -> onBlockedOpen()
+                                }
+                            },
                             onLongPress = { if (attachable) onOpenTerminal(row.n) else onBlockedOpen() },
                             // Remove routes to the EXISTING confirmed delete
                             // path (DeleteSessionDialog) — not a second path.
@@ -459,6 +489,10 @@ private fun SessionRow(
     // UC-46 — a lifecycle action is in flight for this row (AC6); the overflow
     // menu is disabled while pending or terminating so it can't be double-fired.
     pending: Boolean = false,
+    // UC-62 — this is the pinned server host-shell row: render the badge +
+    // "Server shell" title, both gestures open the terminal, and the menu
+    // offers ONLY Remove.
+    isServerSsh: Boolean = false,
     onTap: () -> Unit,
     // UC-37 AC1 — long-press opens the tmux/terminal view; tap opens the
     // structured conversation view. Swipe-left (delete) is unchanged (AC2).
@@ -485,82 +519,106 @@ private fun SessionRow(
             Spacer(Modifier.width(12.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    text = "ai-sandbox-${row.n}",
+                    // UC-62 (AC4) — the host shell shows "Server shell", never
+                    // the synthetic "ai-sandbox-0".
+                    text = if (isServerSsh) {
+                        stringResource(R.string.server_ssh_row_title)
+                    } else {
+                        "ai-sandbox-${row.n}"
+                    },
                     style = AiSandboxMonoTypography.sessionId,
                     color = OnSurface,
                 )
-                if (row.label.isNotBlank()) {
+                if (isServerSsh) {
+                    // UC-62 (AC4) — the distinguishing "SERVER SSH SESSION" badge,
+                    // plus a fixed hint; the SSH row has no Claude conversation
+                    // name / tmux title / lifecycle state to show.
+                    Spacer(Modifier.height(4.dp))
+                    ServerSshBadge()
                     Text(
-                        text = row.label,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = OnSurfaceVariant,
-                    )
-                }
-                // UC-47 — prefer the Claude conversation name as the primary status
-                // line; fall back to the tmux title (which is already normalized to
-                // (idle)/(unavailable)) when no name is known (AC1, AC3). Single line
-                // + ellipsis so a long/odd name never breaks the layout or pushes out
-                // the StatusPill — the middle Column is weight(1f), so the trailing
-                // pill/badge/menu stay fixed (AC5).
-                val statusLine = row.conversationName?.takeIf { it.isNotBlank() } ?: row.tmuxTitle
-                if (statusLine.isNotBlank()) {
-                    Text(
-                        text = statusLine,
+                        text = stringResource(R.string.server_ssh_row_hint),
                         style = AiSandboxMonoTypography.metadata,
                         color = OnSurfaceMuted,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
+                    )
+                } else {
+                    if (row.label.isNotBlank()) {
+                        Text(
+                            text = row.label,
+                            style = MaterialTheme.typography.bodySmall,
+                            color = OnSurfaceVariant,
+                        )
+                    }
+                    // UC-47 — prefer the Claude conversation name as the primary status
+                    // line; fall back to the tmux title (which is already normalized to
+                    // (idle)/(unavailable)) when no name is known (AC1, AC3). Single line
+                    // + ellipsis so a long/odd name never breaks the layout or pushes out
+                    // the StatusPill — the middle Column is weight(1f), so the trailing
+                    // pill/badge/menu stay fixed (AC5).
+                    val statusLine = row.conversationName?.takeIf { it.isNotBlank() } ?: row.tmuxTitle
+                    if (statusLine.isNotBlank()) {
+                        Text(
+                            text = statusLine,
+                            style = AiSandboxMonoTypography.metadata,
+                            color = OnSurfaceMuted,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                    // AC2 — discoverable connection-mode hint. UC-46: only show it
+                    // for attachable rows; a stopped/paused/terminating row can't be
+                    // opened (the row-open gate redirects to a hint), so advertising
+                    // "tap to chat" would be misleading.
+                    Text(
+                        text = if (isAttachable(effectiveState)) {
+                            "Tap to chat · hold for terminal"
+                        } else {
+                            "Use ⋮ to manage this session"
+                        },
+                        style = AiSandboxMonoTypography.metadata,
+                        color = OnSurfaceMuted,
                     )
                 }
-                // AC2 — discoverable connection-mode hint. UC-46: only show it
-                // for attachable rows; a stopped/paused/terminating row can't be
-                // opened (the row-open gate redirects to a hint), so advertising
-                // "tap to chat" would be misleading.
-                Text(
-                    text = if (isAttachable(effectiveState)) {
-                        "Tap to chat · hold for terminal"
-                    } else {
-                        "Use ⋮ to manage this session"
-                    },
-                    style = AiSandboxMonoTypography.metadata,
-                    color = OnSurfaceMuted,
-                )
             }
-            Column(horizontalAlignment = Alignment.End) {
-                // UC-49 / UC-48 — 3-way trailing indicator, all double-gated on a
-                // marker-confirmed `running` row (AC8 here, AC7 for the spinner): a
-                // stale working/pending must never render on a terminating/paused/
-                // stopped row even if it races the state override.
-                //   1. pendingQuestion ⇒ a "?" badge + the pill, NO spinner. PENDING
-                //      TAKES PRECEDENCE (AC5): the session is waiting on the user, not
-                //      working, so the badge replaces the spinner. (The server already
-                //      makes the two mutually exclusive, but the precedence here is the
-                //      client-side guarantee the row never shows both.)
-                //   2. else working ⇒ the working spinner + pill, exactly as UC-48
-                //      (16.dp / 2.dp matching the conversation view's SpinnerRow).
-                //   3. else ⇒ the pill alone.
-                // The pill stays the row's status anchor; the badge/spinner sits to its
-                // left in one Row, coexisting with the conversation name + UC-46 menu
-                // without a layout change (AC7).
-                val running = effectiveState == "running"
-                if (row.pendingQuestion && running) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        PendingQuestionBadge()
-                        Spacer(Modifier.width(6.dp))
+            // UC-62 — the host shell carries no Claude status (no running/
+            // working/pending pill); its identity is the badge in the middle
+            // column, so the trailing status stack is suppressed for it.
+            if (!isServerSsh) {
+                Column(horizontalAlignment = Alignment.End) {
+                    // UC-49 / UC-48 — 3-way trailing indicator, all double-gated on a
+                    // marker-confirmed `running` row (AC8 here, AC7 for the spinner): a
+                    // stale working/pending must never render on a terminating/paused/
+                    // stopped row even if it races the state override.
+                    //   1. pendingQuestion ⇒ a "?" badge + the pill, NO spinner. PENDING
+                    //      TAKES PRECEDENCE (AC5): the session is waiting on the user, not
+                    //      working, so the badge replaces the spinner. (The server already
+                    //      makes the two mutually exclusive, but the precedence here is the
+                    //      client-side guarantee the row never shows both.)
+                    //   2. else working ⇒ the working spinner + pill, exactly as UC-48
+                    //      (16.dp / 2.dp matching the conversation view's SpinnerRow).
+                    //   3. else ⇒ the pill alone.
+                    // The pill stays the row's status anchor; the badge/spinner sits to its
+                    // left in one Row, coexisting with the conversation name + UC-46 menu
+                    // without a layout change (AC7).
+                    val running = effectiveState == "running"
+                    if (row.pendingQuestion && running) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            PendingQuestionBadge()
+                            Spacer(Modifier.width(6.dp))
+                            StatusPill(state = effectiveState)
+                        }
+                    } else if (row.working && running) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                            Spacer(Modifier.width(6.dp))
+                            StatusPill(state = effectiveState)
+                        }
+                    } else {
                         StatusPill(state = effectiveState)
                     }
-                } else if (row.working && running) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
-                        Spacer(Modifier.width(6.dp))
-                        StatusPill(state = effectiveState)
+                    if (row.activeStreams > 0) {
+                        Spacer(Modifier.height(6.dp))
+                        AttachedBadge(count = row.activeStreams)
                     }
-                } else {
-                    StatusPill(state = effectiveState)
-                }
-                if (row.activeStreams > 0) {
-                    Spacer(Modifier.height(6.dp))
-                    AttachedBadge(count = row.activeStreams)
                 }
             }
             // UC-46 — trailing overflow context menu. Its IconButton onClick is
@@ -570,6 +628,10 @@ private fun SessionRow(
                 n = row.n,
                 effectiveState = effectiveState,
                 pending = pending,
+                // UC-62 (AC8) — the host-shell row's menu offers ONLY Remove
+                // (no stop/start/pause/unpause); swipe-to-dismiss still routes
+                // to the same Remove flow (AC9).
+                serverSshOnly = isServerSsh,
                 onRemove = onRemove,
                 onLifecycle = onLifecycle,
             )
@@ -596,6 +658,9 @@ private fun SessionRowMenu(
     n: Int,
     effectiveState: String,
     pending: Boolean,
+    // UC-62 — when true the menu offers ONLY Remove (the host-shell row has no
+    // Docker lifecycle); the four lifecycle items are omitted entirely (AC8).
+    serverSshOnly: Boolean = false,
     onRemove: () -> Unit,
     onLifecycle: (LifecycleAction) -> Unit,
 ) {
@@ -621,20 +686,23 @@ private fun SessionRowMenu(
                 },
             )
             // Order per the proposal: Remove, Stop, Start, Pause, Unpause.
-            for (action in listOf(
-                LifecycleAction.STOP,
-                LifecycleAction.START,
-                LifecycleAction.PAUSE,
-                LifecycleAction.UNPAUSE,
-            )) {
-                DropdownMenuItem(
-                    text = { Text(stringResource(lifecycleActionLabel(action))) },
-                    enabled = action.isValidFrom(effectiveState),
-                    onClick = {
-                        expanded = false
-                        onLifecycle(action)
-                    },
-                )
+            // UC-62 — omitted entirely for the host-shell row (only Remove).
+            if (!serverSshOnly) {
+                for (action in listOf(
+                    LifecycleAction.STOP,
+                    LifecycleAction.START,
+                    LifecycleAction.PAUSE,
+                    LifecycleAction.UNPAUSE,
+                )) {
+                    DropdownMenuItem(
+                        text = { Text(stringResource(lifecycleActionLabel(action))) },
+                        enabled = action.isValidFrom(effectiveState),
+                        onClick = {
+                            expanded = false
+                            onLifecycle(action)
+                        },
+                    )
+                }
             }
         }
     }
@@ -709,13 +777,31 @@ internal fun DeleteSessionDialog(
     onConfirm: (force: Boolean) -> Unit,
 ) {
     var force by rememberSaveable { mutableStateOf(false) }
-    val hasAttached = target.activeStreams > 0
+    // UC-62 — the host shell never reports attached streams (activeStreams=0)
+    // and uses its own remove copy (it's a host tmux, not a sandbox container).
+    val isSsh = target.isServerSsh
+    val hasAttached = !isSsh && target.activeStreams > 0
     AlertDialog(
         onDismissRequest = onCancel,
-        title = { Text(stringResource(R.string.delete_title, target.n)) },
+        title = {
+            Text(
+                if (isSsh) {
+                    stringResource(R.string.server_ssh_delete_title)
+                } else {
+                    stringResource(R.string.delete_title, target.n)
+                },
+            )
+        },
         text = {
             Column {
-                Text(stringResource(R.string.delete_body), style = MaterialTheme.typography.bodyMedium)
+                Text(
+                    if (isSsh) {
+                        stringResource(R.string.server_ssh_delete_body)
+                    } else {
+                        stringResource(R.string.delete_body)
+                    },
+                    style = MaterialTheme.typography.bodyMedium,
+                )
                 if (hasAttached) {
                     Spacer(Modifier.height(12.dp))
                     Text(
