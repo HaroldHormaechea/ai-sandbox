@@ -12,7 +12,9 @@ import com.aisandbox.server.config.ServerProperties;
 import com.aisandbox.server.config.SpecialSessions;
 import com.aisandbox.server.sessions.dto.SessionRecord;
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermission;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
@@ -20,6 +22,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.mockito.ArgumentCaptor;
 
 /**
@@ -50,6 +53,15 @@ import org.mockito.ArgumentCaptor;
  *       pins the row's reserved id + {@code server-ssh} type.</li>
  *   <li><b>master switch</b> — disabled ⇒ {@code exists()} false with NO
  *       subprocess, {@code ensureCreated()} / {@code kill()} no-ops.</li>
+ *   <li><b>UC-64 AC2 / AC9a</b> —
+ *       {@link #ensureCreated_runs_bare_host_tmux_new_session_with_explicit_path_and_term()}
+ *       additionally pins that the {@code new-session} env carries
+ *       {@code HOME} pointing at the accessible, writable redirected home
+ *       (NOT under {@code /home/...}) and that {@code ensureCreated()}
+ *       provisions that dir {@code 0700} (the {@code ProtectHome} fix).</li>
+ *   <li><b>UC-64 AC4</b> —
+ *       {@link #home_defaults_under_host_state_root_when_unset()} mirrors the
+ *       socket-default derivation for the new {@code home} field.</li>
  * </ul>
  */
 class HostShellSessionServiceTest {
@@ -57,8 +69,19 @@ class HostShellSessionServiceTest {
     private static final Path SOCK = Path.of("/tmp/uc62-test/server-ssh.sock");
     private static final String NAME = "ai-sandbox-server-ssh";
 
+    /**
+     * UC-64 — a real, writable home for the redirected {@code HOME}. Used so the
+     * {@code ServerSsh.home} field is non-null and {@code ensureCreated()} can
+     * actually provision the dir {@code 0700} without escaping into a read-only
+     * system path. NOT under {@code /home/...}, so AC9a's "not the hidden home"
+     * assertion holds. {@code resolve("server-ssh-home")} mirrors the runtime
+     * default leaf name.
+     */
+    @TempDir
+    Path tmpHome;
+
     /** ServerProperties carrying ONLY a {@link ServerProperties.ServerSsh}; the rest is unused by the service. */
-    private static ServerProperties props(boolean enabled, Path socket, String name, String shell, Path workdir) {
+    private ServerProperties props(boolean enabled, Path socket, String name, String shell, Path workdir) {
         return new ServerProperties(
                 null,
                 null,
@@ -71,10 +94,15 @@ class HostShellSessionServiceTest {
                 null,
                 null,
                 null,
-                new ServerProperties.ServerSsh(enabled, socket, name, shell, workdir));
+                new ServerProperties.ServerSsh(enabled, socket, name, shell, workdir, redirectedHome()));
     }
 
-    private static ServerProperties enabledProps() {
+    /** The accessible, writable redirected home the test fixtures point {@code HOME} at (UC-64). */
+    private Path redirectedHome() {
+        return tmpHome.resolve("server-ssh-home");
+    }
+
+    private ServerProperties enabledProps() {
         return props(true, SOCK, NAME, "/bin/bash", Path.of("/srv/work"));
     }
 
@@ -181,6 +209,34 @@ class HostShellSessionServiceTest {
 
         // The shell launches in the configured working dir (the server's own cwd).
         assertThat(wd.getAllValues().get(idx)).isEqualTo(Path.of("/srv/work"));
+
+        // UC-64 AC2 / AC9a — the new-session env redirects HOME to the accessible,
+        // writable home, NOT the ProtectHome-hidden /home. Under the hardened unit
+        // /home is overmounted untraversable, so tmux/the login shell would hit
+        // EACCES ("Permission denied") on their config under the inherited
+        // HOME=/home/...; the fix points HOME at a dir inside ReadWritePaths.
+        assertThat(newSessionEnv).containsKey("HOME");
+        assertThat(newSessionEnv.get("HOME"))
+                .as("AC9a — host tmux server HOME is the accessible redirected home")
+                .isEqualTo(redirectedHome().toString());
+        assertThat(newSessionEnv.get("HOME"))
+                .as("AC9a/AC8 — HOME is NOT the ProtectHome-hidden real home")
+                .doesNotStartWith("/home/");
+
+        // UC-64 AC5 — ensureCreated() provisioned the redirected HOME dir before
+        // new-session, restrictively (0700: owner-only, never group/other). The
+        // live tmux semantics on top of this dir are proven by
+        // HostShellSessionLiveTmuxTest; here we pin the dir + mode the service
+        // itself creates.
+        assertThat(Files.isDirectory(redirectedHome()))
+                .as("AC5 — ensureCreated() created the redirected HOME dir")
+                .isTrue();
+        assertThat(Files.getPosixFilePermissions(redirectedHome()))
+                .as("AC5/AC9c — redirected HOME is 0700 (owner-only, no group/other access)")
+                .containsExactlyInAnyOrder(
+                        PosixFilePermission.OWNER_READ,
+                        PosixFilePermission.OWNER_WRITE,
+                        PosixFilePermission.OWNER_EXECUTE);
     }
 
     @Test
@@ -380,9 +436,64 @@ class HostShellSessionServiceTest {
                 null,
                 sessions,
                 null,
-                new ServerProperties.ServerSsh(true, null, null, null, null));
+                new ServerProperties.ServerSsh(true, null, null, null, null, null));
         HostShellSessionService svc = new HostShellSessionService(mock(ProcessExecutor.class), p);
         assertThat(svc.socketPathString()).isEqualTo("/var/lib/ai-sandbox/server-ssh.sock");
         assertThat(svc.sessionName()).isEqualTo("ai-sandbox-server-ssh");
+    }
+
+    @Test
+    void home_defaults_under_host_state_root_when_unset() throws Exception {
+        // UC-64 AC4 — mirrors the socket-default derivation: home null → derived
+        // as <sessions.hostStateRoot>/server-ssh-home, an accessible writable dir
+        // inside the unit's ReadWritePaths (NOT the ProtectHome-hidden /home).
+        // This is exactly the path the postinst pre-creates, so packaging and the
+        // runtime ensureCreated() agree on ownership/mode (the "don't double-own"
+        // pitfall). homePathString() is what TmuxBridgeService reads for the
+        // PTY-attach HOME (AC9b).
+        ServerProperties.Sessions sessions =
+                new ServerProperties.Sessions(Path.of("/var/lib/ai-sandbox-server/sessions"));
+        ServerProperties p = new ServerProperties(
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                sessions,
+                null,
+                new ServerProperties.ServerSsh(true, null, null, null, null, null));
+        HostShellSessionService svc = new HostShellSessionService(mock(ProcessExecutor.class), p);
+        assertThat(svc.homePathString())
+                .as("AC4 — home defaults to <hostStateRoot>/server-ssh-home")
+                .isEqualTo("/var/lib/ai-sandbox-server/sessions/server-ssh-home");
+        assertThat(svc.homePathString())
+                .as("AC8 — the default home is inside the writable /var/lib tree, never the hidden /home")
+                .doesNotStartWith("/home/");
+    }
+
+    @Test
+    void home_honours_explicit_config_override() {
+        // UC-64 AC4 — an explicit ServerSsh.home wins over the runtime default,
+        // matching how socket/shell/name overrides are already honoured.
+        Path override = Path.of("/var/lib/ai-sandbox-server/custom-home");
+        ServerProperties withHome = new ServerProperties(
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                new ServerProperties.ServerSsh(true, SOCK, NAME, "/bin/bash", Path.of("/srv/work"), override));
+        HostShellSessionService svc = new HostShellSessionService(mock(ProcessExecutor.class), withHome);
+        assertThat(svc.homePathString()).isEqualTo(override.toString());
     }
 }

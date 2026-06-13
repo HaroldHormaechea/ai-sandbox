@@ -80,6 +80,15 @@ case "$1" in
         # first use regardless of whether a Docker session was ever spawned.
         # Idempotent and ownership-agreeing with spawn.sh's lazy create.
         install -d -m 0750 -o ai-sandbox-server -g ai-sandbox-server /var/lib/ai-sandbox-server/sessions
+        # UC-64 — host-shell HOME. The UC-62 server host-shell runs tmux + a
+        # login shell whose $HOME would otherwise be the ProtectHome-hidden
+        # /home/ai-sandbox-server, so tmux/the shell hit EACCES reading their
+        # config. The service redirects HOME to this accessible, writable dir
+        # under the host-state tree (the unit's ReadWritePaths), mirroring how
+        # DOCKER_CONFIG redirects Docker. Mode 0700 / ai-sandbox-server owner,
+        # matching docker-config and the runtime ensureCreated() pre-create.
+        # Idempotent on re-installs.
+        install -d -m 0700 -o ai-sandbox-server -g ai-sandbox-server /var/lib/ai-sandbox-server/sessions/server-ssh-home
         install -d -m 0750 -o ai-sandbox-server -g ai-sandbox-server /var/log/ai-sandbox-server
 
         # 3b. UC-38 — versioned session-image rebuild on upgrade. On an UPGRADE

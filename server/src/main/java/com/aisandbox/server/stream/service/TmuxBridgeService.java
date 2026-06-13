@@ -160,18 +160,9 @@ public class TmuxBridgeService {
         prepareClientSession(project, socket, session, effectiveTarget, onHost);
 
         // Step 3 — PTY attach.
-        // pty4j's setEnvironment REPLACES the child environment, so we must
-        // inherit the JVM env (notably $PATH, matching ProcessExecutor's
-        // ProcessBuilder behaviour) and overlay TERM. Otherwise the bare
-        // "docker" argv can't be resolved ("Unable to get $PATH" /
-        // Exec_tty error). The PATH fallback covers a systemd unit started
-        // without one in its environment.
-        Map<String, String> ptyEnv = new HashMap<>(System.getenv());
-        ptyEnv.put("TERM", "xterm-256color");
-        ptyEnv.computeIfAbsent("PATH", k -> "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
         PtyProcessBuilder pb = new PtyProcessBuilder()
                 .setCommand(attachArgv(project, socket, session, onHost))
-                .setEnvironment(ptyEnv)
+                .setEnvironment(buildPtyEnv(onHost))
                 .setInitialColumns(cols > 0 ? cols : 80)
                 .setInitialRows(rows > 0 ? rows : 24);
         PtyProcess proc;
@@ -183,6 +174,34 @@ public class TmuxBridgeService {
             throw io;
         }
         return new Bridge(project, session, socket, onHost, proc, exec);
+    }
+
+    /**
+     * Build the PTY-attach child environment. pty4j's {@code setEnvironment}
+     * REPLACES the child environment, so we must inherit the JVM env (notably
+     * {@code $PATH}, matching {@link ProcessExecutor}'s {@code ProcessBuilder}
+     * behaviour) and overlay {@code TERM}. Otherwise the bare {@code docker}
+     * argv can't be resolved ("Unable to get $PATH" / Exec_tty error). The
+     * {@code PATH} fallback covers a systemd unit started without one in its
+     * environment.
+     *
+     * <p>UC-64: for the host shell ({@code onHost} with a bound host-shell
+     * service) overlay {@code HOME} with the accessible, writable redirected
+     * home so the attaching client and the login shell inside the pane resolve
+     * their (absent) config away from the {@code ProtectHome}-hidden
+     * {@code /home} — matching the {@code HOME} the tmux server itself was
+     * created with. When the host-shell service is unbound, {@code HOME} is left
+     * inherited (graceful degradation). Package-visible so QA can assert the env.
+     */
+    Map<String, String> buildPtyEnv(boolean onHost) {
+        Map<String, String> ptyEnv = new HashMap<>(System.getenv());
+        ptyEnv.put("TERM", "xterm-256color");
+        ptyEnv.computeIfAbsent("PATH", k -> "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin");
+        HostShellSessionService hs = this.hostShell;
+        if (onHost && hs != null) {
+            ptyEnv.put("HOME", hs.homePathString());
+        }
+        return ptyEnv;
     }
 
     /**

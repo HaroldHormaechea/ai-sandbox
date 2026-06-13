@@ -267,13 +267,20 @@ public record ServerProperties(
      *       else {@code /bin/bash}.</li>
      *   <li>{@code workdir} — working dir for the shell; defaults to the JVM
      *       cwd ({@code user.dir}).</li>
+     *   <li>{@code home} — UC-64; {@code HOME} for the host tmux + login shell.
+     *       Optional; defaults at runtime to
+     *       {@code <sessions.hostStateRoot>/server-ssh-home} (inside the unit's
+     *       {@code ReadWritePaths}) when null. Redirects tmux/shell config
+     *       lookups away from the {@code ProtectHome}-hidden real home, mirroring
+     *       how the unit redirects Docker via {@code DOCKER_CONFIG}.</li>
      * </ul>
      */
-    public record ServerSsh(boolean enabled, Path socketPath, String sessionName, String shell, Path workdir) {
+    public record ServerSsh(
+            boolean enabled, Path socketPath, String sessionName, String shell, Path workdir, Path home) {
 
         /** Default-bearing instance used by the back-compat ctor + QA fixtures. */
         public static ServerSsh defaults() {
-            return new ServerSsh(true, null, null, null, null);
+            return new ServerSsh(true, null, null, null, null, null);
         }
     }
 }

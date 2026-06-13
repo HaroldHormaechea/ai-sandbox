@@ -123,6 +123,48 @@ class DebPostinstContractTest {
     }
 
     /**
+     * Exact-shape regex per UC-64 AC9d — same byte-exact-flags / {@code \s+}
+     * between-token tolerance as the docker-config / sessions patterns, for the
+     * host-shell {@code HOME} dir. Mode {@code 0700} (owner-only — it backs the
+     * host shell's home; group/other access would be a needless widening), owner
+     * + group {@code ai-sandbox-server}, mirroring the {@code docker-config}
+     * precedent and the runtime {@code ensureCreated()} pre-create so packaging
+     * and runtime agree on ownership/mode (the "don't double-own" pitfall).
+     */
+    private static final Pattern POSTINST_SERVER_SSH_HOME_PATTERN =
+            Pattern.compile("(?m)^\\s*install\\s+-d\\s+-m\\s+0700\\s+-o\\s+ai-sandbox-server\\s+-g\\s+ai-sandbox-server"
+                    + "\\s+/var/lib/ai-sandbox-server/sessions/server-ssh-home\\s*$");
+
+    /**
+     * UC-64 AC9d — packaging contract: the postinst MUST pre-create the host-shell
+     * {@code HOME} directory at install time, mirroring how {@code docker-config}
+     * is pre-created, so the {@code ProtectHome} HOME-redirect (set in
+     * {@code HostShellSessionService.baseEnv()} / {@code TmuxBridgeService}) points
+     * at a writable dir on a fresh install — not the overmounted-untraversable
+     * {@code /home}. The path
+     * {@code /var/lib/ai-sandbox-server/sessions/server-ssh-home} is exactly the
+     * runtime default ({@code <sessions.host-state-root>/server-ssh-home}); mode
+     * {@code 0700} keeps the host shell's home owner-only (security posture
+     * unchanged — the fix only redirects HOME, it never widens access).
+     */
+    @Test
+    void postinst_creates_server_ssh_home_directory_with_correct_mode_and_ownership() throws IOException {
+        assumeTrue(
+                Files.isRegularFile(POSTINST_FILE),
+                "postinst not found at " + POSTINST_FILE + " — test must run with cwd=server/");
+
+        String text = Files.readString(POSTINST_FILE);
+        assertThat(POSTINST_SERVER_SSH_HOME_PATTERN.matcher(text).find())
+                .as(
+                        "UC-64 AC9d — postinst MUST contain an `install -d -m 0700 -o ai-sandbox-server "
+                                + "-g ai-sandbox-server /var/lib/ai-sandbox-server/sessions/server-ssh-home` "
+                                + "invocation so the ProtectHome HOME-redirect has a writable, owner-only home "
+                                + "to point at on a fresh install (mirroring docker-config). Postinst text was:\n%s",
+                        text)
+                .isTrue();
+    }
+
+    /**
      * UC-17 AC1/AC2/AC9 — packaging contract for the debconf-driven
      * onboarding the postinst now performs. The wizard is invoked
      * non-interactively from {@code configure}; this guard pins the
