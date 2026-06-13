@@ -89,13 +89,14 @@ fun QuestionSheet(
 }
 
 /**
- * UC-50 — a pane-delivered MULTI-question batch that cannot be answered in-app
- * ([PendingSheet.answerable] == false): only the focused tab's options are
- * recoverable from one pane capture, so the server marks the whole batch
- * not-answerable. The sheet stays VISIBLE (so the user is no longer stuck on a
- * silent "Working…") and shows the question headers read-only with an explicit
- * "answer in tmux to continue" affordance and NO submit control. Full in-app
- * multi-answer is a tracked follow-up, not part of this UC.
+ * UC-50/UC-55 — the residual not-answerable body ([PendingSheet.answerable] == false).
+ * As of UC-55 the standard multi-question wizard is NO LONGER routed here: the server
+ * recovers every tab's options (stepping the live pane) and delivers the batch
+ * `answerable=true`, so it renders the in-app [PagedQuestionBody]. This body now serves
+ * ONLY the narrow genuinely-unrecoverable residual — a prompt KIND whose options cannot
+ * be derived at all. The sheet stays VISIBLE (so the user is not stuck on a silent
+ * "Working…") and shows the headers read-only with an explicit "answer in tmux to
+ * continue" affordance and NO submit control.
  */
 @Composable
 private fun NotAnswerableBody(sheet: PendingSheet.Questions) {

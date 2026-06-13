@@ -198,13 +198,16 @@ sealed interface PendingSheet {
     val questionUuid: String
 
     /**
-     * UC-50 — whether this sheet can be answered IN-APP. `true` for a
-     * transcript-delivered sheet (today's behavior) and for a pane-delivered single
-     * question / plan approval; `false` for a pane-delivered multi-question batch,
-     * where only the focused tab's options are recoverable from the pane so the user
-     * must answer in tmux. The flag is set explicitly by the server's `answerable`
-     * field — NEVER inferred client-side. When `false` the sheet shows the questions
-     * read-only with an "answer in tmux to continue" affordance and no submit.
+     * UC-50/UC-55 — whether this sheet can be answered IN-APP. The flag is set explicitly
+     * by the server's `answerable` field — NEVER inferred client-side. `true` for a
+     * transcript-delivered sheet, a pane-delivered single question, plan approval, AND
+     * (UC-55) a pane-delivered MULTI-question batch: the server now recovers every tab's
+     * options by stepping the live pane, so the standard multi-question wizard is fully
+     * in-app answerable via [Questions] → the paged sheet (no tmux fallback). `false` is
+     * reserved for the narrow genuinely-unrecoverable residual — a prompt KIND whose
+     * options cannot be derived at all (NOT the ordinary single/multi-question wizard) —
+     * where the sheet shows the questions read-only with an "answer in tmux to continue"
+     * affordance and no submit.
      */
     val answerable: Boolean
 

@@ -413,12 +413,42 @@ public class SessionConversationHandler implements WebSocketHandler {
     }
 
     private void cacheQuestion(ConvCtx ctx, ConversationServerMessage.Question q) {
-        if (q.toolUseId() != null) {
-            ctx.pendingQuestions.put(q.toolUseId(), q);
+        cachePut(ctx, q.toolUseId(), q);
+        cachePut(ctx, q.uuid(), q);
+    }
+
+    /**
+     * UC-55 (LOCKED CONDITION 2) — cache a synthesized question under {@code key}, but
+     * NEVER downgrade a full-options cached {@code Question} to a header-only one for the
+     * same key. A racing helper {@code pending-question} poll can re-deliver a multi-question
+     * prompt header-only (empty options) while a recovered, full-options sheet is already
+     * cached + open; overwriting it would strip the per-tab option metadata {@link
+     * #deriveAnswerSpec} reads, desyncing the answer-injection walk. The
+     * {@code dispatchPendingQuestion} guards drop most such re-emits before they reach here;
+     * this is the defensive backstop that makes the invariant hold unconditionally.
+     */
+    private void cachePut(ConvCtx ctx, String key, ConversationServerMessage.Question q) {
+        if (key == null) {
+            return;
         }
-        if (q.uuid() != null) {
-            ctx.pendingQuestions.put(q.uuid(), q);
+        ConversationServerMessage.Question existing = ctx.pendingQuestions.get(key);
+        if (existing != null && hasAnyOptions(existing) && !hasAnyOptions(q)) {
+            return; // don't downgrade full-options → header-only
         }
+        ctx.pendingQuestions.put(key, q);
+    }
+
+    /** True iff at least one of the question's items carries a non-empty option list. */
+    private static boolean hasAnyOptions(ConversationServerMessage.Question q) {
+        if (q.questions() == null) {
+            return false;
+        }
+        for (ConversationServerMessage.QuestionItem item : q.questions()) {
+            if (item.options() != null && !item.options().isEmpty()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     // ──────────────────────── inbound: frames → actions ────────────────────────

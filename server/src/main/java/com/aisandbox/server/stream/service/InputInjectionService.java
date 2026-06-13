@@ -58,6 +58,24 @@ public class InputInjectionService {
     /** The Claude Code TUI build these keystroke mappings were verified against. */
     public static final String PINNED_CLAUDE_VERSION = "2.1.169";
 
+    /**
+     * UC-55 — the wizard-tab NAVIGATION keys, the ONLY keystrokes the read-only
+     * option-recovery walk ({@link #stepWizardForward} / {@link #stepWizardBack}) is ever
+     * allowed to send. {@code Right} advances the focused tab for reading, {@code Left}
+     * steps back to restore it; neither commits or mutates any answer (Phase-0 verified).
+     * This set deliberately EXCLUDES every selection/commit key ({@code Space}, {@code
+     * Enter}, {@code Tab}, digits, literals) used by the answer-injection paths — so the
+     * recovery walk's flicker is provably non-corrupting (LOCKED CONDITION 3: the walk must
+     * never emit a selection-or-commit key). QA asserts the recovery keystroke set against
+     * this constant.
+     */
+    public static final String WIZARD_NEXT_TAB_KEY = "Right";
+
+    public static final String WIZARD_PREV_TAB_KEY = "Left";
+
+    public static final java.util.Set<String> WIZARD_NAV_KEYS =
+            java.util.Set.of(WIZARD_NEXT_TAB_KEY, WIZARD_PREV_TAB_KEY);
+
     private final ProcessExecutor exec;
 
     public InputInjectionService(ProcessExecutor exec) {
@@ -308,7 +326,7 @@ public class InputInjectionService {
      * the {@code Tab}/{@code Enter} commit keys {@link #injectAnswerBatch} uses to answer.
      */
     public void stepWizardForward(int n, InjectTarget target) throws IOException {
-        sendKeys(n, target, "Right");
+        sendKeys(n, target, WIZARD_NEXT_TAB_KEY);
     }
 
     /**
@@ -320,7 +338,7 @@ public class InputInjectionService {
      * pane exactly as it found it.
      */
     public void stepWizardBack(int n, InjectTarget target) throws IOException {
-        sendKeys(n, target, "Left");
+        sendKeys(n, target, WIZARD_PREV_TAB_KEY);
     }
 
     // ──────────────────────── internals ────────────────────────
