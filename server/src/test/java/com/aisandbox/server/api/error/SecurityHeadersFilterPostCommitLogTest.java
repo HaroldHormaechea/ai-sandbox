@@ -204,6 +204,11 @@ class SecurityHeadersFilterPostCommitLogTest {
         r.add("ai-sandbox.server.enrollment.dir", ENROLLMENT_DIR::toString);
         r.add("ai-sandbox.server.sessions.host-state-root", SESSIONS_DIR::toString);
         r.add("ai-sandbox.server.secrets.dir", SECRETS_DIR::toString);
+        // UC-62 — this test mocks ProcessExecutor for the docker argv only; the
+        // server-ssh probe would issue a `tmux has-session` through the unstubbed
+        // mock (null Result → 500). It is orthogonal to this test's concern
+        // (security headers on a successful GET /v1/sessions), so disable it.
+        r.add("ai-sandbox.server.server-ssh.enabled", () -> false);
         r.add("server.port", () -> 0);
         r.add("server.shutdown", () -> "immediate");
         r.add("ai-sandbox.server.shutdown.rest-grace-seconds", () -> 1);

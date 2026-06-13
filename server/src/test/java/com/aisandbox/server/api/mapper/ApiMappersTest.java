@@ -104,4 +104,36 @@ class ApiMappersTest {
 
         assertThat(out).extracting(ApiDtos.SessionSummary::pendingQuestion).containsExactly(true, false);
     }
+
+    // ── UC-62 — type carried onto the REST DTO (AC6) ─────────────────────────
+
+    @Test
+    void toSummary_carries_server_ssh_type() {
+        // The 11-arg record carries the discriminator; the mapper must surface it
+        // so the Android client can pin/badge/route the row (AC6).
+        SessionRecord r =
+                new SessionRecord(0, "", "(idle)", "running", 0L, 0, STARTED, null, false, false, "server-ssh");
+
+        assertThat(ApiMappers.toSummary(r).type())
+                .as("AC6 — the server-ssh discriminator reaches the REST DTO")
+                .isEqualTo("server-ssh");
+    }
+
+    @Test
+    void back_compat_record_without_type_defaults_to_claude() {
+        // Every pre-UC-62 record shape (≤10 args) delegates type=claude, so an
+        // ordinary session is always reported as claude.
+        SessionRecord r = new SessionRecord(7, "d", "t", "running", 0L, 0, STARTED, null, false, false);
+
+        assertThat(ApiMappers.toSummary(r).type()).isEqualTo("claude");
+    }
+
+    @Test
+    void toSummaries_maps_each_record_including_type() {
+        List<ApiDtos.SessionSummary> out = ApiMappers.toSummaries(List.of(
+                new SessionRecord(0, "", "t", "running", 0L, 0, STARTED, null, false, false, "server-ssh"),
+                new SessionRecord(1, "a", "t", "running", 0L, 0, STARTED, null, false, false, "claude")));
+
+        assertThat(out).extracting(ApiDtos.SessionSummary::type).containsExactly("server-ssh", "claude");
+    }
 }

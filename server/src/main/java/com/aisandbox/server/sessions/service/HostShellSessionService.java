@@ -106,8 +106,7 @@ public class HostShellSessionService {
             return false;
         }
         try {
-            ProcessExecutor.Result r =
-                    exec.run(tmux("has-session", "-t", sessionName), null, baseEnv(), TIMEOUT);
+            ProcessExecutor.Result r = exec.run(tmux("has-session", "-t", sessionName), null, baseEnv(), TIMEOUT);
             return r.exitCode() == 0;
         } catch (IOException io) {
             LOG.debug("server-ssh has-session check failed (treating as absent): {}", io.toString());
@@ -137,14 +136,18 @@ public class HostShellSessionService {
             // Running detached as the server's own user/cwd. PATH/TERM are set
             // explicitly: under a systemd unit with a minimal environment, a
             // bare "tmux" / the login shell would otherwise fail to resolve.
-            ProcessExecutor.Result r = exec.run(
-                    tmux("new-session", "-d", "-s", sessionName, shell, "-l"), workdir, baseEnv(), TIMEOUT);
+            ProcessExecutor.Result r =
+                    exec.run(tmux("new-session", "-d", "-s", sessionName, shell, "-l"), workdir, baseEnv(), TIMEOUT);
             if (r.exitCode() != 0) {
-                throw new IOException("tmux new-session for server-ssh failed (exit " + r.exitCode() + "): "
-                        + r.stderr());
+                throw new IOException(
+                        "tmux new-session for server-ssh failed (exit " + r.exitCode() + "): " + r.stderr());
             }
-            LOG.info("Created server-ssh host tmux '{}' on socket {} (shell={}, cwd={})",
-                    sessionName, socketPath, shell, workdir);
+            LOG.info(
+                    "Created server-ssh host tmux '{}' on socket {} (shell={}, cwd={})",
+                    sessionName,
+                    socketPath,
+                    shell,
+                    workdir);
         } finally {
             createLock.unlock();
         }

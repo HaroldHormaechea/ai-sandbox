@@ -477,7 +477,13 @@ public class TmuxBridgeService {
         private final ProcessExecutor exec;
         private final AtomicBoolean closed = new AtomicBoolean(false);
 
-        Bridge(String project, String session, String socket, boolean onHost, PtyProcess process, ProcessExecutor exec) {
+        Bridge(
+                String project,
+                String session,
+                String socket,
+                boolean onHost,
+                PtyProcess process,
+                ProcessExecutor exec) {
             this.project = project;
             this.session = session;
             this.socket = socket;

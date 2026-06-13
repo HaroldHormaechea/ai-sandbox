@@ -439,4 +439,78 @@ class SessionsUiStateTest {
             .`as`("AC6 — a successful operation auto-returns the dot to green (no manual retry)")
             .isEqualTo(Connectivity.REACHABLE)
     }
+
+    // ── UC-62 — server host-shell row: pin-top, filter-survival, count-exclusion ──
+
+    private fun sshRow(): SessionSummary =
+        SessionSummary(
+            n = com.aisandbox.android.net.SessionsApi.SERVER_SSH_N,
+            label = "",
+            tmuxTitle = "(idle)",
+            state = "running",
+            uptimeSec = 0L,
+            activeStreams = 0,
+            startedAt = null,
+            type = com.aisandbox.android.net.SessionsApi.TYPE_SERVER_SSH,
+        )
+
+    @Test
+    fun `visible pins the server-ssh row to the top above every claude row (UC-62 AC3)`() {
+        // The SSH row is reserved id 0, but pinning is by type, not by n: it sits
+        // ABOVE the n-ascending Claude rows regardless. Here the claude rows are
+        // deliberately out of order to prove the SSH row isn't merely "n==0 first".
+        val s = SessionsUiState(
+            sessions = listOf(
+                row(3, "running"),
+                row(1, "running"),
+                sshRow(),
+                row(2, "stopped"),
+            ),
+        )
+        assertThat(s.visible.first().isServerSsh)
+            .`as`("AC3 — the server-ssh row is pinned first")
+            .isTrue
+        assertThat(s.visible.map { it.n }).containsExactly(0, 1, 2, 3)
+    }
+
+    @Test
+    fun `visible keeps the server-ssh row under EVERY filter chip (UC-62 AC3)`() {
+        // The SSH row is not a running/stopped Claude session; it must survive all
+        // three chips so the operator can always reach the host shell.
+        for (filter in SessionsFilter.values()) {
+            val s = SessionsUiState(
+                sessions = listOf(sshRow(), row(1, "running"), row(2, "stopped")),
+                filter = filter,
+            )
+            assertThat(s.visible.firstOrNull()?.isServerSsh)
+                .`as`("server-ssh row present + pinned under the %s chip", filter)
+                .isTrue
+        }
+    }
+
+    @Test
+    fun `chip counts exclude the server-ssh row (UC-62)`() {
+        // The chips describe the Claude session population; the host-shell row is
+        // not a Claude session and is excluded from All / Running / Stopped.
+        val s = SessionsUiState(
+            sessions = listOf(
+                sshRow(),
+                row(1, "running"),
+                row(2, "running"),
+                row(3, "stopped"),
+            ),
+        )
+        assertThat(s.countAll).`as`("countAll excludes the SSH row").isEqualTo(3)
+        assertThat(s.countRunning).`as`("countRunning excludes the SSH row").isEqualTo(2)
+        assertThat(s.countStopped).`as`("countStopped excludes the SSH row").isEqualTo(1)
+    }
+
+    @Test
+    fun `server-ssh row is reachable even when it is the only row (UC-62)`() {
+        val s = SessionsUiState(sessions = listOf(sshRow()), filter = SessionsFilter.STOPPED)
+        // Even under STOPPED, the lone host-shell row stays visible (it's pinned,
+        // not filtered) while contributing zero to every chip count.
+        assertThat(s.visible.map { it.n }).containsExactly(0)
+        assertThat(s.countAll).isZero()
+    }
 }

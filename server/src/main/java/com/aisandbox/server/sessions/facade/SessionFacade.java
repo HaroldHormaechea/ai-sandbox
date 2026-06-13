@@ -98,7 +98,12 @@ public class SessionFacade {
         HostShellSessionService hs = requireHostShell();
         hs.ensureCreated();
         registry.invalidate();
-        audit.logEvent(AuditAction.SESSION_SPAWN, "ok", "n", SpecialSessions.SERVER_SSH_N, "type",
+        audit.logEvent(
+                AuditAction.SESSION_SPAWN,
+                "ok",
+                "n",
+                SpecialSessions.SERVER_SSH_N,
+                "type",
                 SpecialSessions.TYPE_SERVER_SSH);
         return hs.row();
     }

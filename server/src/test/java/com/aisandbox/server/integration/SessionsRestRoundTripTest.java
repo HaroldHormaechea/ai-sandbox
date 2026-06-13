@@ -182,6 +182,12 @@ class SessionsRestRoundTripTest {
         r.add("ai-sandbox.server.enrollment.dir", ENROLLMENT_DIR::toString);
         r.add("ai-sandbox.server.sessions.host-state-root", SESSIONS_DIR::toString);
         r.add("ai-sandbox.server.secrets.dir", SECRETS_DIR::toString);
+        // UC-62 — the round trip mocks ProcessExecutor at the docker argv layer; it
+        // exercises Docker session create/list/delete, not the host shell. Disable
+        // the server-ssh probe so SessionRegistryService.list() does not issue a
+        // `tmux has-session` through the unstubbed mock (null Result → 500). The
+        // host-shell paths are covered by the dedicated UC-62 unit tests.
+        r.add("ai-sandbox.server.server-ssh.enabled", () -> false);
         r.add("server.port", () -> 0);
         r.add("server.shutdown", () -> "immediate");
         r.add("ai-sandbox.server.shutdown.rest-grace-seconds", () -> 1);

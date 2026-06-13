@@ -118,9 +118,8 @@ public class StreamFacade {
         // TmuxBridgeService.start for SERVER_SSH_N anyway (it builds the host
         // target internally), so a placeholder main target is sufficient here.
         SwarmEnumerationService s = this.swarm;
-        BridgeTarget target = (n == SpecialSessions.SERVER_SSH_N || s == null)
-                ? BridgeTarget.main()
-                : s.resolveTarget(n, targetId);
+        BridgeTarget target =
+                (n == SpecialSessions.SERVER_SSH_N || s == null) ? BridgeTarget.main() : s.resolveTarget(n, targetId);
 
         ReentrantLock l = perN.get(n);
         try {
