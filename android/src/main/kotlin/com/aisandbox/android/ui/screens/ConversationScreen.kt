@@ -132,16 +132,20 @@ fun ConversationScreen(
                     IconButton(onClick = { menuOpen = true }) {
                         Icon(Icons.Outlined.MoreVert, contentDescription = "Menu")
                     }
-                    DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                        DropdownMenuItem(
-                            text = { Text("Disconnect") },
-                            onClick = {
-                                menuOpen = false
-                                viewModel.disconnect()
-                                onBack()
-                            },
-                        )
-                    }
+                    ConversationOverflowMenu(
+                        expanded = menuOpen,
+                        onClear = {
+                            menuOpen = false // AC7 — close the menu after Clear is chosen
+                            // AC6 — in-place reset; does NOT disconnect or navigate back.
+                            viewModel.clear()
+                        },
+                        onDisconnect = {
+                            menuOpen = false
+                            viewModel.disconnect()
+                            onBack()
+                        },
+                        onDismiss = { menuOpen = false },
+                    )
                 },
             )
         },
@@ -189,6 +193,31 @@ fun ConversationScreen(
         toolDetail?.let { detail ->
             ToolDetailDialog(state = detail, onDismiss = viewModel::closeDetail)
         }
+    }
+}
+
+/**
+ * UC-65 — the top-bar overflow menu, extracted from [ConversationScreen] as an `internal`
+ * seam (same pattern as [ConversationContent]) so same-package instrumented tests can drive
+ * the Clear / Disconnect actions deterministically. Pure extraction plus the new **Clear**
+ * item, positioned ABOVE **Disconnect** (AC1); both remain reachable.
+ */
+@Composable
+internal fun ConversationOverflowMenu(
+    expanded: Boolean,
+    onClear: () -> Unit,
+    onDisconnect: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {
+        DropdownMenuItem(
+            text = { Text("Clear") },
+            onClick = onClear,
+        )
+        DropdownMenuItem(
+            text = { Text("Disconnect") },
+            onClick = onDisconnect,
+        )
     }
 }
 
