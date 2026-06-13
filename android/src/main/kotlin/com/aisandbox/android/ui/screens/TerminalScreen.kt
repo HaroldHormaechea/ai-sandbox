@@ -172,7 +172,9 @@ fun TerminalScreen(
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Text(
-                                text = "ai-sandbox-$sessionN",
+                                // UC-62 — the host-shell row (server-ssh, reserved id 0)
+                                // shows "host-shell", not "ai-sandbox-0".
+                                text = if (summary?.isServerSsh == true) "host-shell" else "ai-sandbox-$sessionN",
                                 style = AiSandboxMonoTypography.sessionId,
                                 color = OnSurface,
                                 maxLines = 1,

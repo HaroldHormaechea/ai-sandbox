@@ -62,6 +62,14 @@ jobs:
         run: ./gradlew :server:spotlessCheck :server:test :server:generateOpenApiDocs --no-daemon
       - name: Fail on drifted committed OAS
         run: git diff --exit-code -- server/openapi.yaml
+      # UC-55 — the in-container conversation-tail helper carries pure parsing seams
+      # (pending-prompt + per-tab --parse-pane recovery) with Node's built-in test
+      # runner. These never run under Gradle, so CI must exercise them explicitly.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Helper unit tests (container-bin)
+        run: node --test container-bin
 
   integration:
     runs-on: ubuntu-latest

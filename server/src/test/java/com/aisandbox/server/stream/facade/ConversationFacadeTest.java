@@ -2,10 +2,14 @@ package com.aisandbox.server.stream.facade;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -13,6 +17,7 @@ import com.aisandbox.server.audit.AuditAction;
 import com.aisandbox.server.audit.AuditLogger;
 import com.aisandbox.server.config.ServerProperties;
 import com.aisandbox.server.identity.ClientIdentity;
+import com.aisandbox.server.stream.dto.ConversationServerMessage;
 import com.aisandbox.server.stream.dto.StreamServerMessage.TargetInfo;
 import com.aisandbox.server.stream.facade.StreamFacade.AuthorizeResult;
 import com.aisandbox.server.stream.service.ConversationEventMapper;
@@ -23,6 +28,8 @@ import com.aisandbox.server.stream.service.TmuxBridgeService.BridgeTarget;
 import com.aisandbox.server.stream.service.TranscriptTailService;
 import com.aisandbox.server.stream.service.TranscriptTailService.PendingState;
 import com.aisandbox.server.stream.service.TranscriptTailService.Tail;
+import com.aisandbox.server.stream.service.TranscriptTailService.TailTarget;
+import java.io.IOException;
 import java.math.BigInteger;
 import java.nio.file.Path;
 import java.util.List;
@@ -310,5 +317,157 @@ class ConversationFacadeTest {
 
         verify(injection).interrupt(eq(7), any(InjectTarget.class));
         verify(swarm, never()).resolveTarget(eq(7), eq("other"));
+    }
+
+    // ──────────────────── UC-55 — multi-question wizard option recovery ───────
+    // recoverWizardOptions steps the LIVE pane through every tab (read-only Right arrow),
+    // captures + parses each focused tab's options, then restores focus (Left) — leaving
+    // the pane exactly as found. The recovered items carry each tab's real options so the
+    // batch becomes in-app answerable (AC2/AC5/AC10). All collaborators mocked.
+
+    private static ConversationServerMessage.QuestionItem headerOnly(String header) {
+        return new ConversationServerMessage.QuestionItem("", header, false, List.of());
+    }
+
+    private static ConversationServerMessage.QuestionItem withOptions(String header, String label) {
+        return new ConversationServerMessage.QuestionItem(
+                "Q-" + header, header, false, List.of(new ConversationServerMessage.Option(label, "")));
+    }
+
+    @Test
+    void recoverWizardOptions_steps_every_tab_then_restores_focus_and_returns_full_options() throws Exception {
+        when(swarm.resolveTarget(7, SwarmEnumerationService.MAIN_ID)).thenReturn(BridgeTarget.main());
+        when(tail.captureFocusedTabJson(eq(7), any(TailTarget.class))).thenReturn("j0", "j1", "j2");
+        ConversationServerMessage.QuestionItem r0 = withOptions("Color", "Red");
+        ConversationServerMessage.QuestionItem r1 = withOptions("Size", "Large");
+        ConversationServerMessage.QuestionItem r2 = withOptions("Shape", "Round");
+        when(mapper.parseFocusedTab(any(), any())).thenReturn(r0, r1, r2);
+
+        List<ConversationServerMessage.QuestionItem> out = facade.recoverWizardOptions(
+                7, "main", List.of(headerOnly("Color"), headerOnly("Size"), headerOnly("Shape")));
+
+        // Every tab recovered with its real options.
+        assertThat(out).containsExactly(r0, r1, r2);
+        // Walk = Right ×(tabs-1) to read tabs 1 and 2, then Left ×(tabs-1) to restore tab 0,
+        // and ALL forwards precede ALL backs (focus is restored only after reading is done).
+        var io = inOrder(injection);
+        io.verify(injection, times(2)).stepWizardForward(eq(7), any(InjectTarget.class));
+        io.verify(injection, times(2)).stepWizardBack(eq(7), any(InjectTarget.class));
+        // Three captures (one per tab), no answer-injection keystrokes.
+        verify(tail, times(3)).captureFocusedTabJson(eq(7), any(TailTarget.class));
+        verify(injection, never()).injectAnswer(anyInt(), any(), anyInt(), anyBoolean(), any(), anyInt(), any());
+    }
+
+    @Test
+    void recoverWizardOptions_single_or_empty_batch_is_returned_unchanged_without_touching_the_pane() throws Exception {
+        // A single question is already fully recovered by UC-50; never perturb the pane.
+        List<ConversationServerMessage.QuestionItem> single = List.of(withOptions("Only", "A"));
+        assertThat(facade.recoverWizardOptions(7, "main", single)).isSameAs(single);
+        assertThat(facade.recoverWizardOptions(7, "main", null)).isNull();
+
+        verify(injection, never()).stepWizardForward(anyInt(), any());
+        verify(injection, never()).stepWizardBack(anyInt(), any());
+        verify(tail, never()).captureFocusedTabJson(anyInt(), any());
+    }
+
+    @Test
+    void recoverWizardOptions_leaves_an_unrecovered_tab_header_only() throws Exception {
+        when(swarm.resolveTarget(7, SwarmEnumerationService.MAIN_ID)).thenReturn(BridgeTarget.main());
+        when(tail.captureFocusedTabJson(eq(7), any(TailTarget.class))).thenReturn("j0", "", "j2");
+        ConversationServerMessage.QuestionItem r0 = withOptions("Color", "Red");
+        ConversationServerMessage.QuestionItem r2 = withOptions("Shape", "Round");
+        // Middle tab fails to parse (capture miss) → null; first and last recover.
+        when(mapper.parseFocusedTab(any(), any())).thenReturn(r0, null, r2);
+
+        ConversationServerMessage.QuestionItem h1 = headerOnly("Size");
+        List<ConversationServerMessage.QuestionItem> out =
+                facade.recoverWizardOptions(7, "main", List.of(headerOnly("Color"), h1, withOptions("Shape", "x")));
+
+        // The unrecovered tab stays the original header-only item (so the batch stays
+        // answerable=false rather than rendering a tab with no options).
+        assertThat(out).hasSize(3);
+        assertThat(out.get(0)).isSameAs(r0);
+        assertThat(out.get(1)).isSameAs(h1);
+        assertThat(out.get(2)).isSameAs(r2);
+    }
+
+    @Test
+    void recoverWizardOptions_restores_focus_even_when_a_step_throws() throws Exception {
+        when(swarm.resolveTarget(7, SwarmEnumerationService.MAIN_ID)).thenReturn(BridgeTarget.main());
+        when(tail.captureFocusedTabJson(eq(7), any(TailTarget.class))).thenReturn("j0", "j1");
+        when(mapper.parseFocusedTab(any(), any())).thenReturn(withOptions("Color", "Red"));
+        // First forward (to tab 1) succeeds; the second (to tab 2) throws mid-walk.
+        doNothing()
+                .doThrow(new IOException("pane vanished"))
+                .when(injection)
+                .stepWizardForward(eq(7), any(InjectTarget.class));
+
+        // Never throws — degrades to best-effort partial recovery …
+        List<ConversationServerMessage.QuestionItem> out = facade.recoverWizardOptions(
+                7, "main", List.of(headerOnly("Color"), headerOnly("Size"), headerOnly("Shape")));
+        assertThat(out).hasSize(3);
+
+        // … and the finally block still restores focus (Left) for the one forward step that
+        // actually succeeded (stepped=1) — the pane must be left as found for injectAnswerBatch.
+        verify(injection, times(2)).stepWizardForward(eq(7), any(InjectTarget.class));
+        verify(injection, times(1)).stepWizardBack(eq(7), any(InjectTarget.class));
+    }
+
+    @Test
+    void recoverWizardOptions_holds_the_pane_lock_so_an_answer_injection_cannot_interleave() throws Exception {
+        // Single-writer invariant: recovery and answer injection drive send-keys into the
+        // SAME pane, so the per-session pane lock must serialize them. We hold the lock inside
+        // the recovery walk (block on a latch during the first pane step) and prove a
+        // concurrent injectAnswer cannot reach injection.injectAnswer until recovery releases.
+        when(swarm.resolveTarget(7, SwarmEnumerationService.MAIN_ID)).thenReturn(BridgeTarget.main());
+        when(tail.captureFocusedTabJson(eq(7), any(TailTarget.class))).thenReturn("j0", "j1");
+        when(mapper.parseFocusedTab(any(), any())).thenReturn(withOptions("Color", "Red"));
+
+        java.util.concurrent.CountDownLatch insideRecovery = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.atomic.AtomicBoolean injectReached = new java.util.concurrent.atomic.AtomicBoolean(false);
+        // The first pane step blocks (holding the lock) until the test releases it.
+        org.mockito.Mockito.doAnswer(inv -> {
+                    insideRecovery.countDown();
+                    release.await(2, java.util.concurrent.TimeUnit.SECONDS);
+                    return null;
+                })
+                .when(injection)
+                .stepWizardForward(eq(7), any(InjectTarget.class));
+        org.mockito.Mockito.doAnswer(inv -> {
+                    injectReached.set(true);
+                    return null;
+                })
+                .when(injection)
+                .injectAnswer(anyInt(), any(), anyInt(), anyBoolean(), any(), anyInt(), any());
+
+        Thread recoverer = new Thread(
+                () -> facade.recoverWizardOptions(7, "main", List.of(headerOnly("Color"), headerOnly("Size"))));
+        recoverer.start();
+        assertThat(insideRecovery.await(2, java.util.concurrent.TimeUnit.SECONDS))
+                .isTrue();
+
+        Thread answerer = new Thread(() -> {
+            try {
+                facade.injectAnswer(7, "main", 2, false, List.of(0), -1, null, identity());
+            } catch (Exception ignored) {
+                // not expected
+            }
+        });
+        answerer.start();
+
+        // While recovery holds the lock, the answer injection must be blocked.
+        Thread.sleep(200);
+        assertThat(injectReached)
+                .as("injectAnswer must not run while recovery holds the pane lock")
+                .isFalse();
+
+        // Release recovery → the answer injection proceeds.
+        release.countDown();
+        recoverer.join(2000);
+        answerer.join(2000);
+        assertThat(injectReached)
+                .as("injectAnswer proceeds once the pane lock is free")
+                .isTrue();
     }
 }

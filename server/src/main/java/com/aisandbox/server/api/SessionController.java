@@ -52,6 +52,31 @@ public class SessionController {
         return ResponseEntity.ok(ApiMappers.toSummaries(facade.listSessions()));
     }
 
+    /**
+     * UC-62 — create (or focus) the singleton server host-shell session.
+     *
+     * <p>Idempotent create-or-focus: the singleton is enforced server-side
+     * ({@link SessionFacade#createServerSsh()}), so a second tap of the Android
+     * shell icon returns the same row (200) rather than creating a second
+     * SERVER SSH SESSION (AC2, AC13). Returns the row as a normal
+     * {@link ApiDtos.SessionSummary} (it carries {@code type=server-ssh} and the
+     * reserved id), so it then flows through the existing list / stream / delete
+     * plumbing.
+     */
+    @Operation(
+            summary = "Create (or focus) the singleton server host-shell session.",
+            description = "Opens a tmux login shell on the management-server host (NOT a sandbox container) and "
+                    + "returns its pinned row. Idempotent: a second call focuses the existing row rather than "
+                    + "creating a second one (server-enforced singleton).")
+    @ApiResponse(
+            responseCode = "200",
+            description = "The server host-shell row (type=server-ssh, reserved id).",
+            content = @Content(schema = @Schema(implementation = ApiDtos.SessionSummary.class)))
+    @PostMapping("/server-ssh")
+    public ResponseEntity<?> createServerSsh() throws IOException {
+        return ResponseEntity.ok(ApiMappers.toSummary(facade.createServerSsh()));
+    }
+
     @PostMapping
     public ResponseEntity<?> spawn(@RequestBody(required = false) ApiDtos.SpawnRequest req)
             throws IOException, InterruptedException {

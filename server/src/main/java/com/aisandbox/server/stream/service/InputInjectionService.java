@@ -28,11 +28,13 @@ import org.springframework.stereotype.Service;
  *   <li><b>Submit</b> — {@code send-keys -l -- <line>} for each text segment,
  *       {@code C-j} (LF) between segments to insert a newline WITHOUT submitting
  *       (AC9 multiline), then {@code Enter} (CR) to submit the turn (AC8).</li>
- *   <li><b>Answer (single-select)</b> — reset the option cursor to the top
- *       ({@code Up} ×N), {@code Down} ×k to the chosen index, {@code Enter}
- *       (AC11).</li>
- *   <li><b>Answer (multiSelect)</b> — reset to top, walk every option toggling
- *       {@code Space} on the selected ones, then advance. With an "Other" answer
+ *   <li><b>Answer (single-select)</b> — the sheet opens with the option cursor
+ *       at the top (index 0), so {@code Down} ×k walks to the chosen index, then
+ *       {@code Enter} (AC11). No blind {@code Up} reset — the option ring wraps,
+ *       so a fixed {@code Up} ×N is non-deterministic (UC-57); this mirrors the
+ *       verified batch path (see {@link #injectAnswerBatch}).</li>
+ *   <li><b>Answer (multiSelect)</b> — from the top-open cursor, walk every option
+ *       toggling {@code Space} on the selected ones, then advance. With an "Other" answer
  *       the free text is composed in (UC-44): type the literal, {@code Enter} to
  *       commit it as a custom option, {@code Space} to select it, then
  *       {@code Tab}+{@code Enter} to activate the in-pane Next/Submit.</li>
@@ -56,8 +58,23 @@ public class InputInjectionService {
     /** The Claude Code TUI build these keystroke mappings were verified against. */
     public static final String PINNED_CLAUDE_VERSION = "2.1.169";
 
-    /** Upper bound on {@code Up} presses used to deterministically reset the option cursor to the top. */
-    private static final int CURSOR_RESET_PRESSES = 20;
+    /**
+     * UC-55 — the wizard-tab NAVIGATION keys, the ONLY keystrokes the read-only
+     * option-recovery walk ({@link #stepWizardForward} / {@link #stepWizardBack}) is ever
+     * allowed to send. {@code Right} advances the focused tab for reading, {@code Left}
+     * steps back to restore it; neither commits or mutates any answer (Phase-0 verified).
+     * This set deliberately EXCLUDES every selection/commit key ({@code Space}, {@code
+     * Enter}, {@code Tab}, digits, literals) used by the answer-injection paths — so the
+     * recovery walk's flicker is provably non-corrupting (LOCKED CONDITION 3: the walk must
+     * never emit a selection-or-commit key). QA asserts the recovery keystroke set against
+     * this constant.
+     */
+    public static final String WIZARD_NEXT_TAB_KEY = "Right";
+
+    public static final String WIZARD_PREV_TAB_KEY = "Left";
+
+    public static final java.util.Set<String> WIZARD_NAV_KEYS =
+            java.util.Set.of(WIZARD_NEXT_TAB_KEY, WIZARD_PREV_TAB_KEY);
 
     private final ProcessExecutor exec;
 
@@ -120,10 +137,19 @@ public class InputInjectionService {
      * AC11 — translate a single-question structured answer into the
      * option-selection keystrokes for the lone {@code AskUserQuestion} sheet.
      *
-     * <p>Resets the option cursor to the top, then delegates to the shared
-     * per-question keystroke helper ({@link #selectQuestionAnswer}) with
-     * {@code Enter} as the commit key — for a single-question sheet there is no
-     * tab to advance to, so {@code Enter} both selects/commits and submits.
+     * <p>Delegates to the shared per-question keystroke helper
+     * ({@link #selectQuestionAnswer}) with {@code Enter} as the commit key — for
+     * a single-question sheet there is no tab to advance to, so {@code Enter}
+     * both selects/commits and submits.
+     *
+     * <p><b>No blind cursor reset.</b> The sheet opens with the option cursor
+     * already at the top (index 0), so the helper's {@code Down}×selectedIndex
+     * walk reaches the target directly — exactly as the multi-question
+     * {@link #injectAnswerBatch} path does. A prior {@code Up}×N "reset" was
+     * <em>removed</em> (UC-57): the TUI option ring <b>wraps</b>, so pressing
+     * {@code Up} a fixed number of times from an unknown position landed at a
+     * non-deterministic option {@code (currentIndex − N) mod ringSize} and sent
+     * the wrong selection.
      *
      * @param optionCount total options on the question (for cursor bounds)
      * @param multiSelect whether multiple options may be toggled
@@ -140,7 +166,6 @@ public class InputInjectionService {
             int otherIndex,
             String freeText)
             throws IOException {
-        resetCursorToTop(n, target);
         selectQuestionAnswer(n, target, optionCount, multiSelect, selections, otherIndex, freeText, "Enter");
     }
 
@@ -154,10 +179,13 @@ public class InputInjectionService {
      * <ul>
      *   <li>The sheet opens at the top of the first question's option list, and
      *       the option cursor <b>auto-resets to the top</b> of each subsequent
-     *       question when the wizard advances — so NO per-question
-     *       {@code resetCursorToTop} is used here (and indeed must not be: in the
-     *       wizard, {@code Up}/{@code Down} <b>wrap around</b> the option ring, so a
-     *       blind {@code Up}×N reset is not deterministic).</li>
+     *       question when the wizard advances — so NO per-question blind cursor
+     *       reset is used here (and indeed must not be: in the wizard,
+     *       {@code Up}/{@code Down} <b>wrap around</b> the option ring, so a blind
+     *       {@code Up}×N reset is not deterministic). The single-question
+     *       {@link #injectAnswer} path relies on the same top-of-list assumption
+     *       (UC-57 removed its former {@code Up}×N reset, which wrapped the ring
+     *       and sent the wrong option).</li>
      *   <li><b>single-select</b> question: walk {@code Down} to the option, then
      *       {@code Enter} — which selects it AND advances to the next tab.</li>
      *   <li><b>multiSelect</b> question (no "Other"): walk the options toggling
@@ -286,13 +314,34 @@ public class InputInjectionService {
         sendKeys(n, target, "Escape");
     }
 
-    // ──────────────────────── internals ────────────────────────
-
-    private void resetCursorToTop(int n, InjectTarget target) throws IOException {
-        for (int i = 0; i < CURSOR_RESET_PRESSES; i++) {
-            sendKeys(n, target, "Up");
-        }
+    /**
+     * UC-55 — advance the multi-question {@code AskUserQuestion} wizard to the NEXT tab
+     * for READING ONLY (the {@code Right} arrow). Verified live against Claude Code
+     * (Phase-0 spike): {@code Right} moves the focused tab and reveals that tab's full
+     * option list <b>without committing any selection</b> (the per-tab answer boxes stay
+     * unchecked) and without moving the option cursor. The server uses this — paired with
+     * a {@code --parse-pane} capture per tab and a matching {@link #stepWizardBack} walk to
+     * restore the original tab — to recover every tab's options so the whole batch becomes
+     * in-app answerable. {@code Right}/{@code Left} are pure navigation here; they are NOT
+     * the {@code Tab}/{@code Enter} commit keys {@link #injectAnswerBatch} uses to answer.
+     */
+    public void stepWizardForward(int n, InjectTarget target) throws IOException {
+        sendKeys(n, target, WIZARD_NEXT_TAB_KEY);
     }
+
+    /**
+     * UC-55 — step the wizard BACK one tab (the {@code Left} arrow), used to restore the
+     * focused tab to its original position after a read-only per-tab option-recovery walk
+     * (Phase-0 verified: {@code Left} returns to the prior tab with its option cursor at the
+     * top and no answer state mutated). Restoration is load-bearing: {@link #injectAnswerBatch}
+     * assumes the wizard opens at the first question's option list, so recovery must leave the
+     * pane exactly as it found it.
+     */
+    public void stepWizardBack(int n, InjectTarget target) throws IOException {
+        sendKeys(n, target, WIZARD_PREV_TAB_KEY);
+    }
+
+    // ──────────────────────── internals ────────────────────────
 
     /** {@code tmux send-keys -t <spec> -l -- <literal>} — sends bytes verbatim (no key interpretation). */
     private void sendLiteral(int n, InjectTarget target, String literal) throws IOException {

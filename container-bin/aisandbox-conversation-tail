@@ -101,6 +101,10 @@ function parseArgs(argv) {
     toolUseId: null,
     // UC-47 — one-shot conversation-name derivation for the sessions-list row.
     conversationName: false,
+    // UC-55 — one-shot read-only per-tab parse of the CURRENTLY-FOCUSED wizard tab
+    // (the server steps the live pane and calls this once per tab to recover every
+    // tab's options for a multi-question AskUserQuestion). Capture-only (no keystroke).
+    parsePane: false,
   };
   for (let i = 2; i < argv.length; i++) {
     const k = argv[i];
@@ -115,6 +119,7 @@ function parseArgs(argv) {
       case '--fetch-detail': a.fetchDetail = true; break;
       case '--tool-use-id': a.toolUseId = argv[++i]; break;
       case '--conversation-name': a.conversationName = true; break;
+      case '--parse-pane': a.parsePane = true; break;
       default: /* ignore unknown flag */ break;
     }
   }
@@ -1296,6 +1301,44 @@ function parsePendingPrompt(paneText) {
 }
 
 /**
+ * UC-55 — PURE: parse the CURRENTLY-FOCUSED wizard tab's real content from one
+ * captured VISIBLE pane. Unlike {@link parsePendingPrompt} (which short-circuits a
+ * multi-question wizard to header-only items because a single capture only shows the
+ * focused tab), this is the per-tab entrypoint the server calls after stepping the
+ * live pane to a given tab — so it MUST recover that tab's full options. Returns
+ * {@code {question, multiSelect, options:[{label,description}]}}. The {@code header}
+ * is NOT returned here: the server owns the tab order (it drove the stepping) and
+ * pairs each parse with the header it already has, since {@link parseSingleTabHeader}
+ * cannot identify WHICH tab is focused from plain text (it always returns the first
+ * tab's label). Returns null only for empty/non-string input.
+ */
+function parseFocusedTab(paneText) {
+  if (typeof paneText !== 'string' || paneText.length === 0) return null;
+  return {
+    question: parseFocusedPrompt(paneText),
+    multiSelect: optionsHaveCheckbox(paneText),
+    options: parseNumberedOptions(paneText),
+  };
+}
+
+/**
+ * UC-55 — one-shot {@code --parse-pane} mode: capture the focused pane (READ-ONLY —
+ * no keystroke; the server owns stepping) and print the focused tab's parsed content
+ * as a single JSON line, exit 0. On a capture failure or no visible AskUserQuestion
+ * chrome, print {@code {}} so the server treats this tab as unrecovered (it will
+ * fall back to leaving that tab header-only / answerable=false rather than guessing).
+ */
+function parsePaneOnce() {
+  const paneText = capturePaneText();
+  if (paneText == null || !looksLikePendingAskUserQuestion(paneText)) {
+    out('{}');
+    return;
+  }
+  const parsed = parseFocusedTab(paneText);
+  out(JSON.stringify(parsed || {}));
+}
+
+/**
  * One-shot: resolve the MAIN pane's active transcript, derive the conversation
  * name AND the working/idle signal from the SAME readAllLines, and print exactly
  * TWO lines, exit 0 (UC-47 line1 + UC-48 line2):
@@ -1550,6 +1593,14 @@ if (require.main === module) {
       out('');
     }
     process.exit(0);
+  } else if (ARGS.parsePane) {
+    try {
+      parsePaneOnce();
+    } catch (e) {
+      // Any failure → empty object; the server treats this tab as unrecovered (UC-55).
+      out('{}');
+    }
+    process.exit(0);
   } else {
     streamLoop().catch((e) => {
       // Never crash the session on an internal error — exit quietly so the server
@@ -1592,6 +1643,8 @@ module.exports = {
   looksLikePendingPlanApproval,
   PLAN_APPROVAL_CHROME,
   parsePendingPrompt,
+  // UC-55 — per-tab focused parse seam (server steps the pane, calls --parse-pane per tab).
+  parseFocusedTab,
   parseWizardHeaders,
   parseSingleTabHeader,
   parseNumberedOptions,

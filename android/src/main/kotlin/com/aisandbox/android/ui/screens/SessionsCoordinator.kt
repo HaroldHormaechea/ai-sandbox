@@ -146,6 +146,21 @@ class SessionsCoordinator(
         // UC-52 — a UC-32 push frame proves the server is reachable again, so
         // clear the transient unreachable banner: the feed auto-recovering is a
         // valid recovery path even without a manual Retry (AC3 auto-recovery).
+        //
+        // UC-61 (deliberate, M-A) — a snapshot is a FULL RESYNC: `sessions = rows`
+        // replaces the whole working set with authoritative server rows. The
+        // client-only optimistic placeholder (optimistic == true) is never in the
+        // server's `rows`, so it is dropped wholesale here — an "evict-on-new-n"
+        // pass like applyDelta's would be a pure no-op and is intentionally NOT
+        // added. The dup-row defect arises ONLY on the incremental applyDelta
+        // merge path, never here. The one trade-off is that a snapshot landing in
+        // the narrow window AFTER the FAB tap but BEFORE spawn-Success can drop the
+        // "starting" placeholder a beat early (brief flicker, not a duplicate). We
+        // ACCEPT that under AC1 rather than preserve the placeholder across a
+        // resync: re-injecting it risks coexisting with the server's real row (the
+        // very duplicate this UC removes), and spawn-Success's reconcile + refresh
+        // restores the authoritative row immediately. Purity preserved — this never
+        // touches `loading`/`spawning`.
         state.value = state.value.copy(
             sessions = rows,
             terminating = reconcileTerminating(rows),
@@ -163,9 +178,29 @@ class SessionsCoordinator(
      */
     fun applyDelta(upserts: List<SessionSummary>, removed: List<Int>) {
         if (upserts.isEmpty() && removed.isEmpty()) return
-        val byN = state.value.sessions.associateByTo(LinkedHashMap()) { it.n }
+        val prior = state.value.sessions
+        val priorNs = prior.mapTo(HashSet()) { it.n }
+        val byN = prior.associateByTo(LinkedHashMap()) { it.n }
         upserts.forEach { byN[it.n] = it }
         removed.forEach { byN.remove(it) }
+        // UC-61 — evict the optimistic placeholder ONLY when (a) one is pending in
+        // the prior working set AND (b) this delta introduces a genuinely-new `n`
+        // (absent from `priorNs`). That new `n` is the server's authoritative row
+        // for the just-spawned session whose assigned number differs from the
+        // client's optimistic max(n)+1 guess; without this the merge-by-`n` upsert
+        // would ADD the real row beside the placeholder (two rows until a full
+        // replace lands — the defect). Dropping the placeholder lets the real row
+        // REPLACE it (AC3). A plain update to an existing `n` (uptime/state tick)
+        // does NOT introduce a new `n`, so the placeholder is preserved — it is
+        // only ever cleared by its real replacement, spawn-Success, or a rollback.
+        // Single-flight (`spawning` guard in spawn()) bounds this to at most one
+        // pending placeholder, so removing all optimistic rows is exact. Purity
+        // preserved — never touches `loading`.
+        val hadOptimistic = prior.any { it.optimistic }
+        val introducesNewN = upserts.any { it.n !in priorNs }
+        if (hadOptimistic && introducesNewN) {
+            byN.values.removeAll { it.optimistic }
+        }
         val merged = byN.values.toList()
         // UC-52 — like applySnapshot, an inbound delta proves reachability →
         // clear the transient unreachable banner (AC3 auto-recovery).
@@ -216,6 +251,11 @@ class SessionsCoordinator(
                 uptimeSec = 0L,
                 activeStreams = 0,
                 startedAt = null,
+                // UC-61 — tag this row as the client-only optimistic placeholder so
+                // the merge paths (applyDelta) and the rollback paths can identify
+                // and evict it independently of the guessed `n` (which is exactly
+                // what may be wrong).
+                optimistic = true,
             )
             state.value = state.value.copy(sessions = state.value.sessions + optimistic)
 
@@ -228,7 +268,7 @@ class SessionsCoordinator(
             val profile = profileSupplier() ?: run {
                 state.value = state.value.copy(
                     spawning = false,
-                    sessions = state.value.sessions.filterNot { it.n == optimisticN && it === optimistic },
+                    sessions = state.value.sessions.filterNot { it.optimistic },
                     lastError = "no_profile",
                 )
                 return@launch
@@ -236,11 +276,25 @@ class SessionsCoordinator(
             try {
                 when (val r = apiFactory(profile).spawn(label)) {
                     is ApiResult.Success -> {
-                        // Replace the optimistic row with the server's
-                        // authoritative summary on the next refresh. The nested
-                        // refresh() is itself now guarded (UC-51), so a spawn
-                        // that succeeds server-side but whose follow-up refresh
-                        // hits a transport throw does not crash.
+                        // UC-61 — USE the authoritative SessionSummary the server
+                        // returned (previously discarded). Drop every optimistic
+                        // placeholder and upsert the real row by its server-assigned
+                        // `n` into a LinkedHashMap (dedup if a UC-32 delta already
+                        // inserted it), so the list converges to EXACTLY ONE row for
+                        // the new session immediately — even when the server `n` ≠
+                        // the client's max(n)+1 guess (AC1, AC2). Reconciling by the
+                        // returned summary — not by `label` (blank/duplicable) or the
+                        // guessed `n` (the thing that's wrong) — is the fix.
+                        val byN = state.value.sessions
+                            .filterNot { it.optimistic }
+                            .associateByTo(LinkedHashMap()) { it.n }
+                        byN[r.value.n] = r.value
+                        state.value = state.value.copy(sessions = byN.values.toList())
+                        // Still refresh() for a full server reconcile (uptime, any
+                        // rows changed out of band). The nested refresh() is itself
+                        // guarded (UC-51), so a spawn that succeeds server-side but
+                        // whose follow-up refresh hits a transport throw does not
+                        // crash.
                         refresh()
                     }
                     is ApiResult.HttpFailure -> {
@@ -249,7 +303,7 @@ class SessionsCoordinator(
                         // unreachable banner (single-surface invariant).
                         // UC-54 — the server answered → it is reachable.
                         state.value = state.value.copy(
-                            sessions = state.value.sessions.filterNot { it.n == optimisticN && it === optimistic },
+                            sessions = state.value.sessions.filterNot { it.optimistic },
                             lastError = "${r.code} (${r.status})",
                             unreachable = false,
                             serverResponded = true,
@@ -267,7 +321,7 @@ class SessionsCoordinator(
                 // surface (AC5).
                 Log.w(TAG, "Spawn threw: ${t.message}", t)
                 state.value = state.value.copy(
-                    sessions = state.value.sessions.filterNot { it.n == optimisticN && it === optimistic },
+                    sessions = state.value.sessions.filterNot { it.optimistic },
                 )
                 surfaceTransportThrow(t, profile, "spawn_failed")
             } finally {
@@ -378,6 +432,47 @@ class SessionsCoordinator(
                 // AC6/AC7 — release the control; refresh() / the next push
                 // carries the authoritative state.
                 state.value = state.value.copy(pendingActions = state.value.pendingActions - n)
+            }
+        }
+    }
+
+    /**
+     * UC-62 — create (or focus) the singleton server host-shell session, then
+     * invoke [onReady] with its reserved id so the screen can navigate straight
+     * into the terminal (AC1, AC2). The server enforces the singleton, so a
+     * second tap returns the same row and [onReady] re-opens it (AC2 "second tap
+     * focuses the existing row"). Errors surface like the other operations — an
+     * HTTP failure as a snackbar (`lastError`), a transport throw via
+     * [surfaceTransportThrow] — and [onReady] is NOT called, so no dead terminal
+     * is opened.
+     */
+    fun openServerSsh(onReady: (Int) -> Unit) {
+        scope.launch {
+            val profile = profileSupplier() ?: run {
+                state.value = state.value.copy(lastError = "no_profile")
+                return@launch
+            }
+            try {
+                when (val r = apiFactory(profile).createServerSsh()) {
+                    is ApiResult.Success -> {
+                        // The server responded → reachable; refresh so the pinned
+                        // row appears in the list, then open its terminal.
+                        state.value = state.value.copy(unreachable = false, serverResponded = true)
+                        refresh()
+                        onReady(r.value.n)
+                    }
+                    is ApiResult.HttpFailure -> {
+                        Log.w(TAG, "createServerSsh failed: ${r.code} (${r.status}) ${r.detail}")
+                        state.value = state.value.copy(
+                            lastError = "${r.code} (${r.status})",
+                            unreachable = false,
+                            serverResponded = true,
+                        )
+                    }
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "createServerSsh threw: ${t.message}", t)
+                surfaceTransportThrow(t, profile, "server_ssh_failed")
             }
         }
     }

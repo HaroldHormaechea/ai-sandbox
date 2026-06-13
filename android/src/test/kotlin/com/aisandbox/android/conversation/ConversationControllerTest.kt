@@ -249,13 +249,7 @@ class ConversationControllerTest {
         // Two-phase delivery (capture the server socket, send the question, ASSERT, then send the
         // turn-end) so the dismissal is observed deterministically rather than racing the sheet.
         val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
-        server.enqueue(
-            MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
-                override fun onOpen(webSocket: WebSocket, response: Response) {
-                    wsRef.set(webSocket)
-                }
-            }),
-        )
+        enqueueCapture(wsRef)
         val c = networkedController()
         c.attach(7)
         try {
@@ -291,13 +285,7 @@ class ConversationControllerTest {
         // `tool-result` carries the SAME toolUseId as the sheet's questionUuid. The controller must
         // dismiss the sheet on that matched frame so it can never linger after the ask is resolved.
         val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
-        server.enqueue(
-            MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
-                override fun onOpen(webSocket: WebSocket, response: Response) {
-                    wsRef.set(webSocket)
-                }
-            }),
-        )
+        enqueueCapture(wsRef)
         val c = networkedController()
         c.attach(7)
         try {
@@ -328,13 +316,7 @@ class ConversationControllerTest {
         // A tool-result for a DIFFERENT tool call (any other Bash/Read/etc. that finishes while the
         // ask is still open) must NOT tear down the unrelated sheet.
         val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
-        server.enqueue(
-            MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
-                override fun onOpen(webSocket: WebSocket, response: Response) {
-                    wsRef.set(webSocket)
-                }
-            }),
-        )
+        enqueueCapture(wsRef)
         val c = networkedController()
         c.attach(7)
         try {
@@ -460,6 +442,101 @@ class ConversationControllerTest {
     }
 
     @Test
+    fun `a pane multi-question batch with answerable=true routes to the in-app paged answerable sheet`() {
+        // UC-55 AC2/AC10 — the server now recovers every tab's options and delivers the
+        // multi-question batch answerable=true. The controller faithfully carries the flag
+        // and the full per-tab options, so the UI renders the in-app PagedQuestionBody (the
+        // answerable path), NOT the read-only "Answer in tmux" NotAnswerableBody. Android is
+        // doc-only for this UC; this guards that the existing answerable path holds for the
+        // now-answerable N>1 case.
+        enqueuePush(
+            listOf(
+                """{"type":"pending-question","promptKey":"pane-multi","kind":"questions","plan":"",""" +
+                    """"answerable":true,"questions":[""" +
+                    """{"question":"Pick a color","header":"Color","multiSelect":false,""" +
+                    """"options":[{"label":"Red","description":""},{"label":"Blue","description":""}]},""" +
+                    """{"question":"Pick a size","header":"Size","multiSelect":true,""" +
+                    """"options":[{"label":"Small","description":""},{"label":"Large","description":""}]}]}""",
+            ),
+        )
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { (c.pendingSheet.value as? PendingSheet.Questions)?.questions?.size == 2 }).isTrue
+            val sheet = c.pendingSheet.value as PendingSheet.Questions
+            // The flagship invariant: a multi-question batch is in-app answerable (not tmux).
+            assertThat(sheet.answerable).isTrue
+            assertThat(sheet.questions).hasSize(2) // N>1 → the paged sheet path
+            assertThat(sheet.questions[0].options).hasSize(2)
+            assertThat(sheet.questions[1].multiSelect).isTrue // multiSelect tab round-trips
+            assertThat(sheet.questions[1].options.map { it.label }).containsExactly("Small", "Large")
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
+    fun `submitting a pane-derived multi-question batch sends one answer-batch frame and resets sheet state`() {
+        // UC-55 AC3/AC7 — submitting the now-answerable pane multi-question batch goes out as a
+        // SINGLE answer-batch frame (identical shape to the transcript-derived path), and the
+        // sheet is optimistically dismissed with the working spinner. Reuses the shared
+        // deriveAnswerSpec/answer-batch path — no parallel pane-specific injection path.
+        val received = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        server.enqueue(
+            MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+                override fun onOpen(webSocket: WebSocket, response: Response) {
+                    Thread {
+                        Thread.sleep(300)
+                        wsRef.set(webSocket)
+                    }.start()
+                }
+
+                override fun onMessage(webSocket: WebSocket, text: String) {
+                    received.add(text)
+                }
+            }),
+        )
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { wsRef.get() != null }).isTrue
+            wsRef.get()!!.send(
+                """{"type":"pending-question","promptKey":"pane-multi","kind":"questions","plan":"",""" +
+                    """"answerable":true,"questions":[""" +
+                    """{"question":"Pick a color","header":"Color","multiSelect":false,""" +
+                    """"options":[{"label":"Red","description":""},{"label":"Blue","description":""}]},""" +
+                    """{"question":"Pick a size","header":"Size","multiSelect":true,""" +
+                    """"options":[{"label":"Small","description":""},{"label":"Large","description":""}]}]}""",
+            )
+            assertThat(awaitUntil { (c.pendingSheet.value as? PendingSheet.Questions)?.questionUuid == "pane-multi" })
+                .isTrue
+            // Submit all answers as one batch (questionIndex order), echoing the pane promptKey.
+            c.submitAnswerBatch(
+                "pane-multi",
+                listOf(
+                    AnswerItem(questionIndex = 0, selections = listOf(1), freeText = ""),
+                    AnswerItem(questionIndex = 1, selections = listOf(0, 1), freeText = ""),
+                ),
+            )
+            // Optimistic local state transition (AC4 parity with the transcript path).
+            assertThat(c.pendingSheet.value).isNull()
+            assertThat(c.turnPhase.value).isEqualTo(TurnPhase.WORKING)
+            // Exactly one answer-batch frame, echoing the promptKey and both answers in order.
+            assertThat(awaitUntil { received.any { it.contains(""""type":"answer-batch"""") } }).isTrue
+            val batch = received.single { it.contains(""""type":"answer-batch"""") }
+            assertThat(batch)
+                .contains(""""questionUuid":"pane-multi"""")
+                .contains(""""questionIndex":0""")
+                .contains(""""selections":[1]""")
+                .contains(""""questionIndex":1""")
+                .contains(""""selections":[0,1]""")
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
     fun `a pane plan pending-question raises a Plan sheet`() {
         // AC6 — an ExitPlanMode plan approval delivered live from the pane.
         enqueuePush(
@@ -485,13 +562,7 @@ class ConversationControllerTest {
     @Test
     fun `a pending-clear with a matching key clears the pane sheet`() {
         val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
-        server.enqueue(
-            MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
-                override fun onOpen(webSocket: WebSocket, response: Response) {
-                    wsRef.set(webSocket)
-                }
-            }),
-        )
+        enqueueCapture(wsRef)
         val c = networkedController()
         c.attach(7)
         try {
@@ -515,13 +586,7 @@ class ConversationControllerTest {
         // The clear must never clobber a sheet it doesn't own (e.g. a transcript-delivered
         // sheet, which carries a different key).
         val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
-        server.enqueue(
-            MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
-                override fun onOpen(webSocket: WebSocket, response: Response) {
-                    wsRef.set(webSocket)
-                }
-            }),
-        )
+        enqueueCapture(wsRef)
         val c = networkedController()
         c.attach(7)
         try {
@@ -550,13 +615,7 @@ class ConversationControllerTest {
         // pane frame added NO inline item, so the transcript write contributes the ONE and
         // only inline Question bubble — no double render / phantom collapsed `❓ question`.
         val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
-        server.enqueue(
-            MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
-                override fun onOpen(webSocket: WebSocket, response: Response) {
-                    wsRef.set(webSocket)
-                }
-            }),
-        )
+        enqueueCapture(wsRef)
         val c = networkedController()
         c.attach(7)
         try {
@@ -856,12 +915,24 @@ class ConversationControllerTest {
         )
     }
 
-    /** Capture the server WebSocket so the test can push frames at a deterministic moment. */
+    /**
+     * Capture the server WebSocket so the test can push frames at a deterministic moment.
+     *
+     * De-flake (test-only): the capture is gated ~300ms (the file's enqueuePush convention)
+     * before [wsRef] is set, so the controller's pump has subscribed to the `replay=0`
+     * `incoming` SharedFlow (ConversationController.kt:630) before any test's first send.
+     * A frame sent pre-subscription is dropped, not queued. Every caller waits on
+     * `wsRef.get() != null` before sending, so this gates exactly the first send. No
+     * production change (do NOT make `_incoming` replay=1; that is a production decision).
+     */
     private fun enqueueCapture(wsRef: java.util.concurrent.atomic.AtomicReference<WebSocket?>) {
         server.enqueue(
             MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
                 override fun onOpen(webSocket: WebSocket, response: Response) {
-                    wsRef.set(webSocket)
+                    Thread {
+                        Thread.sleep(300)
+                        wsRef.set(webSocket)
+                    }.start()
                 }
             }),
         )

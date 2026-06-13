@@ -408,6 +408,74 @@ class SessionsApiTest {
         }
     }
 
+    // ── UC-62 — server-ssh create + type decode ──────────────────────────────
+
+    /**
+     * UC-62 AC2/AC6 — [SessionsApi.createServerSsh] dispatches an empty-body
+     * `POST /v1/sessions/server-ssh` and decodes the returned row, which carries
+     * the reserved id and `type == server-ssh`. Asserts the OUTBOUND request
+     * shape (method + path + empty body), not just a handled success.
+     */
+    @Test
+    fun createServerSsh_dispatches_post_and_decodes_server_ssh_row() = runTest {
+        val (server, profile) = startPinnedServer()
+        try {
+            server.enqueue(
+                MockResponse()
+                    .setResponseCode(200)
+                    .setBody(
+                        """{"n":0,"label":"","tmuxTitle":"(idle)","state":"running","uptimeSec":0,""" +
+                            """"activeStreams":0,"startedAt":null,"type":"server-ssh"}""",
+                    ),
+            )
+
+            val result = apiFor(profile).createServerSsh()
+
+            assertThat(result).isInstanceOf(ApiResult.Success::class.java)
+            val row = (result as ApiResult.Success).value
+            assertThat(row.n).isEqualTo(SessionsApi.SERVER_SSH_N)
+            assertThat(row.type).isEqualTo(SessionsApi.TYPE_SERVER_SSH)
+            assertThat(row.isServerSsh).isTrue()
+
+            val rr = server.takeRequest()
+            assertThat(rr.method).isEqualTo("POST")
+            assertThat(rr.path).isEqualTo("/v1/sessions/server-ssh")
+            assertThat(rr.body.size).isEqualTo(0L)
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    /**
+     * UC-62 — the `type` field decodes leniently: an older server payload with
+     * no `type` defaults to `claude` (and `isServerSsh` is false), so existing
+     * rows are always ordinary sessions.
+     */
+    @Test
+    fun sessionSummary_type_defaults_to_claude_when_absent() = runTest {
+        val (server, profile) = startPinnedServer()
+        try {
+            server.enqueue(
+                MockResponse()
+                    .setResponseCode(200)
+                    .setBody(
+                        """[{"n":1,"label":"","tmuxTitle":"","state":"running","uptimeSec":1,""" +
+                            """"activeStreams":0,"startedAt":null}]""",
+                    ),
+            )
+
+            val result = apiFor(profile).list()
+
+            assertThat(result).isInstanceOf(ApiResult.Success::class.java)
+            val rows = (result as ApiResult.Success).value
+            assertThat(rows).hasSize(1)
+            assertThat(rows[0].type).isEqualTo(SessionsApi.TYPE_CLAUDE)
+            assertThat(rows[0].isServerSsh).isFalse()
+        } finally {
+            server.shutdown()
+        }
+    }
+
     private fun spkiHex(spkiBytes: ByteArray): String =
         MessageDigest.getInstance("SHA-256").digest(spkiBytes)
             .joinToString("") { "%02x".format(it.toInt() and 0xff) }

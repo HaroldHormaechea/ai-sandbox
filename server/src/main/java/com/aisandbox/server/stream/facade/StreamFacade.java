@@ -3,6 +3,7 @@ package com.aisandbox.server.stream.facade;
 import com.aisandbox.server.audit.AuditAction;
 import com.aisandbox.server.audit.AuditLogger;
 import com.aisandbox.server.config.ServerProperties;
+import com.aisandbox.server.config.SpecialSessions;
 import com.aisandbox.server.identity.ClientIdentity;
 import com.aisandbox.server.sessions.facade.internal.PerSessionMutexRegistry;
 import com.aisandbox.server.sessions.service.SessionRegistryService;
@@ -80,6 +81,14 @@ public class StreamFacade {
      * enumerator is not wired.
      */
     public List<TargetInfo> enumerateTargets(int n) {
+        // UC-62 — the host shell has exactly one target (the host login shell);
+        // it has no agent-team panes, so short-circuit BEFORE swarm.enumerate
+        // (which would shell `docker` against the nonexistent ai-sandbox-0). The
+        // Android terminal hides the target switcher for this row anyway.
+        if (n == SpecialSessions.SERVER_SSH_N) {
+            return List.of(new TargetInfo(
+                    SwarmEnumerationService.MAIN_ID, "main", "main", null, null, null, null, null, "main", null, null));
+        }
         SwarmEnumerationService s = this.swarm;
         if (s == null) {
             return List.of(new TargetInfo(
@@ -104,8 +113,13 @@ public class StreamFacade {
      */
     public TmuxBridgeService.Bridge rebridge(int n, String bridgeSessionId, String targetId, int cols, int rows)
             throws IOException {
+        // UC-62 — for the host shell, skip swarm.resolveTarget (no docker/tmux
+        // target to resolve on ai-sandbox-0). The passed target is ignored by
+        // TmuxBridgeService.start for SERVER_SSH_N anyway (it builds the host
+        // target internally), so a placeholder main target is sufficient here.
         SwarmEnumerationService s = this.swarm;
-        BridgeTarget target = (s == null) ? BridgeTarget.main() : s.resolveTarget(n, targetId);
+        BridgeTarget target =
+                (n == SpecialSessions.SERVER_SSH_N || s == null) ? BridgeTarget.main() : s.resolveTarget(n, targetId);
 
         ReentrantLock l = perN.get(n);
         try {

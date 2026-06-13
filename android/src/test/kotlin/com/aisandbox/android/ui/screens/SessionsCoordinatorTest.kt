@@ -1520,7 +1520,17 @@ class SessionsCoordinatorTest {
      */
     @Test
     fun applySnapshot_clears_unreachable_banner(): Unit = runBlocking {
-        val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+        // De-flake (test-only): run the coordinator's init collector inline on
+        // Dispatchers.Unconfined instead of Dispatchers.IO. The init collector
+        // (terminatingSessions.flow → state.value = state.value.copy(...)) and
+        // the synchronous applySnapshot() below both read-modify-write the same
+        // MutableStateFlow. On Dispatchers.IO the collector runs on a separate
+        // thread, so its copy() could clobber the banner-clear from a stale
+        // read (the flake). Unconfined makes the collector consume its initial
+        // emission inline during construction (then suspend), so applySnapshot
+        // runs single-threaded — no cross-thread race. Production is unaffected:
+        // SessionsViewModel uses viewModelScope (Main.immediate), single-threaded.
+        val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
         try {
             val state = MutableStateFlow(SessionsUiState(unreachable = true))
             val coordinator = SessionsCoordinator(
@@ -1547,7 +1557,15 @@ class SessionsCoordinatorTest {
      */
     @Test
     fun applyDelta_clears_unreachable_banner(): Unit = runBlocking {
-        val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+        // De-flake (test-only): run the coordinator's init collector inline on
+        // Dispatchers.Unconfined instead of Dispatchers.IO. See the sibling
+        // applySnapshot_clears_unreachable_banner for the full rationale — the
+        // init collector and the synchronous applyDelta() below both
+        // read-modify-write the shared MutableStateFlow, and an IO-thread
+        // collector could clobber the banner-clear (the flake). Unconfined makes
+        // the collector run inline, so applyDelta runs single-threaded.
+        // Production is unaffected (viewModelScope / Main.immediate).
+        val scope = CoroutineScope(Dispatchers.Unconfined + SupervisorJob())
         try {
             val state = MutableStateFlow(SessionsUiState(unreachable = true))
             val coordinator = SessionsCoordinator(
@@ -1738,6 +1756,232 @@ class SessionsCoordinatorTest {
                 .isEqualTo(Connectivity.REACHABLE)
         } finally {
             workScope.cancel()
+        }
+    }
+
+    // ── UC-61 — spawn-Success row reconciliation through the real client stack ─
+    //
+    // The headline UC-61 defect: spawn() inserted an optimistic placeholder keyed
+    // by a GUESSED `n` (max(n)+1) and then DISCARDED the authoritative
+    // SessionSummary the server returned, merely calling refresh(). When the
+    // server-assigned `n` ≠ the guess, the row rendered TWICE (guessed + real)
+    // until a full snapshot landed. spawn-Success now drops the placeholder and
+    // upserts the server's real row by its actual `n`, so the list converges to
+    // EXACTLY ONE row for the new session (AC1, AC2). These drive the real
+    // SessionsApi + OkHttp + kotlinx stack against a pinned MockWebServer (the
+    // server controls both the POST response body and the post-spawn list).
+
+    /**
+     * AC1 / AC2 — spawn-Success when the server assigns an `n` that DIFFERS from
+     * the client's optimistic max(n)+1 guess. The fixture seeds one row (n=1) so
+     * the guess is n=2, but the POST returns the authoritative n=9 and flips the
+     * list to enumerate it; the list converges to exactly one row for the new
+     * session (n=9), with NO leftover placeholder (n=2) and no transient
+     * duplicate, across spawn-Success → refresh.
+     */
+    @Test
+    fun spawn_success_with_server_n_differing_from_guess_converges_to_single_row(): Unit = runBlocking {
+        val oneRow =
+            """[{"n":1,"label":"existing","tmuxTitle":"","state":"running","uptimeSec":10,"activeStreams":0,"startedAt":null}]"""
+        // The server assigns n=9 (≠ the client's max(1)+1 == 2 guess).
+        val realSpawnRow =
+            """{"n":9,"label":"","tmuxTitle":"","state":"starting","uptimeSec":0,"activeStreams":0,"startedAt":null}"""
+        val twoRows =
+            """[{"n":1,"label":"existing","tmuxTitle":"","state":"running","uptimeSec":10,"activeStreams":0,"startedAt":null},""" +
+                """{"n":9,"label":"","tmuxTitle":"","state":"starting","uptimeSec":0,"activeStreams":0,"startedAt":null}]"""
+        val listRef = AtomicReference(oneRow)
+        val fx = pinnedServer(object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                val path = request.path ?: ""
+                return when {
+                    request.method == "GET" && path == "/v1/sessions" ->
+                        MockResponse().setResponseCode(200).setBody(listRef.get())
+                    request.method == "POST" && path == "/v1/sessions" -> {
+                        // The server assigns the real n and now enumerates it.
+                        listRef.set(twoRows)
+                        MockResponse().setResponseCode(201).setBody(realSpawnRow)
+                    }
+                    else -> MockResponse().setResponseCode(404).setBody("""{"code":"not_found"}""")
+                }
+            }
+        })
+        val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+        try {
+            val state = MutableStateFlow(SessionsUiState())
+            val coordinator = SessionsCoordinator(
+                state = state,
+                scope = scope,
+                profileSupplier = { fx.profile },
+                apiFactory = apiFactory(),
+            )
+
+            coordinator.refresh()
+            withTimeout(10_000) { state.first { !it.loading && it.sessions.any { s -> s.n == 1 } } }
+
+            coordinator.spawn("release-build")
+
+            // Converge: spawning cleared, the new session present exactly once,
+            // the guessed placeholder (n=2) gone, and no optimistic row left.
+            withTimeout(15_000) {
+                state.first {
+                    !it.spawning && !it.loading &&
+                        it.sessions.count { s -> s.n == 9 } == 1 &&
+                        it.sessions.none { s -> s.n == 2 } &&
+                        it.sessions.none { s -> s.optimistic }
+                }
+            }
+
+            assertThat(state.value.sessions.map { it.n })
+                .`as`("AC1/AC2 — converges to exactly the real rows; the guessed placeholder n=2 never persists")
+                .containsExactlyInAnyOrder(1, 9)
+            assertThat(state.value.sessions.filter { it.n == 9 })
+                .`as`("AC1 — exactly ONE row for the new session, no transient duplicate")
+                .hasSize(1)
+            assertThat(state.value.sessions)
+                .`as`("AC2 — the authoritative server row is used; no optimistic placeholder survives")
+                .noneMatch { it.optimistic }
+            assertThat(state.value.lastError).isNull()
+        } finally {
+            scope.cancel()
+            fx.shutdown()
+        }
+    }
+
+    /**
+     * AC4 — the optimistic placeholder is rolled back on the HttpFailure spawn
+     * path (the marker-based {@code filterNot { it.optimistic }} predicate), so a
+     * 500 leaves no orphaned phantom row, surfaces the error, and clears spawning.
+     */
+    @Test
+    fun spawn_http_failure_rolls_back_optimistic_placeholder_and_surfaces_error(): Unit = runBlocking {
+        val oneRow =
+            """[{"n":1,"label":"existing","tmuxTitle":"","state":"running","uptimeSec":10,"activeStreams":0,"startedAt":null}]"""
+        val fx = pinnedServer(object : Dispatcher() {
+            override fun dispatch(request: RecordedRequest): MockResponse {
+                val path = request.path ?: ""
+                return when {
+                    request.method == "GET" && path == "/v1/sessions" ->
+                        MockResponse().setResponseCode(200).setBody(oneRow)
+                    request.method == "POST" && path == "/v1/sessions" ->
+                        MockResponse().setResponseCode(500).setBody(
+                            """{"code":"spawn_failed","detail":"compose up exit 1"}""",
+                        )
+                    else -> MockResponse().setResponseCode(404).setBody("""{"code":"not_found"}""")
+                }
+            }
+        })
+        val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+        try {
+            val state = MutableStateFlow(SessionsUiState())
+            val coordinator = SessionsCoordinator(
+                state = state,
+                scope = scope,
+                profileSupplier = { fx.profile },
+                apiFactory = apiFactory(),
+            )
+
+            coordinator.refresh()
+            withTimeout(10_000) { state.first { !it.loading && it.sessions.any { s -> s.n == 1 } } }
+
+            coordinator.spawn("doomed")
+            withTimeout(15_000) { state.first { it.lastError != null && !it.spawning } }
+
+            assertThat(state.value.lastError)
+                .`as`("AC4 — a spawn HttpFailure surfaces '<code> (<status>)'")
+                .isEqualTo("spawn_failed (500)")
+            assertThat(state.value.sessions)
+                .`as`("AC4 — the optimistic placeholder is rolled back; only the seed row remains, no orphan")
+                .noneMatch { it.optimistic }
+            assertThat(state.value.sessions.map { it.n })
+                .`as`("AC4 — no phantom placeholder row (the guessed n=2) persists")
+                .containsExactly(1)
+            assertThat(state.value.spawning)
+                .`as`("AC4 — spawning is cleared so the FAB never sticks disabled")
+                .isFalse()
+        } finally {
+            scope.cancel()
+            fx.shutdown()
+        }
+    }
+
+    // ── UC-62 — openServerSsh dispatches the create POST and opens the terminal ──
+
+    /**
+     * UC-62 AC2 — [SessionsCoordinator.openServerSsh] MUST put a real
+     * `POST /v1/sessions/server-ssh` on the wire AND, on success, invoke
+     * `onReady` with the row's reserved id so the screen navigates straight into
+     * the terminal. Asserts the OUTBOUND POST (not just a handled success), the
+     * same red-green discipline as the spawn guard.
+     */
+    @Test
+    fun openServerSsh_dispatches_post_and_invokes_onReady_with_reserved_id(): Unit = runBlocking {
+        val cert = HeldCertificate.Builder()
+            .commonName("ai-sandbox-server-ssh-test")
+            .addSubjectAlternativeName("127.0.0.1")
+            .rsa2048()
+            .build()
+        val handshake = HandshakeCertificates.Builder().heldCertificate(cert).build()
+        val server = MockWebServer().apply {
+            useHttps(handshake.sslSocketFactory(), false)
+            dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse {
+                    val path = request.path ?: ""
+                    return when {
+                        request.method == "POST" && path == "/v1/sessions/server-ssh" ->
+                            MockResponse().setResponseCode(200).setBody(
+                                """{"n":0,"label":"","tmuxTitle":"(idle)","state":"running",""" +
+                                    """"uptimeSec":0,"activeStreams":0,"startedAt":null,"type":"server-ssh"}""",
+                            )
+                        request.method == "GET" && path == "/v1/sessions" ->
+                            MockResponse().setResponseCode(200).setBody(
+                                """[{"n":0,"label":"","tmuxTitle":"(idle)","state":"running",""" +
+                                    """"uptimeSec":0,"activeStreams":0,"startedAt":null,"type":"server-ssh"}]""",
+                            )
+                        else -> MockResponse().setResponseCode(404).setBody("""{"code":"not_found"}""")
+                    }
+                }
+            }
+            start(InetAddress.getByName("127.0.0.1"), 0)
+        }
+        val profile = ServerProfile(
+            serverUrl = "https://127.0.0.1:${server.port}",
+            pinSha256Hex = spkiHex(cert.certificate.publicKey.encoded),
+            clientCertCn = "alice-phone",
+            clientCertExpiresAtMs = 0L,
+        )
+        val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+        try {
+            val state = MutableStateFlow(SessionsUiState())
+            val coordinator = SessionsCoordinator(
+                state = state,
+                scope = scope,
+                profileSupplier = { profile },
+                apiFactory = { p -> SessionsApi(AiSandboxHttpClient(p, mockIdentity())) },
+            )
+
+            val ready = CompletableDeferred<Int>()
+            coordinator.openServerSsh { n -> ready.complete(n) }
+
+            // The outbound create POST must actually leave the client.
+            val seen = mutableListOf<String>()
+            var sawPost = false
+            withTimeout(10_000) {
+                while (!sawPost) {
+                    val rr = server.takeRequest(10, TimeUnit.SECONDS) ?: break
+                    seen.add("${rr.method} ${rr.path}")
+                    if (rr.method == "POST" && rr.path == "/v1/sessions/server-ssh") sawPost = true
+                }
+            }
+            assertThat(sawPost)
+                .`as`("openServerSsh MUST dispatch POST /v1/sessions/server-ssh. Recorded: $seen")
+                .isTrue()
+
+            // onReady fires with the reserved id → the screen opens the terminal (AC2).
+            val openedN = withTimeout(10_000) { ready.await() }
+            assertThat(openedN).isEqualTo(SessionsApi.SERVER_SSH_N)
+        } finally {
+            scope.cancel()
+            server.shutdown()
         }
     }
 

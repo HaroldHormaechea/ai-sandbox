@@ -502,10 +502,11 @@ analysis lives in [`../docs/THREAT_MODEL.md`](../docs/THREAT_MODEL.md)
 
 | Verb   | Path                              | Notes |
 |--------|-----------------------------------|-------|
-| GET    | `/v1/sessions`                    | Session list. `state` ∈ running \| starting \| provisioning \| terminating \| paused \| stopped (UC04 AC37 + UC-27/28/46). |
+| GET    | `/v1/sessions`                    | Session list. `state` ∈ running \| starting \| provisioning \| terminating \| paused \| stopped (UC04 AC37 + UC-27/28/46). Each row carries `type` ∈ `claude` \| `server-ssh` (UC-62). |
 | POST   | `/v1/sessions`                    | Spawn (sync, 60s timeout). |
+| POST   | `/v1/sessions/server-ssh`         | Create-or-focus the singleton server host-shell session (UC-62). Opens a tmux login shell on the management-server **host** (not a sandbox container), modelled as reserved id `0` / `type=server-ssh`. Idempotent (server-enforced singleton) → 200 with the row. Then lists/streams/deletes via the `{n}` endpoints below. Disable via `ai-sandbox.server.server-ssh.enabled: false`. |
 | GET    | `/v1/sessions/{n}`                | Session detail. |
-| DELETE | `/v1/sessions/{n}[?force=true]`   | Clean (destroy) a session. |
+| DELETE | `/v1/sessions/{n}[?force=true]`   | Clean (destroy) a session. For the `server-ssh` row (id `0`) this kills the host tmux instead of running `clean.sh` (UC-62). |
 | POST   | `/v1/sessions/{n}/{action}`       | Docker-lifecycle action, `action` ∈ `stop\|start\|pause\|unpause` (UC-46). 204 ok; 404 unknown N; 409 `session_state_conflict` (out-of-state); 500 on script failure. Non-destructive — `stop` preserves the container/volumes (resumable via `start`); use DELETE to destroy. |
 | POST   | `/v1/enrollment`                  | **mTLS-exempt.** Single-use-token bootstrap; returns a P12 bundle (UC04). |
 | GET    | `/v1/healthz`                     | 200 only if Docker, scripts, TLS are all healthy. |

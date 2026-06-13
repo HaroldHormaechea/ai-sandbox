@@ -56,7 +56,7 @@ subagent/teammate lines), and `source` (`main` | `subagent:<agentId>`).
 | `system-note`     | `uuid`, `isSidechain`, `source`, `label`, `detail` (UC-42 — an injected `user` line with no host bubble) | 42 |
 | `question`        | `…`, `toolUseId`, `questions[]` (`question`,`header`,`multiSelect`,`options[]{label,description}`) | 10 |
 | `plan-approval`   | `…`, `toolUseId`, `plan`                                           | 13 |
-| `pending-question`| `promptKey`, `kind` (`questions`\|`plan`), `questions[]`, `plan`, `answerable` — UC-50 LIVE pane-delivered prompt (sets the sheet ONLY, NO inline item) | 50 |
+| `pending-question`| `promptKey`, `kind` (`questions`\|`plan`), `questions[]`, `plan`, `answerable` — UC-50 LIVE pane-delivered prompt (sets the sheet ONLY, NO inline item); UC-55 carries FULL per-tab options for a multi-question batch (`answerable=true`) | 50/55 |
 | `pending-clear`   | `promptKey` — UC-50 clears a pane-delivered sheet whose key matches | 50 |
 | `turn-end`        | `…`, `durationMs`, `messageCount` (the `system:turn_duration` marker) | 15 |
 | `targets`         | `targets[]` (incl. `pendingActivity`/`pendingQuestion`), `selectedId` | 16, 18 |
@@ -92,16 +92,53 @@ the sessions-list "?" into the conversation channel:
   `transcriptPromptThisTurn` guard suppresses the pane frame if a transcript
   `question`/`plan-approval` already fired this turn (transcript wins). On
   `2.1.169` only the pane path fires.
-- **`answerable`** is decided server-side (never inferred client-side): `true` for
-  a single question and for plan approval — fully in-app answerable; `false` for a
-  multi-question batch. Empirically, one passive `capture-pane` of the
-  multi-question wizard (`← ☐ Q1  ☐ Q2 … ✔ Submit →`) shows ONLY the focused tab's
-  options — the other tabs' options are NOT on screen — so full per-question
-  recovery is infeasible. A multi-question prompt is therefore delivered VISIBLE
-  with header-only items and `answerable=false`; the client shows the questions
-  read-only with an "answer in tmux to continue" affordance (full in-app
-  multi-answer is a tracked follow-up). This satisfies the core goal: no more
-  silent "Working…".
+- **`answerable`** is decided server-side (never inferred client-side):
+  `answerable = "plan".equals(kind) || allQuestionsHaveOptions(questions)`
+  (`ConversationEventMapper#answerable`). Plan approval and a single question
+  (options fully recovered from one capture) are answerable; a multi-question batch
+  is answerable once **every** tab's options are recovered (see UC-55 below).
+  `answerable=false` is reserved for the narrow genuinely-unrecoverable residual — a
+  prompt KIND whose options cannot be derived at all — where the client shows the
+  questions read-only with an "answer in tmux to continue" affordance.
+
+**UC-55 — full multi-question recovery (eager, server-side wizard walk).** One passive
+`capture-pane` of the multi-question wizard (`← ☐ Q1  ☐ Q2 … ✔ Submit →`) shows ONLY
+the focused tab's options, so UC-50 delivered the batch header-only with
+`answerable=false` (tmux fallback). UC-55 removes that fallback for the standard
+wizard: when the pane signal delivers a header-only multi-question prompt, the server
+**eagerly recovers every tab's options** before emitting the frame, so the batch
+arrives `answerable=true` with the full per-tab `options[]` and the client renders the
+existing paged sheet (no new frames; the `pending-question` shape is unchanged).
+
+- **The server is the single keystroke writer.** Recovery runs in
+  `ConversationFacade#recoverWizardOptions` under a **per-session pane lock** serialized
+  with `injectAnswer`/`injectAnswerBatch`, so a recovery walk can never interleave with
+  an answer injection on the same pane. It steps the live wizard with **navigation keys
+  ONLY** (`InputInjectionService.WIZARD_NAV_KEYS` = `Right`/`Left`) — `Right` to read the
+  next tab, `Left` to restore — and **never** sends a selection/commit key (`Space`,
+  `Enter`, `Tab`, digits, literals), so the brief tab-flicker is provably non-corrupting:
+  a user's committed answer can never be mutated by recovery (a user manually navigating
+  tmux during the walk may have cursor/tab focus perturbed, but not their answer).
+- **Per-tab parse.** Each stepped capture is parsed by the helper's read-only
+  `--parse-pane` mode (`parseFocusedTab` = `parseFocusedPrompt` + `optionsHaveCheckbox` +
+  `parseNumberedOptions`; the focused tab's header is supplied by the server, which owns
+  the tab order). The walk is **bounded and always restores** focus to tab 0 — even on
+  error/timeout (a `finally` step-back) — so `injectAnswerBatch`'s "wizard opens at tab 0"
+  assumption holds.
+- **Race with the helper poll.** The walk perturbs the focused tab while the helper's
+  independent 300 ms poll runs, which can transiently change the `promptKey`. Two guards
+  keep this invisible to the client: (1) a header-only `pending-question` re-emit for an
+  **already-recovered key** is dropped (it never downgrades the open full-options sheet,
+  and `cacheQuestion` additionally refuses any full→header-only cache downgrade so
+  `deriveAnswerSpec` keeps its per-tab options); (2) for a short settle window after a
+  recovery, a header-only multi-question `pending-question` for a **new** key, or a
+  `pending-clear`, is dropped as a stepping transient. Recovery fires **once per settled
+  promptKey**. This satisfies the core goal with no silent "Working…" and no tmux fallback
+  for the ordinary wizard.
+
+  > Keystroke walks are pinned to `InputInjectionService.PINNED_CLAUDE_VERSION`
+  > (`2.1.169`); the UC-55 nav-only walk was verified against the live wizard
+  > (Phase-0 spike) — `Right`/`Left` navigate tabs for reading without committing.
 
 **UC-41 — collapsed tool bubbles + on-demand detail.** The client renders one
 collapsed, type-aware bubble per tool call, merging the `tool-use` with its

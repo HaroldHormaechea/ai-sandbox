@@ -83,6 +83,23 @@ paths:
           description: lifecycle.sh exited non-zero.
           content:
             application/problem+json: {}
+  /v1/sessions/server-ssh:
+    post:
+      tags:
+      - session-controller
+      summary: Create (or focus) the singleton server host-shell session.
+      description: "Opens a tmux login shell on the management-server host (NOT a\
+        \ sandbox container) and returns its pinned row. Idempotent: a second call\
+        \ focuses the existing row rather than creating a second one (server-enforced\
+        \ singleton)."
+      operationId: createServerSsh
+      responses:
+        "200":
+          description: "The server host-shell row (type=server-ssh, reserved id)."
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/SessionSummary"
   /v1/enrollment:
     post:
       tags:
@@ -263,34 +280,6 @@ components:
           type: string
           default: shared
           description: shared | isolated
-    EnrollmentRequest:
-      type: object
-      description: Body of POST /v1/enrollment (UC04).
-      properties:
-        token:
-          type: string
-          description: Opaque single-use token issued by `aisandboxctl client invite
-            <name>`.
-          example: 8a1f3c0e9b4d…
-          maxLength: 256
-          minLength: 32
-          pattern: "[A-Za-z0-9._-]{32,256}"
-      required:
-      - token
-    AddClientRequest:
-      type: object
-      description: Body of POST /v1/clients.
-      properties:
-        name:
-          type: string
-          minLength: 1
-          pattern: "[A-Za-z0-9._-]+"
-        certPem:
-          type: string
-          minLength: 1
-      required:
-      - certPem
-      - name
     SessionSummary:
       type: object
       description: A summary row returned by GET /v1/sessions.
@@ -355,6 +344,46 @@ components:
             \ is 'waiting', never 'working'). The client shows a '?' badge in the\
             \ row's status area while true (double-gated on state==running) and suppresses\
             \ the working spinner. Derived from the visible pane, not the transcript."
+        type:
+          type: string
+          default: claude
+          description: "UC-62 — session kind. 'claude' for an ordinary sandbox/Docker\
+            \ session; 'server-ssh' for the single always-on server host-shell row\
+            \ (a tmux login shell on the management-server host, reserved id 0). The\
+            \ client pins the server-ssh row to the top of the list, badges it 'SERVER\
+            \ SSH SESSION', offers only Remove, and routes its taps to the terminal\
+            \ (never the Claude conversation view)."
+          enum:
+          - claude
+          - server-ssh
+    EnrollmentRequest:
+      type: object
+      description: Body of POST /v1/enrollment (UC04).
+      properties:
+        token:
+          type: string
+          description: Opaque single-use token issued by `aisandboxctl client invite
+            <name>`.
+          example: 8a1f3c0e9b4d…
+          maxLength: 256
+          minLength: 32
+          pattern: "[A-Za-z0-9._-]{32,256}"
+      required:
+      - token
+    AddClientRequest:
+      type: object
+      description: Body of POST /v1/clients.
+      properties:
+        name:
+          type: string
+          minLength: 1
+          pattern: "[A-Za-z0-9._-]+"
+        certPem:
+          type: string
+          minLength: 1
+      required:
+      - certPem
+      - name
     SessionDetailDto:
       type: object
       description: "Detail returned by GET /v1/sessions/{n}."

@@ -1851,3 +1851,71 @@ test('UC-50 CTRL constants are the exact control-kind tokens the server splits o
   assert.strictEqual(helper.CTRL_PENDING_QUESTION, 'pending-question');
   assert.strictEqual(helper.CTRL_PENDING_CLEAR, 'pending-clear');
 });
+
+// ════════════════════════════════════════════════════════════════════════════
+// UC-55 — per-tab parse (parseFocusedTab + --parse-pane).
+//
+// UC-50 recovers a multi-QUESTION wizard header-only (one capture only shows the
+// FOCUSED tab). UC-55 makes the whole batch in-app answerable: the server steps the
+// live pane through every tab and calls --parse-pane once per tab; parseFocusedTab
+// must recover THAT tab's full options (not header-only). The two fixtures below are
+// the SAME 2-question wizard captured on each tab — UC50_REAL_MULTI_QUESTION is tab 0
+// (Color focused); UC55_REAL_MULTI_QUESTION_TAB_SIZE is tab 1 (Size focused, recorded
+// live by stepping Right). The tab strip is identical across tabs; only the focused
+// option block differs — which is exactly why per-tab stepping is required.
+// ════════════════════════════════════════════════════════════════════════════
+
+const UC55_REAL_MULTI_QUESTION_TAB_SIZE = [
+  '←  ☐ Color  ☐ Size  ✔ Submit  →',
+  '',
+  'Pick a size',
+  '',
+  '❯ 1. Small',
+  '     A small size.',
+  '  2. Large',
+  '     A large size.',
+  '  3. Type something.',
+  '────────────────────────────────────────────────────────────────────────────────',
+  '  4. Chat about this',
+  '',
+  'Enter to select · Tab/Arrow keys to navigate · Esc to cancel',
+].join('\n');
+
+test('UC-55 parseFocusedTab — tab 0 (Color focused) recovers that tab\'s FULL options, not header-only', () => {
+  const t = helper.parseFocusedTab(UC50_REAL_MULTI_QUESTION);
+  assert.strictEqual(t.question, 'What is your favorite color?');
+  assert.strictEqual(t.multiSelect, false);
+  assert.deepStrictEqual(
+    t.options.map((o) => o.label),
+    ['Red', 'Green', 'Blue'],
+  );
+});
+
+test('UC-55 parseFocusedTab — tab 1 (Size focused) recovers the OTHER tab\'s options after the server steps Right', () => {
+  // The flagship recovery: the non-focused tab UC-50 could only see header-only is
+  // now fully recovered from its own focused capture. This is what flips the whole
+  // multi-question batch answerable=true (AC2/AC5/AC10).
+  const t = helper.parseFocusedTab(UC55_REAL_MULTI_QUESTION_TAB_SIZE);
+  assert.strictEqual(t.question, 'Pick a size');
+  assert.strictEqual(t.multiSelect, false);
+  assert.deepStrictEqual(
+    t.options.map((o) => o.label),
+    ['Small', 'Large'],
+  );
+});
+
+test('UC-55 parseFocusedTab — a multi-SELECT tab is recovered with multiSelect=true (per-option checkboxes)', () => {
+  const t = helper.parseFocusedTab(UC50_REAL_MULTI_SELECT);
+  assert.strictEqual(t.multiSelect, true);
+  assert.deepStrictEqual(
+    t.options.map((o) => o.label),
+    ['Cheese', 'Mushroom', 'Onion'],
+  );
+});
+
+test('UC-55 parseFocusedTab — empty / null / non-string input returns null (robustness)', () => {
+  assert.strictEqual(helper.parseFocusedTab(''), null);
+  assert.strictEqual(helper.parseFocusedTab(null), null);
+  assert.strictEqual(helper.parseFocusedTab(undefined), null);
+  assert.strictEqual(helper.parseFocusedTab(42), null);
+});

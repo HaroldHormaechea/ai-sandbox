@@ -64,6 +64,15 @@
          guaranteed-failing connection. -->
     <string name="session_not_running_hint">Session not running — start or unpause it first.</string>
 
+    <!-- UC-62 — server host-shell ("SERVER SSH SESSION") row. -->
+    <string name="server_ssh_badge">SERVER SSH SESSION</string>
+    <string name="server_ssh_action_description">Open server shell</string>
+    <string name="server_ssh_row_title">Server shell</string>
+    <string name="server_ssh_row_hint">Login shell on the management server · tap to open</string>
+    <!-- SSH-specific delete-dialog copy (the host tmux, not a sandbox container). -->
+    <string name="server_ssh_delete_title">Remove SERVER SSH SESSION?</string>
+    <string name="server_ssh_delete_body">The login shell (tmux) on the management server will be destroyed. You can re-open it any time from the shell icon.</string>
+
     <!-- Terminal (UC04-3) -->
     <string name="terminal_back">Back</string>
     <string name="terminal_split">Toggle split pane</string>

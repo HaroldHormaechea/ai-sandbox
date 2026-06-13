@@ -136,12 +136,17 @@ class InputInjectionServiceTest {
         // optionCount=4, choose index 2, no free-text.
         svc.injectAnswer(3, InjectTarget.main(), 4, false, List.of(2), -1, null);
 
-        List<List<String>> calls = capturedArgvs(/* 20 Up + 2 Down + Enter */ 23);
+        // UC-57 — the single-question path no longer emits a blind 20×Up cursor reset (the option
+        // ring WRAPS, so Up×N from an unknown position landed on the WRONG option and sent it). The
+        // sheet opens at the top, so the walk is just Down×index then Enter — matching the batch path.
+        List<List<String>> calls = capturedArgvs(/* 2 Down + Enter */ 3);
         long ups = calls.stream().filter(c -> "Up".equals(tail(c, 1))).count();
         long downs = calls.stream().filter(c -> "Down".equals(tail(c, 1))).count();
-        assertThat(ups).isEqualTo(20); // deterministic cursor reset to top
+        assertThat(ups)
+                .as("UC-57: no blind Up cursor reset (the wrapping-ring bug)")
+                .isZero();
         assertThat(downs).isEqualTo(2); // walk to index 2
-        assertThat(tail(calls.get(calls.size() - 1), 1)).isEqualTo("Enter");
+        assertThat(keySeq(calls)).containsExactly("Down", "Down", "Enter");
     }
 
     // ──────────────────────── AC11 — multi-select answer ─────────────────────
@@ -151,10 +156,14 @@ class InputInjectionServiceTest {
         // optionCount=3, multiSelect, choose 0 and 2.
         svc.injectAnswer(3, InjectTarget.main(), 3, true, List.of(0, 2), -1, null);
 
-        List<List<String>> calls = capturedArgvs(/* 20 Up + walk(2 Space + 2 Down) + Enter */ 25);
+        // UC-57 — no blind 20×Up reset (see single-select test). Walk from the top toggling Space on
+        // each selected option: Space(0), Down, Down, Space(2), Enter = 5 calls, ZERO Up.
+        List<List<String>> calls = capturedArgvs(/* Space + Down + Down + Space + Enter */ 5);
+        long ups = calls.stream().filter(c -> "Up".equals(tail(c, 1))).count();
         long spaces = calls.stream().filter(c -> "Space".equals(tail(c, 1))).count();
+        assertThat(ups).as("UC-57: no blind Up cursor reset").isZero();
         assertThat(spaces).isEqualTo(2); // one toggle per selected option
-        assertThat(tail(calls.get(calls.size() - 1), 1)).isEqualTo("Enter");
+        assertThat(keySeq(calls)).containsExactly("Space", "Down", "Down", "Space", "Enter");
     }
 
     // ──────────────────────── AC11 — free-text "Other" ───────────────────────
@@ -166,14 +175,14 @@ class InputInjectionServiceTest {
 
         // UC-43 bugfix (live-verified on 2.1.169): the free-text path now TYPES BEFORE Enter —
         // walk Down to the "Type something" row, type the text INLINE, THEN a single Enter. The
-        // OLD order (Enter-on-empty, then type) DECLINED the ask. So the sequence is
-        // 20 Up (reset) + 2 Down (to otherIndex 2) + literal + Enter = 24 calls, with NO
-        // intermediate Enter between the Downs and the literal.
-        List<List<String>> calls = capturedArgvs(24);
+        // OLD order (Enter-on-empty, then type) DECLINED the ask. UC-57: no blind 20×Up reset, so the
+        // sequence is just 2 Down (to otherIndex 2) + literal + Enter = 4 calls, with NO intermediate
+        // Enter between the Downs and the literal and ZERO Up.
+        List<List<String>> calls = capturedArgvs(4);
         long ups = calls.stream().filter(c -> "Up".equals(tail(c, 1))).count();
         long downs = calls.stream().filter(c -> "Down".equals(tail(c, 1))).count();
         long enters = calls.stream().filter(c -> "Enter".equals(tail(c, 1))).count();
-        assertThat(ups).isEqualTo(20);
+        assertThat(ups).as("UC-57: no blind Up cursor reset").isZero();
         assertThat(downs).isEqualTo(2);
         assertThat(enters)
                 .as("exactly one Enter — typed text is committed once, not after an empty row")
@@ -187,10 +196,15 @@ class InputInjectionServiceTest {
 
     @Test
     void answer_other_blank_free_text_is_not_typed() throws Exception {
-        // Other "selected" but freeText blank → freeText path is skipped.
+        // Other "selected" but freeText blank → freeText path is skipped; falls back to walking
+        // Down to the (blank-Other) index and Enter. UC-57: no blind 20×Up reset → 2 Down + Enter.
         svc.injectAnswer(3, InjectTarget.main(), 3, false, List.of(2), 2, "   ");
-        List<List<String>> calls = capturedArgvs(/* 20 Up + 2 Down + Enter */ 23);
+        List<List<String>> calls = capturedArgvs(/* 2 Down + Enter */ 3);
         assertThat(calls).noneSatisfy(c -> assertThat(c).contains("-l"));
+        assertThat(calls.stream().filter(c -> "Up".equals(tail(c, 1))).count())
+                .as("UC-57: no blind Up cursor reset")
+                .isZero();
+        assertThat(keySeq(calls)).containsExactly("Down", "Down", "Enter");
     }
 
     // ──────────────── UC-44 AC6 — single-question multiSelect + "Other" (injectAnswer) ────────────────
@@ -202,25 +216,98 @@ class InputInjectionServiceTest {
         // Mirrors the handler's deriveAnswerSpec output for 2 listed options [X,Y] + "Other":
         //   optionCount = 2 listed + 1 (the Other row, because freeText is non-blank) = 3
         //   otherIndex  = 2 (the Other row is always last); selections = [0, 2] (client appends Other).
-        // The implemented multiSelect+Other walk (verified live on 2.1.169):
-        //   reset cursor (20×Up); Space on option 0; Down; Down to the "Type something" row; type the
-        //   literal; Enter (COMMIT the typed text as a custom option — NOT a silent preview drop);
-        //   Space (SELECT it); then from that row Tab FOCUSES + Enter ACTIVATES the in-pane Submit;
-        //   and because this is the single-question path (commitKey == "Enter") one final Enter
-        //   confirms the "Review your answers" screen.
+        // The implemented multiSelect+Other walk (verified live on 2.1.169), UC-57: NO cursor reset —
+        //   Space on option 0; Down; Down to the "Type something" row; type the literal; Enter (COMMIT
+        //   the typed text as a custom option — NOT a silent preview drop); Space (SELECT it); then
+        //   from that row Tab FOCUSES + Enter ACTIVATES the in-pane Submit; and because this is the
+        //   single-question path (commitKey == "Enter") one final Enter confirms the "Review your
+        //   answers" screen.
         svc.injectAnswer(3, InjectTarget.main(), 3, true, List.of(0, 2), 2, "custom");
 
-        List<List<String>> calls = capturedArgvs(/* 20 Up + 9 */ 29);
+        List<List<String>> calls = capturedArgvs(9);
         long ups = calls.stream().filter(c -> "Up".equals(tail(c, 1))).count();
         assertThat(ups)
-                .as("single-question injectAnswer resets the cursor to the top")
-                .isEqualTo(20);
+                .as("UC-57: single-question injectAnswer no longer emits a blind Up cursor reset")
+                .isZero();
         // The literal MUST be sent — this is the UC-44 fix (the prior code toggled Space but never typed).
         assertThat(calls).anySatisfy(c -> assertThat(c).containsSequence("-l", "--", "custom"));
-        // Pin the EXACT post-reset sequence (drop the 20 leading Ups).
-        List<String> seq = keySeq(calls);
-        assertThat(seq.subList(20, seq.size()))
+        // Pin the EXACT sequence from index 0 (UC-57 dropped the leading Up reset).
+        assertThat(keySeq(calls))
                 .containsExactly("Space", "Down", "Down", "LIT:custom", "Enter", "Space", "Tab", "Enter", "Enter");
+    }
+
+    // ──────────────── UC-57 AC6 — wrong-option regression guard (single-question path) ────────────────
+    //
+    // The reported bug: answering an in-app AskUserQuestion sent the FIRST visible option instead of
+    // the one selected. Root cause in the keystroke layer: a blind Up×20 "reset" walked the WRAPPING
+    // option ring from an unknown position, landing on a non-deterministic index. The fix removes the
+    // reset so the walk is purely Down×selectedIndex from the top-open cursor. These tests pin, for a
+    // single-question sheet, that selecting a NON-FIRST option produces exactly Down×index + Enter with
+    // ZERO Up — so the off-by-one / first-option regression can never silently return. The MOCKED
+    // executor means a wrong ORDER would pass a count-only check, so every case pins the exact sequence.
+
+    @Test
+    void uc57_single_select_index1_of_3_sends_exactly_one_Down_then_Enter_zero_Up() throws Exception {
+        // 3 options, pick the SECOND (index 1) — the exact shape the user reported (tapped 2nd, got 1st).
+        svc.injectAnswer(3, InjectTarget.main(), 3, false, List.of(1), -1, null);
+        List<List<String>> calls = capturedArgvs(2);
+        assertThat(keySeq(calls)).containsExactly("Down", "Enter");
+        assertNoUp(calls);
+    }
+
+    @Test
+    void uc57_single_select_last_index_of_3_sends_two_Downs_then_Enter_zero_Up() throws Exception {
+        // 3 options, pick the LAST (index 2) — boundary of the walk.
+        svc.injectAnswer(3, InjectTarget.main(), 3, false, List.of(2), -1, null);
+        List<List<String>> calls = capturedArgvs(3);
+        assertThat(keySeq(calls)).containsExactly("Down", "Down", "Enter");
+        assertNoUp(calls);
+    }
+
+    @Test
+    void uc57_two_option_index0_sends_no_Down_no_Up_just_Enter() throws Exception {
+        // 2 options, pick the FIRST (index 0): the top-open cursor is already there → just Enter.
+        // This is the exact 2-option swap shape from the report; here index 0 must stay index 0.
+        svc.injectAnswer(3, InjectTarget.main(), 2, false, List.of(0), -1, null);
+        List<List<String>> calls = capturedArgvs(1);
+        assertThat(keySeq(calls)).containsExactly("Enter");
+        assertNoUp(calls);
+    }
+
+    @Test
+    void uc57_two_option_index1_sends_one_Down_then_Enter_zero_Up() throws Exception {
+        // 2 options, pick the SECOND (index 1): exactly one Down then Enter — never index 0.
+        svc.injectAnswer(3, InjectTarget.main(), 2, false, List.of(1), -1, null);
+        List<List<String>> calls = capturedArgvs(2);
+        assertThat(keySeq(calls)).containsExactly("Down", "Enter");
+        assertNoUp(calls);
+    }
+
+    @Test
+    void uc57_multiSelect_non_first_only_has_zero_leading_Up() throws Exception {
+        // 3-option multiSelect picking only index 2 (a non-first option): Down past 0 and 1 (no toggle),
+        // Space on 2, Enter — zero Up.
+        svc.injectAnswer(3, InjectTarget.main(), 3, true, List.of(2), -1, null);
+        List<List<String>> calls = capturedArgvs(4);
+        assertThat(keySeq(calls)).containsExactly("Down", "Down", "Space", "Enter");
+        assertNoUp(calls);
+    }
+
+    @Test
+    void uc57_free_text_other_non_first_index_has_zero_leading_Up() throws Exception {
+        // 4-option single-select free-text where the "Other" row is the LAST index (3): walk Down×3 to
+        // it, type, Enter — zero Up, and the typed text round-trips verbatim (AC4).
+        svc.injectAnswer(3, InjectTarget.main(), 4, false, List.of(3), 3, "typed value");
+        List<List<String>> calls = capturedArgvs(5);
+        assertThat(keySeq(calls)).containsExactly("Down", "Down", "Down", "LIT:typed value", "Enter");
+        assertNoUp(calls);
+    }
+
+    /** UC-57 guard: the single-question answer path must NEVER emit a blind Up cursor reset. */
+    private static void assertNoUp(List<List<String>> calls) {
+        assertThat(calls.stream().filter(c -> "Up".equals(tail(c, 1))).count())
+                .as("UC-57: zero Up — the wrapping-ring reset that sent the first/wrong option is gone")
+                .isZero();
     }
 
     // ──────────────────────── interrupt ──────────────────────────────────────
@@ -417,5 +504,63 @@ class InputInjectionServiceTest {
         List<List<String>> calls = capturedArgvs(4);
         // Q0 Enter (advance), Q1 Enter (advance), Q2 Enter (advance to Submit tab), final Enter (submit).
         assertThat(keySeq(calls)).containsExactly("Enter", "Enter", "Enter", "Enter");
+    }
+
+    // ──────────────────────── UC-55 — read-only wizard-tab recovery walk ──────
+    // The multi-question option recovery steps the live pane to READ each tab's options.
+    // LOCKED CONDITION 3 (the load-bearing safety invariant): the walk may emit ONLY the
+    // navigation arrows Right/Left — NEVER a selection/commit key — so the transient
+    // flicker it causes is provably non-corrupting (it cannot toggle, type, or submit an
+    // answer). These tests pin that the recovery keystroke set is exactly {Right, Left}
+    // and that the step helpers emit only those keys.
+
+    @Test
+    void WIZARD_NAV_KEYS_is_exactly_Right_and_Left_and_contains_no_selection_or_commit_key() {
+        // CONDITION 3 — the recovery walk's allowed keystroke set must be navigation-only.
+        assertThat(InputInjectionService.WIZARD_NAV_KEYS)
+                .containsExactlyInAnyOrder("Right", "Left")
+                .containsExactlyInAnyOrder(
+                        InputInjectionService.WIZARD_NEXT_TAB_KEY, InputInjectionService.WIZARD_PREV_TAB_KEY);
+        // Not one of the selection/commit keys the answer-injection paths use — a single
+        // leaked key here would corrupt the user's unanswered wizard.
+        assertThat(InputInjectionService.WIZARD_NAV_KEYS)
+                .doesNotContain("Space", "Enter", "Tab", "C-j", "Up", "Down")
+                .doesNotContain("0", "1", "2", "3", "4", "5", "6", "7", "8", "9");
+    }
+
+    @Test
+    void stepWizardForward_sends_only_the_Right_arrow() throws Exception {
+        svc.stepWizardForward(3, InjectTarget.main());
+        List<List<String>> calls = capturedArgvs(1);
+        assertThat(calls.get(0)).containsSubsequence("send-keys", "-t", "main");
+        assertThat(tail(calls.get(0), 1)).isEqualTo("Right");
+        // Provably NOT a literal type and NOT a selection/commit key.
+        assertThat(calls.get(0)).doesNotContain("-l");
+        assertThat(keySeq(calls)).containsExactly("Right");
+    }
+
+    @Test
+    void stepWizardBack_sends_only_the_Left_arrow() throws Exception {
+        svc.stepWizardBack(3, InjectTarget.main());
+        List<List<String>> calls = capturedArgvs(1);
+        assertThat(tail(calls.get(0), 1)).isEqualTo("Left");
+        assertThat(calls.get(0)).doesNotContain("-l");
+        assertThat(keySeq(calls)).containsExactly("Left");
+    }
+
+    @Test
+    void a_full_recovery_walk_emits_only_navigation_keys_never_a_selection_or_commit_key() throws Exception {
+        // Simulate the facade's recovery of a 3-tab wizard: Right ×2 to read tabs 1 and 2,
+        // then Left ×2 to restore focus to tab 0. The ENTIRE keystroke trace must be
+        // navigation-only — the strongest expression of CONDITION 3 at the service surface.
+        svc.stepWizardForward(3, InjectTarget.main()); // → tab 1
+        svc.stepWizardForward(3, InjectTarget.main()); // → tab 2
+        svc.stepWizardBack(3, InjectTarget.main()); // ← tab 1
+        svc.stepWizardBack(3, InjectTarget.main()); // ← tab 0 (restored)
+
+        List<List<String>> calls = capturedArgvs(4);
+        assertThat(keySeq(calls)).containsExactly("Right", "Right", "Left", "Left");
+        // No literal sends anywhere in the walk.
+        assertThat(calls).allSatisfy(c -> assertThat(c).doesNotContain("-l"));
     }
 }
