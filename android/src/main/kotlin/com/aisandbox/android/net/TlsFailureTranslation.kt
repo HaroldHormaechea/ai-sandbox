@@ -118,6 +118,33 @@ object TlsFailureTranslation {
     }
 
     /**
+     * UC-61 — does [t]'s cause chain carry a {@link CertificateException}?
+     * Anchored at the SSLHandshakeException's `.cause` by the caller (so it
+     * probes the WRAPPED cause, not the handshake exception itself). Used by
+     * [translate] to keep a genuine cert/identity handshake failure (e.g.
+     * SpkiPinningTrustManager's "no certificate chain" throw, whose message
+     * does NOT match the SPKI-mismatch regex so [extractObservedSpkiHex] returns
+     * null) on the destructive identity route, while letting a non-identity
+     * handshake failure fall through to the transient [NetworkEvent.ServerUnreachable]
+     * surface. Iterative walk with the same [MAX_CAUSE_DEPTH] guard as
+     * [extractObservedSpkiHex]/[hasTlsCause] against pathological / circular
+     * chains. Distinct from [hasTlsCause] (which predicates on {@link SSLException})
+     * — this predicates on {@link CertificateException}.
+     */
+    private fun hasCertificateCause(t: Throwable?): Boolean {
+        var current: Throwable? = t
+        var depth = 0
+        while (current != null && depth < MAX_CAUSE_DEPTH) {
+            if (current is CertificateException) {
+                return true
+            }
+            current = current.cause
+            depth++
+        }
+        return false
+    }
+
+    /**
      * Translate a TLS-layer throwable from an OkHttp call into the
      * corresponding {@link NetworkEvent} variant.
      *
@@ -145,8 +172,36 @@ object TlsFailureTranslation {
                         observedPinHex = observedHex,
                         rawMessage = rawMessage,
                     )
-                } else {
+                } else if (hasCertificateCause(throwable.cause)) {
+                    // UC-61 — identity wins. The SPKI-mismatch case was already
+                    // lifted to PinMismatch above (extractObservedSpkiHex matched).
+                    // A remaining CertificateException in the cause chain is a
+                    // genuine cert/identity failure — notably
+                    // SpkiPinningTrustManager's "Server presented no certificate
+                    // chain" throw, which carries no SPKI-mismatch message so
+                    // extractObservedSpkiHex returns null. Keep it on the
+                    // destructive identity route as HandshakeError (AC6). The walk
+                    // is anchored at throwable.cause (NOT the throwable itself):
+                    // anchoring at the SSLHandshakeException would be safe for a
+                    // CertificateException probe, but starting at .cause keeps the
+                    // predicate's intent unambiguous and mirrors the other walks.
                     NetworkEvent.HandshakeError(rawMessage = rawMessage)
+                } else {
+                    // UC-61 — a NON-identity handshake failure (no observed SPKI,
+                    // no CertificateException cause): protocol/cipher negotiation
+                    // hiccup, a transient TLS fault on a routine list/spawn/refresh
+                    // REST call, etc. Reclassify from the destructive HandshakeError
+                    // (which the interceptor bus-routes to ServerIdentityChangedScreen
+                    // → "re-scan a fresh invite QR") to the non-destructive,
+                    // retryable ServerUnreachable signal. ServerUnreachable is NOT
+                    // bus-routed by the interceptor, surfaces as the UC-54 tri-state
+                    // dot via surfaceTransportThrow, is a NoOp in decideNetworkRoute,
+                    // and maps to inline io_error in EnrollmentClient — so a valid QR
+                    // with an unchanged pin no longer misroutes to the re-enroll
+                    // screen (AC5, AC7). Genuine identity failures (PinMismatch,
+                    // HostnameMismatch, cert-chain) are unaffected — they were
+                    // classified above.
+                    NetworkEvent.ServerUnreachable
                 }
             }
             is SSLPeerUnverifiedException -> NetworkEvent.HostnameMismatch(
