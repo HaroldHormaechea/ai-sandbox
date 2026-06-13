@@ -1805,51 +1805,6 @@ class SessionsCoordinatorTest {
                 }
             }
         })
-    // ── UC-62 — openServerSsh dispatches the create POST and opens the terminal ──
-
-    /**
-     * UC-62 AC2 — [SessionsCoordinator.openServerSsh] MUST put a real
-     * `POST /v1/sessions/server-ssh` on the wire AND, on success, invoke
-     * `onReady` with the row's reserved id so the screen navigates straight into
-     * the terminal. Asserts the OUTBOUND POST (not just a handled success), the
-     * same red-green discipline as the spawn guard.
-     */
-    @Test
-    fun openServerSsh_dispatches_post_and_invokes_onReady_with_reserved_id(): Unit = runBlocking {
-        val cert = HeldCertificate.Builder()
-            .commonName("ai-sandbox-server-ssh-test")
-            .addSubjectAlternativeName("127.0.0.1")
-            .rsa2048()
-            .build()
-        val handshake = HandshakeCertificates.Builder().heldCertificate(cert).build()
-        val server = MockWebServer().apply {
-            useHttps(handshake.sslSocketFactory(), false)
-            dispatcher = object : Dispatcher() {
-                override fun dispatch(request: RecordedRequest): MockResponse {
-                    val path = request.path ?: ""
-                    return when {
-                        request.method == "POST" && path == "/v1/sessions/server-ssh" ->
-                            MockResponse().setResponseCode(200).setBody(
-                                """{"n":0,"label":"","tmuxTitle":"(idle)","state":"running",""" +
-                                    """"uptimeSec":0,"activeStreams":0,"startedAt":null,"type":"server-ssh"}""",
-                            )
-                        request.method == "GET" && path == "/v1/sessions" ->
-                            MockResponse().setResponseCode(200).setBody(
-                                """[{"n":0,"label":"","tmuxTitle":"(idle)","state":"running",""" +
-                                    """"uptimeSec":0,"activeStreams":0,"startedAt":null,"type":"server-ssh"}]""",
-                            )
-                        else -> MockResponse().setResponseCode(404).setBody("""{"code":"not_found"}""")
-                    }
-                }
-            }
-            start(InetAddress.getByName("127.0.0.1"), 0)
-        }
-        val profile = ServerProfile(
-            serverUrl = "https://127.0.0.1:${server.port}",
-            pinSha256Hex = spkiHex(cert.certificate.publicKey.encoded),
-            clientCertCn = "alice-phone",
-            clientCertExpiresAtMs = 0L,
-        )
         val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
         try {
             val state = MutableStateFlow(SessionsUiState())
@@ -1946,6 +1901,60 @@ class SessionsCoordinatorTest {
         } finally {
             scope.cancel()
             fx.shutdown()
+        }
+    }
+
+    // ── UC-62 — openServerSsh dispatches the create POST and opens the terminal ──
+
+    /**
+     * UC-62 AC2 — [SessionsCoordinator.openServerSsh] MUST put a real
+     * `POST /v1/sessions/server-ssh` on the wire AND, on success, invoke
+     * `onReady` with the row's reserved id so the screen navigates straight into
+     * the terminal. Asserts the OUTBOUND POST (not just a handled success), the
+     * same red-green discipline as the spawn guard.
+     */
+    @Test
+    fun openServerSsh_dispatches_post_and_invokes_onReady_with_reserved_id(): Unit = runBlocking {
+        val cert = HeldCertificate.Builder()
+            .commonName("ai-sandbox-server-ssh-test")
+            .addSubjectAlternativeName("127.0.0.1")
+            .rsa2048()
+            .build()
+        val handshake = HandshakeCertificates.Builder().heldCertificate(cert).build()
+        val server = MockWebServer().apply {
+            useHttps(handshake.sslSocketFactory(), false)
+            dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse {
+                    val path = request.path ?: ""
+                    return when {
+                        request.method == "POST" && path == "/v1/sessions/server-ssh" ->
+                            MockResponse().setResponseCode(200).setBody(
+                                """{"n":0,"label":"","tmuxTitle":"(idle)","state":"running",""" +
+                                    """"uptimeSec":0,"activeStreams":0,"startedAt":null,"type":"server-ssh"}""",
+                            )
+                        request.method == "GET" && path == "/v1/sessions" ->
+                            MockResponse().setResponseCode(200).setBody(
+                                """[{"n":0,"label":"","tmuxTitle":"(idle)","state":"running",""" +
+                                    """"uptimeSec":0,"activeStreams":0,"startedAt":null,"type":"server-ssh"}]""",
+                            )
+                        else -> MockResponse().setResponseCode(404).setBody("""{"code":"not_found"}""")
+                    }
+                }
+            }
+            start(InetAddress.getByName("127.0.0.1"), 0)
+        }
+        val profile = ServerProfile(
+            serverUrl = "https://127.0.0.1:${server.port}",
+            pinSha256Hex = spkiHex(cert.certificate.publicKey.encoded),
+            clientCertCn = "alice-phone",
+            clientCertExpiresAtMs = 0L,
+        )
+        val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
+        try {
+            val state = MutableStateFlow(SessionsUiState())
+            val coordinator = SessionsCoordinator(
+                state = state,
+                scope = scope,
                 profileSupplier = { profile },
                 apiFactory = { p -> SessionsApi(AiSandboxHttpClient(p, mockIdentity())) },
             )
