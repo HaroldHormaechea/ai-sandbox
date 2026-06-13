@@ -505,4 +505,62 @@ class InputInjectionServiceTest {
         // Q0 Enter (advance), Q1 Enter (advance), Q2 Enter (advance to Submit tab), final Enter (submit).
         assertThat(keySeq(calls)).containsExactly("Enter", "Enter", "Enter", "Enter");
     }
+
+    // ──────────────────────── UC-55 — read-only wizard-tab recovery walk ──────
+    // The multi-question option recovery steps the live pane to READ each tab's options.
+    // LOCKED CONDITION 3 (the load-bearing safety invariant): the walk may emit ONLY the
+    // navigation arrows Right/Left — NEVER a selection/commit key — so the transient
+    // flicker it causes is provably non-corrupting (it cannot toggle, type, or submit an
+    // answer). These tests pin that the recovery keystroke set is exactly {Right, Left}
+    // and that the step helpers emit only those keys.
+
+    @Test
+    void WIZARD_NAV_KEYS_is_exactly_Right_and_Left_and_contains_no_selection_or_commit_key() {
+        // CONDITION 3 — the recovery walk's allowed keystroke set must be navigation-only.
+        assertThat(InputInjectionService.WIZARD_NAV_KEYS)
+                .containsExactlyInAnyOrder("Right", "Left")
+                .containsExactlyInAnyOrder(
+                        InputInjectionService.WIZARD_NEXT_TAB_KEY, InputInjectionService.WIZARD_PREV_TAB_KEY);
+        // Not one of the selection/commit keys the answer-injection paths use — a single
+        // leaked key here would corrupt the user's unanswered wizard.
+        assertThat(InputInjectionService.WIZARD_NAV_KEYS)
+                .doesNotContain("Space", "Enter", "Tab", "C-j", "Up", "Down")
+                .doesNotContain("0", "1", "2", "3", "4", "5", "6", "7", "8", "9");
+    }
+
+    @Test
+    void stepWizardForward_sends_only_the_Right_arrow() throws Exception {
+        svc.stepWizardForward(3, InjectTarget.main());
+        List<List<String>> calls = capturedArgvs(1);
+        assertThat(calls.get(0)).containsSubsequence("send-keys", "-t", "main");
+        assertThat(tail(calls.get(0), 1)).isEqualTo("Right");
+        // Provably NOT a literal type and NOT a selection/commit key.
+        assertThat(calls.get(0)).doesNotContain("-l");
+        assertThat(keySeq(calls)).containsExactly("Right");
+    }
+
+    @Test
+    void stepWizardBack_sends_only_the_Left_arrow() throws Exception {
+        svc.stepWizardBack(3, InjectTarget.main());
+        List<List<String>> calls = capturedArgvs(1);
+        assertThat(tail(calls.get(0), 1)).isEqualTo("Left");
+        assertThat(calls.get(0)).doesNotContain("-l");
+        assertThat(keySeq(calls)).containsExactly("Left");
+    }
+
+    @Test
+    void a_full_recovery_walk_emits_only_navigation_keys_never_a_selection_or_commit_key() throws Exception {
+        // Simulate the facade's recovery of a 3-tab wizard: Right ×2 to read tabs 1 and 2,
+        // then Left ×2 to restore focus to tab 0. The ENTIRE keystroke trace must be
+        // navigation-only — the strongest expression of CONDITION 3 at the service surface.
+        svc.stepWizardForward(3, InjectTarget.main()); // → tab 1
+        svc.stepWizardForward(3, InjectTarget.main()); // → tab 2
+        svc.stepWizardBack(3, InjectTarget.main()); // ← tab 1
+        svc.stepWizardBack(3, InjectTarget.main()); // ← tab 0 (restored)
+
+        List<List<String>> calls = capturedArgvs(4);
+        assertThat(keySeq(calls)).containsExactly("Right", "Right", "Left", "Left");
+        // No literal sends anywhere in the walk.
+        assertThat(calls).allSatisfy(c -> assertThat(c).doesNotContain("-l"));
+    }
 }
