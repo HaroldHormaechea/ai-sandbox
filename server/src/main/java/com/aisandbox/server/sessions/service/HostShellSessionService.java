@@ -6,6 +6,7 @@ import com.aisandbox.server.sessions.dto.SessionRecord;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFilePermissions;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
@@ -55,6 +56,7 @@ public class HostShellSessionService {
     private final String sessionName;
     private final String shell;
     private final Path workdir;
+    private final Path home;
 
     /** Serialises {@link #ensureCreated()} so two near-simultaneous creates yield one tmux (AC13). */
     private final ReentrantLock createLock = new ReentrantLock();
@@ -70,6 +72,14 @@ public class HostShellSessionService {
                 : "ai-sandbox-server-ssh";
         this.shell = resolveShell(cfg.shell());
         this.workdir = cfg.workdir() != null ? cfg.workdir() : Path.of(System.getProperty("user.dir", "/"));
+        // UC-64 — redirect HOME to an accessible, writable dir under the
+        // host-state tree (inside the unit's ReadWritePaths), so the host tmux
+        // server and the login shell resolve their (absent) config away from the
+        // ProtectHome-hidden /home, mirroring how the unit redirects Docker via
+        // DOCKER_CONFIG. Defaults to <hostStateRoot>/server-ssh-home when unset.
+        this.home = cfg.home() != null
+                ? cfg.home()
+                : props.sessions().hostStateRoot().resolve("server-ssh-home");
     }
 
     private static String resolveShell(String configured) {
@@ -93,6 +103,16 @@ public class HostShellSessionService {
     /** tmux base session name for the host shell. */
     public String sessionName() {
         return sessionName;
+    }
+
+    /**
+     * UC-64 — the accessible, writable {@code HOME} the host tmux server and the
+     * PTY-attached login shell run with, so tmux/shell config lookups resolve
+     * away from the {@code ProtectHome}-hidden real home. Consumed by
+     * {@code TmuxBridgeService} for the host-mode PTY env.
+     */
+    public String homePathString() {
+        return home.toString();
     }
 
     /**
@@ -146,6 +166,18 @@ public class HostShellSessionService {
             Path parent = socketPath.getParent();
             if (parent != null) {
                 Files.createDirectories(parent);
+            }
+            // UC-64 — provision the redirected HOME before new-session, so the
+            // tmux server and the login shell have an accessible, writable home
+            // (under the host-state tree / ReadWritePaths) instead of the
+            // ProtectHome-hidden /home. Mode 0700, agreeing with the postinst
+            // pre-create and the docker-config precedent. Idempotent; falls back
+            // to a plain createDirectories on a non-POSIX filesystem.
+            try {
+                Files.createDirectories(
+                        home, PosixFilePermissions.asFileAttribute(PosixFilePermissions.fromString("rwx------")));
+            } catch (UnsupportedOperationException nonPosix) {
+                Files.createDirectories(home);
             }
             // tmux -S <sock> new-session -d -s <name> <shell> -l
             // Running detached as the server's own user/cwd. PATH/TERM are set
@@ -226,9 +258,20 @@ public class HostShellSessionService {
         return argv;
     }
 
-    /** Minimal environment overlay for the tmux subprocess (systemd minimal-PATH gotcha). */
+    /**
+     * Minimal environment overlay for the tmux subprocess (systemd minimal-PATH
+     * gotcha). UC-64 adds {@code HOME} pointing at the accessible, writable
+     * redirected home so the host tmux server (has-/new-/kill-session) resolves
+     * its config away from the {@code ProtectHome}-hidden {@code /home}.
+     */
     private Map<String, String> baseEnv() {
         String path = System.getenv("PATH");
-        return Map.of("PATH", (path != null && !path.isBlank()) ? path : DEFAULT_PATH, "TERM", "xterm-256color");
+        return Map.of(
+                "PATH",
+                (path != null && !path.isBlank()) ? path : DEFAULT_PATH,
+                "TERM",
+                "xterm-256color",
+                "HOME",
+                home.toString());
     }
 }

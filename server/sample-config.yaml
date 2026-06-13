@@ -63,9 +63,15 @@ ai-sandbox:
       #   socket-path : tmux server socket. Default <sessions.host-state-root>/server-ssh.sock
       #   shell       : login shell to launch. Default $SHELL, else /bin/bash
       #   workdir     : working dir for the shell. Default the server JVM cwd
+      #   home        : UC-64 — HOME for the host tmux + login shell. Default
+      #                 <sessions.host-state-root>/server-ssh-home. Redirected to
+      #                 this writable path (inside the unit's ReadWritePaths) so
+      #                 tmux/the shell don't hit the ProtectHome-hidden /home,
+      #                 mirroring how DOCKER_CONFIG redirects Docker.
       # socket-path: /var/lib/ai-sandbox-server/sessions/server-ssh.sock
       # shell: /bin/bash
       # workdir: /var/lib/ai-sandbox-server
+      # home: /var/lib/ai-sandbox-server/sessions/server-ssh-home
 
     limits:
       # Per-IP connection rate-limit (token bucket).
