@@ -5,9 +5,11 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import com.aisandbox.server.sessions.service.HostShellSessionService;
 import com.aisandbox.server.sessions.service.ProcessExecutor;
 import com.aisandbox.server.stream.service.TmuxBridgeService.BridgeTarget;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.CopyOnWriteArrayList;
 import org.junit.jupiter.api.Test;
 
@@ -94,5 +96,75 @@ class TmuxBridgeHostModeTest {
                 .orElseThrow();
         assertThat(newSession)
                 .startsWith("docker", "compose", "-p", "ai-sandbox-1", "exec", "-T", "claude-sandbox", "tmux");
+    }
+
+    private static final String HOST_HOME = "/var/lib/ai-sandbox-server/sessions/server-ssh-home";
+
+    /**
+     * UC-64 AC9b — the host-mode PTY-attach env overlays {@code HOME} with the
+     * accessible, writable redirected home reported by the bound
+     * {@link HostShellSessionService}, so the attaching client and the login
+     * shell inside the pane resolve their (absent) config away from the
+     * {@code ProtectHome}-hidden {@code /home} — matching the {@code HOME} the
+     * tmux server itself was created with. Also retains the inherited
+     * {@code PATH}/{@code TERM} (the pty4j replace-env gotcha).
+     */
+    @Test
+    void buildPtyEnv_onHost_overlays_redirected_home() {
+        HostShellSessionService hostShell = mock(HostShellSessionService.class);
+        when(hostShell.homePathString()).thenReturn(HOST_HOME);
+        TmuxBridgeService svc = new TmuxBridgeService(mock(ProcessExecutor.class));
+        svc.setHostShell(hostShell);
+
+        Map<String, String> env = svc.buildPtyEnv(true);
+
+        assertThat(env).containsKey("HOME");
+        assertThat(env.get("HOME"))
+                .as("AC9b — host-mode attach HOME is the accessible redirected home")
+                .isEqualTo(HOST_HOME);
+        assertThat(env.get("HOME"))
+                .as("AC9b/AC8 — HOME is NOT the ProtectHome-hidden real home")
+                .doesNotStartWith("/home/");
+        // The pty4j env-replace gotcha guard stays intact: PATH/TERM are present.
+        assertThat(env).containsKey("PATH");
+        assertThat(env).containsEntry("TERM", "xterm-256color");
+    }
+
+    /**
+     * UC-64 — control: a NON-host (container) attach must NOT have its
+     * {@code HOME} rewritten to the host-shell's redirected home even when the
+     * host-shell service is bound. Container sessions carry their own in-image
+     * {@code $HOME}; only the host shell needs the ProtectHome redirect.
+     */
+    @Test
+    void buildPtyEnv_offHost_does_not_override_home_to_hostShell() {
+        HostShellSessionService hostShell = mock(HostShellSessionService.class);
+        when(hostShell.homePathString()).thenReturn(HOST_HOME);
+        TmuxBridgeService svc = new TmuxBridgeService(mock(ProcessExecutor.class));
+        svc.setHostShell(hostShell);
+
+        Map<String, String> env = svc.buildPtyEnv(false);
+
+        assertThat(env.get("HOME"))
+                .as("AC9b — container (off-host) attach keeps the inherited HOME, never the host-shell redirect")
+                .isNotEqualTo(HOST_HOME);
+        // Whatever HOME the JVM inherited is passed through unchanged.
+        assertThat(env.get("HOME")).isEqualTo(System.getenv("HOME"));
+    }
+
+    /**
+     * UC-64 — graceful degradation: when no host-shell service is bound (the
+     * field doc's fallback), even an {@code onHost} attach leaves {@code HOME}
+     * inherited rather than NPEing on a null service.
+     */
+    @Test
+    void buildPtyEnv_onHost_withUnboundHostShell_leaves_home_inherited() {
+        TmuxBridgeService svc = new TmuxBridgeService(mock(ProcessExecutor.class)); // no setHostShell
+
+        Map<String, String> env = svc.buildPtyEnv(true);
+
+        assertThat(env.get("HOME"))
+                .as("UC-64 — unbound host-shell ⇒ HOME left inherited (no NPE, no host redirect)")
+                .isEqualTo(System.getenv("HOME"));
     }
 }
