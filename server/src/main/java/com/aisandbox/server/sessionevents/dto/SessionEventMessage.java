@@ -1,5 +1,6 @@
 package com.aisandbox.server.sessionevents.dto;
 
+import com.aisandbox.server.config.SpecialSessions;
 import com.fasterxml.jackson.annotation.JsonSubTypes;
 import com.fasterxml.jackson.annotation.JsonTypeInfo;
 import java.time.Instant;
@@ -104,7 +105,42 @@ public sealed interface SessionEventMessage permits SessionEventMessage.Snapshot
             Instant startedAt,
             String conversationName,
             boolean working,
-            boolean pendingQuestion) {
+            boolean pendingQuestion,
+            String type) {
+
+        /**
+         * UC-62 back-compat 10-arg constructor for call sites built before this
+         * use case appended {@code type}. Delegates with
+         * {@code type=}{@link SpecialSessions#TYPE_CLAUDE}. The {@code type} field
+         * participates in record value-equality, so a row's appearance /
+         * disappearance (the host-shell row) flips equality and the UC-32 watcher
+         * emits a Delta automatically — no watcher edit (AC7 persistence reaches
+         * every device, AC11 removal too).
+         */
+        public Row(
+                int n,
+                String label,
+                String tmuxTitle,
+                String state,
+                long uptimeSec,
+                int activeStreams,
+                Instant startedAt,
+                String conversationName,
+                boolean working,
+                boolean pendingQuestion) {
+            this(
+                    n,
+                    label,
+                    tmuxTitle,
+                    state,
+                    uptimeSec,
+                    activeStreams,
+                    startedAt,
+                    conversationName,
+                    working,
+                    pendingQuestion,
+                    SpecialSessions.TYPE_CLAUDE);
+        }
 
         /**
          * UC-49 back-compat 9-arg constructor for call sites built after UC-48 but

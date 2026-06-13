@@ -3,12 +3,14 @@ package com.aisandbox.server.sessions.facade;
 import com.aisandbox.server.audit.AuditAction;
 import com.aisandbox.server.audit.AuditLogger;
 import com.aisandbox.server.config.ServerProperties;
+import com.aisandbox.server.config.SpecialSessions;
 import com.aisandbox.server.sessions.dto.LifecycleAction;
 import com.aisandbox.server.sessions.dto.SessionDetail;
 import com.aisandbox.server.sessions.dto.SessionRecord;
 import com.aisandbox.server.sessions.dto.SpawnCommand;
 import com.aisandbox.server.sessions.facade.internal.PerSessionMutexRegistry;
 import com.aisandbox.server.sessions.facade.internal.SpawnMutex;
+import com.aisandbox.server.sessions.service.HostShellSessionService;
 import com.aisandbox.server.sessions.service.ProcessExecutor;
 import com.aisandbox.server.sessions.service.ScriptExecutorService;
 import com.aisandbox.server.sessions.service.SessionRegistryService;
@@ -22,6 +24,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
 /**
@@ -43,6 +46,18 @@ public class SessionFacade {
     private final TerminatingSessions terminating;
     private final Duration spawnTimeout;
 
+    /**
+     * UC-62 — the host-shell service. Injected via a setter (not the
+     * constructor) so the existing unit-test constructions of this facade
+     * compile unchanged — the same late-binding pattern {@code StreamFacade}
+     * uses for its swarm enumerator. It is a regular always-present
+     * {@code @Service} in production; only the {@code server-ssh} paths
+     * ({@link #createServerSsh()} and the {@link SpecialSessions#SERVER_SSH_N}
+     * branches in delete/lifecycle) touch it, and those are never exercised by
+     * the pre-UC-62 tests that leave it unset.
+     */
+    private volatile HostShellSessionService hostShell;
+
     public SessionFacade(
             SessionRegistryService registry,
             ScriptExecutorService executor,
@@ -58,6 +73,42 @@ public class SessionFacade {
         this.audit = audit;
         this.terminating = terminating;
         this.spawnTimeout = Duration.ofSeconds(props.limits().spawnTimeoutSeconds());
+    }
+
+    /** Late-binding injection of the UC-62 host-shell service (see field doc). */
+    @Autowired(required = false)
+    public void setHostShell(HostShellSessionService hostShell) {
+        this.hostShell = hostShell;
+    }
+
+    /**
+     * UC-62 — create (or focus, if it already exists) the singleton server
+     * host-shell session and return its pinned row.
+     *
+     * <p>The server-side singleton guard lives in
+     * {@link HostShellSessionService#ensureCreated()} (idempotent + lock-
+     * serialised), so two near-simultaneous {@code POST /v1/sessions/server-ssh}
+     * requests yield exactly one tmux and one row (AC2, AC13); the second simply
+     * focuses the existing one. The registry cache is invalidated so the next
+     * {@code GET /v1/sessions} re-lists the now-present row.
+     *
+     * @return the host-shell row (reserved id, {@code type=server-ssh}).
+     */
+    public SessionRecord createServerSsh() throws IOException {
+        HostShellSessionService hs = requireHostShell();
+        hs.ensureCreated();
+        registry.invalidate();
+        audit.logEvent(AuditAction.SESSION_SPAWN, "ok", "n", SpecialSessions.SERVER_SSH_N, "type",
+                SpecialSessions.TYPE_SERVER_SSH);
+        return hs.row();
+    }
+
+    private HostShellSessionService requireHostShell() {
+        HostShellSessionService hs = this.hostShell;
+        if (hs == null) {
+            throw new IllegalStateException("host-shell service not wired");
+        }
+        return hs;
     }
 
     public List<SessionRecord> listSessions() throws IOException {
@@ -150,6 +201,17 @@ public class SessionFacade {
             throw new IOException("Timed out acquiring per-session mutex for N=" + n);
         }
         try {
+            // UC-62 — the host-shell row is not a Docker container: Remove kills
+            // the host tmux directly (AC11) and SKIPS clean.sh + the terminating
+            // machinery (which would otherwise shell `docker` against the
+            // nonexistent ai-sandbox-0, since clean.sh only guards n < 0). The
+            // per-N lock is still held to serialise against a concurrent create.
+            if (n == SpecialSessions.SERVER_SSH_N) {
+                requireHostShell().kill();
+                registry.invalidate();
+                audit.logEvent(AuditAction.SESSION_KILL, "ok", "n", n, "type", SpecialSessions.TYPE_SERVER_SSH);
+                return true;
+            }
             if (!force && !registry.exists(n)) {
                 throw new NoSuchElementException("session " + n + " not found");
             }
@@ -236,6 +298,14 @@ public class SessionFacade {
      *     for the current state (→ 409)
      */
     public boolean lifecycle(int n, String actionToken) throws IOException, InterruptedException {
+        // UC-62 — the host-shell row exposes ONLY Remove (no stop/start/pause/
+        // unpause): its menu offers no lifecycle items and it is not a Docker
+        // container. Reject any lifecycle action on it as 404 BEFORE parsing the
+        // action or touching lifecycle.sh, which (guarding only n < 0) would
+        // otherwise shell `docker` against the nonexistent ai-sandbox-0.
+        if (n == SpecialSessions.SERVER_SSH_N) {
+            throw new NoSuchElementException("session " + n + " not found");
+        }
         LifecycleAction action = LifecycleAction.fromToken(actionToken);
         ReentrantLock l = perN.get(n);
         if (!l.tryLock(2_000L, TimeUnit.MILLISECONDS)) {

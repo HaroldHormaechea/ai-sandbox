@@ -50,6 +50,23 @@ ai-sandbox:
       # `aisandboxctl pki init`.
       dir: /etc/ai-sandbox-server/secrets
 
+    server-ssh:
+      # UC-62 — the always-on "SERVER SSH SESSION" row: a tmux login shell
+      # on the management-server HOST itself (the server's own user + cwd),
+      # NOT inside any sandbox container. It crosses the container trust
+      # boundary by design (an accepted operator convenience). Set enabled
+      # to false to remove the row + endpoint entirely.
+      enabled: true
+      # tmux base session name on the dedicated socket.
+      session-name: ai-sandbox-server-ssh
+      # Optional overrides (defaulted at runtime when omitted):
+      #   socket-path : tmux server socket. Default <sessions.host-state-root>/server-ssh.sock
+      #   shell       : login shell to launch. Default $SHELL, else /bin/bash
+      #   workdir     : working dir for the shell. Default the server JVM cwd
+      # socket-path: /var/lib/ai-sandbox-server/sessions/server-ssh.sock
+      # shell: /bin/bash
+      # workdir: /var/lib/ai-sandbox-server
+
     limits:
       # Per-IP connection rate-limit (token bucket).
       per-ip-new-conn-per-window: 10

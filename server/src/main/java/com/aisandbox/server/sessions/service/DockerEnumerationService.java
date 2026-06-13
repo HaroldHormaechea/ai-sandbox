@@ -1,5 +1,6 @@
 package com.aisandbox.server.sessions.service;
 
+import com.aisandbox.server.config.SpecialSessions;
 import com.aisandbox.server.sessions.dto.SessionRecord;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -280,7 +281,17 @@ public class DockerEnumerationService {
                 pendingQuestion = cachedConversationPending(n);
             }
             out.add(new SessionRecord(
-                    n, label, title, state, 0L, 0, Instant.EPOCH, conversationName, working, pendingQuestion));
+                    n,
+                    label,
+                    title,
+                    state,
+                    0L,
+                    0,
+                    Instant.EPOCH,
+                    conversationName,
+                    working,
+                    pendingQuestion,
+                    SpecialSessions.TYPE_CLAUDE));
         }
         out.sort((a, b) -> Integer.compare(a.n(), b.n()));
         // UC-47 — drop cached names for sessions that vanished this enumeration.
