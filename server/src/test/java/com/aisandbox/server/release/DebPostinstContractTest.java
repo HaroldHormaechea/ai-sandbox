@@ -86,6 +86,43 @@ class DebPostinstContractTest {
     }
 
     /**
+     * Exact-shape regex per UC-63 AC5 — same byte-exact-flags / {@code \s+}
+     * between-token tolerance as {@link #POSTINST_DOCKER_CONFIG_PATTERN}, but for
+     * the host-state {@code sessions/} dir. Mode {@code 0750} + owner/group
+     * {@code ai-sandbox-server}, mirroring the sibling state dirs.
+     */
+    private static final Pattern POSTINST_SESSIONS_DIR_PATTERN =
+            Pattern.compile("(?m)^\\s*install\\s+-d\\s+-m\\s+0750\\s+-o\\s+ai-sandbox-server\\s+-g\\s+ai-sandbox-server"
+                    + "\\s+/var/lib/ai-sandbox-server/sessions\\s*$");
+
+    /**
+     * UC-63 AC5 — packaging contract: the postinst MUST provision the host-state
+     * {@code sessions/} directory at install time, so the UC-62 server host-shell's
+     * tmux socket ({@code /var/lib/ai-sandbox-server/sessions/server-ssh.sock}) has
+     * a parent dir on a FRESH install — independent of {@code spawn.sh}'s lazy
+     * create on the first Docker session. Without it, opening the SSH row first on
+     * a freshly-installed server hits a missing parent dir. Mode {@code 0750} +
+     * owner/group {@code ai-sandbox-server}, mirroring the sibling state dirs (and
+     * the docker-config assertion above).
+     */
+    @Test
+    void postinst_creates_sessions_state_directory_with_correct_mode_and_ownership() throws IOException {
+        assumeTrue(
+                Files.isRegularFile(POSTINST_FILE),
+                "postinst not found at " + POSTINST_FILE + " — test must run with cwd=server/");
+
+        String text = Files.readString(POSTINST_FILE);
+        assertThat(POSTINST_SESSIONS_DIR_PATTERN.matcher(text).find())
+                .as(
+                        "UC-63 AC5 — postinst MUST contain an `install -d -m 0750 -o ai-sandbox-server "
+                                + "-g ai-sandbox-server /var/lib/ai-sandbox-server/sessions` invocation so the "
+                                + "UC-62 host-shell socket dir exists on a fresh install regardless of whether a "
+                                + "Docker session was ever spawned. Postinst text was:\n%s",
+                        text)
+                .isTrue();
+    }
+
+    /**
      * UC-17 AC1/AC2/AC9 — packaging contract for the debconf-driven
      * onboarding the postinst now performs. The wizard is invoked
      * non-interactively from {@code configure}; this guard pins the
