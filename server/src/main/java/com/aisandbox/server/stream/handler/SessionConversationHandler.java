@@ -17,7 +17,9 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -69,6 +71,16 @@ public class SessionConversationHandler implements WebSocketHandler {
 
     /** Close code for an unsupported / absent subprotocol (STREAM_PROTOCOL.md matrix). */
     private static final CloseStatus UNSUPPORTED = new CloseStatus(1003, "unsupported_subprotocol");
+
+    /**
+     * UC-55 — settle window after a multi-question option recovery during which transient
+     * pane-signal control lines (a header-only pending-question for a NEW key, or a
+     * pending-clear) are dropped. The recovery steps the live pane and restores it; the
+     * helper's independent 300ms poll can briefly observe an intermediate tab and emit a
+     * transient. This window absorbs those (the buffered transients are processed within
+     * ms of recovery completing); a value comfortably above the helper poll interval.
+     */
+    private static final long RECOVERY_SUPPRESS_MS = 1500L;
 
     private final ConversationFacade facade;
     private final StreamControlMessageService controlSvc;
@@ -298,7 +310,7 @@ public class SessionConversationHandler implements WebSocketHandler {
     }
 
     /**
-     * UC-50 — handle a pane-signal {@code pending-question} control line: map the
+     * UC-50/UC-55 — handle a pane-signal {@code pending-question} control line: map the
      * JSON payload to a {@link ConversationServerMessage.PendingPrompt}, cache a
      * synthesized {@link ConversationServerMessage.Question} keyed by promptKey (so an
      * in-app answer can derive its option spec), and emit the PendingPrompt — UNLESS a
@@ -306,11 +318,53 @@ public class SessionConversationHandler implements WebSocketHandler {
      * ConvCtx#transcriptPromptThisTurn}), in which case the transcript path owns the
      * sheet and the pane signal is suppressed (no double sheet). On claude 2.1.169 the
      * transcript path never fires, so the pane signal is what delivers the question.
+     *
+     * <p><b>UC-55 — multi-question recovery (eager).</b> A multi-question batch arrives
+     * header-only ({@code answerable=false}: one pane capture only shows the focused tab).
+     * Here the handler eagerly recovers EVERY tab's options by stepping the live pane
+     * (under the facade's per-session pane lock), re-maps the prompt through the same
+     * {@link ConversationEventMapper#answerable} gate, and emits it {@code answerable=true}
+     * with the full per-tab options — so the Android sheet renders the existing paged
+     * controls and the cached {@code Question} carries the per-tab option metadata
+     * {@code deriveAnswerSpec} needs for injection. No tmux fallback for the standard
+     * multi-question wizard (AC2/AC5/AC10). The stepping races with the helper's own 300ms
+     * pane poll, so two guards keep that race invisible to the client: (1) a header-only
+     * re-emit for an already-recovered key (the helper re-settling the restored tab) is
+     * dropped, and (2) for a short settle window after a recovery, a header-only
+     * pending-question for a DIFFERENT key — a transient from the recovery's own
+     * tab-stepping — is dropped.
      */
     private void dispatchPendingQuestion(WebSocketSession session, ConvCtx ctx, String json) {
         ConversationServerMessage.PendingPrompt pp = mapper.mapPendingPrompt(json);
         if (pp == null) {
             return; // malformed payload — skip without crashing the pump (AC20 parity)
+        }
+        boolean multiHeaderOnly = "questions".equals(pp.kind())
+                && !pp.answerable()
+                && pp.questions() != null
+                && pp.questions().size() > 1;
+        if (multiHeaderOnly) {
+            // Guard 1 — a header-only re-emit for an already-recovered key must not
+            // downgrade the open full-options sheet (a racing poll re-settling the
+            // restored tab). Drop it.
+            if (ctx.recoveredKeys.contains(pp.promptKey())) {
+                return;
+            }
+            // Guard 2 — a header-only multi-question prompt for a NEW key during the
+            // post-recovery settle window is a transient produced by the recovery's own
+            // tab-stepping (the pane is already restored to tab 0); drop it.
+            if (System.currentTimeMillis() < ctx.recoverySuppressUntilMs) {
+                return;
+            }
+            // Recover all tabs' options only when this pane signal actually owns the sheet
+            // this turn (never perturb the pane when the transcript path owns it).
+            if (!ctx.transcriptPromptThisTurn) {
+                pp = recoverMultiQuestion(ctx, pp);
+                if (pp.answerable()) {
+                    ctx.recoveredKeys.add(pp.promptKey());
+                    ctx.recoverySuppressUntilMs = System.currentTimeMillis() + RECOVERY_SUPPRESS_MS;
+                }
+            }
         }
         cacheQuestion(ctx, mapper.pendingPromptToQuestion(pp));
         if (!ctx.transcriptPromptThisTurn) {
@@ -319,25 +373,82 @@ public class SessionConversationHandler implements WebSocketHandler {
     }
 
     /**
-     * UC-50 — handle a pane-signal {@code pending-clear} control line: evict the
+     * UC-55 — step the live pane through every tab to recover the full per-question option
+     * set, then re-map the prompt through the same {@code answerable} gate. On any failure
+     * the original header-only prompt is returned unchanged (so the batch stays
+     * {@code answerable=false} — the narrow genuinely-unrecoverable exception — rather than
+     * crashing the pump or rendering a tab with no options).
+     */
+    private ConversationServerMessage.PendingPrompt recoverMultiQuestion(
+            ConvCtx ctx, ConversationServerMessage.PendingPrompt pp) {
+        try {
+            List<ConversationServerMessage.QuestionItem> full =
+                    facade.recoverWizardOptions(ctx.n, ctx.selectedTarget.get(), pp.questions());
+            boolean answerable = mapper.answerable(pp.kind(), full);
+            return new ConversationServerMessage.PendingPrompt(pp.promptKey(), pp.kind(), full, pp.plan(), answerable);
+        } catch (RuntimeException e) {
+            LOG.warn("UC-55 wizard option recovery failed for n={} key={}: {}", ctx.n, pp.promptKey(), e.toString());
+            return pp;
+        }
+    }
+
+    /**
+     * UC-50/UC-55 — handle a pane-signal {@code pending-clear} control line: evict the
      * synthesized question cached under the promptKey and tell the client to clear its
      * pending sheet if that key matches the open sheet (it never clobbers a
-     * transcript-delivered sheet, which carries a different key).
+     * transcript-delivered sheet, which carries a different key). UC-55: a clear arriving
+     * within the post-recovery settle window is a transient from the recovery's own
+     * tab-stepping (the pane briefly left/returned to the wizard chrome), not a real
+     * resolution — drop it so the just-delivered answerable sheet is not torn down.
      */
     private void dispatchPendingClear(WebSocketSession session, ConvCtx ctx, String promptKey) {
+        if (System.currentTimeMillis() < ctx.recoverySuppressUntilMs) {
+            return;
+        }
         if (promptKey != null && !promptKey.isBlank()) {
             ctx.pendingQuestions.remove(promptKey);
+            ctx.recoveredKeys.remove(promptKey);
         }
         emit(ctx, session, new ConversationServerMessage.PendingClear(promptKey == null ? "" : promptKey));
     }
 
     private void cacheQuestion(ConvCtx ctx, ConversationServerMessage.Question q) {
-        if (q.toolUseId() != null) {
-            ctx.pendingQuestions.put(q.toolUseId(), q);
+        cachePut(ctx, q.toolUseId(), q);
+        cachePut(ctx, q.uuid(), q);
+    }
+
+    /**
+     * UC-55 (LOCKED CONDITION 2) — cache a synthesized question under {@code key}, but
+     * NEVER downgrade a full-options cached {@code Question} to a header-only one for the
+     * same key. A racing helper {@code pending-question} poll can re-deliver a multi-question
+     * prompt header-only (empty options) while a recovered, full-options sheet is already
+     * cached + open; overwriting it would strip the per-tab option metadata {@link
+     * #deriveAnswerSpec} reads, desyncing the answer-injection walk. The
+     * {@code dispatchPendingQuestion} guards drop most such re-emits before they reach here;
+     * this is the defensive backstop that makes the invariant hold unconditionally.
+     */
+    private void cachePut(ConvCtx ctx, String key, ConversationServerMessage.Question q) {
+        if (key == null) {
+            return;
         }
-        if (q.uuid() != null) {
-            ctx.pendingQuestions.put(q.uuid(), q);
+        ConversationServerMessage.Question existing = ctx.pendingQuestions.get(key);
+        if (existing != null && hasAnyOptions(existing) && !hasAnyOptions(q)) {
+            return; // don't downgrade full-options → header-only
         }
+        ctx.pendingQuestions.put(key, q);
+    }
+
+    /** True iff at least one of the question's items carries a non-empty option list. */
+    private static boolean hasAnyOptions(ConversationServerMessage.Question q) {
+        if (q.questions() == null) {
+            return false;
+        }
+        for (ConversationServerMessage.QuestionItem item : q.questions()) {
+            if (item.options() != null && !item.options().isEmpty()) {
+                return true;
+            }
+        }
+        return false;
     }
 
     // ──────────────────────── inbound: frames → actions ────────────────────────
@@ -641,6 +752,22 @@ public class SessionConversationHandler implements WebSocketHandler {
          * is sufficient — no cross-thread visibility concern.
          */
         boolean transcriptPromptThisTurn = false;
+
+        /**
+         * UC-55 — promptKeys whose full per-tab options have been recovered and emitted as
+         * an answerable sheet. A header-only re-emit for one of these (a racing helper poll
+         * re-settling the restored tab) is dropped so it cannot downgrade the open sheet.
+         * Mutated/read only on the single tail-pump thread, so a plain {@link HashSet} is
+         * sufficient — no cross-thread visibility concern (mirrors {@link #transcriptPromptThisTurn}).
+         */
+        final Set<String> recoveredKeys = new HashSet<>();
+
+        /**
+         * UC-55 — wall-clock deadline ({@code System.currentTimeMillis()}) until which
+         * transient pane-signal control lines produced by a recovery's own tab-stepping are
+         * dropped. {@code 0} when no recovery has run. Pump-thread-only, like the fields above.
+         */
+        long recoverySuppressUntilMs = 0L;
 
         ConvCtx(int n, ClientIdentity identity, Sinks.Many<WebSocketMessage> outbound) {
             this.n = n;

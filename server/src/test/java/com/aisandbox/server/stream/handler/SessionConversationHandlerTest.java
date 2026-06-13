@@ -8,10 +8,12 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.aisandbox.server.identity.ClientIdentity;
+import com.aisandbox.server.stream.dto.ConversationServerMessage;
 import com.aisandbox.server.stream.facade.ConversationFacade;
 import com.aisandbox.server.stream.facade.StreamFacade;
 import com.aisandbox.server.stream.handshake.ConversationSubprotocolHandshakeInterceptor;
@@ -333,6 +335,168 @@ class SessionConversationHandlerTest {
 
         assertThat(session.sent).anySatisfy(f -> assertThat(f).contains("\"type\":\"backfill-start\""));
         assertThat(session.sent).anySatisfy(f -> assertThat(f).contains("\"type\":\"backfill-end\""));
+        assertThat(session.closedWith).isNull();
+    }
+
+    // ──────────────── UC-55 — eager multi-question option recovery + race guards ───────────────
+    // A multi-question batch arrives header-only (answerable=false). The handler eagerly
+    // recovers every tab's options via facade.recoverWizardOptions, re-maps through the same
+    // answerable gate, and emits the batch answerable=true with full options — no tmux
+    // fallback (AC2/AC5/AC10). The recovery races the helper's own pane poll, so two guards
+    // keep that race invisible: (1) a header-only re-emit for an already-recovered key is
+    // dropped; (2) a header-only prompt for a new key during the settle window is dropped;
+    // and a pending-clear inside the settle window is dropped (the just-recovered sheet survives).
+
+    /** Like {@link #driveAllowedTail} but with a caller-supplied (stubbable) facade. */
+    private static FakeSession driveAllowedTail(ConversationFacade facade, String... tailLines) throws Exception {
+        TranscriptTailService.Tail tail = mock(TranscriptTailService.Tail.class);
+        var stub = when(tail.readLine());
+        for (String l : tailLines) {
+            stub = stub.thenReturn(l);
+        }
+        stub.thenReturn(null);
+
+        when(facade.authorizeOpen(eq(7), any())).thenReturn(new StreamFacade.Allowed());
+        when(facade.startTail(eq(7), any())).thenReturn(tail);
+
+        Map<String, Object> attrs = new HashMap<>();
+        attrs.put(SessionConversationHandler.IDENTITY_ATTR, identity());
+        FakeSession session = new FakeSession(URI.create("/v1/sessions/7/conversation"), subprotocolHeaders(), attrs);
+
+        newHandler(facade).handle(session).block();
+        return session;
+    }
+
+    /** The full per-tab option set the facade's pane recovery would return for MULTI_PENDING_JSON. */
+    private static List<ConversationServerMessage.QuestionItem> recoveredColorSize() {
+        return List.of(
+                new ConversationServerMessage.QuestionItem(
+                        "Pick a color",
+                        "Color",
+                        false,
+                        List.of(
+                                new ConversationServerMessage.Option("Red", ""),
+                                new ConversationServerMessage.Option("Blue", ""))),
+                new ConversationServerMessage.QuestionItem(
+                        "Pick a size",
+                        "Size",
+                        true,
+                        List.of(
+                                new ConversationServerMessage.Option("Small", ""),
+                                new ConversationServerMessage.Option("Large", ""))));
+    }
+
+    @Test
+    void eager_recovery_flips_a_multi_question_batch_to_answerable_with_full_per_tab_options() throws Exception {
+        // AC2/AC5/AC10 FLAGSHIP — the standard multi-question wizard is delivered in-app
+        // answerable (full options for every tab), never on the tmux fallback.
+        ConversationFacade facade = mock(ConversationFacade.class);
+        when(facade.recoverWizardOptions(eq(7), any(), any())).thenReturn(recoveredColorSize());
+
+        FakeSession session = driveAllowedTail(facade, pendingQuestionCtrl(MULTI_PENDING_JSON));
+
+        // The handler asked the facade to recover all tabs …
+        verify(facade).recoverWizardOptions(eq(7), any(), any());
+        // … and emitted the batch answerable=true with the recovered per-tab options.
+        assertThat(session.sent).anySatisfy(f -> assertThat(f)
+                .contains("\"type\":\"pending-question\"")
+                .contains("\"promptKey\":\"pane-k2\"")
+                .contains("\"answerable\":true")
+                .contains("\"header\":\"Color\"")
+                .contains("\"label\":\"Red\"")
+                .contains("\"header\":\"Size\"")
+                .contains("\"label\":\"Large\""));
+        assertThat(countPendingPrompt(session.sent)).isEqualTo(1L);
+        assertThat(session.closedWith).isNull();
+    }
+
+    @Test
+    void eager_recovery_failure_keeps_the_batch_answerable_false_without_crashing() throws Exception {
+        // AC5 narrow exception — if recovery cannot derive options (returns the header-only
+        // batch unchanged), the prompt stays answerable=false and the pump does not crash.
+        ConversationFacade facade = mock(ConversationFacade.class);
+        when(facade.recoverWizardOptions(eq(7), any(), any())).thenAnswer(inv -> inv.getArgument(2));
+
+        FakeSession session = driveAllowedTail(facade, pendingQuestionCtrl(MULTI_PENDING_JSON));
+
+        assertThat(session.sent).anySatisfy(f -> assertThat(f)
+                .contains("\"type\":\"pending-question\"")
+                .contains("\"promptKey\":\"pane-k2\"")
+                .contains("\"answerable\":false"));
+        assertThat(session.closedWith).isNull();
+    }
+
+    @Test
+    void eager_recovery_swallows_a_facade_exception_and_keeps_the_batch_answerable_false() throws Exception {
+        // recoverMultiQuestion catches a RuntimeException and returns the original header-only
+        // prompt (answerable=false) — the pump survives a recovery blow-up.
+        ConversationFacade facade = mock(ConversationFacade.class);
+        when(facade.recoverWizardOptions(eq(7), any(), any())).thenThrow(new RuntimeException("pane gone"));
+
+        FakeSession session = driveAllowedTail(facade, pendingQuestionCtrl(MULTI_PENDING_JSON));
+
+        assertThat(session.sent)
+                .anySatisfy(f ->
+                        assertThat(f).contains("\"type\":\"pending-question\"").contains("\"answerable\":false"));
+        assertThat(session.closedWith).isNull();
+    }
+
+    @Test
+    void guard1_a_header_only_re_emit_for_an_already_recovered_key_is_dropped() throws Exception {
+        // GUARD 1 — after a key is recovered+emitted answerable, a racing helper poll that
+        // re-delivers the SAME key header-only must NOT produce a second (downgraded) frame.
+        ConversationFacade facade = mock(ConversationFacade.class);
+        when(facade.recoverWizardOptions(eq(7), any(), any())).thenReturn(recoveredColorSize());
+
+        FakeSession session = driveAllowedTail(
+                facade, pendingQuestionCtrl(MULTI_PENDING_JSON), pendingQuestionCtrl(MULTI_PENDING_JSON));
+
+        // Exactly ONE pending-question frame (the recovered, answerable one); the re-emit is dropped.
+        assertThat(countPendingPrompt(session.sent)).isEqualTo(1L);
+        // And the recovery walk ran only once (the second header-only re-emit short-circuited).
+        verify(facade, times(1)).recoverWizardOptions(eq(7), any(), any());
+        assertThat(session.closedWith).isNull();
+    }
+
+    @Test
+    void a_pending_clear_inside_the_settle_window_is_dropped_so_the_recovered_sheet_survives() throws Exception {
+        // The recovery's own tab-stepping can make the helper emit a transient pending-clear;
+        // within the post-recovery settle window it is dropped so the just-delivered answerable
+        // sheet is not torn down. (Frames are processed back-to-back, well inside the window.)
+        ConversationFacade facade = mock(ConversationFacade.class);
+        when(facade.recoverWizardOptions(eq(7), any(), any())).thenReturn(recoveredColorSize());
+
+        FakeSession session = driveAllowedTail(
+                facade,
+                pendingQuestionCtrl(MULTI_PENDING_JSON),
+                TranscriptTailService.CTRL_SOURCE + "\t" + TranscriptTailService.CTRL_PENDING_CLEAR + "\tpane-k2");
+
+        // The answerable sheet was delivered …
+        assertThat(session.sent)
+                .anySatisfy(f ->
+                        assertThat(f).contains("\"type\":\"pending-question\"").contains("\"answerable\":true"));
+        // … and the transient clear was suppressed (no pending-clear frame for the recovered key).
+        assertThat(session.sent.stream().filter(f -> f.contains("\"type\":\"pending-clear\"")))
+                .isEmpty();
+        assertThat(session.closedWith).isNull();
+    }
+
+    @Test
+    void transcript_prompt_this_turn_means_a_multi_pane_prompt_never_perturbs_the_pane() throws Exception {
+        // When the transcript path owns the sheet this turn, the handler must NOT step the
+        // pane to recover options (it would corrupt the live wizard) — recoverWizardOptions
+        // is never called, and no pane PendingPrompt is emitted.
+        ConversationFacade facade = mock(ConversationFacade.class);
+
+        FakeSession session = driveAllowedTail(
+                facade,
+                askUserQuestionLine("[{\"question\":\"Pick\",\"header\":\"H\","
+                        + "\"multiSelect\":false,\"options\":[{\"label\":\"A\",\"description\":\"\"}]}]"),
+                pendingQuestionCtrl(MULTI_PENDING_JSON));
+
+        verify(facade, never()).recoverWizardOptions(anyInt(), any(), any());
+        assertThat(countPendingPrompt(session.sent)).isEqualTo(0L);
+        assertThat(session.sent).anySatisfy(f -> assertThat(f).contains("\"type\":\"question\""));
         assertThat(session.closedWith).isNull();
     }
 

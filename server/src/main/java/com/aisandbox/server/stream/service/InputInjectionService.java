@@ -58,6 +58,24 @@ public class InputInjectionService {
     /** The Claude Code TUI build these keystroke mappings were verified against. */
     public static final String PINNED_CLAUDE_VERSION = "2.1.169";
 
+    /**
+     * UC-55 — the wizard-tab NAVIGATION keys, the ONLY keystrokes the read-only
+     * option-recovery walk ({@link #stepWizardForward} / {@link #stepWizardBack}) is ever
+     * allowed to send. {@code Right} advances the focused tab for reading, {@code Left}
+     * steps back to restore it; neither commits or mutates any answer (Phase-0 verified).
+     * This set deliberately EXCLUDES every selection/commit key ({@code Space}, {@code
+     * Enter}, {@code Tab}, digits, literals) used by the answer-injection paths — so the
+     * recovery walk's flicker is provably non-corrupting (LOCKED CONDITION 3: the walk must
+     * never emit a selection-or-commit key). QA asserts the recovery keystroke set against
+     * this constant.
+     */
+    public static final String WIZARD_NEXT_TAB_KEY = "Right";
+
+    public static final String WIZARD_PREV_TAB_KEY = "Left";
+
+    public static final java.util.Set<String> WIZARD_NAV_KEYS =
+            java.util.Set.of(WIZARD_NEXT_TAB_KEY, WIZARD_PREV_TAB_KEY);
+
     private final ProcessExecutor exec;
 
     public InputInjectionService(ProcessExecutor exec) {
@@ -294,6 +312,33 @@ public class InputInjectionService {
     /** ESC — interrupt/cancel the active turn (AC, proposal RISK 2: verify it cancels cleanly). */
     public void interrupt(int n, InjectTarget target) throws IOException {
         sendKeys(n, target, "Escape");
+    }
+
+    /**
+     * UC-55 — advance the multi-question {@code AskUserQuestion} wizard to the NEXT tab
+     * for READING ONLY (the {@code Right} arrow). Verified live against Claude Code
+     * (Phase-0 spike): {@code Right} moves the focused tab and reveals that tab's full
+     * option list <b>without committing any selection</b> (the per-tab answer boxes stay
+     * unchecked) and without moving the option cursor. The server uses this — paired with
+     * a {@code --parse-pane} capture per tab and a matching {@link #stepWizardBack} walk to
+     * restore the original tab — to recover every tab's options so the whole batch becomes
+     * in-app answerable. {@code Right}/{@code Left} are pure navigation here; they are NOT
+     * the {@code Tab}/{@code Enter} commit keys {@link #injectAnswerBatch} uses to answer.
+     */
+    public void stepWizardForward(int n, InjectTarget target) throws IOException {
+        sendKeys(n, target, WIZARD_NEXT_TAB_KEY);
+    }
+
+    /**
+     * UC-55 — step the wizard BACK one tab (the {@code Left} arrow), used to restore the
+     * focused tab to its original position after a read-only per-tab option-recovery walk
+     * (Phase-0 verified: {@code Left} returns to the prior tab with its option cursor at the
+     * top and no answer state mutated). Restoration is load-bearing: {@link #injectAnswerBatch}
+     * assumes the wizard opens at the first question's option list, so recovery must leave the
+     * pane exactly as it found it.
+     */
+    public void stepWizardBack(int n, InjectTarget target) throws IOException {
+        sendKeys(n, target, WIZARD_PREV_TAB_KEY);
     }
 
     // ──────────────────────── internals ────────────────────────

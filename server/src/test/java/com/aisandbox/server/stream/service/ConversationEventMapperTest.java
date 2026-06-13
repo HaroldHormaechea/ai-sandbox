@@ -601,11 +601,14 @@ class ConversationEventMapperTest {
         assertThat(d.result()).contains("teammate skill body content");
     }
 
-    // ──────────────────────── UC-50 — pane-signal pending prompt ─────────────
+    // ──────────────────────── UC-50/UC-55 — pane-signal pending prompt ───────
     // mapPendingPrompt maps the helper's `{kind,questions,plan,key}` JSON to a typed
-    // PendingPrompt and DECIDES `answerable` server-side: a single question and a plan
-    // approval are fully in-app answerable; a multi-question batch is visible but
-    // answerable=false (only the focused tab's options are recoverable from one pane).
+    // PendingPrompt and DECIDES `answerable` server-side. UC-55 replaced the UC-50
+    // `questions.size() <= 1` gate with `answerable = plan || EVERY question carries
+    // options`: a plan approval is always answerable; an AskUserQuestion (single OR
+    // multi) is answerable iff every tab's option list is non-empty. A header-only
+    // batch (options not yet recovered) is answerable=false until the handler steps
+    // the pane to recover them and re-maps through this same predicate (AC2/AC5/AC10).
 
     @Test
     void pending_prompt_single_question_is_answerable_with_full_structure() {
@@ -630,9 +633,13 @@ class ConversationEventMapperTest {
     }
 
     @Test
-    void pending_prompt_multi_question_batch_is_NOT_answerable() {
-        // AC2 — questions.size() > 1 → answerable=false (the gate the client honours to
-        // render the not-answerable affordance). The header-only items are preserved.
+    void pending_prompt_multi_question_batch_header_only_is_NOT_answerable() {
+        // AC2/AC10 — a multi-question batch arrives header-only (each tab's options empty,
+        // because one pane capture only shows the FOCUSED tab). Under the UC-55 rule this is
+        // answerable=false ONLY because not every tab carries options yet — NOT because of a
+        // size gate. The handler's eager recovery later flips it true (see
+        // pending_prompt_multi_question_with_every_tab's_options_is_answerable). The
+        // header-only items are preserved so the recovery can pair each with its header.
         String json = "{\"kind\":\"questions\",\"key\":\"pane-multi\",\"questions\":["
                 + "{\"question\":\"\",\"header\":\"Color\",\"multiSelect\":false,\"options\":[]},"
                 + "{\"question\":\"\",\"header\":\"Size\",\"multiSelect\":false,\"options\":[]}]}";
@@ -658,15 +665,117 @@ class ConversationEventMapperTest {
     }
 
     @Test
-    void pending_prompt_zero_questions_is_answerable_true_boundary() {
-        // size() <= 1 includes the empty case (a degraded single question with no parsed
-        // items): answerable=true so the sheet is at least dismissible/answerable, never
-        // wrongly forced into the not-answerable multi affordance.
+    void pending_prompt_zero_questions_is_NOT_answerable_genuinely_unrecoverable_boundary() {
+        // AC5 boundary — UC-55 CONTRACT CHANGE vs UC-50: an empty/degraded AskUserQuestion
+        // (no parsed items, hence no options to render) is the *genuinely-unrecoverable*
+        // residual, so answerable=false (the explicitly-justified tmux exception). Under the
+        // old `size() <= 1` gate this was answerable=true, which would have rendered an empty
+        // in-app sheet with a submit and no options. The new `allQuestionsHaveOptions` rule
+        // (a question with no options cannot be answered in-app) correctly routes it to the
+        // narrow fallback. The ordinary single/multi wizard is NOT this case — it carries
+        // options (single) or has them recovered (multi).
         String json = "{\"kind\":\"questions\",\"key\":\"pane-empty\",\"questions\":[]}";
         ConversationServerMessage.PendingPrompt pp = mapper.mapPendingPrompt(json);
         assertThat(pp).isNotNull();
-        assertThat(pp.answerable()).isTrue();
+        assertThat(pp.answerable()).isFalse();
         assertThat(pp.questions()).isEmpty();
+    }
+
+    @Test
+    void pending_prompt_multi_question_with_every_tab_options_is_answerable() {
+        // AC2/AC10 FLAGSHIP — once every tab carries options (the state the handler's pane
+        // recovery produces), the SAME mapPendingPrompt predicate flips the multi-question
+        // batch to answerable=true. This is the load-bearing rule: a fully-recovered N>1
+        // wizard is in-app answerable, never deferred to the tmux fallback.
+        String json = "{\"kind\":\"questions\",\"key\":\"pane-multi-full\",\"questions\":["
+                + "{\"question\":\"Pick a color\",\"header\":\"Color\",\"multiSelect\":false,"
+                + "\"options\":[{\"label\":\"Red\",\"description\":\"\"},{\"label\":\"Blue\",\"description\":\"\"}]},"
+                + "{\"question\":\"Pick a size\",\"header\":\"Size\",\"multiSelect\":true,"
+                + "\"options\":[{\"label\":\"S\",\"description\":\"\"},{\"label\":\"L\",\"description\":\"\"}]}]}";
+        ConversationServerMessage.PendingPrompt pp = mapper.mapPendingPrompt(json);
+        assertThat(pp).isNotNull();
+        assertThat(pp.answerable()).isTrue();
+        assertThat(pp.questions()).hasSize(2);
+        assertThat(pp.questions())
+                .extracting(ConversationServerMessage.QuestionItem::header)
+                .containsExactly("Color", "Size");
+        assertThat(pp.questions().get(1).multiSelect()).isTrue();
+    }
+
+    @Test
+    void pending_prompt_multi_question_with_one_unrecovered_tab_is_NOT_answerable() {
+        // AC5 — a partial recovery (one tab still has empty options) keeps the WHOLE batch
+        // answerable=false: rendering an answerable sheet with a tab that has no options
+        // would let the user "answer" a question with nothing to pick. The single failing
+        // tab governs the whole batch (the narrow genuinely-unrecoverable exception).
+        String json = "{\"kind\":\"questions\",\"key\":\"pane-partial\",\"questions\":["
+                + "{\"question\":\"Pick a color\",\"header\":\"Color\",\"multiSelect\":false,"
+                + "\"options\":[{\"label\":\"Red\",\"description\":\"\"}]},"
+                + "{\"question\":\"\",\"header\":\"Size\",\"multiSelect\":false,\"options\":[]}]}";
+        ConversationServerMessage.PendingPrompt pp = mapper.mapPendingPrompt(json);
+        assertThat(pp).isNotNull();
+        assertThat(pp.answerable()).isFalse();
+        assertThat(pp.questions()).hasSize(2);
+    }
+
+    @Test
+    void answerable_predicate_plan_is_always_answerable_even_with_no_questions() {
+        // The server-single-sourced predicate: a plan approval is answerable regardless of
+        // any question list, while an AskUserQuestion requires every question to have options.
+        assertThat(mapper.answerable("plan", List.of())).isTrue();
+        assertThat(mapper.answerable("plan", null)).isTrue();
+        assertThat(mapper.answerable("questions", null)).isFalse();
+        assertThat(mapper.answerable("questions", List.of())).isFalse();
+        assertThat(mapper.answerable(
+                        "questions",
+                        List.of(new ConversationServerMessage.QuestionItem(
+                                "Q", "H", false, List.of(new ConversationServerMessage.Option("A", ""))))))
+                .isTrue();
+    }
+
+    @Test
+    void parseFocusedTab_parses_one_tab_with_options_multiselect_and_stamps_header() {
+        // AC6 — the helper's per-tab `--parse-pane` JSON ({question,multiSelect,options})
+        // maps to a QuestionItem; the caller-supplied header is stamped (the server owns the
+        // tab order, --parse-pane does not derive the header). multiSelect + "Other" round-trip.
+        String tabJson = "{\"question\":\"Which features?\",\"multiSelect\":true,\"options\":["
+                + "{\"label\":\"Search\",\"description\":\"Full-text search.\"},"
+                + "{\"label\":\"Other\",\"description\":\"Type your own.\"}]}";
+        ConversationServerMessage.QuestionItem item = mapper.parseFocusedTab(tabJson, "Features");
+        assertThat(item).isNotNull();
+        assertThat(item.question()).isEqualTo("Which features?");
+        assertThat(item.header()).isEqualTo("Features"); // stamped by the caller, not from the pane
+        assertThat(item.multiSelect()).isTrue();
+        assertThat(item.options()).hasSize(2);
+        assertThat(item.options().get(0).label()).isEqualTo("Search");
+        assertThat(item.options().get(1).label()).isEqualTo("Other"); // free-text "Other" preserved
+    }
+
+    @Test
+    void parseFocusedTab_returns_null_for_unrecovered_blank_or_malformed_payloads() {
+        // An unrecovered tab ({} or empty options) → null so the caller keeps that tab
+        // header-only and the whole batch correctly stays answerable=false. Never throws.
+        assertThat(mapper.parseFocusedTab(null, "H")).isNull();
+        assertThat(mapper.parseFocusedTab("", "H")).isNull();
+        assertThat(mapper.parseFocusedTab("   ", "H")).isNull();
+        assertThat(mapper.parseFocusedTab("not-json", "H")).isNull();
+        assertThat(mapper.parseFocusedTab("[1,2,3]", "H")).isNull(); // not an object
+        assertThat(mapper.parseFocusedTab("{}", "H")).isNull(); // capture miss → no options
+        assertThat(mapper.parseFocusedTab("{\"question\":\"Q\",\"options\":[]}", "H"))
+                .isNull(); // empty options → unrecovered
+    }
+
+    @Test
+    void parseFocusedTab_tolerates_a_null_header_and_missing_question_text() {
+        // Defensive: a null header becomes "" and a missing question becomes "" (mirrors
+        // mapPendingPrompt's never-throw contract) as long as at least one option exists.
+        ConversationServerMessage.QuestionItem item =
+                mapper.parseFocusedTab("{\"options\":[{\"label\":\"A\",\"description\":\"\"}]}", null);
+        assertThat(item).isNotNull();
+        assertThat(item.header()).isEmpty();
+        assertThat(item.question()).isEmpty();
+        assertThat(item.options()).singleElement().satisfies(o -> assertThat(o.label())
+                .isEqualTo("A"));
     }
 
     @Test

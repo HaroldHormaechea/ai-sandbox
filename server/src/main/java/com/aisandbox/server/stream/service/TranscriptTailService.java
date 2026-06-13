@@ -81,6 +81,14 @@ public class TranscriptTailService {
     private static final Duration DETAIL_TIMEOUT = Duration.ofSeconds(8);
 
     /**
+     * UC-55 — one-shot {@code --parse-pane} timeout. The helper only captures the
+     * current pane and parses the focused tab (no transcript resolution), so it is fast;
+     * a slow/failed call degrades to an unrecovered tab (the batch stays answerable=false
+     * rather than rendering wrong options).
+     */
+    private static final Duration PARSE_PANE_TIMEOUT = Duration.ofSeconds(5);
+
+    /**
      * UC-41 — control line the helper prints (instead of matched transcript lines)
      * when a {@code --fetch-detail} id cannot be found in the retained transcript
      * window. Surfaced to the client as {@code available=false} (AC9).
@@ -191,6 +199,32 @@ public class TranscriptTailService {
         } catch (IOException io) {
             LOG.debug("fetchDetailLines failed for n={} target={} id={}: {}", n, target, toolUseId, io.toString());
             return List.of();
+        }
+    }
+
+    /**
+     * UC-55 — one-shot, READ-ONLY capture+parse of the CURRENTLY-FOCUSED wizard tab of
+     * {@code target}'s pane (the {@code --parse-pane} helper mode). The helper captures
+     * the visible pane (no keystroke — the SERVER owns stepping via {@link
+     * InputInjectionService#stepWizardForward}) and prints the focused tab's parsed
+     * content as ONE JSON line ({@code {question,multiSelect,options:[...]}}), or {@code
+     * {}} when the pane shows no answerable wizard. Returns that raw JSON string for the
+     * caller ({@link com.aisandbox.server.stream.facade.ConversationFacade}) to map via
+     * {@link ConversationEventMapper#parseFocusedTab}; returns {@code ""} on a non-zero
+     * exit / timeout / I/O error (→ an unrecovered tab). Never throws.
+     */
+    public String captureFocusedTabJson(int n, TailTarget target) {
+        try {
+            List<String> argv = new ArrayList<>(buildArgv(n, target, 1));
+            argv.add("--parse-pane");
+            ProcessExecutor.Result r = exec.run(argv, null, PARSE_PANE_TIMEOUT);
+            if (r.exitCode() != 0 || r.stdout() == null) {
+                return "";
+            }
+            return r.stdout().trim();
+        } catch (IOException io) {
+            LOG.debug("captureFocusedTabJson failed for n={} target={}: {}", n, target, io.toString());
+            return "";
         }
     }
 

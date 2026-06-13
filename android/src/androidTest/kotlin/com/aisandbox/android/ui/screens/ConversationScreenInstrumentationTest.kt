@@ -206,6 +206,52 @@ class ConversationScreenInstrumentationTest {
     }
 
     @Test
+    fun multi_question_answerable_renders_the_paged_sheet_and_not_the_tmux_fallback() {
+        // UC-55 AC2/AC4 (flagship) — a multi-question batch delivered answerable=true (the
+        // server recovered every tab's options) renders the in-app PagedQuestionBody, NOT the
+        // read-only "Answer in tmux to continue" NotAnswerableBody. This is the device-realistic
+        // guard that the standard multi-question wizard is answerable in-app.
+        composeTestRule.setContent {
+            AiSandboxTheme {
+                QuestionSheet(
+                    sheet = threeQuestionSheet(), // answerable defaults to true
+                    onSubmit = { _, _, _, _ -> },
+                    onSubmitBatch = { _, _ -> },
+                )
+            }
+        }
+        // The paged sheet is shown with its option controls …
+        composeTestRule.onNodeWithText("Question 1 of 3").assertIsDisplayed()
+        composeTestRule.onNodeWithText("Blue").assertIsDisplayed()
+        // … and the tmux fallback affordance is NOT rendered for the ordinary wizard.
+        composeTestRule.onNodeWithText("⌨  Answer in tmux to continue").assertDoesNotExist()
+    }
+
+    @Test
+    fun not_answerable_multi_question_shows_the_tmux_fallback_and_no_submit() {
+        // UC-55 AC5 narrow exception — the genuinely-unrecoverable residual (answerable=false)
+        // still renders the read-only tmux affordance with NO submit/paging control. Pins that
+        // the fallback path is intact for the explicitly-justified case (NOT the ordinary wizard).
+        val sheet = PendingSheet.Questions(
+            questionUuid = "pane-residual",
+            questions = listOf(
+                ConvQuestion("", "Color", false, options = emptyList()),
+                ConvQuestion("", "Size", false, options = emptyList()),
+            ),
+            answerable = false,
+        )
+        composeTestRule.setContent {
+            AiSandboxTheme {
+                QuestionSheet(sheet = sheet, onSubmit = { _, _, _, _ -> }, onSubmitBatch = { _, _ -> })
+            }
+        }
+        composeTestRule.onNodeWithText("⌨  Answer in tmux to continue").assertIsDisplayed()
+        // No answerable controls in the residual fallback.
+        composeTestRule.onNodeWithText("Submit all").assertDoesNotExist()
+        composeTestRule.onNodeWithText("Next").assertDoesNotExist()
+    }
+
+    @Test
     fun single_question_sheet_uses_the_single_answer_path_not_the_batch_path() {
         // AC5 regression — a single-question ask submits via the existing single `answer` path
         // (onSubmit, questionIndex 0) and NEVER the batch path.
