@@ -1155,4 +1155,168 @@ class ConversationControllerTest {
             c.close()
         }
     }
+
+    // ──────────────────── Part F — UC-65 Clear (send /clear + wipe in place) ──
+    // [ConversationController.clear] resets the conversation in place: it wipes the
+    // locally-rendered transcript AND sends `/clear` to the session's Claude, WITHOUT
+    // disconnecting or navigating away. These tests mirror AC1–AC7 at the unit level
+    // (the menu/UI surface — AC1/AC7 — is covered device-realistically by
+    // ConversationOverflowMenuInstrumentationTest); the live end-to-end gate (AC2/AC8)
+    // is QA's runbook verification against a real server + emulator.
+
+    /** Record every inbound client→server frame AND capture the socket (300 ms subscription gate). */
+    private fun enqueueRecorder(
+        received: java.util.concurrent.CopyOnWriteArrayList<String>,
+        wsRef: java.util.concurrent.atomic.AtomicReference<WebSocket?>,
+    ) {
+        server.enqueue(
+            MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
+                override fun onOpen(webSocket: WebSocket, response: Response) {
+                    Thread {
+                        Thread.sleep(300)
+                        wsRef.set(webSocket)
+                    }.start()
+                }
+
+                override fun onMessage(webSocket: WebSocket, text: String) {
+                    received.add(text)
+                }
+            }),
+        )
+    }
+
+    private fun composerInputs(received: List<String>): List<String> =
+        received.filter { it.contains(""""type":"composer-input"""") }
+
+    @Test
+    fun `clear with no pending sheet wipes the transcript, nulls the sheet, idles, and leaves no clear bubble`() {
+        // AC3 — the in-app transcript is emptied. AC4 — any sheet is nulled. The turn goes IDLE
+        // (composer stays enabled, AC5/AC6). Pitfall — the `/clear` send must NOT go through the
+        // optimistic-echo path, so no stray `/clear` user bubble is left in the wiped transcript.
+        val c = offlineController()
+        c.submitComposer("hello") // a populated transcript + WORKING spinner
+        assertThat(c.items.value).isNotEmpty
+        c.clear()
+        assertThat(c.items.value).isEmpty() // AC3
+        assertThat(c.pendingSheet.value).isNull() // AC4
+        assertThat(c.turnPhase.value).isEqualTo(TurnPhase.IDLE)
+        assertThat(userMessages(c)).isEmpty() // no `/clear` optimistic bubble (pitfall)
+    }
+
+    @Test
+    fun `clear with no pending sheet sends exactly one composer-input slash-clear and no interrupt`() {
+        // AC2 (wire-level) — the happy path delivers `/clear` as a single composer-input frame,
+        // byte-for-byte, with NO preceding interrupt (the interrupt is only for the sheet path).
+        val received = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        enqueueRecorder(received, wsRef)
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { c.state.value == TerminalState.Open && wsRef.get() != null }).isTrue
+            c.clear()
+            assertThat(awaitUntil { composerInputs(received).isNotEmpty() }).isTrue
+            Thread.sleep(250) // give any erroneous extra/interrupt frame a chance to land
+            assertThat(composerInputs(received)).hasSize(1)
+            assertThat(composerInputs(received).single())
+                .isEqualTo("""{"type":"composer-input","text":"/clear"}""")
+            // Happy path → no interrupt frame is sent.
+            assertThat(received.none { it.contains(""""type":"interrupt"""") }).isTrue
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
+    fun `clear with a pending sheet dismisses it and interrupts BEFORE sending slash-clear`() {
+        // AC4 — a pending question sheet at clear time is dismissed immediately. The session is
+        // mid-blocking-turn, so the controller interrupts FIRST, then sends `/clear` (assert the
+        // interrupt precedes the composer-input on the wire).
+        val received = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        enqueueRecorder(received, wsRef)
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { wsRef.get() != null }).isTrue
+            wsRef.get()!!.send(
+                """{"type":"question","uuid":"uq","source":"main","isSidechain":false,"toolUseId":"tuQ",""" +
+                    """"questions":[{"question":"Pick","header":"H","multiSelect":false,""" +
+                    """"options":[{"label":"A","description":""},{"label":"B","description":""}]}]}""",
+            )
+            assertThat(awaitUntil { c.pendingSheet.value is PendingSheet.Questions }).isTrue
+            c.clear()
+            assertThat(c.pendingSheet.value).isNull() // AC4 — dismissed immediately
+            // The `/clear` lands (after the interrupt + settle gap) …
+            assertThat(awaitUntil { composerInputs(received).isNotEmpty() }).isTrue
+            val interruptIdx = received.indexOfFirst { it.contains(""""type":"interrupt"""") }
+            val clearIdx = received.indexOfFirst {
+                it.contains(""""type":"composer-input"""") && it.contains("/clear")
+            }
+            assertThat(interruptIdx).withFailMessage("expected an interrupt frame, got $received")
+                .isGreaterThanOrEqualTo(0)
+            assertThat(clearIdx).withFailMessage("interrupt must precede /clear, got $received")
+                .isGreaterThan(interruptIdx)
+            // Exactly one `/clear` send (no duplicate from the sheet path).
+            assertThat(composerInputs(received)).hasSize(1)
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
+    fun `the clear guard drops late pre-clear frames so the wiped transcript is not resurrected`() {
+        // AC3 (the race) — after clear() the suppression guard is armed; a late assistant-text /
+        // turn-start echo / `/clear` command echo (system-note) / re-raised pending-question
+        // belonging to the pre-clear epoch are ALL dropped, so none repopulate the empty view.
+        val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        enqueueCapture(wsRef)
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { c.state.value == TerminalState.Open && wsRef.get() != null }).isTrue
+            c.clear() // arms the guard (CLEAR_SUPPRESS_MS = 1500 ms)
+            listOf(
+                """{"type":"turn-start","uuid":"s1","source":"main","isSidechain":false,"text":"stale"}""",
+                """{"type":"assistant-text","uuid":"a1","source":"main","isSidechain":false,"text":"ghost"}""",
+                """{"type":"system-note","uuid":"n1","source":"main","isSidechain":false,""" +
+                    """"label":"Command: /clear","detail":"<command-name>/clear</command-name>"}""",
+                """{"type":"pending-question","promptKey":"k1","kind":"questions","plan":"",""" +
+                    """"answerable":true,"questions":[{"question":"Q","header":"H","multiSelect":false,""" +
+                    """"options":[{"label":"A","description":""}]}]}""",
+            ).forEach { wsRef.get()!!.send(it) }
+            Thread.sleep(400) // well within CLEAR_SUPPRESS_MS — guard is still active
+            assertThat(c.items.value).isEmpty() // nothing resurrected (AC3)
+            assertThat(c.pendingSheet.value).isNull() // re-raised pending-question dropped (AC4)
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
+    fun `a submit after clear lifts the guard so the new line and its reply render`() {
+        // AC5 — after Clear the composer is usable: a new submit deterministically lifts the guard,
+        // its optimistic bubble renders, the server turn-start reconciles it, and the following
+        // assistant-text now renders (proving the guard is truly lifted, not just for the user line).
+        val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        enqueueCapture(wsRef)
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { c.state.value == TerminalState.Open && wsRef.get() != null }).isTrue
+            c.clear() // guard armed
+            c.submitComposer("after clear") // lifts the guard + optimistic bubble
+            assertThat(awaitUntil { userMessages(c).size == 1 }).isTrue
+            wsRef.get()!!.send(
+                """{"type":"turn-start","uuid":"u1","source":"main","isSidechain":false,"text":"after clear"}""",
+            )
+            assertThat(awaitUntil { userMessages(c).singleOrNull()?.uuid == "u1" }).isTrue
+            wsRef.get()!!.send(
+                """{"type":"assistant-text","uuid":"r1","source":"main","isSidechain":false,"text":"reply"}""",
+            )
+            assertThat(awaitUntil { c.items.value.any { it is ConversationItem.AssistantMessage } }).isTrue
+        } finally {
+            c.close()
+        }
+    }
 }
