@@ -1,18 +1,23 @@
 package com.aisandbox.android.ui.screens
 
+import android.app.Application
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.getBoundsInRoot
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.longClick
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipeLeft
+import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.aisandbox.android.R
@@ -21,6 +26,7 @@ import com.aisandbox.android.net.SessionsApi
 import com.aisandbox.android.ui.theme.AiSandboxTheme
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -50,9 +56,11 @@ import org.junit.runner.RunWith
  * </ul>
  *
  * <p>AC1 (the top-bar shell IconButton immediately left of Settings) lives in the
- * `SessionsScreen` Scaffold top bar — outside this `SessionsBody` seam — and is
- * pinned by the `sessions_server_ssh_action` testTag in source; it is verified at
- * the screen tier, not here.
+ * `SessionsScreen` Scaffold top bar — outside the `SessionsBody` seam — so
+ * {@link #shell_icon_sits_immediately_left_of_the_settings_gear_and_settings_still_works()}
+ * renders the real screen (with a [SessionsViewModel] from the instrumented app)
+ * and asserts the shell glyph is displayed, tappable, strictly left of the gear,
+ * and that Settings still fires unchanged.
  */
 @RunWith(AndroidJUnit4::class)
 class ServerSshRowInstrumentationTest {
@@ -197,5 +205,43 @@ class ServerSshRowInstrumentationTest {
         assertEquals("AC9 — Remove fires for the reserved id", SessionsApi.SERVER_SSH_N, deletedN)
         assertEquals("the host shell removes with force=false", false, deletedForce)
         composeTestRule.onNodeWithTag("session-card-0").assertDoesNotExist()
+    }
+
+    @Test
+    fun shell_icon_sits_immediately_left_of_the_settings_gear_and_settings_still_works() {
+        // AC1 — render the real SessionsScreen top bar (a SessionsViewModel built
+        // from the instrumented app under test) and assert the shell IconButton is
+        // displayed, tappable, positioned to the LEFT of the gear, and that the
+        // Settings gear still fires its own callback unchanged. This is the
+        // screen-tier assertion the SessionsBody seam can't reach.
+        var settingsClicked = false
+        val app = ApplicationProvider.getApplicationContext<Application>()
+        composeTestRule.setContent {
+            AiSandboxTheme {
+                SessionsScreen(
+                    onOpen = {},
+                    onOpenTerminal = {},
+                    onOpenSettings = { settingsClicked = true },
+                    viewModel = SessionsViewModel(app),
+                )
+            }
+        }
+
+        val shell = composeTestRule.onNodeWithTag("sessions_server_ssh_action")
+        shell.assertIsDisplayed().assertHasClickAction()
+        val settings = composeTestRule.onNodeWithContentDescription("Settings")
+        settings.assertIsDisplayed().assertHasClickAction()
+
+        // Placement: the shell glyph is strictly to the LEFT of the gear.
+        val shellLeft = shell.getBoundsInRoot().left
+        val gearLeft = settings.getBoundsInRoot().left
+        assertTrue(
+            "AC1 — the shell icon ($shellLeft) must sit left of the Settings gear ($gearLeft)",
+            shellLeft < gearLeft,
+        )
+
+        // AC1 — Settings continues to work unchanged.
+        settings.performClick()
+        assertEquals("the gear still fires onOpenSettings", true, settingsClicked)
     }
 }
