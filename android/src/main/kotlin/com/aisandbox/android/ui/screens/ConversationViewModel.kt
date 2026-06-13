@@ -11,9 +11,13 @@ import com.aisandbox.android.conversation.ToolDetailState
 import com.aisandbox.android.conversation.TurnPhase
 import com.aisandbox.android.terminal.StreamTarget
 import com.aisandbox.android.terminal.TerminalStreamController
+import com.aisandbox.android.ui.settings.AppearanceSettingsStore
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
 /**
@@ -51,6 +55,33 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
 
     private val _toolDetail = MutableStateFlow<ToolDetailState?>(null)
     val toolDetail: StateFlow<ToolDetailState?> = _toolDetail.asStateFlow()
+
+    /**
+     * UC-53 (AC2) — the conversation-view font scale, projected live from the
+     * process-scoped [AppearanceSettingsStore]. Independent of [attach]/the
+     * controller — it tracks the user's preference, not the stream — so a change
+     * applies the moment it's persisted (AC6).
+     */
+    val fontScale: StateFlow<Float> =
+        container.appearanceSettings.fontSize
+            .map { it.scale }
+            .stateIn(
+                viewModelScope,
+                SharingStarted.Eagerly,
+                AppearanceSettingsStore.DEFAULT_FONT_SIZE.scale,
+            )
+
+    /**
+     * UC-53 (AC3) — whether assistant bubbles render with a subtle agent-color
+     * tint, projected live from the [AppearanceSettingsStore].
+     */
+    val useAgentColor: StateFlow<Boolean> =
+        container.appearanceSettings.useAgentColorInBubbles
+            .stateIn(
+                viewModelScope,
+                SharingStarted.Eagerly,
+                AppearanceSettingsStore.DEFAULT_USE_AGENT_COLOR,
+            )
 
     /** Resolve the controller for [sessionN] and (idempotently) start its loop. */
     fun attach(sessionN: Int) {

@@ -28,7 +28,6 @@ import com.aisandbox.android.ui.theme.AccentContainer
 import com.aisandbox.android.ui.theme.AiSandboxMonoTypography
 import com.aisandbox.android.ui.theme.OnAccent
 import com.aisandbox.android.ui.theme.OnAccentContainer
-import com.aisandbox.android.ui.theme.OnSurfaceVariant
 import com.aisandbox.android.ui.theme.SurfaceLow
 
 /**
@@ -142,21 +141,4 @@ private fun labelFor(target: StreamTarget): String = when {
     !target.agentName.isNullOrBlank() -> target.agentName!!
     target.title.isNotBlank() -> target.title
     else -> target.id
-}
-
-/**
- * Map a Claude Code agent color name to a display color. Unknown / null names
- * fall back to the mono-warm [Accent] so an unrecognised upstream color never
- * breaks the row.
- */
-private fun agentColor(name: String?): Color = when (name?.lowercase()) {
-    "red" -> Color(0xFFFF6B68)
-    "green" -> Color(0xFF8AD6A5)
-    "yellow" -> Color(0xFFFFD479)
-    "blue" -> Color(0xFF7CA8FF)
-    "magenta", "purple", "pink" -> Color(0xFFD79AE0)
-    "cyan", "teal" -> Color(0xFF79D6D6)
-    "orange" -> Color(0xFFFFB784)
-    "white", "gray", "grey" -> OnSurfaceVariant
-    else -> Accent
 }

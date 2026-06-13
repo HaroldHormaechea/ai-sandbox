@@ -114,6 +114,17 @@
     <string name="settings_section_identity">Client identity</string>
     <string name="settings_section_websocket">WebSocket</string>
     <string name="settings_section_diagnostics">Diagnostics</string>
+    <string name="settings_group_appearance">Appearance</string>
+    <string name="settings_group_info">Info</string>
+    <string name="settings_section_appearance">Conversation view</string>
+    <string name="settings_appearance_font_size">Font size</string>
+    <string name="settings_appearance_font_size_subtitle">Rescales text in the conversation/agent view only. Other screens are unaffected.</string>
+    <string name="settings_font_size_s">S</string>
+    <string name="settings_font_size_m">M</string>
+    <string name="settings_font_size_l">L</string>
+    <string name="settings_font_size_xl">XL</string>
+    <string name="settings_appearance_agent_color">Use agent color in bubbles</string>
+    <string name="settings_appearance_agent_color_subtitle">Tint assistant message bubbles toward each agent\'s color. Off keeps the neutral background.</string>
     <string name="settings_section_keyboard">Keyboard</string>
     <string name="settings_keyboard_conversational">Conversational keyboard</string>
     <string name="settings_keyboard_conversational_subtitle">Word prediction, suggestions, and autocomplete while you type — best for talking to an agent. Turn off for raw character-by-character input (best for heavy CLI control). Autocorrect stays off in both modes so commands aren\'t altered.</string>
