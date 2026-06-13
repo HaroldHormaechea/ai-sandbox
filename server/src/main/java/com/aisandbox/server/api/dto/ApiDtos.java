@@ -65,7 +65,17 @@ public final class ApiDtos {
                                     + " status area while true (double-gated on state==running) and suppresses the"
                                     + " working spinner. Derived from the visible pane, not the transcript.",
                             defaultValue = "false")
-                    boolean pendingQuestion) {}
+                    boolean pendingQuestion,
+            @Schema(
+                            description = "UC-62 — session kind. 'claude' for an ordinary sandbox/Docker session;"
+                                    + " 'server-ssh' for the single always-on server host-shell row (a tmux login"
+                                    + " shell on the management-server host, reserved id 0). The client pins the"
+                                    + " server-ssh row to the top of the list, badges it 'SERVER SSH SESSION',"
+                                    + " offers only Remove, and routes its taps to the terminal (never the Claude"
+                                    + " conversation view).",
+                            allowableValues = {"claude", "server-ssh"},
+                            defaultValue = "claude")
+                    String type) {}
 
     @Schema(description = "Detail returned by GET /v1/sessions/{n}.")
     public record SessionDetailDto(

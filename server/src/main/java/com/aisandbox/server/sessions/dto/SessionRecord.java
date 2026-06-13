@@ -1,5 +1,6 @@
 package com.aisandbox.server.sessions.dto;
 
+import com.aisandbox.server.config.SpecialSessions;
 import java.time.Instant;
 
 /**
@@ -46,6 +47,14 @@ import java.time.Instant;
  *     with {@code working} (a pending question is "waiting", never "working" — AC5);
  *     only ever {@code true} for a {@code running} session (AC8). Drives the
  *     Android row's "?" badge, which suppresses the working spinner (AC1, AC5).
+ * @param type UC-62 — {@code claude} for an ordinary Docker session,
+ *     {@code server-ssh} for the single always-on server host-shell row
+ *     ({@link SpecialSessions#TYPE_CLAUDE} / {@link SpecialSessions#TYPE_SERVER_SSH}).
+ *     The authoritative discriminator for the host-shell row in row-carrying
+ *     contexts (the list, the events push); id-only contexts key on
+ *     {@code n == }{@link SpecialSessions#SERVER_SSH_N} instead. The Android row
+ *     pins {@code server-ssh} to the top, badges it, and routes its taps to the
+ *     terminal (never the Claude conversation view).
  */
 public record SessionRecord(
         int n,
@@ -57,7 +66,39 @@ public record SessionRecord(
         Instant startedAt,
         String conversationName,
         boolean working,
-        boolean pendingQuestion) {
+        boolean pendingQuestion,
+        String type) {
+
+    /**
+     * UC-62 back-compat 10-arg constructor for call sites (and test fixtures)
+     * created before this use case appended {@code type}. Delegates with
+     * {@code type=}{@link SpecialSessions#TYPE_CLAUDE}, so every pre-UC-62 row
+     * is reported as an ordinary Claude session — exactly the prior behaviour.
+     */
+    public SessionRecord(
+            int n,
+            String label,
+            String tmuxTitle,
+            String state,
+            long uptimeSec,
+            int activeStreams,
+            Instant startedAt,
+            String conversationName,
+            boolean working,
+            boolean pendingQuestion) {
+        this(
+                n,
+                label,
+                tmuxTitle,
+                state,
+                uptimeSec,
+                activeStreams,
+                startedAt,
+                conversationName,
+                working,
+                pendingQuestion,
+                SpecialSessions.TYPE_CLAUDE);
+    }
 
     /**
      * UC-49 back-compat 9-arg constructor for call sites (and test fixtures)

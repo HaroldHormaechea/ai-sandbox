@@ -77,6 +77,14 @@ ai-sandbox:
     # to PKI material under /etc; mode 0700 enforced by `pki init`.
     secrets:
       dir: /etc/ai-sandbox-server/secrets
+    # UC-62 — the always-on "SERVER SSH SESSION": a tmux login shell on the
+    # management-server host itself, managed in-process (no Docker, no host
+    # script). socket-path / shell / workdir default at runtime when omitted
+    # (see ServerProperties.ServerSsh): socket → <sessions.host-state-root>/
+    # server-ssh.sock, shell → $SHELL else /bin/bash, workdir → JVM cwd.
+    server-ssh:
+      enabled: true
+      session-name: ai-sandbox-server-ssh
     limits:
       per-ip-new-conn-per-window: 10
       per-ip-window-seconds: 10

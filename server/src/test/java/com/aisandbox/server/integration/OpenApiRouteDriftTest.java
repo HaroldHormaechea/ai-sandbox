@@ -70,6 +70,30 @@ class OpenApiRouteDriftTest {
         }
     }
 
+    /**
+     * UC-62 AC6 — the committed OAS must declare the new
+     * {@code POST /v1/sessions/server-ssh} route AND the session {@code type}
+     * discriminator with both allowable values ({@code claude}, {@code server-ssh}),
+     * so {@code server-ci.yml}'s OpenAPI-drift check passes and Android decodes the
+     * documented value set. A miss here means the developer did not regenerate
+     * {@code server/openapi.yaml} after adding the endpoint / DTO field — a
+     * developer-side bug, not a test bug.
+     */
+    @Test
+    void committed_openapi_yaml_includes_server_ssh_route_and_type_enum() throws IOException {
+        Path oas = locateOas();
+        String body = Files.readString(oas);
+        assertThat(body)
+                .as("UC-62 AC6 — the server-ssh create route must appear in the committed OAS")
+                .contains("/v1/sessions/server-ssh");
+        // The session.type discriminator and BOTH allowable values must be present.
+        for (String token : new String[] {"server-ssh", "claude"}) {
+            assertThat(body)
+                    .as("UC-62 — session type value %s in committed OAS", token)
+                    .contains(token);
+        }
+    }
+
     private static Path locateOas() {
         Path direct = Path.of("openapi.yaml");
         if (Files.isRegularFile(direct)) {

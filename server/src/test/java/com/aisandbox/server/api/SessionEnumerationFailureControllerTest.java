@@ -171,6 +171,13 @@ class SessionEnumerationFailureControllerTest {
         r.add("ai-sandbox.server.enrollment.dir", ENROLLMENT_DIR::toString);
         r.add("ai-sandbox.server.sessions.host-state-root", SESSIONS_DIR::toString);
         r.add("ai-sandbox.server.secrets.dir", SECRETS_DIR::toString);
+        // UC-62 — this test fully mocks ProcessExecutor for the docker argv only;
+        // it is about Docker enumeration, not the host shell. Disable the
+        // server-ssh probe so SessionRegistryService.list() does not issue a
+        // `tmux has-session` through the (unstubbed) mock — which would return a
+        // null Result and 500 the enumeration. The host-shell row is covered by
+        // HostShellSessionServiceTest / SessionRegistryServiceServerSshTest.
+        r.add("ai-sandbox.server.server-ssh.enabled", () -> false);
         r.add("server.port", () -> 0);
         r.add("server.shutdown", () -> "immediate");
         r.add("ai-sandbox.server.shutdown.rest-grace-seconds", () -> 1);

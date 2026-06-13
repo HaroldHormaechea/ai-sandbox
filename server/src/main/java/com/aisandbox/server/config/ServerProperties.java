@@ -35,7 +35,8 @@ public record ServerProperties(
         @NotNull Streams streams,
         @NotNull Enrollment enrollment,
         @NotNull Sessions sessions,
-        @NotNull Secrets secrets) {
+        @NotNull Secrets secrets,
+        @NotNull ServerSsh serverSsh) {
 
     /**
      * Canonical constructor — explicitly tagged
@@ -46,6 +47,41 @@ public record ServerProperties(
      */
     @ConstructorBinding
     public ServerProperties {}
+
+    /**
+     * Backwards-compatible 11-arg constructor for QA-owned test fixtures
+     * built before UC-62 added the {@link ServerSsh} field. Production
+     * binding always supplies it from {@code application.yaml} (which ships
+     * a {@code server-ssh:} block) so this constructor is never reached by
+     * Spring; only QA test code uses it. New tests should call the canonical
+     * 12-arg constructor.
+     */
+    public ServerProperties(
+            Tls tls,
+            Pki pki,
+            Clients clients,
+            Hostscripts hostscripts,
+            Limits limits,
+            Audit audit,
+            Shutdown shutdown,
+            Streams streams,
+            Enrollment enrollment,
+            Sessions sessions,
+            Secrets secrets) {
+        this(
+                tls,
+                pki,
+                clients,
+                hostscripts,
+                limits,
+                audit,
+                shutdown,
+                streams,
+                enrollment,
+                sessions,
+                secrets,
+                ServerSsh.defaults());
+    }
 
     /**
      * Backwards-compatible 9-arg constructor for QA-owned test fixtures
@@ -205,4 +241,39 @@ public record ServerProperties(
      * production: {@code /etc/ai-sandbox-server/secrets}.
      */
     public record Secrets(@NotNull Path dir) {}
+
+    /**
+     * UC-62 — the always-on server host-shell ("SERVER SSH SESSION").
+     * Managed in-process by {@code HostShellSessionService}, which runs a
+     * bare {@code tmux -S <socketPath>} as the server's own user/cwd (no new
+     * host script, deliberately avoiding the operator-zip / {@code .deb} / CI
+     * packaging burden). Existence derives from {@code tmux has-session}, so
+     * persistence across detach / disconnect / app-restart is automatic with
+     * no separate registry.
+     *
+     * <p>Every field is optional at the binding layer (only {@code enabled} is
+     * primitive); the effective values are resolved by
+     * {@code HostShellSessionService} so a deployment can leave the whole
+     * block at its baked defaults:
+     *
+     * <ul>
+     *   <li>{@code enabled} — master switch; when {@code false} the row is
+     *       never listed and {@code POST /v1/sessions/server-ssh} is a no-op.</li>
+     *   <li>{@code socketPath} — tmux server socket; defaults to
+     *       {@code <sessions.hostStateRoot>/server-ssh.sock} when null.</li>
+     *   <li>{@code sessionName} — tmux base session name; defaults to
+     *       {@code ai-sandbox-server-ssh}.</li>
+     *   <li>{@code shell} — login shell to launch; defaults to {@code $SHELL},
+     *       else {@code /bin/bash}.</li>
+     *   <li>{@code workdir} — working dir for the shell; defaults to the JVM
+     *       cwd ({@code user.dir}).</li>
+     * </ul>
+     */
+    public record ServerSsh(boolean enabled, Path socketPath, String sessionName, String shell, Path workdir) {
+
+        /** Default-bearing instance used by the back-compat ctor + QA fixtures. */
+        public static ServerSsh defaults() {
+            return new ServerSsh(true, null, null, null, null);
+        }
+    }
 }

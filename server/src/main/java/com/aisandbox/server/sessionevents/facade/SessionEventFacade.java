@@ -124,7 +124,8 @@ public class SessionEventFacade {
                 r.startedAt(),
                 r.conversationName(),
                 r.working(),
-                r.pendingQuestion());
+                r.pendingQuestion(),
+                r.type());
     }
 
     /**
