@@ -70,6 +70,16 @@ case "$1" in
         # invocation. Idempotent on re-installs (install -d is a no-op when
         # the directory already exists at the requested mode/owner).
         install -d -m 0700 -o ai-sandbox-server -g ai-sandbox-server /var/lib/ai-sandbox-server/docker-config
+        # UC-63 — host-state sessions root. The UC-62 server host-shell
+        # ("SERVER SSH SESSION") puts its tmux socket at
+        # /var/lib/ai-sandbox-server/sessions/server-ssh.sock. On a fresh
+        # install this subdir was otherwise created lazily by spawn.sh only on
+        # the first Docker session, so opening the SSH row first on a freshly
+        # installed server hit a missing parent dir. Pre-create it here with the
+        # same mode/ownership as the sibling state dirs so it exists before
+        # first use regardless of whether a Docker session was ever spawned.
+        # Idempotent and ownership-agreeing with spawn.sh's lazy create.
+        install -d -m 0750 -o ai-sandbox-server -g ai-sandbox-server /var/lib/ai-sandbox-server/sessions
         install -d -m 0750 -o ai-sandbox-server -g ai-sandbox-server /var/log/ai-sandbox-server
 
         # 3b. UC-38 — versioned session-image rebuild on upgrade. On an UPGRADE
