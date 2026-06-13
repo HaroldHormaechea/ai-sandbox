@@ -83,6 +83,73 @@ class SessionsCoordinatorEventsTest {
         assertThat(state.value.sessions.first { it.n == 2 }.state).isEqualTo("starting")
     }
 
+    // ── UC-61 — a delta carrying the server's real row replaces the optimistic
+    //            placeholder instead of adding a second row (AC3). ────────────
+    //
+    // spawn() inserts a client-only optimistic placeholder keyed by a GUESSED
+    // `n` (max(n)+1). When the server assigns a DIFFERENT `n`, the UC-32 push
+    // feed's merge-by-`n` upsert would historically ADD the real row beside the
+    // placeholder (two rows until a full snapshot/refresh landed — the defect).
+    // applyDelta now evicts the placeholder when (a) one is pending AND (b) the
+    // delta introduces a genuinely-new `n`, so the real row REPLACES it.
+
+    /** An optimistic placeholder row as spawn() builds it (optimistic = true). */
+    private fun placeholder(n: Int): SessionSummary =
+        SessionSummary(n = n, label = "", tmuxTitle = "", state = "starting", optimistic = true)
+
+    @Test
+    fun delta_with_new_n_replaces_optimistic_placeholder_instead_of_duplicating() {
+        // Prior set: an authoritative row n=1 + an optimistic placeholder guessed
+        // at n=2. The server actually assigned n=5 (≠ the guess) and the push feed
+        // delivers it as a delta.
+        val state = MutableStateFlow(
+            SessionsUiState(sessions = listOf(summary(1, "running"), placeholder(2))),
+        )
+        val coordinator = newCoordinator(state)
+
+        coordinator.applyDelta(upserts = listOf(summary(5, "starting")), removed = emptyList())
+
+        // AC3 — the placeholder (guessed n=2) is gone; exactly the real rows remain.
+        assertThat(state.value.sessions.map { it.n })
+            .`as`("the optimistic placeholder is replaced by the server's real row, not duplicated")
+            .containsExactly(1, 5)
+        assertThat(state.value.sessions)
+            .`as`("no optimistic placeholder survives once the real row arrives")
+            .noneMatch { it.optimistic }
+    }
+
+    @Test
+    fun delta_updating_an_existing_n_does_not_evict_a_pending_placeholder() {
+        // A plain uptime/state tick for an EXISTING n introduces no new `n`, so a
+        // still-pending placeholder (spawn-Success not landed yet) MUST be kept —
+        // it is only ever cleared by its real replacement, spawn-Success, or a
+        // rollback. Evicting it on a mere tick would flicker the row away early.
+        val state = MutableStateFlow(
+            SessionsUiState(sessions = listOf(summary(1, "running"), placeholder(2))),
+        )
+        val coordinator = newCoordinator(state)
+
+        coordinator.applyDelta(upserts = listOf(summary(1, "stopped")), removed = emptyList())
+
+        assertThat(state.value.sessions.map { it.n })
+            .`as`("a tick on an existing row must not drop the still-pending placeholder")
+            .containsExactlyInAnyOrder(1, 2)
+        assertThat(state.value.sessions.first { it.n == 2 }.optimistic).isTrue()
+    }
+
+    @Test
+    fun delta_with_new_n_and_no_placeholder_still_just_adds_the_row() {
+        // Regression guard: with NO optimistic placeholder pending, the eviction
+        // pass is inert and a genuinely-new `n` is added exactly as before
+        // (the original delta_upsert_adds_a_new_row contract is preserved).
+        val state = MutableStateFlow(SessionsUiState(sessions = listOf(summary(1, "running"))))
+        val coordinator = newCoordinator(state)
+
+        coordinator.applyDelta(upserts = listOf(summary(2, "starting")), removed = emptyList())
+
+        assertThat(state.value.sessions.map { it.n }).containsExactly(1, 2)
+    }
+
     @Test
     fun delta_removal_drops_a_row() {
         val state = MutableStateFlow(

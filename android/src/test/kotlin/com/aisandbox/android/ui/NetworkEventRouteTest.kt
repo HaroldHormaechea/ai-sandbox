@@ -1,6 +1,9 @@
 package com.aisandbox.android.ui
 
 import com.aisandbox.android.net.NetworkEvent
+import com.aisandbox.android.net.TlsFailureTranslation
+import java.security.cert.CertificateException
+import javax.net.ssl.SSLHandshakeException
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.Test
 
@@ -133,5 +136,53 @@ class NetworkEventRouteTest {
     fun `StreamGaveUp is a no-op (handled in TerminalScreen)`() {
         assertThat(decideNetworkRoute(NetworkEvent.StreamGaveUp("s1"), identityRouteActive = false))
             .isEqualTo(NetworkRouteDecision.NoOp)
+    }
+
+    // ── UC-61 — non-QR TLS misroute fix, end-to-end (translator → router) ─────
+    //
+    // The UC-61 fix lives upstream in [TlsFailureTranslation]: a generic,
+    // non-identity TLS handshake failure on a routine REST call now classifies as
+    // [NetworkEvent.ServerUnreachable] instead of [NetworkEvent.HandshakeError].
+    // The router is unchanged — but these tests cross BOTH pure functions to pin
+    // the observable contract: the SAME raw SSLHandshakeException that pre-fix
+    // would have driven a Navigate to ServerIdentityChangedScreen now resolves to
+    // a NoOp (never the re-scan-QR screen), while a GENUINE identity handshake
+    // (CertificateException cause) still Navigates (AC5 / AC6).
+
+    @Test
+    fun `UC-61 — a generic REST handshake failure resolves to NoOp, never the identity screen (AC5)`() {
+        val event = TlsFailureTranslation.translate(
+            SSLHandshakeException("generic handshake error"),
+            expectedPinHex = "a".repeat(64),
+            expectedHost = "potato-server",
+        )
+        // Step 1: the translator reclassifies it as the transient signal.
+        assertThat(event)
+            .`as`("AC5 — a non-identity handshake on a REST call is transient, not identity")
+            .isEqualTo(NetworkEvent.ServerUnreachable)
+        // Step 2: the router never sends the transient signal to the identity screen.
+        assertThat(decideNetworkRoute(event!!, identityRouteActive = false))
+            .`as`("AC5 — no ServerIdentityChanged navigation for a generic handshake on spawn/list/refresh")
+            .isEqualTo(NetworkRouteDecision.NoOp)
+        assertThat(decideNetworkRoute(event, identityRouteActive = true))
+            .isEqualTo(NetworkRouteDecision.NoOp)
+    }
+
+    @Test
+    fun `UC-61 — a genuine identity handshake (cert cause) still Navigates to the identity screen (AC6)`() {
+        val event = TlsFailureTranslation.translate(
+            SSLHandshakeException("handshake aborted")
+                .initCause(CertificateException("Server presented no certificate chain")),
+            expectedPinHex = "a".repeat(64),
+            expectedHost = "potato-server",
+        )
+        // Step 1: identity wins — the cert cause keeps it a HandshakeError.
+        assertThat(event)
+            .`as`("AC6 — a CertificateException-caused handshake stays a HandshakeError")
+            .isInstanceOf(NetworkEvent.HandshakeError::class.java)
+        // Step 2: a genuine identity event still routes to the identity screen on first arrival.
+        assertThat(decideNetworkRoute(event!!, identityRouteActive = false))
+            .`as`("AC6 — genuine identity failures still surface the re-enroll screen")
+            .isEqualTo(NetworkRouteDecision.Navigate)
     }
 }
