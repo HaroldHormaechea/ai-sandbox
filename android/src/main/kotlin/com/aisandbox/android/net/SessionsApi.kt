@@ -5,6 +5,7 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.SerializationException
+import kotlinx.serialization.Transient
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -191,6 +192,20 @@ data class SessionSummary(
      * Covers REST and the UC-32 push (which reuses this DTO).
      */
     val pendingQuestion: Boolean = false,
+    /**
+     * UC-61 — client-only marker for an optimistic placeholder row inserted by
+     * [com.aisandbox.android.ui.screens.SessionsCoordinator.spawn] before the
+     * server has assigned the real session number `n`. `@Transient` (the
+     * kotlinx.serialization one, NOT `kotlin.jvm.Transient`) keeps it OFF THE
+     * WIRE — it is never encoded into `SpawnRequest`/list payloads — and the
+     * `= false` default makes decode of server payloads unaffected
+     * (`ignoreUnknownKeys` + this default). Every row sourced from the server
+     * (REST or the UC-32 push feed) therefore decodes as `optimistic = false`;
+     * only the locally-built placeholder sets it true, so the merge/rollback
+     * logic can distinguish the guess from authoritative rows.
+     */
+    @Transient
+    val optimistic: Boolean = false,
 )
 
 @Serializable

@@ -74,13 +74,84 @@ class TlsFailureTranslationTest {
         assertThat(pin.observedPinHex).isEqualTo(observedHex)
     }
 
+    // ── UC-61 — non-identity SSLHandshakeException reclassification (AC5 / AC6) ──
+    //
+    // UC-61 narrows the `is SSLHandshakeException` arm. Pre-fix, ANY handshake
+    // exception without an SPKI-mismatch message became a HandshakeError, which
+    // the REST interceptor bus-routes to ServerIdentityChangedScreen → "re-scan a
+    // fresh invite QR" — so a transient protocol/cipher hiccup on a routine
+    // list/spawn/refresh call misrouted the user to the destructive re-enroll
+    // screen even though the QR was valid and the pin unchanged. The arm is now:
+    //   1. SPKI-mismatch message present       → PinMismatch (unchanged, above)
+    //   2. CertificateException in .cause chain → HandshakeError (identity wins, AC6)
+    //   3. otherwise                            → ServerUnreachable (transient, AC5)
+
     @Test
-    fun `SSLHandshakeException without an SPKI message falls back to HandshakeError`() {
+    fun `UC-61 — generic SSLHandshakeException with no cause now routes to ServerUnreachable (AC5)`() {
+        // Pre-UC-61 this asserted HandshakeError. A handshake exception with no
+        // SPKI message and NO CertificateException cause is a non-identity TLS
+        // hiccup → transient ServerUnreachable, so it never reaches the re-scan-QR
+        // identity screen on a routine REST call.
         val sslHandshake = SSLHandshakeException("generic handshake error")
         val event = TlsFailureTranslation.translate(sslHandshake, expectedPinHex, expectedHost)
+        assertThat(event)
+            .`as`("a non-identity handshake failure is transient, never the destructive identity route (AC5)")
+            .isEqualTo(NetworkEvent.ServerUnreachable)
+    }
+
+    @Test
+    fun `UC-61 — SSLHandshakeException wrapping a SocketException cause routes to ServerUnreachable (AC5)`() {
+        // A handshake that aborted because the underlying socket dropped (no
+        // CertificateException anywhere in the chain) is a transient transport
+        // fault, not an identity failure.
+        val sslHandshake = SSLHandshakeException("Connection closed by peer")
+            .initCause(SocketException("Connection reset"))
+        val event = TlsFailureTranslation.translate(sslHandshake, expectedPinHex, expectedHost)
+        assertThat(event).isEqualTo(NetworkEvent.ServerUnreachable)
+    }
+
+    @Test
+    fun `UC-61 — SSLHandshakeException wrapping a no-cert-chain CertificateException stays HandshakeError (AC6 identity wins)`() {
+        // SpkiPinningTrustManager throws CertificateException("Server presented no
+        // certificate chain") on a genuine cert/identity failure whose message does
+        // NOT match the SPKI-mismatch regex (so extractObservedSpkiHex returns
+        // null). The identity-cause guard MUST keep it on the destructive identity
+        // route as HandshakeError — only the generic, cert-free handshake bucket is
+        // narrowed (AC6, "identity wins").
+        val certEx = CertificateException("Server presented no certificate chain")
+        val sslHandshake = SSLHandshakeException("handshake aborted").initCause(certEx)
+        val event = TlsFailureTranslation.translate(sslHandshake, expectedPinHex, expectedHost)
+        assertThat(event)
+            .`as`("a CertificateException cause keeps a handshake failure on the identity route (AC6)")
+            .isInstanceOf(NetworkEvent.HandshakeError::class.java)
+        assertThat((event as NetworkEvent.HandshakeError).rawMessage).isEqualTo("handshake aborted")
+    }
+
+    @Test
+    fun `UC-61 — SSLHandshakeException with a CertificateException nested two levels deep stays HandshakeError (AC6)`() {
+        // The cert-cause walk follows .cause (bounded by MAX_CAUSE_DEPTH), so a
+        // CertificateException wrapped behind an intermediate throwable still
+        // pins the failure to the identity route.
+        val certEx = CertificateException("Server presented no certificate chain")
+        val mid = RuntimeException("intermediate wrapper").initCause(certEx)
+        val sslHandshake = SSLHandshakeException("top-level handshake").initCause(mid)
+        val event = TlsFailureTranslation.translate(sslHandshake, expectedPinHex, expectedHost)
         assertThat(event).isInstanceOf(NetworkEvent.HandshakeError::class.java)
-        val err = event as NetworkEvent.HandshakeError
-        assertThat(err.rawMessage).isEqualTo("generic handshake error")
+    }
+
+    @Test
+    fun `UC-61 — a generic handshake ServerUnreachable never produces a Mismatch identity screen (AC5, AC7)`() {
+        // End-to-end at the translator: a generic handshake reclassifies to
+        // ServerUnreachable, and toMismatch(ServerUnreachable) is null, so the
+        // sessions/onboarding flow can NEVER surface the "re-scan a fresh invite
+        // QR" identity copy from a non-identity transport fault (AC5, AC7).
+        val event = TlsFailureTranslation.translate(
+            SSLHandshakeException("generic handshake error"), expectedPinHex, expectedHost,
+        )
+        assertThat(event).isEqualTo(NetworkEvent.ServerUnreachable)
+        assertThat(TlsFailureTranslation.toMismatch(event!!))
+            .`as`("a non-identity handshake must never map to an identity Mismatch (AC7)")
+            .isNull()
     }
 
     @Test
