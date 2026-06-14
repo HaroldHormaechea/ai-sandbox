@@ -4,6 +4,7 @@ import com.aisandbox.server.audit.AuditAction;
 import com.aisandbox.server.audit.AuditLogger;
 import com.aisandbox.server.config.ServerProperties;
 import com.aisandbox.server.identity.ClientIdentity;
+import com.aisandbox.server.mcp.McpLoginInitiator;
 import com.aisandbox.server.stream.dto.ConversationServerMessage;
 import com.aisandbox.server.stream.dto.StreamServerMessage.TargetInfo;
 import com.aisandbox.server.stream.facade.StreamFacade.AuthorizeResult;
@@ -37,7 +38,7 @@ import org.springframework.stereotype.Component;
  * reuse of {@link StreamFacade} is a facade-to-facade call, per the same profile.
  */
 @Component
-public class ConversationFacade {
+public class ConversationFacade implements McpLoginInitiator {
 
     private static final Logger LOG = LoggerFactory.getLogger(ConversationFacade.class);
 
@@ -190,6 +191,7 @@ public class ConversationFacade {
      * callers (the {@code mcp} facade) reach this via a facade-to-facade call, per
      * {@code profile-java-server-architecture}.
      */
+    @Override
     public void openMcpMenu(int n, ClientIdentity identity) throws IOException {
         // Always the main (orchestrator) pane — MCP config + the /mcp TUI live with
         // the session's primary claude, not a teammate tile.

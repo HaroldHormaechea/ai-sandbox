@@ -1,11 +1,11 @@
 package com.aisandbox.server.mcp.facade;
 
 import com.aisandbox.server.identity.ClientIdentity;
+import com.aisandbox.server.mcp.McpLoginInitiator;
 import com.aisandbox.server.mcp.dto.McpActionOutcome;
 import com.aisandbox.server.mcp.dto.McpServerStatus;
 import com.aisandbox.server.mcp.dto.McpState;
 import com.aisandbox.server.mcp.service.McpInventoryService;
-import com.aisandbox.server.stream.facade.ConversationFacade;
 import java.io.IOException;
 import java.util.List;
 import java.util.Locale;
@@ -22,9 +22,12 @@ import org.springframework.stereotype.Component;
  *
  * <p>Layering ({@code profile-java-server-architecture}): the controller calls
  * only this facade; the facade composes its own-domain {@link McpInventoryService}
- * and reaches the conversation domain (to surface the {@code /mcp} login menu) via
- * a facade-to-facade call into {@link ConversationFacade} — never another domain's
- * service.
+ * and reaches the conversation domain (to surface the {@code /mcp} login menu)
+ * through the {@link McpLoginInitiator} port — a dependency-inversion seam owned by
+ * this package, implemented by the {@code stream} domain — so {@code mcp} never
+ * imports {@code stream} (which would create an {@code api → mcp → stream → api}
+ * package cycle that {@code LayeringTest} forbids). The runtime call is still a
+ * facade-to-facade hand-off; only the compile-time arrow is inverted.
  */
 @Component
 public class McpFacade {
@@ -38,11 +41,11 @@ public class McpFacade {
     public static final String ACTION_REFRESH = "refresh";
 
     private final McpInventoryService inventory;
-    private final ConversationFacade conversationFacade;
+    private final McpLoginInitiator loginInitiator;
 
-    public McpFacade(McpInventoryService inventory, ConversationFacade conversationFacade) {
+    public McpFacade(McpInventoryService inventory, McpLoginInitiator loginInitiator) {
         this.inventory = inventory;
-        this.conversationFacade = conversationFacade;
+        this.loginInitiator = loginInitiator;
     }
 
     /** List the session's MCP servers and their current state (AC3/AC4). */
@@ -74,7 +77,7 @@ public class McpFacade {
         String act = action == null ? "" : action.toLowerCase(Locale.ROOT);
         if (ACTION_LOGIN.equals(act)) {
             // Initiate only — surface /mcp in the live session for the human to finish.
-            conversationFacade.openMcpMenu(n, identity);
+            loginInitiator.openMcpMenu(n, identity);
             McpState state = stateOf(inventory.refresh(n), name);
             return new McpActionOutcome(
                     name, state, "Opens MCP authentication in the live session — complete it there, then refresh.");
