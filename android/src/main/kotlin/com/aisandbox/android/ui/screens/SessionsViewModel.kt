@@ -108,11 +108,20 @@ class SessionsViewModel(application: Application) : AndroidViewModel(application
 }
 
 /**
- * UC-54 — tri-state server connectivity for the Sessions-screen dot.
- * UNKNOWN and CHECKING both render yellow; they are kept distinct so the two
- * sub-cases (never-reached vs. a check in flight) are independently testable.
+ * Server-connectivity rendering for the Sessions-screen dot.
+ *
+ * <p>UC-54 introduced the REST-derived tri-state: UNKNOWN and CHECKING both
+ * render yellow (never-reached vs. a check in flight; kept distinct so they are
+ * independently testable), REACHABLE green, UNREACHABLE red.
+ *
+ * <p>UC-72 adds two states driven by the live-feed reconnect CYCLE (not the REST
+ * ladder): RETRYING (yellow) while a reconnect attempt is actively in flight,
+ * and BACKOFF (red) while the loop is waiting out the back-off delay between
+ * attempts (and on terminal STOPPED). These take precedence over the REST ladder
+ * so the dot reflects the moment-to-moment reconnect oscillation; green stays
+ * REST-driven (REACHABLE).
  */
-enum class Connectivity { UNKNOWN, CHECKING, REACHABLE, UNREACHABLE }
+enum class Connectivity { UNKNOWN, CHECKING, REACHABLE, UNREACHABLE, RETRYING, BACKOFF }
 
 /** Read-only state surfaced to the Compose layer. */
 data class SessionsUiState(
@@ -217,18 +226,34 @@ data class SessionsUiState(
     fun isPending(row: SessionSummary): Boolean = row.n in pendingActions
 
     /**
-     * UC-54 — the tri-state connectivity the Sessions-screen dot binds to.
-     * Precedence (highest first):
+     * The connectivity the Sessions-screen dot binds to. Precedence (highest
+     * first):
+     *
+     * UC-72 — the live-feed reconnect CYCLE is checked FIRST, so the dot tracks
+     * the moment-to-moment attempt/backoff oscillation:
+     *   • a reconnect attempt is in flight → RETRYING (yellow);
+     *   • else the loop is waiting out the back-off delay → BACKOFF (red);
+     *   • else the feed has terminally given up → BACKOFF (red);
+     *
+     * UC-54 — otherwise the existing REST-derived ladder applies (green stays
+     * REST-driven):
      *   • a check/refresh/spawn in flight → CHECKING (yellow);
      *   • else the last interaction failed → UNREACHABLE (red);
      *   • else the server has answered before → REACHABLE (green);
      *   • else nothing has resolved yet → UNKNOWN (yellow).
-     * CHECKING is deliberately ABOVE UNREACHABLE — a foreground ON_RESUME fires
-     * refresh(), so a persistently-down server intentionally flickers
-     * red→yellow→red ("retrying now") rather than sitting flat red.
+     *
+     * The feed-reconnect arms intentionally OUTRANK the REST ladder: while the
+     * push feed is cycling attempt↔backoff, that is the most live, precise
+     * connectivity signal we have, so it should win over a possibly-stale REST
+     * verdict. CHECKING remains ABOVE UNREACHABLE within the REST ladder — a
+     * foreground ON_RESUME fires refresh(), so a persistently-down server
+     * flickers red→yellow→red rather than sitting flat red.
      */
     val connectivity: Connectivity
         get() = when {
+            feedStatus.activity == SessionsFeedStatus.ReconnectActivity.ATTEMPTING -> Connectivity.RETRYING
+            feedStatus.activity == SessionsFeedStatus.ReconnectActivity.WAITING -> Connectivity.BACKOFF
+            feedStatus.phase == SessionsFeedStatus.Phase.STOPPED -> Connectivity.BACKOFF
             loading || spawning || pendingActions.isNotEmpty() -> Connectivity.CHECKING
             unreachable -> Connectivity.UNREACHABLE
             serverResponded -> Connectivity.REACHABLE

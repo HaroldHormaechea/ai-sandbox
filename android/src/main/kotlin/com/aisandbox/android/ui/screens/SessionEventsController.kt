@@ -98,14 +98,46 @@ class SessionEventsController(
             val http = httpClientFactory(profile)
 
             while (isActive) {
-                // UC-70 hard-req #1 (anti-flicker) — emit CONNECTING (a silent,
-                // non-retrying phase) ONLY before the first failure
-                // (attemptCount == 0). Once any failure has been recorded the
-                // back-off has already emitted RECONNECTING, and we must HOLD it
-                // across the wait + the next attempt — never re-emit CONNECTING
-                // mid-sequence, or the background would flicker away and back.
+                // UC-72 loop-top dial emit — fired before EVERY client.connect()
+                // to mark the attempt as in-flight (activity = ATTEMPTING → the
+                // status dot reads yellow). This replaces UC-70's
+                // attemptCount==0-only CONNECTING emit; the anti-flicker contract
+                // is preserved by keeping the PHASE stable across the cycle:
+                //
+                //  • attempt 0 (initial connect, no failure yet) → phase
+                //    CONNECTING — still the silent, non-retrying phase UC-70's
+                //    background ignores, so an initial connect never flashes the
+                //    "retrying" surface. Defaults (attempt 0, both instants null).
+                //  • attempt > 0 (a reconnect dial) → phase RECONNECTING, HELD
+                //    from the preceding WAITING emit so UC-70's background never
+                //    flickers away mid-sequence. We carry the SAME attempt and
+                //    giveUpAtMs the WAITING emit carried (so UC-70's "attempt N" /
+                //    give-up lines stay stable), and only nextRetryAtMs flips to
+                //    null — there is no scheduled next retry while the dial is in
+                //    flight, so the countdown hides during the attempt. We never
+                //    re-emit CONNECTING once a failure has been recorded.
                 if (reconnect.attemptCount == 0) {
-                    onStatus(SessionsFeedStatus(phase = SessionsFeedStatus.Phase.CONNECTING))
+                    onStatus(
+                        SessionsFeedStatus(
+                            phase = SessionsFeedStatus.Phase.CONNECTING,
+                            activity = SessionsFeedStatus.ReconnectActivity.ATTEMPTING,
+                            attempt = 0,
+                            nextRetryAtMs = null,
+                            giveUpAtMs = null,
+                        ),
+                    )
+                } else {
+                    onStatus(
+                        SessionsFeedStatus(
+                            phase = SessionsFeedStatus.Phase.RECONNECTING,
+                            activity = SessionsFeedStatus.ReconnectActivity.ATTEMPTING,
+                            attempt = reconnect.attemptCount,
+                            // null during the dial — no next retry is scheduled
+                            // while the attempt is in flight (countdown hides).
+                            nextRetryAtMs = null,
+                            giveUpAtMs = reconnect.giveUpAtMs(),
+                        ),
+                    )
                 }
                 val client = eventsClientFactory(http)
                 eventsClient = client
@@ -119,7 +151,13 @@ class SessionEventsController(
                     is SessionEventsClient.State.Open -> {
                         reconnect.reset()
                         // UC-70 — the socket is up: clear any retrying background.
-                        onStatus(SessionsFeedStatus(phase = SessionsFeedStatus.Phase.CONNECTED))
+                        // UC-72 — activity IDLE: the dot returns to the REST ladder.
+                        onStatus(
+                            SessionsFeedStatus(
+                                phase = SessionsFeedStatus.Phase.CONNECTED,
+                                activity = SessionsFeedStatus.ReconnectActivity.IDLE,
+                            ),
+                        )
                         // The server pushes a fresh Snapshot immediately on
                         // connect, so collecting incoming is the whole job —
                         // the resync happens for free (AC5).
@@ -156,7 +194,14 @@ class SessionEventsController(
                     Log.i(TAG, "events feed gave up after back-off cap; REST refresh is the fallback")
                     // UC-70 hard-req #4 — terminal give-up: a static "Not
                     // connected" background, no countdown.
-                    onStatus(SessionsFeedStatus(phase = SessionsFeedStatus.Phase.STOPPED))
+                    // UC-72 — activity IDLE; the dot's STOPPED→BACKOFF/red arm is
+                    // keyed off phase, not activity.
+                    onStatus(
+                        SessionsFeedStatus(
+                            phase = SessionsFeedStatus.Phase.STOPPED,
+                            activity = SessionsFeedStatus.ReconnectActivity.IDLE,
+                        ),
+                    )
                     return@launch
                 }
                 // UC-70 hard-req #2 — advance the schedule FIRST (nextDelayMs()
@@ -168,6 +213,11 @@ class SessionEventsController(
                 onStatus(
                     SessionsFeedStatus(
                         phase = SessionsFeedStatus.Phase.RECONNECTING,
+                        // UC-72 — WAITING: sitting out the back-off delay before
+                        // the next attempt; the status dot reads red. The next
+                        // loop-top ATTEMPTING emit (same attempt / giveUpAtMs)
+                        // flips it back to yellow and hides the countdown.
+                        activity = SessionsFeedStatus.ReconnectActivity.WAITING,
                         attempt = reconnect.attemptCount,
                         nextRetryAtMs = nowMs() + delayMs,
                         giveUpAtMs = reconnect.giveUpAtMs(),
