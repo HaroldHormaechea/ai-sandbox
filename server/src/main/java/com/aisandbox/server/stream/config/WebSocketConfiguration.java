@@ -11,6 +11,7 @@ import com.aisandbox.server.stream.handshake.ConversationSubprotocolHandshakeInt
 import com.aisandbox.server.stream.handshake.StreamCapsHandshakeInterceptor;
 import com.aisandbox.server.stream.handshake.SubprotocolHandshakeInterceptor;
 import com.aisandbox.server.stream.service.ConversationEventMapper;
+import com.aisandbox.server.stream.service.StreamBridgeRegistry;
 import com.aisandbox.server.stream.service.StreamControlMessageService;
 import java.util.Map;
 import org.springframework.context.annotation.Bean;
@@ -56,6 +57,7 @@ public class WebSocketConfiguration {
             StreamControlMessageService controlSvc,
             ActiveConnectionRegistry connections,
             ActiveStreamRegistry streamRegistry,
+            StreamBridgeRegistry bridgeRegistry,
             ServerProperties props,
             SubprotocolHandshakeInterceptor subprotocol,
             StreamCapsHandshakeInterceptor capCheck) {
@@ -81,6 +83,9 @@ public class WebSocketConfiguration {
         // a graceful close (close code 4401, reason "revoked") before
         // tearing down the underlying TCP channel.
         handler.setActiveStreamRegistry(streamRegistry);
+        // UC-74 — register live PTY bridges so GracefulShutdownHandler can
+        // destroy any survivors deterministically on shutdown (AC4).
+        handler.setStreamBridgeRegistry(bridgeRegistry);
         return handler;
     }
 

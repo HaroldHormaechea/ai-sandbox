@@ -113,8 +113,12 @@
     <string name="notification_channel_name">Attached terminal stream</string>
     <string name="notification_channel_description">Ongoing notification while ai-sandbox keeps a terminal stream open in the background.</string>
     <string name="notification_pill">FOREGROUND · dataSync</string>
-    <string name="notification_title">Attached to ai-sandbox-%1$d</string>
-    <string name="notification_body">%1$s · %2$dx%3$d · idle %4$ds</string>
+    <!-- UC-76 — quiet/generic FGS copy: no longer reveals "Attached to ai-sandbox-N"
+         or the wssUrl·cols×rows·idle detail. Kept on the LOW terminal-stream channel.
+         MUST contain no literal % — buildNotification still calls getString(id, args…),
+         which runs String.format; a no-placeholder string simply ignores the extra args. -->
+    <string name="notification_title">ai-sandbox</string>
+    <string name="notification_body">Terminal session active</string>
     <string name="notification_action_open">Open</string>
     <string name="notification_action_disconnect">Disconnect</string>
 
@@ -123,14 +127,20 @@
     <string name="pending_question_channel_id">pending-questions</string>
     <string name="pending_question_channel_name">Pending questions</string>
     <string name="pending_question_channel_description">Alerts when a session asks you a question and is waiting for an answer.</string>
+    <!-- UC-76 — fixed title for every pending-question alert (was the conversation
+         name / label / ai-sandbox-N). The body remains the first question text. -->
+    <string name="pending_question_title">Claude needs your input</string>
     <!-- Body used when a question is up but its text could not be read. -->
     <string name="pending_question_fallback_body">A session is waiting for your answer.</string>
     <!-- LOW channel: the ongoing foreground-service notification for the watcher. -->
     <string name="question_watcher_channel_id">question-watcher</string>
     <string name="question_watcher_channel_name">Question watcher</string>
     <string name="question_watcher_channel_description">Ongoing notification while ai-sandbox watches for sessions asking questions in the background.</string>
-    <string name="question_watcher_title">Watching for questions</string>
-    <string name="question_watcher_text">You\'ll be notified when a session needs an answer.</string>
+    <!-- UC-76 — quiet/generic watcher FGS copy: no longer reads "Watching for
+         questions" / "you'll be notified". App-name title, empty body, so the
+         always-on FGS notification recedes. Channel id/importance unchanged. -->
+    <string name="question_watcher_title">ai-sandbox</string>
+    <string name="question_watcher_text"></string>
 
     <!-- Battery optimization prompt (AC23) -->
     <string name="battery_opt_title">Keep terminal alive in background?</string>

@@ -1,8 +1,10 @@
 package com.aisandbox.server.identity;
 
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -114,5 +116,51 @@ public class ActiveStreamRegistry {
     public int sessionCountFor(String fingerprintHex) {
         Set<WebSocketSession> set = byFingerprint.get(fingerprintHex);
         return set == null ? 0 : set.size();
+    }
+
+    /**
+     * UC-74 — issue a graceful close to EVERY live WS session across all
+     * fingerprints, concurrently. This registry is the superset of all live
+     * sockets (binary streams AND the structured-conversation channel, which
+     * registers here only), so {@code GracefulShutdownHandler.stop()} calls
+     * this as the drain safety-net after the {@code StreamRegistryService}
+     * pass that carries the UC-44 {@code STREAM_CLOSE} text-frame ceremony.
+     *
+     * <p>Closes fan out via {@code Flux…flatMap} so the returned {@link Mono}
+     * completes when the slowest single close-handshake completes — NOT the
+     * serial sum. The caller bounds the whole composite with the configured
+     * total-grace deadline, so a non-responsive client cannot pin shutdown.
+     *
+     * <p>Idempotent against the cert-revocation path: a session already closed
+     * by {@link #gracefulClose} (or removed from the index) is simply absent
+     * here, and a second {@code WebSocketSession.close} on an already-closed
+     * session is a no-op.
+     */
+    public Mono<Void> gracefulCloseAll(CloseStatus status) {
+        List<WebSocketSession> all = new ArrayList<>();
+        for (String fp : new HashSet<>(byFingerprint.keySet())) {
+            Set<WebSocketSession> set = byFingerprint.remove(fp);
+            if (set == null) {
+                continue;
+            }
+            synchronized (set) {
+                all.addAll(set);
+            }
+        }
+        if (all.isEmpty()) {
+            return Mono.empty();
+        }
+        LOG.info("Gracefully closing {} live WS session(s) on shutdown with code {}", all.size(), status.getCode());
+        return Flux.fromIterable(all)
+                .flatMap(s -> s.close(status).onErrorResume(t -> {
+                    LOG.warn("Shutdown WS close errored: {}", t.toString());
+                    return Mono.empty();
+                }))
+                .then();
+    }
+
+    /** UC-74 — total live WS sessions across every fingerprint. */
+    public int totalLiveSessions() {
+        return byFingerprint.values().stream().mapToInt(Set::size).sum();
     }
 }

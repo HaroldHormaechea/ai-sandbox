@@ -6,12 +6,19 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 import org.junit.jupiter.api.Test;
+import org.springframework.boot.context.properties.bind.Bindable;
+import org.springframework.boot.context.properties.bind.Binder;
+import org.springframework.boot.context.properties.source.ConfigurationPropertySources;
+import org.springframework.boot.env.YamlPropertySourceLoader;
+import org.springframework.core.env.PropertySource;
+import org.springframework.core.io.ClassPathResource;
 
 /**
  * UC11 § AC2 — parsed-content assertions on the packaged systemd unit
@@ -156,7 +163,115 @@ class UnitFileContractTest {
                 .contains("/etc/ai-sandbox-server");
     }
 
+    /**
+     * UC-74 § AC2 — the systemd stop backstop MUST stay strictly greater than
+     * the sum of the JVM's internal graceful-shutdown grace budgets, so a stuck
+     * WebSocket can never drag the process all the way to {@code TimeoutStopSec}.
+     * If it could, systemd would SIGKILL mid-shutdown — losing the UC-44 graceful
+     * WS close and breaking the {@code SuccessExitStatus=143} contract (restarts
+     * would log as failed).
+     *
+     * <p>The two internal budgets live in {@code application.yaml}:
+     * {@code spring.lifecycle.timeout-per-shutdown-phase} (the SmartLifecycle
+     * phase cap that wraps {@code GracefulShutdownHandler.stop()}) and
+     * {@code ai-sandbox.server.shutdown.total-grace-seconds} (the graceful-WS
+     * drain budget). This test reads {@code TimeoutStopSec} from the unit file
+     * and both budgets from the baked yaml, and asserts the invariant — so a
+     * future edit that bumps either budget past the backstop fails here.
+     */
+    @Test
+    void timeout_stop_sec_exceeds_sum_of_internal_shutdown_grace_budgets() throws IOException {
+        assumeTrue(
+                Files.isRegularFile(UNIT_FILE),
+                "unit file not found at " + UNIT_FILE + " — test must run with cwd=server/");
+
+        List<String> timeoutStopSec = valuesForKeyInSection("[Service]", "TimeoutStopSec");
+        assertThat(timeoutStopSec)
+                .as("[Service] MUST declare a single TimeoutStopSec backstop")
+                .hasSize(1);
+        long timeoutStopSeconds = parseSystemdSeconds(timeoutStopSec.get(0));
+
+        Binder yaml = applicationYamlBinder();
+        long phaseSeconds = yaml.bind("spring.lifecycle.timeout-per-shutdown-phase", Bindable.of(Duration.class))
+                .get()
+                .getSeconds();
+        long totalGraceSeconds = yaml.bind("ai-sandbox.server.shutdown.total-grace-seconds", Bindable.of(Long.class))
+                .get();
+
+        long internalGrace = phaseSeconds + totalGraceSeconds;
+        assertThat(internalGrace)
+                .as(
+                        "UC-74 § AC2 — TimeoutStopSec=%d MUST stay strictly greater than the sum of the "
+                                + "internal grace budgets (phase=%ds + total-grace=%ds = %ds); otherwise systemd "
+                                + "SIGKILLs mid-shutdown and the SuccessExitStatus=143 contract breaks",
+                        timeoutStopSeconds, phaseSeconds, totalGraceSeconds, internalGrace)
+                .isLessThan(timeoutStopSeconds);
+    }
+
+    /**
+     * UC-74 § AC5 / pitfall — the fix is about timeouts and draining, NOT about
+     * changing the kill semantics. The unit MUST keep delivering {@code SIGTERM}
+     * (so {@code GracefulShutdownHandler} runs the graceful WS-close ceremony)
+     * and MUST honour {@code SuccessExitStatus=143} (128+SIGTERM) so an orderly
+     * SIGTERM-driven exit logs as success, not failure. It MUST NOT have been
+     * "sped up" by switching to {@code KillMode=mixed}/{@code SIGKILL}, which
+     * would defeat the graceful close and route clients to the destructive
+     * re-scan-QR identity path.
+     */
+    @Test
+    void graceful_kill_semantics_are_preserved_not_replaced_with_sigkill() throws IOException {
+        assumeTrue(
+                Files.isRegularFile(UNIT_FILE),
+                "unit file not found at " + UNIT_FILE + " — test must run with cwd=server/");
+
+        assertThat(valuesForKeyInSection("[Service]", "KillSignal"))
+                .as("UC-74 § AC5 — KillSignal MUST stay SIGTERM so the graceful WS-close ceremony runs")
+                .containsExactly("SIGTERM");
+        assertThat(valuesForKeyInSection("[Service]", "SuccessExitStatus"))
+                .as("UC-74 § AC5 — SIGTERM-driven exit (143) MUST be honoured as success")
+                .containsExactly("143");
+        assertThat(valuesForKeyInSection("[Service]", "KillMode"))
+                .as("UC-74 pitfall — do NOT introduce KillMode=mixed/SIGKILL to 'speed up' the stop; "
+                        + "that defeats the UC-44 graceful close and triggers the UC-52/UC-61 re-scan-QR path")
+                .isEmpty();
+    }
+
     // ── helpers ──────────────────────────────────────────────────────
+
+    /**
+     * Load the baked {@code application.yaml} from the classpath (main resources
+     * are on the test classpath) and expose it as a {@link Binder}, so duration
+     * and numeric budgets bind with the same {@code DurationStyle} semantics the
+     * runtime uses — rather than re-implementing systemd/Spring duration parsing.
+     */
+    private static Binder applicationYamlBinder() throws IOException {
+        List<PropertySource<?>> sources =
+                new YamlPropertySourceLoader().load("application", new ClassPathResource("application.yaml"));
+        assertThat(sources)
+                .as("application.yaml must be on the test classpath and parseable")
+                .isNotEmpty();
+        return new Binder(ConfigurationPropertySources.from(sources));
+    }
+
+    /**
+     * Parse a systemd time value (e.g. {@code "70"}, {@code "70s"}, {@code "1min"})
+     * into seconds. The unit file uses bare-seconds form ({@code TimeoutStopSec=70}),
+     * but accept the common {@code s}/{@code sec}/{@code min} suffixes defensively so
+     * a future edit using an explicit unit doesn't silently break the parse.
+     */
+    private static long parseSystemdSeconds(String raw) {
+        String v = raw.strip();
+        if (v.endsWith("min")) {
+            return Long.parseLong(v.substring(0, v.length() - 3).strip()) * 60L;
+        }
+        if (v.endsWith("sec")) {
+            return Long.parseLong(v.substring(0, v.length() - 3).strip());
+        }
+        if (v.endsWith("s")) {
+            return Long.parseLong(v.substring(0, v.length() - 1).strip());
+        }
+        return Long.parseLong(v);
+    }
 
     /**
      * Collect the values of {@code key} within the given systemd section
