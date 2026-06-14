@@ -41,12 +41,37 @@ class OpenApiRouteDriftTest {
     void committed_openapi_yaml_lists_every_controller_route() throws IOException {
         Path oas = locateOas();
         String body = Files.readString(oas);
-        // Routes pulled from SessionController / ClientController / HealthController.
+        // Routes pulled from SessionController / ClientController / HealthController / ModelController.
         for (String path : new String[] {
-            "/v1/sessions", "/v1/sessions/{n}", "/v1/clients", "/v1/clients/{cnOrFingerprint}", "/v1/healthz"
+            "/v1/sessions",
+            "/v1/sessions/{n}",
+            "/v1/clients",
+            "/v1/clients/{cnOrFingerprint}",
+            "/v1/healthz",
+            "/v1/models"
         }) {
             assertThat(body).as("route %s in committed OAS", path).contains(path);
         }
+    }
+
+    /**
+     * UC-66 AC2/AC3 — the committed OAS must declare the new {@code GET /v1/models}
+     * route AND the {@code ModelSummary} schema (id + label), so {@code server-ci.yml}'s
+     * OpenAPI-drift check passes and the Android {@code ModelsApi} decodes the
+     * documented shape. A miss here means the developer did not regenerate
+     * {@code server/openapi.yaml} after adding the endpoint / DTO — a developer-side
+     * bug, not a test bug.
+     */
+    @Test
+    void committed_openapi_yaml_includes_models_route_and_schema() throws IOException {
+        Path oas = locateOas();
+        String body = Files.readString(oas);
+        assertThat(body)
+                .as("UC-66 AC3 — the model-catalogue route must appear in the committed OAS")
+                .contains("/v1/models");
+        assertThat(body)
+                .as("UC-66 — the ModelSummary response schema must be present in the committed OAS")
+                .contains("ModelSummary");
     }
 
     /**

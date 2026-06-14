@@ -1319,4 +1319,86 @@ class ConversationControllerTest {
             c.close()
         }
     }
+
+    // ──────────────── Part G — UC-66 model selection ─────────────────────────
+
+    @Test
+    fun `selectModel publishes the chosen model id for the current target`() {
+        // AC5 (best-effort highlight) — picking a model records it as the
+        // current target's selected model so the picker can highlight the row.
+        val c = offlineController()
+        assertThat(c.selectedModelId.value).isNull() // nothing chosen yet
+        c.selectModel("opus")
+        assertThat(c.selectedModelId.value).isEqualTo("opus")
+    }
+
+    @Test
+    fun `selectModel ignores a blank id`() {
+        val c = offlineController()
+        c.selectModel("   ")
+        assertThat(c.selectedModelId.value).isNull()
+    }
+
+    @Test
+    fun `selectModel is not a content turn - no spinner and no user bubble`() {
+        // The model switch reuses the RAW composer path (sendComposer), NOT
+        // submitComposer: it arms no working spinner and leaves no `/model …`
+        // optimistic user bubble in the transcript.
+        val c = offlineController()
+        c.selectModel("sonnet")
+        assertThat(c.turnPhase.value).isEqualTo(TurnPhase.IDLE)
+        assertThat(userMessages(c)).isEmpty()
+    }
+
+    @Test
+    fun `a model choice survives a target switch and round-trip (no wipe on selectTarget)`() {
+        // AC5 — selectedModelByTarget is per-target and is deliberately NOT
+        // wiped by selectTarget()/clearItems(). Switching to a target with no
+        // prior choice publishes null; switching back republishes the original.
+        val c = offlineController()
+        c.selectModel("opus") // for the default "main" target
+        assertThat(c.selectedModelId.value).isEqualTo("opus")
+
+        c.selectTarget("swarm:main:0.1") // a target with no model chosen yet
+        assertThat(c.selectedTargetId.value).isEqualTo("swarm:main:0.1")
+        assertThat(c.selectedModelId.value).isNull()
+
+        c.selectModel("haiku") // choice for the swarm target
+        assertThat(c.selectedModelId.value).isEqualTo("haiku")
+
+        // Back to main → the original choice is republished, not lost.
+        c.selectTarget(TerminalStreamController.MAIN_TARGET_ID)
+        assertThat(c.selectedModelId.value).isEqualTo("opus")
+
+        // And forward to the swarm target again → its own choice.
+        c.selectTarget("swarm:main:0.1")
+        assertThat(c.selectedModelId.value).isEqualTo("haiku")
+    }
+
+    @Test
+    fun `selectModel sends exactly one composer-input slash-model frame for the id`() {
+        // AC4 (wire-level) — the model change is delivered as a single
+        // composer-input `/model <id>` frame down the SAME path the server
+        // already routes to the selected target. No interrupt, byte-for-byte.
+        val received = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        enqueueRecorder(received, wsRef)
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { c.state.value == TerminalState.Open && wsRef.get() != null }).isTrue
+            c.selectModel("opus")
+            assertThat(awaitUntil { composerInputs(received).isNotEmpty() }).isTrue
+            Thread.sleep(250) // give any erroneous extra/interrupt frame a chance to land
+            assertThat(composerInputs(received)).hasSize(1)
+            assertThat(composerInputs(received).single())
+                .isEqualTo("""{"type":"composer-input","text":"/model opus"}""")
+            // A model switch is not a blocking turn → no interrupt frame.
+            assertThat(received.none { it.contains(""""type":"interrupt"""") }).isTrue
+            // And it leaves no optimistic user bubble in the transcript.
+            assertThat(userMessages(c)).isEmpty()
+        } finally {
+            c.close()
+        }
+    }
 }

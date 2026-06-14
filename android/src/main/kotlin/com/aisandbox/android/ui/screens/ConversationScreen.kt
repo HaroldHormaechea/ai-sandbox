@@ -63,6 +63,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.aisandbox.android.conversation.ConversationItem
 import com.aisandbox.android.conversation.ToolDetailState
 import com.aisandbox.android.conversation.TurnPhase
+import com.aisandbox.android.net.ModelInfo
 import com.aisandbox.android.ui.components.AgentSwitcherBar
 import com.aisandbox.android.ui.components.Composer
 import com.aisandbox.android.ui.components.QuestionSheet
@@ -98,6 +99,9 @@ fun ConversationScreen(
     val pendingSheet by viewModel.pendingSheet.collectAsState()
     val turnPhase by viewModel.turnPhase.collectAsState()
     val toolDetail by viewModel.toolDetail.collectAsState()
+    // UC-66 — model-selection dialog state + the highlighted last-selected model (AC5).
+    val modelMenu by viewModel.modelMenu.collectAsState()
+    val selectedModelId by viewModel.selectedModelId.collectAsState()
     // UC-53 — live appearance prefs scoped to this transcript only (AC2/AC3).
     val fontScale by viewModel.fontScale.collectAsState()
     val useAgentColor by viewModel.useAgentColor.collectAsState()
@@ -134,6 +138,10 @@ fun ConversationScreen(
                     }
                     ConversationOverflowMenu(
                         expanded = menuOpen,
+                        onModel = {
+                            menuOpen = false // close the menu, then open the model dialog (AC2)
+                            viewModel.loadModels() // sets ModelMenuState != Idle, which shows the dialog
+                        },
                         onClear = {
                             menuOpen = false // AC7 — close the menu after Clear is chosen
                             // AC6 — in-place reset; does NOT disconnect or navigate back.
@@ -193,6 +201,19 @@ fun ConversationScreen(
         toolDetail?.let { detail ->
             ToolDetailDialog(state = detail, onDismiss = viewModel::closeDetail)
         }
+        // UC-66 — the model-selection dialog. Shown whenever the catalogue fetch is in any
+        // non-Idle state; dismissing resets it to Idle and changes nothing (AC6).
+        if (modelMenu != ModelMenuState.Idle) {
+            ModelSelectionDialog(
+                state = modelMenu,
+                selectedModelId = selectedModelId,
+                onSelect = { id ->
+                    viewModel.selectModel(id) // AC4 — routes `/model <id>` to the current target
+                    viewModel.dismissModelMenu()
+                },
+                onDismiss = viewModel::dismissModelMenu,
+            )
+        }
     }
 }
 
@@ -205,11 +226,17 @@ fun ConversationScreen(
 @Composable
 internal fun ConversationOverflowMenu(
     expanded: Boolean,
+    onModel: () -> Unit,
     onClear: () -> Unit,
     onDisconnect: () -> Unit,
     onDismiss: () -> Unit,
 ) {
     DropdownMenu(expanded = expanded, onDismissRequest = onDismiss) {
+        // UC-66 — opens the model-selection dialog for the current target (AC1).
+        DropdownMenuItem(
+            text = { Text("Model") },
+            onClick = onModel,
+        )
         DropdownMenuItem(
             text = { Text("Clear") },
             onClick = onClear,
@@ -463,6 +490,110 @@ internal fun ToolDetailDialog(state: ToolDetailState, onDismiss: () -> Unit) {
                     Text("Close")
                 }
             }
+        }
+    }
+}
+
+/**
+ * UC-66 (AC2/AC5/AC6) — the model-selection dialog. Reuses [ToolDetailDialog]'s
+ * styling ([Dialog] + rounded [Surface], bounded max-height, scrollable body).
+ * Renders the [ModelMenuState]:
+ *
+ * - [ModelMenuState.Loading] → a spinner (AC2 fetch in flight).
+ * - [ModelMenuState.Loaded] → one selectable row per server-reported model, each
+ *   showing its human label; the row whose id matches [selectedModelId] is
+ *   highlighted with a `✓` and a tinted background (AC5, best-effort).
+ * - [ModelMenuState.Empty] → "No models available".
+ * - [ModelMenuState.Error] → the failure message.
+ *
+ * Tapping a row calls [onSelect] (which sends `/model <id>` and dismisses);
+ * tapping Close / outside calls [onDismiss], leaving the model unchanged (AC6).
+ */
+@Composable
+internal fun ModelSelectionDialog(
+    state: ModelMenuState,
+    selectedModelId: String?,
+    onSelect: (String) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    Dialog(onDismissRequest = onDismiss) {
+        Surface(shape = RoundedCornerShape(12.dp), color = SurfaceLow) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 480.dp)
+                    .padding(16.dp),
+            ) {
+                Text(text = "Select model", style = MaterialTheme.typography.titleSmall, color = OnSurface)
+                Spacer(Modifier.height(12.dp))
+                Box(modifier = Modifier.weight(1f, fill = false)) {
+                    when (state) {
+                        ModelMenuState.Loading -> Row(verticalAlignment = Alignment.CenterVertically) {
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+                            Spacer(Modifier.width(10.dp))
+                            Text("Loading…", style = MaterialTheme.typography.bodySmall, color = OnSurfaceMuted)
+                        }
+                        ModelMenuState.Empty -> Text(
+                            text = "No models available",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = OnSurfaceMuted,
+                        )
+                        is ModelMenuState.Error -> Text(
+                            text = "Could not load models: ${state.message}",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = Warning,
+                        )
+                        is ModelMenuState.Loaded -> Column(
+                            modifier = Modifier.verticalScroll(rememberScrollState()),
+                        ) {
+                            state.models.forEach { model ->
+                                ModelRow(
+                                    model = model,
+                                    selected = model.id == selectedModelId,
+                                    onClick = { onSelect(model.id) },
+                                )
+                            }
+                        }
+                        // Idle never reaches here (the caller gates on state != Idle), but the
+                        // exhaustive when needs a branch.
+                        ModelMenuState.Idle -> Unit
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+                TextButton(onClick = onDismiss, modifier = Modifier.align(Alignment.End)) {
+                    Text("Close")
+                }
+            }
+        }
+    }
+}
+
+/** UC-66 — one tappable model row; highlighted (tint + `✓`) when it is the selected model (AC5). */
+@Composable
+private fun ModelRow(model: ModelInfo, selected: Boolean, onClick: () -> Unit) {
+    val background = if (selected) MaterialTheme.colorScheme.primaryContainer else Color.Transparent
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .clickable(onClick = onClick)
+            .background(background)
+            .padding(horizontal = 12.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = model.label.ifBlank { model.id },
+            style = MaterialTheme.typography.bodyMedium,
+            color = if (selected) MaterialTheme.colorScheme.onPrimaryContainer else OnSurface,
+            modifier = Modifier.weight(1f),
+        )
+        if (selected) {
+            Spacer(Modifier.width(8.dp))
+            Text(
+                text = "✓",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onPrimaryContainer,
+            )
         }
     }
 }

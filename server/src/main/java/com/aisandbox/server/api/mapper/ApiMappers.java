@@ -68,6 +68,10 @@ public final class ApiMappers {
         throw new IllegalArgumentException("claudeConfigMode must be 'shared' or 'isolated'; got: " + s);
     }
 
+    public static ApiDtos.ModelSummary toModelSummary(com.aisandbox.server.models.dto.ModelDescriptor m) {
+        return new ApiDtos.ModelSummary(m.id(), m.label());
+    }
+
     public static ApiDtos.ClientSummary toClientSummary(AllowedClient c) {
         return new ApiDtos.ClientSummary(
                 c.name(),

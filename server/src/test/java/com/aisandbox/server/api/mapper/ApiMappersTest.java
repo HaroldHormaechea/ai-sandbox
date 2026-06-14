@@ -136,4 +136,19 @@ class ApiMappersTest {
 
         assertThat(out).extracting(ApiDtos.SessionSummary::type).containsExactly("server-ssh", "claude");
     }
+
+    // ── UC-66 — model descriptor → API ModelSummary (AC2/AC3) ────────────────
+
+    @Test
+    void toModelSummary_carries_id_and_label_onto_the_api_dto() {
+        // The controller-boundary mapper translates the internal ModelDescriptor
+        // into the REST ModelSummary the Android picker decodes (id + human label).
+        com.aisandbox.server.models.dto.ModelDescriptor d =
+                new com.aisandbox.server.models.dto.ModelDescriptor("claude-opus-4-8", "Opus 4.8");
+
+        ApiDtos.ModelSummary s = ApiMappers.toModelSummary(d);
+
+        assertThat(s.id()).isEqualTo("claude-opus-4-8");
+        assertThat(s.label()).isEqualTo("Opus 4.8");
+    }
 }

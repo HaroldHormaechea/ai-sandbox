@@ -103,6 +103,11 @@ public final class ApiDtos {
     @Schema(description = "Response of GET /v1/healthz.")
     public record HealthResponse(boolean dockerOk, boolean scriptsOk, boolean tlsOk) {}
 
+    @Schema(description = "UC-66 — an advertised Claude model returned by GET /v1/models.")
+    public record ModelSummary(
+            @Schema(description = "Model id/alias sent to Claude Code via `/model <id>`.", example = "opus") String id,
+            @Schema(description = "Human-readable label for the model picker.", example = "Opus 4.8") String label) {}
+
     /**
      * Body of {@code POST /v1/enrollment} (UC04 AC33). The endpoint is
      * the only mTLS-exempt path on the server; redeeming a one-time
