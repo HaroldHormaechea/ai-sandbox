@@ -222,6 +222,18 @@ public class ActiveConnectionRegistry {
     }
 
     /**
+     * UC-74 — close EVERY active channel across all fingerprints. Unscoped
+     * mirror of {@link #terminate(Set)} used by {@code GracefulShutdownHandler.stop()}
+     * as the final TCP-layer backstop after the graceful WS drain and PTY
+     * teardown, so no lingering reactor-netty connection can keep the JVM
+     * alive past the systemd stop budget. Fire-and-forget like
+     * {@link #terminate(Set)}.
+     */
+    public void terminateAll() {
+        terminate(Set.copyOf(byFingerprint.keySet()));
+    }
+
+    /**
      * Look up the authenticated identity by Netty channel id. Returns
      * {@code null} when no identity is recorded — typically because the
      * TLS handshake-completion handler has not yet fired, or because the
