@@ -68,6 +68,7 @@ class PendingQuestionService : Service() {
         val container = requireContainer(this)
         val notifier = PendingQuestionNotifier(
             gateway = NotificationGateway(),
+            title = getString(R.string.pending_question_title),
             fallbackBody = getString(R.string.pending_question_fallback_body),
         )
         this.notifier = notifier
