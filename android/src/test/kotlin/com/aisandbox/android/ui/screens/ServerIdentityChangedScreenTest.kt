@@ -5,6 +5,7 @@ import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import com.aisandbox.android.net.Mismatch
 import org.junit.Rule
 import org.junit.Test
@@ -151,6 +152,37 @@ class ServerIdentityChangedScreenTest {
         // contract pinned here so the action is reachable by both this
         // test and any future accessibility test).
         composeRule.onNodeWithTag("copy-raw-message").assertIsDisplayed()
+    }
+
+    /**
+     * UC-68 AC2/AC3 — on a short viewport the hard-refusal screen's stacked
+     * content (error badge + title + body + the Pin-variant expected/observed
+     * SHA-256 hex blocks + the technical-details expander + the action row)
+     * is taller than the screen, so the bottom "Scan new QR" / "Quit" actions
+     * start below the fold. UC-68 wrapped the content {@code Column} in a
+     * {@code verticalScroll}, so {@code performScrollTo()} can bring them into
+     * view. Pre-fix (a fixed {@code Box(contentAlignment = Center)} with no
+     * scroll) this call has nowhere to scroll and fails — the regression guard.
+     *
+     * <p>The {@code w360dp-h320dp} qualifier deliberately picks a viewport
+     * short enough that the Pin variant (the tallest of the three) overflows.
+     */
+    @Test
+    @Config(sdk = [29], qualifiers = "w360dp-h320dp")
+    fun bottom_actions_are_reachable_via_scroll_on_a_short_viewport() {
+        composeRule.setContent {
+            ServerIdentityChangedScreen(
+                cause = Mismatch.Pin(
+                    expectedHex = expectedHex,
+                    observedHex = observedHex,
+                    rawMessage = rawPinMessage,
+                ),
+                onScanNewQr = {},
+                onQuit = {},
+            )
+        }
+        composeRule.onNodeWithText("Scan new QR").performScrollTo().assertIsDisplayed()
+        composeRule.onNodeWithText("Quit").performScrollTo().assertIsDisplayed()
     }
 }
 

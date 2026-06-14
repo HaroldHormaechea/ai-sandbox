@@ -1,7 +1,19 @@
 package com.aisandbox.android.ui.screens
 
+import android.app.Application
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.requiredHeight
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
+import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.unit.dp
+import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import com.aisandbox.android.ui.theme.AiSandboxTheme
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -69,5 +81,46 @@ class OnboardingScreenInstrumentationTest {
         // of the imported state (AC4).
         //
         // DEFERRED.
+    }
+
+    /**
+     * UC-68 AC2 — the Failure panel ("error code + message + Try again")
+     * renders its content in a centred Column. On a long error message and/or a
+     * short viewport the bottom "Try again" action could be clipped, so UC-68
+     * wrapped the panel in a {@code verticalScroll}.
+     *
+     * <p>We drive the real {@link OnboardingScreen} into the Failure state
+     * without a camera or network: feeding an unparseable string to
+     * {@link OnboardingViewModel#onQrPayload} fails the QR parse and emits
+     * {@code OnboardingState.Failure} directly (no enrollment round-trip). The
+     * screen is rendered in a deliberately short box to force overflow, then we
+     * prove "Try again" is reachable by scrolling — which only works because of
+     * the UC-68 {@code verticalScroll}; pre-fix this {@code performScrollTo()}
+     * would throw on the non-scrolling Column.
+     */
+    @Test
+    fun failureState_tryAgain_isReachableByScrolling_onAShortViewport() {
+        val app = ApplicationProvider.getApplicationContext<Application>()
+        val viewModel = OnboardingViewModel(app)
+
+        composeTestRule.setContent {
+            AiSandboxTheme {
+                Box(Modifier.fillMaxWidth().requiredHeight(200.dp)) {
+                    OnboardingScreen(onContinue = {}, viewModel = viewModel)
+                }
+            }
+        }
+
+        // Unparseable QR → OnboardingState.Failure (bad_qr); no camera/network.
+        composeTestRule.runOnUiThread {
+            viewModel.onQrPayload("this-is-not-a-valid-ai-sandbox-invite-payload")
+        }
+        composeTestRule.waitUntil(timeoutMillis = 5_000) {
+            composeTestRule.onAllNodesWithText("Try again").fetchSemanticsNodes().isNotEmpty()
+        }
+
+        composeTestRule.onNodeWithText("Try again")
+            .performScrollTo()
+            .assertIsDisplayed()
     }
 }
