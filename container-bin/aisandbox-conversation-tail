@@ -56,12 +56,20 @@
  *   • Main/orchestrator pane (cmdline has no --agent-name):
  *       0. sessionId-exact (preferred, current entrypoint): the restart loop now
  *          launches `claude --session-id <uuid>`, so the main pane's cmdline
- *          carries its OWN session id. Anchor main to <session-id>.jsonl EXACTLY
- *          and ONLY — never fall through to newest-mtime. Until that file exists,
- *          resolution returns null (the helper surfaces a transient no-transcript
- *          state), so a freshly-started session can NEVER adopt a foreign
- *          session's transcript from the shared slug dir. This is the UC-37
- *          session-bleed fix.
+ *          carries its OWN session id. Anchor main to <session-id>.jsonl EXACTLY.
+ *          Until that file exists, resolution returns null (the helper surfaces a
+ *          transient no-transcript state), so a freshly-started session can NEVER
+ *          adopt a foreign session's transcript from the shared slug dir. This is
+ *          the UC-37 session-bleed fix. UC-65 REFINEMENT: `/clear` makes claude
+ *          ROTATE to a brand-new <new-uuid>.jsonl in the same slug while its
+ *          cmdline --session-id (the LAUNCH id) is unchanged, so a pure exact
+ *          anchor stays pinned to the stale pre-clear file forever. So once the
+ *          launch file exists, if a STRICTLY-NEWER agentName-ABSENT transcript is
+ *          present (claude rotated past its launch session), adopt that newest file
+ *          instead (selectMainCurrent). This is still foreign-safe: a teammate file
+ *          carries agentName and is excluded, and the no-foreign-adoption-at-startup
+ *          guarantee holds because we only ever adopt a file NEWER than our own
+ *          already-existing launch transcript.
  *       1. Team active (no --session-id, old entrypoint): any teammate process in
  *          the same cwd-slug carries --parent-session-id = the orchestrator's
  *          transcript stem → anchor main to <parent-session-id>.jsonl exactly.
@@ -71,11 +79,16 @@
  *     Tiers 1–2 are retained only for backward compatibility with a pre-fix
  *     entrypoint image whose claude launch carries no --session-id; with the
  *     current entrypoint, tier 0 always wins.
- * Once anchored, the file is followed STABLY — resolution only re-runs when the
- * pane's claude PID changes — so the tail never hops onto a concurrent teammate
- * or foreign-session file. ~/.claude is bind-mounted/shared across sessions with
- * the same cwd-slug (AC23): identity-anchoring is mandatory; naive newest-mtime
- * would route a foreign session's conversation to the client.
+ * Once anchored, the file is followed STABLY — resolution re-runs when the pane's
+ * claude PID changes (entrypoint restart) OR when a same-PID transcript ROTATION
+ * is detected (UC-65: `/clear` starts a new session jsonl in-process; detectRotation
+ * spots the newer agentName-absent / same-agent file and rebaselines so post-clear
+ * turns stream again) — so the tail never hops onto a concurrent teammate or
+ * foreign-session file. ~/.claude is bind-mounted/shared across sessions with the
+ * same cwd-slug (AC23): identity-anchoring is mandatory; naive newest-mtime would
+ * route a foreign session's conversation to the client, so rotation only ever
+ * adopts a file within the pane's own identity family (agentName-absent for main,
+ * matching (agentName, teamName) for a teammate).
  */
 
 'use strict';
@@ -403,6 +416,52 @@ function selectMainTranscript(candidates, opts) {
   return selectMainNewestNoAgent(candidates);
 }
 
+/**
+ * UC-65 — pick a transcript ROTATION target for a MAIN/orchestrator pane (PURE —
+ * unit-testable). candidates: [{ path, mtimeMs, agentNamePresent }]. Returns the
+ * newest agentName-ABSENT candidate whose mtime is STRICTLY greater than
+ * `currentMtimeMs` and whose path differs from `currentPath`, or null when none.
+ *
+ * This is the signal that claude has rotated past `currentPath` (e.g. after
+ * `/clear`, which starts a fresh session jsonl while the process — and its launch
+ * --session-id — stay put). Foreign-safe: agentName-present (teammate) transcripts
+ * are excluded, so the main pane never adopts a swarm teammate's file; and the
+ * strict newer-than-current floor means a stale foreign session is never adopted.
+ */
+function selectRotatedMain(candidates, currentPath, currentMtimeMs) {
+  let best = null;
+  let bestMtime = currentMtimeMs;
+  for (const c of candidates) {
+    if (!c || c.agentNamePresent) continue;
+    if (c.path === currentPath) continue;
+    if (c.mtimeMs > bestMtime) {
+      bestMtime = c.mtimeMs;
+      best = c.path;
+    }
+  }
+  return best;
+}
+
+/**
+ * UC-65 — main resolution that FOLLOWS a `/clear` rotation (PURE — unit-testable).
+ * candidates: [{ path, stem, mtimeMs, agentNamePresent }]. Anchor by exact
+ * --session-id (the launch id); but if claude has rotated past it (a strictly-newer
+ * agentName-absent transcript exists), adopt that newest file instead — so a fresh
+ * connection AFTER `/clear` backfills the CURRENT transcript, not the stale
+ * pre-clear one. Returns null when the launch session-id file is absent, preserving
+ * the startup no-foreign-adoption guarantee (a freshly-started session shows a
+ * transient no-transcript until its OWN file appears, never a foreign one).
+ */
+function selectMainCurrent(candidates, sessionId) {
+  const exact = selectMainBySessionId(candidates, sessionId);
+  if (!exact) return null;
+  let exactMtime = -1;
+  for (const c of candidates) {
+    if (c && c.path === exact && c.mtimeMs > exactMtime) exactMtime = c.mtimeMs;
+  }
+  return selectRotatedMain(candidates, exact, exactMtime) || exact;
+}
+
 /** List top-level <slug>/*.jsonl as [{ path, stem, mtimeMs }] (impure FS read). */
 function listTopLevelTranscripts(slugDir) {
   let entries;
@@ -526,11 +585,17 @@ function resolveTranscriptForClaude(claudePid) {
 
   // Main / orchestrator pane — delegate the decision to selectMainTranscript.
   if (idn.sessionId) {
-    // Current entrypoint: anchor EXACTLY by our own --session-id. No fallthrough
-    // to newest-mtime, so we never adopt a foreign session's transcript from the
-    // shared slug dir — we show a transient no-transcript state until ours lands.
-    // (candidates already carry the { path, stem, mtimeMs } stem-match needs.)
-    return selectMainTranscript(candidates, { sessionId: idn.sessionId });
+    // Current entrypoint: anchor by our own --session-id, but FOLLOW a `/clear`
+    // rotation (UC-65) — if claude has started a newer agentName-absent session
+    // jsonl, adopt it so a fresh connection backfills the CURRENT transcript, not
+    // the stale pre-clear one. Still no foreign adoption: selectMainCurrent returns
+    // null until our own launch file exists, and only ever adopts a file NEWER than
+    // it. Enrich with agentNamePresent so the rotation filter can exclude teammates.
+    const enrichedMain = candidates.map((c) => {
+      const id = readTranscriptIdentity(c.path, ID_SCAN_BYTES);
+      return { path: c.path, stem: c.stem, mtimeMs: c.mtimeMs, agentNamePresent: id.agentNamePresent };
+    });
+    return selectMainCurrent(enrichedMain, idn.sessionId);
   }
   // Old-entrypoint degradation (no --session-id on cmdline): Tier 1 parent-anchor
   // then Tier 2 newest agentName-absent. Enrich with agentNamePresent for Tier 2.
@@ -547,6 +612,57 @@ function resolveTranscriptOnce() {
   const panePid = resolvePanePid();
   const claudePid = findClaudePid(panePid, 3);
   return resolveTranscriptForClaude(claudePid);
+}
+
+/**
+ * UC-65 — detect a same-PID transcript ROTATION for an already-anchored pane
+ * (impure orchestration over the pure selectors). The live loop re-resolves only
+ * on a claude PID change (entrypoint restart), but `/clear` rotates claude to a
+ * NEW jsonl WITHOUT a restart, so the anchor would otherwise stay pinned to the
+ * stale pre-clear file and no post-clear turns would ever stream (AC5/AC8).
+ *
+ * Returns the path claude is CURRENTLY writing when it differs from `currentPath`
+ * (→ caller rebaselines), or null when there is no rotation. Cheap on the steady
+ * state: a readdir + stat per poll, and the (heavier) per-candidate identity sniff
+ * runs ONLY when some candidate is strictly newer than the anchored file — the
+ * rotation signal. Foreign-safe: a teammate pane stays within its (agentName,
+ * teamName) family; a main pane only adopts a newer agentName-ABSENT file.
+ */
+function detectRotation(claudePid, currentPath) {
+  if (claudePid == null || !currentPath) return null;
+  const cwd = readProcLink('/proc/' + claudePid + '/cwd');
+  const slug = slugFromCwd(cwd);
+  if (!slug) return null;
+  const slugDir = path.join(ARGS.projectsDir, slug);
+  const candidates = listTopLevelTranscripts(slugDir);
+  if (candidates.length === 0) return null;
+  // Cheap pre-check: only proceed if a candidate is strictly newer than the file we
+  // are anchored to. On the steady state our own file is the freshest, so this
+  // returns immediately without sniffing any identities.
+  const cur = candidates.find((c) => c.path === currentPath);
+  const curMtime = cur ? cur.mtimeMs : -1;
+  let freshest = -1;
+  for (const c of candidates) {
+    if (c.mtimeMs > freshest) freshest = c.mtimeMs;
+  }
+  if (freshest <= curMtime) return null;
+  const idn = parseClaudeIdentity(readProc('/proc/' + claudePid + '/cmdline'));
+  if (idn.agentName) {
+    // Teammate / subagent pane — newest within the (agentName, teamName) family.
+    const enriched = candidates.map((c) => {
+      const id = readTranscriptIdentity(c.path, ID_SCAN_BYTES);
+      return { path: c.path, mtimeMs: c.mtimeMs, agentName: id.agentName, teamName: id.teamName };
+    });
+    const sel = selectAgentTranscript(enriched, idn.agentName, idn.teamName);
+    return sel && sel !== currentPath ? sel : null;
+  }
+  // Main / orchestrator pane — adopt a strictly-newer agentName-ABSENT file.
+  const enriched = candidates.map((c) => {
+    const id = readTranscriptIdentity(c.path, ID_SCAN_BYTES);
+    return { path: c.path, mtimeMs: c.mtimeMs, agentNamePresent: id.agentNamePresent };
+  });
+  const sel = selectRotatedMain(enriched, currentPath, curMtime);
+  return sel && sel !== currentPath ? sel : null;
 }
 
 /** subagents/agent-*.jsonl directory derived from the main transcript path. */
@@ -1447,10 +1563,12 @@ async function streamLoop() {
     noTranscriptEmitted = false;
   }
 
-  // Live poll loop. Resolution is re-run ONLY when the pane's claude PID changes
-  // (entrypoint restart loop → fresh claude → new transcript); otherwise the
-  // anchored file is followed stably, so the tail never hops onto a concurrent
-  // teammate or foreign-session transcript in the shared slug dir.
+  // Live poll loop. Resolution re-runs when the pane's claude PID changes
+  // (entrypoint restart loop → fresh claude → new transcript) OR when a same-PID
+  // transcript ROTATION is detected (UC-65: `/clear` starts a new session jsonl
+  // in-process). Otherwise the anchored file is followed stably, so the tail never
+  // hops onto a concurrent teammate or foreign-session transcript in the shared
+  // slug dir.
   // eslint-disable-next-line no-constant-condition
   while (true) {
     const panePid = resolvePanePid();
@@ -1462,6 +1580,17 @@ async function streamLoop() {
         const hadAnchor = mainPath != null;
         anchorClaudePid = claudePid;
         rebaseline(resolved, hadAnchor && resolved !== mainPath);
+      }
+    } else if (claudePid != null && mainPath != null) {
+      // UC-65 — same claude PID, but `/clear` (or any in-process new-session
+      // rotation) may have started a fresh transcript the PID-change guard above
+      // can't see. Follow it: rebaseline so the wiped/empty transcript renders and
+      // post-clear turns stream again (AC5/AC8). `announce` → the client (under its
+      // post-clear suppression guard) re-wipes on the backfill-start that follows.
+      const rotated = detectRotation(claudePid, mainPath);
+      if (rotated && rotated !== mainPath) {
+        anchorClaudePid = claudePid;
+        rebaseline(rotated, true);
       }
     }
 
@@ -1620,6 +1749,10 @@ module.exports = {
   selectMainNewestNoAgent,
   selectMainBySessionId,
   selectMainTranscript,
+  // UC-65 — rotation-follow seams (QA unit tests): `/clear` starts a new session
+  // jsonl in-process; these pick the rotated/current transcript foreign-safely.
+  selectRotatedMain,
+  selectMainCurrent,
   readTranscriptIdentity,
   listTopLevelTranscripts,
   makeReader,
