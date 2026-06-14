@@ -125,7 +125,8 @@ public class SessionEventFacade {
                 r.conversationName(),
                 r.working(),
                 r.pendingQuestion(),
-                r.type());
+                r.type(),
+                r.pendingQuestionText());
     }
 
     /**

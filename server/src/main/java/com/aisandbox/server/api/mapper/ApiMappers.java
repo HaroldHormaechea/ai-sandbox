@@ -29,7 +29,8 @@ public final class ApiMappers {
                 r.conversationName(),
                 r.working(),
                 r.pendingQuestion(),
-                r.type());
+                r.type(),
+                r.pendingQuestionText());
     }
 
     public static List<ApiDtos.SessionSummary> toSummaries(List<SessionRecord> rs) {

@@ -274,11 +274,15 @@ public class DockerEnumerationService {
             String conversationName = null;
             boolean working = false;
             boolean pendingQuestion = false;
+            // UC-69 — the first pending question's text (notification body), warmed
+            // from the SAME helper exec as the "?" flag; null unless a question is up.
+            String pendingQuestionText = null;
             if ("running".equals(state)) {
                 refreshConversationName(n, project);
                 conversationName = cachedConversationName(n);
                 working = cachedConversationWorking(n);
                 pendingQuestion = cachedConversationPending(n);
+                pendingQuestionText = cachedConversationPendingText(n);
             }
             out.add(new SessionRecord(
                     n,
@@ -291,7 +295,8 @@ public class DockerEnumerationService {
                     conversationName,
                     working,
                     pendingQuestion,
-                    SpecialSessions.TYPE_CLAUDE));
+                    SpecialSessions.TYPE_CLAUDE,
+                    pendingQuestionText));
         }
         out.sort((a, b) -> Integer.compare(a.n(), b.n()));
         // UC-47 — drop cached names for sessions that vanished this enumeration.
@@ -319,6 +324,11 @@ public class DockerEnumerationService {
     /** UC-49 null-safe wrapper — non-blocking read of the cached pending-question flag. */
     private boolean cachedConversationPending(int n) {
         return conversationNames != null && conversationNames.pendingQuestion(n);
+    }
+
+    /** UC-69 null-safe wrapper — non-blocking read of the cached pending-question text. */
+    private String cachedConversationPendingText(int n) {
+        return conversationNames == null ? null : conversationNames.pendingQuestionText(n);
     }
 
     /** UC-47 null-safe wrapper — prune cached names to the set of enumerated sessions. */

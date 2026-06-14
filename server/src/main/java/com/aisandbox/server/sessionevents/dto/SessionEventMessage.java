@@ -94,6 +94,11 @@ public sealed interface SessionEventMessage permits SessionEventMessage.Snapshot
      *     flips the {@link Row} record's value-equality and the UC-32 watcher emits a
      *     Delta automatically (no watcher edit needed — AC6); the client shows a "?"
      *     badge and suppresses the spinner while true (double-gated on running).
+     * @param pendingQuestionText UC-69 — the first pending question's text (the
+     *     notification body), or {@code null} when none is known. Carried so a body
+     *     change flips the {@link Row} record's value-equality and the UC-32 watcher
+     *     emits a Delta automatically (no watcher edit); the always-on client
+     *     subscription builds the local push notification from it.
      */
     record Row(
             int n,
@@ -106,10 +111,45 @@ public sealed interface SessionEventMessage permits SessionEventMessage.Snapshot
             String conversationName,
             boolean working,
             boolean pendingQuestion,
-            String type) {
+            String type,
+            String pendingQuestionText) {
 
         /**
-         * UC-62 back-compat 10-arg constructor for call sites built before this
+         * UC-69 back-compat 11-arg constructor for call sites built after UC-62 but
+         * before this use case appended {@code pendingQuestionText}. Delegates with
+         * {@code null} text. The text field participates in record value-equality, so
+         * a change to the first question's text flips equality and the UC-32 watcher
+         * emits a Delta automatically — no watcher edit.
+         */
+        public Row(
+                int n,
+                String label,
+                String tmuxTitle,
+                String state,
+                long uptimeSec,
+                int activeStreams,
+                Instant startedAt,
+                String conversationName,
+                boolean working,
+                boolean pendingQuestion,
+                String type) {
+            this(
+                    n,
+                    label,
+                    tmuxTitle,
+                    state,
+                    uptimeSec,
+                    activeStreams,
+                    startedAt,
+                    conversationName,
+                    working,
+                    pendingQuestion,
+                    type,
+                    null);
+        }
+
+        /**
+         * UC-62 back-compat 10-arg constructor for call sites built before that
          * use case appended {@code type}. Delegates with
          * {@code type=}{@link SpecialSessions#TYPE_CLAUDE}. The {@code type} field
          * participates in record value-equality, so a row's appearance /
