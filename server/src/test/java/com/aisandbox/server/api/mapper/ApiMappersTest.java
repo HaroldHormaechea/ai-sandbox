@@ -105,6 +105,56 @@ class ApiMappersTest {
         assertThat(out).extracting(ApiDtos.SessionSummary::pendingQuestion).containsExactly(true, false);
     }
 
+    // ── UC-69 — pendingQuestionText carried onto the REST DTO (AC3) ──────────
+
+    @Test
+    void toSummary_carries_the_pending_question_text() {
+        // The 12-arg record carries the first-question text; the mapper must surface
+        // it so the Android client can build the local notification body (AC3).
+        SessionRecord r = new SessionRecord(
+                3,
+                "alpha",
+                "vim",
+                "running",
+                42L,
+                1,
+                STARTED,
+                "Pick a database",
+                false,
+                true,
+                "claude",
+                "Which database should we use?");
+
+        ApiDtos.SessionSummary s = ApiMappers.toSummary(r);
+
+        assertThat(s.pendingQuestionText())
+                .as("AC3 — the first-question text reaches the REST DTO as the notification body")
+                .isEqualTo("Which database should we use?");
+        assertThat(s.pendingQuestion()).isTrue();
+    }
+
+    @Test
+    void back_compat_record_without_pending_question_text_defaults_to_null() {
+        // Every pre-UC-69 record shape (≤11 args) delegates pendingQuestionText=null,
+        // so a row built through an older shape simply carries no notification body
+        // (the server omits the field from JSON via @JsonInclude(NON_NULL)).
+        SessionRecord r = new SessionRecord(7, "d", "t", "running", 0L, 0, STARTED, null, false, false, "claude");
+
+        assertThat(ApiMappers.toSummary(r).pendingQuestionText()).isNull();
+    }
+
+    @Test
+    void toSummaries_maps_each_record_including_pending_question_text() {
+        List<ApiDtos.SessionSummary> out = ApiMappers.toSummaries(List.of(
+                new SessionRecord(
+                        1, "a", "t", "running", 0L, 0, STARTED, null, false, true, "claude", "First question?"),
+                new SessionRecord(2, "b", "t", "running", 0L, 0, STARTED, null, false, false, "claude", null)));
+
+        assertThat(out)
+                .extracting(ApiDtos.SessionSummary::pendingQuestionText)
+                .containsExactly("First question?", null);
+    }
+
     // ── UC-62 — type carried onto the REST DTO (AC6) ─────────────────────────
 
     @Test

@@ -309,6 +309,45 @@ class SessionsApiTest {
         }
     }
 
+    /**
+     * UC-69 AC3 — the server-provided `pendingQuestionText` (notification body)
+     * decodes onto [SessionSummary] over REST: a row carrying it exposes it
+     * verbatim, a row that OMITS it (the server's `@JsonInclude(NON_NULL)`)
+     * defaults to null, and an explicit null also reads null. The app-wide watcher
+     * reads this field to build the local push notification body.
+     */
+    @Test
+    fun pendingQuestionTextField_decodesFromRestAndDefaultsToNullWhenAbsent() = runTest {
+        val (server, profile) = startPinnedServer()
+        try {
+            server.enqueue(
+                MockResponse().setResponseCode(200).setBody(
+                    """
+                    [
+                      {"n":1,"label":"a","tmuxTitle":"(idle)","state":"running","uptimeSec":1,"activeStreams":0,"startedAt":null,"pendingQuestion":true,"pendingQuestionText":"Which database should we use?"},
+                      {"n":2,"label":"b","tmuxTitle":"vim","state":"running","uptimeSec":2,"activeStreams":0,"startedAt":null,"pendingQuestion":false},
+                      {"n":3,"label":"c","tmuxTitle":"(idle)","state":"running","uptimeSec":3,"activeStreams":0,"startedAt":null,"pendingQuestionText":null}
+                    ]
+                    """.trimIndent(),
+                ),
+            )
+
+            val result = apiFor(profile).list()
+
+            assertThat(result).isInstanceOf(ApiResult.Success::class.java)
+            val rows = (result as ApiResult.Success).value
+            assertThat(rows.map { it.n }).containsExactly(1, 2, 3)
+            // Present → exposed verbatim (the notification body).
+            assertThat(rows[0].pendingQuestionText).isEqualTo("Which database should we use?")
+            // Omitted (server NON_NULL) → null default.
+            assertThat(rows[1].pendingQuestionText).isNull()
+            // Explicit null → null.
+            assertThat(rows[2].pendingQuestionText).isNull()
+        } finally {
+            server.shutdown()
+        }
+    }
+
     @Test
     fun problemJsonError_mapsToHttpFailureWithCode() = runTest {
         val (server, profile) = startPinnedServer()

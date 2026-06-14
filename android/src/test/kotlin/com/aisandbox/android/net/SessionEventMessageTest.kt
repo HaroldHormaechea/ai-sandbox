@@ -174,4 +174,35 @@ class SessionEventMessageTest {
         // The live transition pending→answered reaches the client over a delta upsert.
         assertThat(delta.upserts.single().pendingQuestion).isFalse()
     }
+
+    /**
+     * UC-69 AC3 — the `pendingQuestionText` (notification body) rides the UC-32 push
+     * frames (same [SessionSummary] row type). A snapshot row carries it; a delta
+     * upsert carries the UPDATED body (the live body-change path the always-on
+     * watcher posts from); a row that omits it decodes to null (older server / no
+     * body). This is the field the app-wide PendingQuestionService builds the
+     * notification body from while the app is backgrounded (AC5).
+     */
+    @Test
+    fun snapshot_and_delta_frames_carry_the_pending_question_text() {
+        val snapshotText = """
+            {"type":"snapshot","sessions":[
+              {"n":1,"label":"build","tmuxTitle":"vim","state":"running","uptimeSec":42,"activeStreams":2,"startedAt":null,"working":false,"pendingQuestion":true,"pendingQuestionText":"Which database should we use?"},
+              {"n":2,"label":"","tmuxTitle":"(idle)","state":"running","uptimeSec":0,"activeStreams":0,"startedAt":null}
+            ]}
+        """.trimIndent()
+        val snapshot = json.decodeFromString<SessionEventMessage>(snapshotText) as SessionEventMessage.Snapshot
+        assertThat(snapshot.sessions[0].pendingQuestionText).isEqualTo("Which database should we use?")
+        // Omitted field → null (server @JsonInclude(NON_NULL)); no notification body.
+        assertThat(snapshot.sessions[1].pendingQuestionText).isNull()
+
+        val deltaText = """
+            {"type":"delta",
+             "upserts":[{"n":1,"label":"build","tmuxTitle":"vim","state":"running","uptimeSec":50,"activeStreams":2,"startedAt":null,"working":false,"pendingQuestion":true,"pendingQuestionText":"A new distinct question?"}],
+             "removed":[]}
+        """.trimIndent()
+        val delta = json.decodeFromString<SessionEventMessage>(deltaText) as SessionEventMessage.Delta
+        // The live body change reaches the client over a delta upsert → notification body updates.
+        assertThat(delta.upserts.single().pendingQuestionText).isEqualTo("A new distinct question?")
+    }
 }

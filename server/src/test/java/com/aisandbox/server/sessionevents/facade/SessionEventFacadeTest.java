@@ -159,6 +159,62 @@ class SessionEventFacadeTest {
                 .isNotEqualTo(notPending);
     }
 
+    /**
+     * UC-69 AC3 — the new {@code pendingQuestionText} (the notification body) flows
+     * verbatim from the {@link SessionRecord} through {@code toRow} onto the wire
+     * {@link Row}, and a {@code null} body round-trips as {@code null}. The text
+     * also participates in the {@code Row}'s value-equality (see
+     * {@link #a_pending_question_text_change_alone_changes_row_value_equality()}),
+     * so the always-on client subscription receives the body over snapshot + delta.
+     */
+    @Test
+    void snapshot_carries_the_pending_question_text_through_to_the_wire_row() throws IOException {
+        Instant started = Instant.parse("2026-06-05T10:15:30Z");
+        when(sessionFacade.listSessions())
+                .thenReturn(List.of(
+                        new SessionRecord(
+                                1,
+                                "build",
+                                "vim",
+                                "running",
+                                42L,
+                                2,
+                                started,
+                                "Pick a database",
+                                false,
+                                true,
+                                "claude",
+                                "Which database should we use?"),
+                        new SessionRecord(
+                                2, "", "(idle)", "running", 0L, 0, started, null, false, false, "claude", null)));
+
+        Snapshot snapshot = facade.snapshot();
+
+        assertThat(snapshot.sessions().get(0).pendingQuestionText())
+                .as("AC3 — the first-question text flows to the wire row as the notification body")
+                .isEqualTo("Which database should we use?");
+        assertThat(snapshot.sessions().get(1).pendingQuestionText()).isNull();
+    }
+
+    /**
+     * UC-69 — a pending-question-TEXT flip alone (every other field identical)
+     * changes the {@link Row}'s value-equality, which is exactly what the UC-32
+     * watcher diffs on. Proves a NEW first-question body auto-emits a Delta (so a
+     * backgrounded client's notification body updates) with no watcher change.
+     */
+    @Test
+    void a_pending_question_text_change_alone_changes_row_value_equality() {
+        Instant started = Instant.parse("2026-06-05T10:15:30Z");
+        Row oldBody =
+                new Row(1, "build", "vim", "running", 42L, 2, started, "Pick a database", false, true, "claude", "A?");
+        Row newBody =
+                new Row(1, "build", "vim", "running", 42L, 2, started, "Pick a database", false, true, "claude", "B?");
+
+        assertThat(newBody)
+                .as("a body change alone makes the row unequal (drives the delta)")
+                .isNotEqualTo(oldBody);
+    }
+
     @Test
     void snapshot_swallows_ioexception_and_serves_an_empty_snapshot() throws IOException {
         when(sessionFacade.listSessions()).thenThrow(new IOException("docker enumeration down"));

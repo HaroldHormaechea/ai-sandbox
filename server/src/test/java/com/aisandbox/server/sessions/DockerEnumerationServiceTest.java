@@ -1225,4 +1225,74 @@ class DockerEnumerationServiceTest {
                 .as("the pre-UC-49 ctor leaves every row not-pending (no badge)")
                 .isFalse();
     }
+
+    /**
+     * UC-69 AC3 — a RUNNING session whose cached pending-question text is warm
+     * carries that body on its {@link SessionRecord}, warmed from the SAME helper
+     * exec as the "?" flag. The cached read is non-blocking (the same warming
+     * refresh that fetches the name + flag fetches the body).
+     */
+    @Test
+    void running_session_carries_the_cached_pending_question_text() throws Exception {
+        ProcessExecutor exec = runningSession(3);
+        ConversationNameService names = mock(ConversationNameService.class);
+        when(names.pendingQuestion(3)).thenReturn(true);
+        when(names.pendingQuestionText(3)).thenReturn("Which database should we use?");
+
+        DockerEnumerationService svc = new DockerEnumerationService(exec, new TerminatingSessions(), names);
+        SessionRecord r = svc.enumerate().get(0);
+
+        assertThat(r.state()).isEqualTo("running");
+        assertThat(r.pendingQuestionText())
+                .as("AC3 — a running session with a warm body carries it as the notification text")
+                .isEqualTo("Which database should we use?");
+        verify(names).pendingQuestionText(3);
+    }
+
+    /**
+     * UC-69 AC8 — a NON-running (paused) session never reads the pending-question
+     * text and always reports {@code pendingQuestionText=null}: a backgrounded
+     * device never builds a notification for a paused / stopped row, and a stale
+     * cached body can never race a non-running override.
+     */
+    @Test
+    void paused_session_never_reads_pending_text_and_reports_null() throws Exception {
+        ProcessExecutor exec = mock(ProcessExecutor.class);
+        when(exec.run(
+                        argThat(argv -> argv != null && argv.size() >= 3 && "ls".equals(argv.get(2))),
+                        any(),
+                        any(),
+                        any()))
+                .thenReturn(new ProcessExecutor.Result(0, "[{\"Name\":\"ai-sandbox-13\"}]", ""));
+        when(exec.run(argThat(argv -> argv != null && argv.contains("ps")), any(), any(), any()))
+                .thenReturn(new ProcessExecutor.Result(0, "paused-cid\n", ""));
+        when(exec.run(argThat(argv -> argv != null && argv.contains("inspect")), any(), any()))
+                .thenReturn(new ProcessExecutor.Result(0, "lbl|paused|false", ""));
+        ConversationNameService names = mock(ConversationNameService.class);
+
+        DockerEnumerationService svc = new DockerEnumerationService(exec, new TerminatingSessions(), names);
+        SessionRecord r = svc.enumerate().get(0);
+
+        assertThat(r.state()).isEqualTo("paused");
+        assertThat(r.pendingQuestionText())
+                .as("AC8 — a non-running session never carries a notification body")
+                .isNull();
+        verify(names, never()).pendingQuestionText(13);
+    }
+
+    /**
+     * UC-69 back-compat — the {@link TerminatingSessions}-only ctor (no name
+     * service) leaves every row {@code pendingQuestionText=null} without an NPE.
+     */
+    @Test
+    void null_name_service_back_compat_ctor_yields_no_pending_text_without_npe() throws Exception {
+        ProcessExecutor exec = runningSession(5);
+
+        DockerEnumerationService svc = new DockerEnumerationService(exec, new TerminatingSessions());
+        SessionRecord r = svc.enumerate().get(0);
+
+        assertThat(r.pendingQuestionText())
+                .as("the no-name-service ctor leaves every row without a notification body")
+                .isNull();
+    }
 }

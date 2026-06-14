@@ -1919,3 +1919,71 @@ test('UC-55 parseFocusedTab — empty / null / non-string input returns null (ro
   assert.strictEqual(helper.parseFocusedTab(undefined), null);
   assert.strictEqual(helper.parseFocusedTab(42), null);
 });
+
+// ════════════════════════════════════════════════════════════════════════════
+// UC-69 — firstQuestionText: the notification BODY (line 4) seam.
+//
+// firstQuestionText(parsed) takes the structured prompt from parsePendingPrompt
+// and yields the FIRST question's text (AC3) for the local push-notification
+// body: the focused question's prompt, falling back to its header when the prompt
+// line was not recovered (a header-only wizard item). Sanitised + codepoint-
+// capped. Returns '' when there is no usable text, so conversationName OMITS line
+// 4 and the server RETAINS its prior body (failure policy (b)).
+// ════════════════════════════════════════════════════════════════════════════
+
+test('UC-69 firstQuestionText — a single-question pane yields the focused question text (AC3, pending+text → emit)', () => {
+  const parsed = helper.parsePendingPrompt(UC50_REAL_SINGLE_SELECT);
+  assert.strictEqual(helper.firstQuestionText(parsed), 'Which database should we use?');
+});
+
+test('UC-69 firstQuestionText — a multi-QUESTION batch uses the FIRST question, header-only (AC3)', () => {
+  // parsePendingPrompt yields header-only items for a multi-question batch (only the
+  // focused tab's options are recovered), so the body falls back to the FIRST
+  // question's header ("Color") rather than its full prompt — still the first
+  // question's identity (AC3), and never an empty body for a multi-question wizard.
+  const parsed = helper.parsePendingPrompt(UC50_REAL_MULTI_QUESTION);
+  assert.deepStrictEqual(
+    parsed.questions.map((q) => q.header),
+    ['Color', 'Size'],
+  );
+  assert.strictEqual(helper.firstQuestionText(parsed), 'Color');
+});
+
+test('UC-69 firstQuestionText — falls back to the header when the first item is header-only', () => {
+  // A header-only item (no recovered prompt line) still yields a non-empty body via
+  // its header, so a multi-question wizard never ships an empty notification body.
+  const parsed = { kind: 'questions', questions: [{ header: 'Color', question: '' }] };
+  assert.strictEqual(helper.firstQuestionText(parsed), 'Color');
+});
+
+test('UC-69 firstQuestionText — a plan-approval prompt has no question text → "" (omit line 4)', () => {
+  // kind=plan carries questions=[] → no body. conversationName omits line 4, so the
+  // server retains its prior text rather than clobbering it (failure policy (b)).
+  const parsed = helper.parsePendingPrompt(UC50_PLAN_APPROVAL);
+  assert.strictEqual(parsed.kind, 'plan');
+  assert.strictEqual(helper.firstQuestionText(parsed), '');
+});
+
+test('UC-69 firstQuestionText — not-pending / null / malformed input yields "" (no line 4)', () => {
+  // A non-pending pane parses to null → no body (server retains / shows none).
+  assert.strictEqual(helper.firstQuestionText(helper.parsePendingPrompt(UC49_WORKING_PANE)), '');
+  assert.strictEqual(helper.firstQuestionText(null), '');
+  assert.strictEqual(helper.firstQuestionText(undefined), '');
+  assert.strictEqual(helper.firstQuestionText({ kind: 'questions', questions: [] }), '');
+  assert.strictEqual(helper.firstQuestionText({ kind: 'questions' }), '');
+  assert.strictEqual(helper.firstQuestionText({}), '');
+});
+
+test('UC-69 firstQuestionText — body is sanitised to one line and codepoint-capped', () => {
+  // A pathological multi-line / over-long prompt must collapse to a single line and
+  // cap at CONVERSATION_NAME_MAX_CP (defence in depth; the server caps again).
+  const longLine = 'q'.repeat(helper.CONVERSATION_NAME_MAX_CP + 50);
+  const parsed = { kind: 'questions', questions: [{ question: 'line one\n   line two   \t' + longLine }] };
+  const body = helper.firstQuestionText(parsed);
+  assert.ok(!body.includes('\n'), 'no embedded newlines');
+  assert.ok(!body.includes('\t'), 'no embedded tabs');
+  assert.ok(
+    [...body].length <= helper.CONVERSATION_NAME_MAX_CP,
+    'body is capped at CONVERSATION_NAME_MAX_CP codepoints',
+  );
+});

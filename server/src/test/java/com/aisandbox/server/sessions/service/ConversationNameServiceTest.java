@@ -700,4 +700,222 @@ class ConversationNameServiceTest {
             svc.shutdown();
         }
     }
+
+    // ── UC-69 — pending-question TEXT (line 4) helper + tri-state lifecycle ────
+
+    @Test
+    void fourthLine_returns_the_fourth_newline_delimited_line_or_null() {
+        // Full four-line tuple → line 4 is the notification body.
+        assertThat(ConversationNameService.fourthLine("name\nworking\npending-question\nPick a database"))
+                .isEqualTo("Pick a database");
+        // A trailing 5th line is ignored — only line 4 is the body.
+        assertThat(ConversationNameService.fourthLine("name\nidle\npending-question\nBody text\ntrailing"))
+                .isEqualTo("Body text");
+        // Pre-UC-69 three-line output (no body emitted) → no fourth line.
+        assertThat(ConversationNameService.fourthLine("name\nworking\npending-question"))
+                .isNull();
+        // Two-line / one-line legacy shapes → null.
+        assertThat(ConversationNameService.fourthLine("name\nworking")).isNull();
+        assertThat(ConversationNameService.fourthLine("only-one-line")).isNull();
+        assertThat(ConversationNameService.fourthLine(null)).isNull();
+        // Blank earlier lines are fine — the body still rides line 4.
+        assertThat(ConversationNameService.fourthLine("\nidle\npending-question\nThe body"))
+                .isEqualTo("The body");
+    }
+
+    @Test
+    void pendingQuestionText_is_null_before_any_refresh() {
+        ProcessExecutor exec = mock(ProcessExecutor.class);
+        ConversationNameService svc = new ConversationNameService(exec);
+        try {
+            assertThat(svc.pendingQuestionText(1)).isNull();
+        } finally {
+            svc.shutdown();
+        }
+    }
+
+    /**
+     * UC-69 AC3 — a derive whose line 3 is {@code pending-question} AND whose line
+     * 4 carries a body stores the first-question text, readable via the
+     * non-blocking {@link ConversationNameService#pendingQuestionText(int)}. The
+     * "?" flag and the body ride the SAME derivation.
+     */
+    @Test
+    void a_pending_derivation_with_a_body_stores_the_pending_question_text() throws Exception {
+        ProcessExecutor exec = mock(ProcessExecutor.class);
+        when(exec.run(any(), any(), any(), any()))
+                .thenReturn(new ProcessExecutor.Result(
+                        0, "Pick a database\nworking\npending-question\nWhich database should we use?\n", ""));
+        ConversationNameService svc = new ConversationNameService(exec);
+        try {
+            svc.refreshAsync(3, "ai-sandbox-3");
+            await().atMost(POLL).untilAsserted(() -> {
+                assertThat(svc.pendingQuestion(3)).isTrue();
+                assertThat(svc.pendingQuestionText(3)).isEqualTo("Which database should we use?");
+            });
+        } finally {
+            svc.shutdown();
+        }
+    }
+
+    /**
+     * UC-69 failure policy (b) — a derive that is STILL pending (line 3
+     * {@code pending-question}) but OMITS line 4 (a parse/capture miss while the
+     * question is up) RETAINS the prior body rather than blanking it: a single
+     * miss never empties an otherwise-good notification body.
+     */
+    @Test
+    void a_pending_derivation_without_a_body_retains_the_prior_text() throws Exception {
+        ProcessExecutor exec = mock(ProcessExecutor.class);
+        when(exec.run(any(), any(), any(), any()))
+                .thenReturn(new ProcessExecutor.Result(0, "Pick a database\nidle\npending-question\nFirst body\n", ""))
+                .thenReturn(new ProcessExecutor.Result(
+                        0, "Pick a database\nidle\npending-question\n", "")); // line 4 omitted, still pending
+        ConversationNameService svc = new ConversationNameService(exec);
+        try {
+            svc.refreshAsync(7, "ai-sandbox-7");
+            await().atMost(POLL)
+                    .untilAsserted(() -> assertThat(svc.pendingQuestionText(7)).isEqualTo("First body"));
+
+            // Second derive: still pending, but the helper omitted the body → retain.
+            svc.refreshAsync(7, "ai-sandbox-7");
+            await().atMost(POLL).untilAsserted(() -> verify(exec, times(2)).run(any(), any(), any(), any()));
+            assertThat(svc.pendingQuestionText(7))
+                    .as("failure policy (b) — a missing line 4 while pending retains the prior body")
+                    .isEqualTo("First body");
+        } finally {
+            svc.shutdown();
+        }
+    }
+
+    /**
+     * UC-69 — a NEW distinct body on a still-pending session OVERWRITES the prior
+     * text (a fresh first-question text replaces the old notification body).
+     */
+    @Test
+    void a_fresh_body_while_still_pending_overwrites_the_prior_text() throws Exception {
+        ProcessExecutor exec = mock(ProcessExecutor.class);
+        when(exec.run(any(), any(), any(), any()))
+                .thenReturn(new ProcessExecutor.Result(0, "name\nidle\npending-question\nOld question?\n", ""))
+                .thenReturn(new ProcessExecutor.Result(0, "name\nidle\npending-question\nNew question?\n", ""));
+        ConversationNameService svc = new ConversationNameService(exec);
+        try {
+            svc.refreshAsync(4, "ai-sandbox-4");
+            await().atMost(POLL)
+                    .untilAsserted(() -> assertThat(svc.pendingQuestionText(4)).isEqualTo("Old question?"));
+
+            svc.refreshAsync(4, "ai-sandbox-4");
+            await().atMost(POLL)
+                    .untilAsserted(() -> assertThat(svc.pendingQuestionText(4)).isEqualTo("New question?"));
+        } finally {
+            svc.shutdown();
+        }
+    }
+
+    /**
+     * UC-69 — when the question clears (line 3 {@code none}) the body is dropped
+     * alongside the flag, so a stale notification body can never survive past the
+     * "?" badge.
+     */
+    @Test
+    void a_none_derivation_drops_the_pending_question_text() throws Exception {
+        ProcessExecutor exec = mock(ProcessExecutor.class);
+        when(exec.run(any(), any(), any(), any()))
+                .thenReturn(new ProcessExecutor.Result(0, "name\nidle\npending-question\nAnswer me\n", ""))
+                .thenReturn(new ProcessExecutor.Result(0, "name\nworking\nnone\n", ""));
+        ConversationNameService svc = new ConversationNameService(exec);
+        try {
+            svc.refreshAsync(5, "ai-sandbox-5");
+            await().atMost(POLL)
+                    .untilAsserted(() -> assertThat(svc.pendingQuestionText(5)).isEqualTo("Answer me"));
+
+            svc.refreshAsync(5, "ai-sandbox-5");
+            await().atMost(POLL).untilAsserted(() -> {
+                assertThat(svc.pendingQuestion(5)).isFalse();
+                assertThat(svc.pendingQuestionText(5)).isNull();
+            });
+        } finally {
+            svc.shutdown();
+        }
+    }
+
+    /**
+     * UC-69 failure policy (a) — an exec FAILURE (null SessionSignals) touches
+     * nothing, so a previously-stored body survives a transient docker blip.
+     */
+    @Test
+    void an_exec_failure_leaves_the_pending_question_text_untouched() throws Exception {
+        ProcessExecutor exec = mock(ProcessExecutor.class);
+        when(exec.run(any(), any(), any(), any()))
+                .thenReturn(new ProcessExecutor.Result(0, "name\nidle\npending-question\nKeep me\n", ""))
+                .thenReturn(new ProcessExecutor.Result(1, "", "boom")); // exec failure
+        ConversationNameService svc = new ConversationNameService(exec);
+        try {
+            svc.refreshAsync(8, "ai-sandbox-8");
+            await().atMost(POLL)
+                    .untilAsserted(() -> assertThat(svc.pendingQuestionText(8)).isEqualTo("Keep me"));
+
+            svc.refreshAsync(8, "ai-sandbox-8");
+            await().atMost(POLL).untilAsserted(() -> verify(exec, times(2)).run(any(), any(), any(), any()));
+            assertThat(svc.pendingQuestionText(8))
+                    .as("an exec failure must not drop a stored notification body")
+                    .isEqualTo("Keep me");
+        } finally {
+            svc.shutdown();
+        }
+    }
+
+    /**
+     * UC-69 — the server re-caps a pathologically long body at 120 codepoints
+     * (surrogate-safe), mirroring the conversation-name cap (defence in depth).
+     */
+    @Test
+    void server_recaps_a_pathologically_long_pending_question_text() throws Exception {
+        ProcessExecutor exec = mock(ProcessExecutor.class);
+        String longBody = "q".repeat(500);
+        when(exec.run(any(), any(), any(), any()))
+                .thenReturn(new ProcessExecutor.Result(0, "name\nidle\npending-question\n" + longBody + "\n", ""));
+        ConversationNameService svc = new ConversationNameService(exec);
+        try {
+            svc.refreshAsync(6, "ai-sandbox-6");
+            await().atMost(POLL).untilAsserted(() -> {
+                String body = svc.pendingQuestionText(6);
+                assertThat(body).isNotNull();
+                assertThat(body.codePointCount(0, body.length()))
+                        .isEqualTo(ConversationNameService.MAX_NAME_CODEPOINTS);
+            });
+        } finally {
+            svc.shutdown();
+        }
+    }
+
+    /**
+     * UC-69 — {@code prune} drops the pending-question text for a vanished session,
+     * so a re-used session number cannot inherit a stale notification body.
+     */
+    @Test
+    void prune_clears_the_pending_question_text_for_vanished_sessions() throws Exception {
+        ProcessExecutor exec = mock(ProcessExecutor.class);
+        when(exec.run(any(), any(), any(), any()))
+                .thenReturn(new ProcessExecutor.Result(0, "alive\nidle\npending-question\nbody\n", ""));
+        ConversationNameService svc = new ConversationNameService(exec);
+        try {
+            svc.refreshAsync(1, "ai-sandbox-1");
+            svc.refreshAsync(2, "ai-sandbox-2");
+            await().atMost(POLL).untilAsserted(() -> {
+                assertThat(svc.pendingQuestionText(1)).isEqualTo("body");
+                assertThat(svc.pendingQuestionText(2)).isEqualTo("body");
+            });
+
+            svc.prune(Set.of(1));
+            assertThat(svc.pendingQuestionText(1))
+                    .as("surviving session keeps its body")
+                    .isEqualTo("body");
+            assertThat(svc.pendingQuestionText(2))
+                    .as("vanished session's body is cleared")
+                    .isNull();
+        } finally {
+            svc.shutdown();
+        }
+    }
 }
