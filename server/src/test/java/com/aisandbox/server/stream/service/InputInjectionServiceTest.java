@@ -506,6 +506,170 @@ class InputInjectionServiceTest {
         assertThat(keySeq(calls)).containsExactly("Enter", "Enter", "Enter", "Enter");
     }
 
+    // ──────────────── UC-75 — newline-safe "Other" free-text injection ────────────────
+    //
+    // THE bug: the answer free-text path injected the "Other" text RAW (sendLiteral), so an
+    // embedded newline landed as a bare Enter on the "Type something" row, which COMMITS/DECLINES
+    // the ask early → blocked prompt → stuck spinner. The fix routes every free-text branch through
+    // typeMultiline (the verified composer line-walk): split on '\n', emit each non-empty segment as
+    // a LITERAL, insert C-j (LF, NOT submit) BETWEEN segments, and send NO trailing submit (the
+    // caller still owns the committing Enter / Enter-Space-Tab choreography). The executor is MOCKED,
+    // so every test pins the EXACT ordered keystroke sequence AND asserts no '\n' ever rides inside a
+    // single LIT token and no premature Enter sits between segments.
+
+    /** UC-75 guard: no captured literal (`-l -- <text>`) may contain a raw newline. */
+    private static void assertNoRawNewlineInLiterals(List<List<String>> calls) {
+        assertThat(calls)
+                .as("UC-75: a raw '\\n' inside a LIT would land as a bare Enter → commit/decline the ask")
+                .allSatisfy(c -> {
+                    if (c.contains("-l")) {
+                        assertThat(c.get(c.size() - 1)).doesNotContain("\n");
+                    }
+                });
+    }
+
+    @Test
+    void uc75_single_select_other_multiline_walks_Cj_between_lines_no_raw_newline_no_premature_Enter()
+            throws Exception {
+        // AC2/AC3 — single-select free-text "Other" (otherIndex=2) with a two-line answer. The walk
+        // is Down×2 to the "Type something" row, then typeMultiline: LIT(line a), C-j, LIT(line b),
+        // and ONE final committing Enter. The newline is delivered as C-j (NOT a bare Enter), so the
+        // ask is committed exactly once with the full multi-line text.
+        svc.injectAnswer(3, InjectTarget.main(), 3, false, List.of(2), 2, "line a\nline b");
+
+        List<List<String>> calls = capturedArgvs(6);
+        assertThat(keySeq(calls)).containsExactly("Down", "Down", "LIT:line a", "C-j", "LIT:line b", "Enter");
+        assertNoRawNewlineInLiterals(calls);
+        // Exactly ONE Enter — the single commit. No premature Enter between the two segments.
+        assertThat(calls.stream().filter(c -> "Enter".equals(tail(c, 1))).count())
+                .as("AC2: the multi-line answer commits exactly once")
+                .isEqualTo(1);
+        assertThat(calls.stream().filter(c -> "C-j".equals(tail(c, 1))).count())
+                .as("AC2: one C-j inserts the single interior newline without submitting")
+                .isEqualTo(1);
+    }
+
+    @Test
+    void uc75_single_select_other_singleline_unchanged_no_Cj() throws Exception {
+        // AC1 — a single-LINE "Other" answer behaves exactly as before: walk + LIT + Enter, with NO
+        // C-j (nothing to separate). Regression guard so the newline-safe rewrite did not perturb the
+        // common single-line path.
+        svc.injectAnswer(3, InjectTarget.main(), 3, false, List.of(2), 2, "just one line");
+
+        List<List<String>> calls = capturedArgvs(4);
+        assertThat(keySeq(calls)).containsExactly("Down", "Down", "LIT:just one line", "Enter");
+        assertThat(calls.stream().filter(c -> "C-j".equals(tail(c, 1))).count())
+                .as("a single-line answer emits no C-j")
+                .isZero();
+    }
+
+    @Test
+    void uc75_single_select_other_blank_interior_line_skips_literal_but_keeps_Cj() throws Exception {
+        // Pitfall — a blank/whitespace-only INTERIOR line must be skipped for CONTENT but still
+        // advance with C-j (identical to injectComposer). "a\n\nb" → LIT(a), C-j, C-j, LIT(b): the
+        // empty middle segment emits NO literal and NO Enter (a stray Enter on an empty segment would
+        // decline the ask — the exact failure this UC fixes).
+        svc.injectAnswer(3, InjectTarget.main(), 3, false, List.of(2), 2, "a\n\nb");
+
+        List<List<String>> calls = capturedArgvs(7);
+        assertThat(keySeq(calls)).containsExactly("Down", "Down", "LIT:a", "C-j", "C-j", "LIT:b", "Enter");
+        assertNoRawNewlineInLiterals(calls);
+        assertThat(calls.stream().filter(c -> "Enter".equals(tail(c, 1))).count())
+                .as("no stray Enter on the empty interior segment — only the one committing Enter")
+                .isEqualTo(1);
+    }
+
+    @Test
+    void uc75_single_question_multiSelect_other_multiline_types_Cj_then_commit_choreography() throws Exception {
+        // AC2/AC3 — single-question multiSelect + "Other" (the injectAnswer review-confirm path) with a
+        // multi-line custom answer. Option 0 toggled, then at the "Type something" row (otherIndex=2)
+        // the text is typed newline-safe: LIT(line a), C-j, LIT(line b), then the UC-44 commit dance
+        // (Enter commits the typed option, Space selects it, Tab focuses + Enter activates the in-pane
+        // button, and a final Enter confirms the single-question review screen). The interior newline
+        // rides as C-j — never a bare Enter that would decline the ask mid-type.
+        svc.injectAnswer(3, InjectTarget.main(), 3, true, List.of(0, 2), 2, "line a\nline b");
+
+        List<List<String>> calls = capturedArgvs(11);
+        assertThat(keySeq(calls))
+                .containsExactly(
+                        "Space",
+                        "Down",
+                        "Down",
+                        "LIT:line a",
+                        "C-j",
+                        "LIT:line b",
+                        "Enter",
+                        "Space",
+                        "Tab",
+                        "Enter",
+                        "Enter");
+        assertNoRawNewlineInLiterals(calls);
+        // The literal segments are sent verbatim, each as a single argv element.
+        assertThat(calls).anySatisfy(c -> assertThat(c).containsSequence("-l", "--", "line a"));
+        assertThat(calls).anySatisfy(c -> assertThat(c).containsSequence("-l", "--", "line b"));
+    }
+
+    @Test
+    void uc75_batch_single_select_other_multiline_is_newline_safe() throws Exception {
+        // AC3 — the BATCH path (commitKey == "Tab") single-select "Other" with a multi-line answer.
+        // Down×2 to the row, typeMultiline (LIT, C-j, LIT), the per-question committing Enter, then
+        // injectAnswerBatch's ONE trailing Enter submits the sheet. No raw newline, no premature Enter.
+        svc.injectAnswerBatch(
+                3, InjectTarget.main(), List.of(new BatchAnswerSpec(3, false, List.of(2), 2, "line a\nline b")));
+
+        List<List<String>> calls = capturedArgvs(7);
+        assertThat(keySeq(calls)).containsExactly("Down", "Down", "LIT:line a", "C-j", "LIT:line b", "Enter", "Enter");
+        assertNoRawNewlineInLiterals(calls);
+    }
+
+    @Test
+    void uc75_batch_multiSelect_other_multiline_is_newline_safe() throws Exception {
+        // AC2/AC3 — THE load-bearing cell: the BATCH multiSelect + "Other" UC-44 choreography with a
+        // multi-line custom answer. Space on option 0, walk Down to the "Type something" row, type the
+        // text newline-safe (LIT, C-j, LIT), Enter (commit the typed option), Space (select it), Tab
+        // (focus the in-pane button) + Enter (activate it), then the batch's ONE trailing Enter submits.
+        // The interior newline is C-j — never the bare Enter that the raw-inject bug produced.
+        svc.injectAnswerBatch(
+                3, InjectTarget.main(), List.of(new BatchAnswerSpec(3, true, List.of(0, 2), 2, "line a\nline b")));
+
+        List<List<String>> calls = capturedArgvs(11);
+        assertThat(keySeq(calls))
+                .containsExactly(
+                        "Space",
+                        "Down",
+                        "Down",
+                        "LIT:line a",
+                        "C-j",
+                        "LIT:line b",
+                        "Enter",
+                        "Space",
+                        "Tab",
+                        "Enter",
+                        "Enter");
+        assertNoRawNewlineInLiterals(calls);
+        // The newline must NOT have been injected as a raw multi-line literal in one shot.
+        assertThat(calls).noneSatisfy(c -> assertThat(c).containsSequence("-l", "--", "line a\nline b"));
+    }
+
+    @Test
+    void uc75_batch_multiSelect_other_three_line_answer_emits_two_Cj() throws Exception {
+        // AC2 — a THREE-line "Other" answer in the batch multiSelect path inserts exactly TWO C-j
+        // (one per interior boundary) and never a bare Enter between segments. Guards the loop bound
+        // (C-j between, not after, the last line) at >2 lines.
+        svc.injectAnswerBatch(
+                3, InjectTarget.main(), List.of(new BatchAnswerSpec(3, true, List.of(0, 2), 2, "a\nb\nc")));
+
+        List<List<String>> calls = capturedArgvs(13);
+        assertThat(keySeq(calls))
+                .containsExactly(
+                        "Space", "Down", "Down", "LIT:a", "C-j", "LIT:b", "C-j", "LIT:c", "Enter", "Space", "Tab",
+                        "Enter", "Enter");
+        assertThat(calls.stream().filter(c -> "C-j".equals(tail(c, 1))).count())
+                .as("two interior newlines → exactly two C-j")
+                .isEqualTo(2);
+        assertNoRawNewlineInLiterals(calls);
+    }
+
     // ──────────────────────── UC-55 — read-only wizard-tab recovery walk ──────
     // The multi-question option recovery steps the live pane to READ each tab's options.
     // LOCKED CONDITION 3 (the load-bearing safety invariant): the walk may emit ONLY the
