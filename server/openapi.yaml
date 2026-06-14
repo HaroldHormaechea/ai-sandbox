@@ -232,6 +232,20 @@ paths:
           description: clean.sh exited non-zero.
           content:
             application/problem+json: {}
+  /v1/models:
+    get:
+      tags:
+      - model-controller
+      operationId: list_2
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ModelSummary"
   /v1/healthz:
     get:
       tags:
@@ -398,6 +412,18 @@ components:
           type: array
           items:
             type: string
+    ModelSummary:
+      type: object
+      description: UC-66 — an advertised Claude model returned by GET /v1/models.
+      properties:
+        id:
+          type: string
+          description: Model id/alias sent to Claude Code via `/model <id>`.
+          example: opus
+        label:
+          type: string
+          description: Human-readable label for the model picker.
+          example: Opus 4.8
     ClientSummary:
       type: object
       description: Item in GET /v1/clients.
