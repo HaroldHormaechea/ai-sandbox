@@ -102,6 +102,20 @@
     <string name="notification_action_open">Open</string>
     <string name="notification_action_disconnect">Disconnect</string>
 
+    <!-- UC-69 — pending-question push notifications -->
+    <!-- HIGH channel: the per-session "a session is asking you something" alert. -->
+    <string name="pending_question_channel_id">pending-questions</string>
+    <string name="pending_question_channel_name">Pending questions</string>
+    <string name="pending_question_channel_description">Alerts when a session asks you a question and is waiting for an answer.</string>
+    <!-- Body used when a question is up but its text could not be read. -->
+    <string name="pending_question_fallback_body">A session is waiting for your answer.</string>
+    <!-- LOW channel: the ongoing foreground-service notification for the watcher. -->
+    <string name="question_watcher_channel_id">question-watcher</string>
+    <string name="question_watcher_channel_name">Question watcher</string>
+    <string name="question_watcher_channel_description">Ongoing notification while ai-sandbox watches for sessions asking questions in the background.</string>
+    <string name="question_watcher_title">Watching for questions</string>
+    <string name="question_watcher_text">You\'ll be notified when a session needs an answer.</string>
+
     <!-- Battery optimization prompt (AC23) -->
     <string name="battery_opt_title">Keep terminal alive in background?</string>
     <string name="battery_opt_body">Android may kill the terminal stream on long idle periods. Exempting ai-sandbox from battery optimization keeps the WebSocket attached while the screen is locked.</string>

@@ -135,10 +135,13 @@ correct (if not live) state — no crash, no stuck spinner.
 
 ## Lifecycle / battery
 
-The subscription is **foreground-bound**: the client opens it when the
-sessions screen is started and closes it when the screen stops, so the
-socket is not held open in the background (distinct from the terminal
-stream's intentionally long-lived foreground-service socket).
+The sessions screen's subscription is **foreground-bound**: the client opens it
+when the sessions screen is started and closes it when the screen stops, so that
+socket is not held open in the background. UC-69 added a **second**, app-wide
+subscription owned by a `dataSync` foreground service (the pending-question
+watcher), which is intentionally long-lived so a backgrounded device can still
+notice a session asking a question — analogous to the terminal stream's
+foreground-service socket. A single device therefore holds up to two feeds.
 
 ## WebSocket close-code matrix
 
@@ -154,7 +157,7 @@ stream's intentionally long-lived foreground-service socket).
 
 | Cap                                   | Default | Notes                                            |
 |---------------------------------------|---------|--------------------------------------------------|
-| Per-client (fingerprint) subscriptions| 4       | A status feed is cheap; this is a light guard, **not** the terminal-stream per-client cap (10). Cap exceeded → close 1013. |
+| Per-client (fingerprint) subscriptions| 20      | A status feed is cheap; this is a light guard, **not** the terminal-stream per-client cap (10). Raised from 4 in UC-69 because a single device now holds two feeds (sessions screen + pending-question watcher). Cap exceeded → close 1013. |
 | Reconcile interval                    | 1 s     | Subscriber-gated; no enumeration when nobody is listening. |
 
 > The cap and interval are constants today; they may move to

@@ -75,7 +75,17 @@ public final class ApiDtos {
                                     + " conversation view).",
                             allowableValues = {"claude", "server-ssh"},
                             defaultValue = "claude")
-                    String type) {}
+                    String type,
+            @Schema(
+                            description = "UC-69 — the first pending question's text, when the session's main"
+                                    + " pane is showing an AskUserQuestion awaiting an answer (the first question"
+                                    + " when several are raised together). The client uses it as the body of the"
+                                    + " local push notification it posts on the pending transition, deep-linking"
+                                    + " into the conversation. Omitted from the JSON when null (class-level"
+                                    + " @JsonInclude(NON_NULL)): an idle / working / non-running session, or one"
+                                    + " whose body was not parseable, simply has no field. Derived from the"
+                                    + " visible pane, not the transcript.")
+                    String pendingQuestionText) {}
 
     @Schema(description = "Detail returned by GET /v1/sessions/{n}.")
     public record SessionDetailDto(

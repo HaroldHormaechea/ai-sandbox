@@ -151,6 +151,24 @@ fun AiSandboxApp() {
         // flows fully clear it (UC-16 pitfall note: keep both
         // popUpTo call sites converted).
         val start: String = resolved.route
+        // UC-69 — consume a pending deep-link (from a tapped pending-question
+        // notification) ONLY after the start destination has settled. Navigate to
+        // the conversation only when the start destination is the sessions list —
+        // an un-enrolled cold start (Onboarding / identity screens) has no
+        // conversation to open, so the request is dropped. consume() clears the
+        // latched value either way, so a configuration change cannot re-navigate.
+        LaunchedEffect(start) {
+            container.deepLinkEvents.pendingSession.collect { n ->
+                if (n != null) {
+                    if (start == Routes.Sessions) {
+                        navController.navigate(Routes.conversationFor(n)) {
+                            launchSingleTop = true
+                        }
+                    }
+                    container.deepLinkEvents.consume()
+                }
+            }
+        }
         NavHost(navController = navController, startDestination = start) {
 
             composable(Routes.Onboarding) {

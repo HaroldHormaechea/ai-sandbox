@@ -47,6 +47,12 @@ import java.time.Instant;
  *     with {@code working} (a pending question is "waiting", never "working" — AC5);
  *     only ever {@code true} for a {@code running} session (AC8). Drives the
  *     Android row's "?" badge, which suppresses the working spinner (AC1, AC5).
+ * @param pendingQuestionText UC-69 — the FIRST pending question's text (the
+ *     notification body the Android client posts when this session enters the
+ *     pending-question state), or {@code null} when none is known. Present only
+ *     while {@code pendingQuestion} is true and the helper supplied a parseable
+ *     body; the client truncates it for display and uses it for the local
+ *     notification (the title comes from {@code conversationName} / {@code label}).
  * @param type UC-62 — {@code claude} for an ordinary Docker session,
  *     {@code server-ssh} for the single always-on server host-shell row
  *     ({@link SpecialSessions#TYPE_CLAUDE} / {@link SpecialSessions#TYPE_SERVER_SSH}).
@@ -67,11 +73,45 @@ public record SessionRecord(
         String conversationName,
         boolean working,
         boolean pendingQuestion,
-        String type) {
+        String type,
+        String pendingQuestionText) {
+
+    /**
+     * UC-69 back-compat 11-arg constructor for call sites (and test fixtures)
+     * created after UC-62 but before this use case appended
+     * {@code pendingQuestionText}. Delegates with {@code null} text, so a session
+     * reported through the pre-UC-69 shape simply carries no notification body.
+     */
+    public SessionRecord(
+            int n,
+            String label,
+            String tmuxTitle,
+            String state,
+            long uptimeSec,
+            int activeStreams,
+            Instant startedAt,
+            String conversationName,
+            boolean working,
+            boolean pendingQuestion,
+            String type) {
+        this(
+                n,
+                label,
+                tmuxTitle,
+                state,
+                uptimeSec,
+                activeStreams,
+                startedAt,
+                conversationName,
+                working,
+                pendingQuestion,
+                type,
+                null);
+    }
 
     /**
      * UC-62 back-compat 10-arg constructor for call sites (and test fixtures)
-     * created before this use case appended {@code type}. Delegates with
+     * created before that use case appended {@code type}. Delegates with
      * {@code type=}{@link SpecialSessions#TYPE_CLAUDE}, so every pre-UC-62 row
      * is reported as an ordinary Claude session — exactly the prior behaviour.
      */

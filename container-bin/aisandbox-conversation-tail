@@ -1455,9 +1455,33 @@ function parsePaneOnce() {
 }
 
 /**
+ * UC-69 — PURE: the notification BODY text for a pending AskUserQuestion — the
+ * FIRST question's prompt (AC3: when several questions are raised together, the
+ * first one). Takes the parsed prompt from {@link parsePendingPrompt}; prefers the
+ * focused question's prompt text, falling back to its header when the prompt line
+ * was not recovered (a multi-question wizard yields header-only items). Sanitised
+ * to a single line and codepoint-capped. Returns '' when there is no usable text,
+ * so {@link conversationName} OMITS line 4 and the server RETAINS its prior text
+ * (failure policy (b)) rather than clobbering a good body with an empty one.
+ */
+function firstQuestionText(parsed) {
+  if (
+    !parsed ||
+    parsed.kind !== 'questions' ||
+    !Array.isArray(parsed.questions) ||
+    parsed.questions.length === 0
+  ) {
+    return '';
+  }
+  const q = parsed.questions[0] || {};
+  const raw = q.question || q.header || '';
+  return capCodepoints(sanitizeOneLine(raw), CONVERSATION_NAME_MAX_CP);
+}
+
+/**
  * One-shot: resolve the MAIN pane's active transcript, derive the conversation
- * name AND the working/idle signal from the SAME readAllLines, and print exactly
- * TWO lines, exit 0 (UC-47 line1 + UC-48 line2):
+ * name AND the working/idle signal from the SAME readAllLines, and print up to
+ * FOUR lines, exit 0 (UC-47 line1 + UC-48 line2 + UC-49 line3 + UC-69 line4):
  *   line1 = the conversation name, or empty when none (server parses it via
  *           firstLine — unchanged from UC-47).
  *   line2 = "working" | "idle" (server parses it via secondLine).
@@ -1466,6 +1490,12 @@ function parsePaneOnce() {
  *           OMITTED entirely (2-line output, exactly the pre-UC-49 shape) when the
  *           pane capture fails, so the server retains its prior pending value
  *           (failure policy (b)) rather than flickering the "?" off.
+ *   line4 = the first pending question's text (UC-69; server parses it via
+ *           fourthLine). APPEND-ONLY and back-compat: only emitted when line3 is
+ *           "pending-question" AND a non-empty body was parsed from the SAME
+ *           capture (no second capture). OMITTED on a capture/parse miss, so the
+ *           server RETAINS its prior text rather than clobbering it (failure
+ *           policy (b)); an old (pre-UC-69) server simply ignores the extra line.
  * Any no-transcript / failure path prints empty name + idle so the server falls
  * back to tmuxTitle (AC3) and shows no spinner. Never blocks.
  */
@@ -1488,6 +1518,14 @@ function conversationName() {
   out(working ? 'working' : 'idle');
   if (pending !== null) {
     out(pending ? 'pending-question' : 'none');
+    // UC-69 — line 4 (APPEND-ONLY): when a question is up, emit the first
+    // question's text as the notification body, parsed from the SAME already-
+    // captured pane (no second capture). Omitted when no body parses, so the
+    // server retains its prior text (tri-state, mirroring the line-3 policy).
+    if (pending === true) {
+      const body = firstQuestionText(parsePendingPrompt(paneText));
+      if (body) out(body);
+    }
   }
 }
 
@@ -1783,6 +1821,8 @@ module.exports = {
   parseNumberedOptions,
   optionsHaveCheckbox,
   parseFocusedPrompt,
+  // UC-69 — notification-body (first-question text) seam (QA unit tests).
+  firstQuestionText,
   stripVolatile,
   fnv1a,
   CTRL_PENDING_QUESTION,

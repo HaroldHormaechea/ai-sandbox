@@ -72,6 +72,16 @@ The operator path from source to an enrolled device is three steps:
   Settings → Keyboard; the choice persists.
 - **Foreground service** (UC04-4): `dataSync` ongoing notification
   keeps the WS alive across lock-screen + task-switch.
+- **Pending-question push** (UC-69): an app-wide `dataSync` foreground
+  service keeps the `/v1/sessions/events` feed connected in the
+  background, so when a session raises an `AskUserQuestion` the phone
+  posts a local notification (HIGH "Pending questions" channel) titled
+  with the session's conversation name / label and bodied with the first
+  question's text. Tapping it deep-links straight to that session's
+  conversation; the notification clears when the question is answered.
+  One buzz per question episode (silent body updates), graceful no-op if
+  `POST_NOTIFICATIONS` is denied — the in-app "?" indicators still work.
+  No FCM/Firebase; built on-device from the existing server signal.
 - **Settings** (UC04-5): server URL + pin + client cert metadata +
   WebSocket diagnostics + a Keyboard section (UC-36 conversational vs.
   raw/char toggle) + a "Simulate cert revoke" test path.

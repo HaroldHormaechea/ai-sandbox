@@ -39,6 +39,7 @@ class AiSandboxApplication : Application() {
         BouncyCastleClientProvider.register()
         container = AppContainer(this)
         registerTerminalStreamNotificationChannel()
+        registerPendingQuestionChannels()
     }
 
     private fun registerTerminalStreamNotificationChannel() {
@@ -55,6 +56,39 @@ class AiSandboxApplication : Application() {
             setShowBadge(false)
         }
         nm.createNotificationChannel(channel)
+    }
+
+    /**
+     * UC-69 — register the two channels the pending-question push path uses:
+     * a HIGH "Pending questions" channel for the per-session alerting
+     * notifications, and a LOW "Question watcher" channel for the app-wide
+     * [com.aisandbox.android.notifications.PendingQuestionService] ongoing FGS
+     * notification. Registered eagerly so the first {@code notify} never waits;
+     * a user who dislikes them can disable either channel from system settings
+     * (AC8). No-op on a device without a NotificationManager.
+     */
+    private fun registerPendingQuestionChannels() {
+        val nm = getSystemService<NotificationManager>() ?: return
+        val pending = NotificationChannel(
+            getString(R.string.pending_question_channel_id),
+            getString(R.string.pending_question_channel_name),
+            // HIGH so a question genuinely alerts the user even when backgrounded.
+            NotificationManager.IMPORTANCE_HIGH,
+        ).apply {
+            description = getString(R.string.pending_question_channel_description)
+            setShowBadge(true)
+        }
+        val watcher = NotificationChannel(
+            getString(R.string.question_watcher_channel_id),
+            getString(R.string.question_watcher_channel_name),
+            // LOW — the ongoing watcher notification is informational, never alerts.
+            NotificationManager.IMPORTANCE_LOW,
+        ).apply {
+            description = getString(R.string.question_watcher_channel_description)
+            setShowBadge(false)
+        }
+        nm.createNotificationChannel(pending)
+        nm.createNotificationChannel(watcher)
     }
 
     companion object {

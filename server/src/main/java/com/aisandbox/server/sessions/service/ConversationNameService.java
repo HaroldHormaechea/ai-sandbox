@@ -124,6 +124,18 @@ public class ConversationNameService {
      */
     private final ConcurrentHashMap<Integer, Boolean> pending = new ConcurrentHashMap<>();
 
+    /**
+     * UC-69 — n → the FIRST pending question's text (the notification body the
+     * Android client renders). Present only while {@link #pending} is {@code TRUE}
+     * for {@code n} and the helper has supplied a non-empty line 4; absent when the
+     * question cleared or no text was parseable. Lifecycle is tied to {@link #pending}:
+     * a TRUE pending with a fresh line-4 text overwrites it; a FALSE pending drops it;
+     * a MISSING line 4 while still pending leaves the prior text UNTOUCHED so a
+     * single capture/parse miss does not blank an otherwise-good body (failure
+     * policy (b), the same tri-state the "?" badge uses).
+     */
+    private final ConcurrentHashMap<Integer, String> pendingText = new ConcurrentHashMap<>();
+
     /** Sessions with a refresh currently queued or running — dedups resubmits. */
     private final Set<Integer> inFlight = ConcurrentHashMap.newKeySet();
 
@@ -204,6 +216,16 @@ public class ConversationNameService {
     }
 
     /**
+     * UC-69 — non-blocking read of the FIRST pending question's text for session
+     * {@code n} (the notification body), or {@code null} when no pending-question
+     * text is known (no question up, text not yet warmed, or never parseable).
+     * Safe to call on the enumeration hot path.
+     */
+    public String pendingQuestionText(int n) {
+        return pendingText.get(n);
+    }
+
+    /**
      * Fire-and-forget: schedule a background refresh of session {@code n}'s
      * conversation name. No-op when {@code project} is blank, when a refresh for
      * {@code n} is already in flight, or when the pool is shutting down. Never
@@ -249,6 +271,9 @@ public class ConversationNameService {
         // UC-49 — drop the pending flag for vanished sessions too, so a re-used
         // session number can't inherit a stale "?" from a prior tenant.
         pending.keySet().retainAll(activeNs);
+        // UC-69 — drop the pending-question text for vanished sessions too, so a
+        // re-used session number can't inherit a stale notification body.
+        pendingText.keySet().retainAll(activeNs);
         // In-flight tasks self-clear in their finally; retaining here only trims
         // markers for sessions that vanished mid-derive (harmless if the task later
         // no-ops its remove).
@@ -306,8 +331,19 @@ public class ConversationNameService {
                 if (sig.pendingQuestion() != null) {
                     if (sig.pendingQuestion()) {
                         pending.put(n, Boolean.TRUE);
+                        // UC-69 — apply the notification body alongside the flag:
+                        //   non-null line 4 → overwrite with the fresh first-question text.
+                        //   null line 4     → the helper omitted it (parse/capture miss while
+                        //                     the question is still up): RETAIN the prior text
+                        //                     rather than blanking a good body (failure policy (b)).
+                        if (sig.pendingQuestionText() != null) {
+                            pendingText.put(n, sig.pendingQuestionText());
+                        }
                     } else {
                         pending.remove(n);
+                        // UC-69 — the question cleared: drop its text so a stale body
+                        // can't survive past the "?" badge.
+                        pendingText.remove(n);
                     }
                 }
             } catch (RuntimeException e) {
@@ -331,8 +367,15 @@ public class ConversationNameService {
      * = a question is up, {@code FALSE} = the screen has no question, {@code null} =
      * UNKNOWN (the pane capture failed, helper omitted line 3) so the caller must
      * RETAIN the prior pending value rather than clearing it (failure policy (b)).
+     *
+     * <p>UC-69 — {@code pendingQuestionText} is the FIRST pending question's text
+     * (line 4), or {@code null} when the helper omitted it (no question up, or the
+     * body was not parseable). Its application is gated on {@code pendingQuestion}
+     * by the caller: stored only while pending is {@code TRUE}, retained when
+     * pending is {@code TRUE} but the text is {@code null} (a parse miss mid-
+     * question), and dropped when pending is {@code FALSE}.
      */
-    record SessionSignals(String nameOrNull, boolean working, Boolean pendingQuestion) {}
+    record SessionSignals(String nameOrNull, boolean working, Boolean pendingQuestion, String pendingQuestionText) {}
 
     /**
      * Run the helper one-shot and return both signals, or {@code null} on an exec
@@ -355,7 +398,10 @@ public class ConversationNameService {
             String name = capCodepoints(trimToNull(firstLine(r.stdout())), MAX_NAME_CODEPOINTS);
             boolean working = parseWorking(secondLine(r.stdout()));
             Boolean pendingQuestion = parsePending(thirdLine(r.stdout()));
-            return new SessionSignals(name, working, pendingQuestion);
+            // UC-69 — line 4 is the first pending question's text; cap it server-side
+            // too (defence in depth, mirroring the name cap) and null-if-blank/absent.
+            String pendingQuestionText = capCodepoints(trimToNull(fourthLine(r.stdout())), MAX_NAME_CODEPOINTS);
+            return new SessionSignals(name, working, pendingQuestion, pendingQuestionText);
         } catch (IOException io) {
             // Any I/O failure (exec error, timeout) → no signals; do NOT poison either cache.
             LOG.debug("conversation-name derive for n={} project={}: {}", n, project, io.toString());
@@ -424,6 +470,35 @@ public class ConversationNameService {
         String third = rest.substring(nl2 + 1);
         int nl3 = third.indexOf('\n');
         return nl3 < 0 ? third : third.substring(0, nl3);
+    }
+
+    /**
+     * UC-69 — fourth newline-delimited line of {@code out} (the first pending
+     * question's text), or {@code null} when there is no fourth line (any pre-UC-69
+     * helper output, or a capture/parse-miss path where the helper deliberately
+     * omits line 4 so the server retains its prior text). Null-safe.
+     */
+    static String fourthLine(String out) {
+        if (out == null) {
+            return null;
+        }
+        int nl = out.indexOf('\n');
+        if (nl < 0) {
+            return null;
+        }
+        String rest = out.substring(nl + 1);
+        int nl2 = rest.indexOf('\n');
+        if (nl2 < 0) {
+            return null;
+        }
+        String third = rest.substring(nl2 + 1);
+        int nl3 = third.indexOf('\n');
+        if (nl3 < 0) {
+            return null;
+        }
+        String fourth = third.substring(nl3 + 1);
+        int nl4 = fourth.indexOf('\n');
+        return nl4 < 0 ? fourth : fourth.substring(0, nl4);
     }
 
     /**

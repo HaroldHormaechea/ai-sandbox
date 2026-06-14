@@ -193,6 +193,45 @@ class SessionEventWatcherTest {
         assertThat(((Delta) captor.getValue()).upserts()).containsExactly(rowNamed(1, "running", "Now named"));
     }
 
+    /** UC-69 — a running, pending row carrying an explicit first-question body. */
+    private static Row rowPendingText(int n, String body) {
+        return new Row(n, "s" + n, "(idle)", "running", 0L, 0, null, "Pick a database", false, true, "claude", body);
+    }
+
+    /**
+     * UC-69 AC3 — the first-question text (notification body) updates live over the
+     * UC-32 push with NO watcher edit. When ONLY {@code pendingQuestionText} changes
+     * between two ticks (every other field identical), {@link Row} record-equality
+     * still sees a difference, so the watcher emits exactly one coalesced
+     * {@link Delta} carrying the row with the NEW body — a backgrounded client's
+     * notification body updates without a manual refresh. An unchanged body tick is
+     * silent (no spurious churn from the new field).
+     */
+    @Test
+    void a_pending_question_text_change_alone_emits_one_delta_with_the_new_body() {
+        subscribers(1);
+
+        // Tick 1 baselines [1: pending, body="First question?"].
+        snapshot(rowPendingText(1, "First question?"));
+        watcher.tick();
+
+        // Tick 2 — same row in every field EXCEPT the first-question body.
+        snapshot(rowPendingText(1, "A different question?"));
+        watcher.tick();
+
+        ArgumentCaptor<SessionEventMessage> captor = ArgumentCaptor.forClass(SessionEventMessage.class);
+        verify(broadcaster, times(1)).broadcast(captor.capture());
+        Delta delta = (Delta) captor.getValue();
+        assertThat(delta.upserts()).containsExactly(rowPendingText(1, "A different question?"));
+        assertThat(delta.upserts().get(0).pendingQuestionText()).isEqualTo("A different question?");
+        assertThat(delta.removed()).isEmpty();
+
+        // Tick 3 — the body is unchanged → no spurious churn from the field.
+        snapshot(rowPendingText(1, "A different question?"));
+        watcher.tick();
+        verify(broadcaster, times(1)).broadcast(any(SessionEventMessage.class));
+    }
+
     @Test
     void unchanged_tick_broadcasts_nothing() {
         subscribers(1);
