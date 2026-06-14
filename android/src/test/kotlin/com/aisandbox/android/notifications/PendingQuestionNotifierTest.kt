@@ -15,9 +15,10 @@ import org.junit.jupiter.api.Test
  * <ul>
  *   <li>AC1 — a pending+running session posts exactly one notification
  *       ({@link #rising_edge_posts_exactly_one_notification()}).</li>
- *   <li>AC2 — title prefers conversationName, then label, then ai-sandbox-&lt;n&gt;
- *       ({@link #title_prefers_conversation_name_then_label_then_session_id()}).</li>
- *   <li>AC3 — body is the first-question text, truncated; fallback when blank
+ *   <li>UC-76 AC1 — the title is ALWAYS the fixed injected string, regardless of
+ *       conversationName / label / session id
+ *       ({@link #title_is_always_the_fixed_string_regardless_of_conversation_name_label_or_id()}).</li>
+ *   <li>UC-76 AC2 / UC-69 AC3 — body is the first-question text, truncated; fallback when blank
  *       ({@link #body_is_the_question_text_truncated_with_fallback_when_blank()}).</li>
  *   <li>AC6 — episode dedup (no re-buzz) + silent update on a new distinct text
  *       ({@link #same_episode_is_deduped_no_rebuzz()},
@@ -60,8 +61,16 @@ class PendingQuestionNotifierTest {
 
     private val fallback = "A session is waiting for your answer."
 
+    /**
+     * UC-76 — the fixed title injected into the notifier for EVERY pending
+     * question (previously the title was derived from conversationName / label /
+     * ai-sandbox-&lt;n&gt;). Production injects [R.string.pending_question_title]
+     * ("Claude needs your input"); the pure core just receives the resolved string.
+     */
+    private val fixedTitle = "Claude needs your input"
+
     private fun notifier(gateway: FakeGateway, maxBodyChars: Int = 140) =
-        PendingQuestionNotifier(gateway, fallback, maxBodyChars)
+        PendingQuestionNotifier(gateway, fixedTitle, fallback, maxBodyChars)
 
     private fun session(
         n: Int,
@@ -90,7 +99,9 @@ class PendingQuestionNotifierTest {
         val p = gw.posts.single()
         assertThat(p.sessionN).isEqualTo(3)
         assertThat(p.id).isEqualTo(PendingQuestionNotifier.notificationId(3))
-        assertThat(p.title).isEqualTo("Pick a DB")
+        // UC-76 — the title is the fixed string even though this session has a
+        // conversationName ("Pick a DB") that the old behaviour would have used.
+        assertThat(p.title).isEqualTo(fixedTitle)
         assertThat(p.body).isEqualTo("Which database should we use?")
         assertThat(p.alertOnce).`as`("the first post for a session ALERTS (alertOnce=false)").isFalse()
         assertThat(gw.cancels).isEmpty()
@@ -112,26 +123,35 @@ class PendingQuestionNotifierTest {
         assertThat(gw.posts).isEmpty()
     }
 
-    // ── AC2 — title fallbacks ────────────────────────────────────────────────
+    // ── UC-76 AC1 — title is ALWAYS the fixed injected string ─────────────────
 
     @Test
-    fun title_prefers_conversation_name_then_label_then_session_id() {
-        val gw = FakeGateway()
-        val notifier = notifier(gw)
-        notifier.onSnapshot(listOf(session(2, conversationName = "Refactor the row", label = "build")))
-        notifier.onSnapshot(listOf(session(2, conversationName = "Refactor the row", label = "build")))
-        // conversationName wins.
-        assertThat(gw.posts.last().title).isEqualTo("Refactor the row")
+    fun title_is_always_the_fixed_string_regardless_of_conversation_name_label_or_id() {
+        // UC-76 AC1: every pending-question notification is titled exactly the
+        // injected fixed string ("Claude needs your input"), NEVER derived from
+        // the conversationName / label / ai-sandbox-<n> any more. Each case below
+        // would have produced a DIFFERENT title under the old behaviour.
 
+        // (a) conversationName AND label present → old behaviour: "Refactor the row".
+        val gw1 = FakeGateway()
+        notifier(gw1).onSnapshot(listOf(session(2, conversationName = "Refactor the row", label = "build")))
+        assertThat(gw1.posts.single().title)
+            .`as`("conversationName is ignored — fixed title used")
+            .isEqualTo(fixedTitle)
+
+        // (b) blank conversationName, label present → old behaviour: "build-server".
         val gw2 = FakeGateway()
         notifier(gw2).onSnapshot(listOf(session(5, conversationName = "   ", label = "build-server")))
-        // blank conversationName → label.
-        assertThat(gw2.posts.single().title).isEqualTo("build-server")
+        assertThat(gw2.posts.single().title)
+            .`as`("label is ignored — fixed title used")
+            .isEqualTo(fixedTitle)
 
+        // (c) neither name nor label → old behaviour: "ai-sandbox-7".
         val gw3 = FakeGateway()
         notifier(gw3).onSnapshot(listOf(session(7, conversationName = null, label = "")))
-        // no name, no label → ai-sandbox-<n>.
-        assertThat(gw3.posts.single().title).isEqualTo("ai-sandbox-7")
+        assertThat(gw3.posts.single().title)
+            .`as`("session id is ignored — fixed title used")
+            .isEqualTo(fixedTitle)
     }
 
     // ── AC3 — body text + truncation + fallback ──────────────────────────────
