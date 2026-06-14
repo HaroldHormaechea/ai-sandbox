@@ -1401,4 +1401,160 @@ class ConversationControllerTest {
             c.close()
         }
     }
+
+    // ──────────────────────── UC-75 — free-text normalization + spinner safety-net ─────────────
+    //
+    // THE bug: answering via the "Other" field could pin the spinner on WORKING forever — the
+    // server injected the answer free-text raw, so an embedded newline committed/declined the ask
+    // early and no forward frame arrived to flip WORKING→IDLE. The client-side fixes: (1)
+    // normalizeFreeText folds CRLF/CR→LF and trims surrounding whitespace/newlines so a stray
+    // edge newline can never commit prematurely, while interior newlines survive end-to-end; and
+    // (2) a spinner safety-net (awaitingAnswerKey + a conservative watchdog) recovers to IDLE on a
+    // `pending-clear` while awaiting, or as a last-resort timeout — but is DISARMED by any
+    // forward-progress frame so a slow-but-valid answer is never flipped early.
+
+    /** An offline controller with an injected (short) watchdog so the safety-net is testable. */
+    private fun offlineController(watchdogMs: Long): ConversationController =
+        ConversationController(
+            sessionN = 7,
+            profileStore = mock(ServerProfileStore::class.java),
+            httpClientFactory = { error("not used") },
+            clientFactory = { _, _ -> error("not used") },
+            onClosed = {},
+            answerWatchdogMs = watchdogMs,
+        )
+
+    /** A networked controller with an injected (short) watchdog. */
+    private fun networkedController(watchdogMs: Long): ConversationController {
+        val store = mock(ServerProfileStore::class.java)
+        runBlocking { doReturn(profile).`when`(store).current() }
+        return ConversationController(
+            sessionN = 7,
+            profileStore = store,
+            httpClientFactory = { AiSandboxHttpClient(profile, fakeIdentity()) },
+            clientFactory = { http, n -> ConversationClient(http, n) },
+            onClosed = {},
+            answerWatchdogMs = watchdogMs,
+        )
+    }
+
+    @Test
+    fun `normalizeFreeText trims surrounding whitespace and newlines but preserves interior newlines`() {
+        // AC4 — the defensive normalization contract. A stray leading/trailing newline (the exact
+        // thing that committed/declined the ask early) is trimmed; CRLF/CR fold to LF; and a genuine
+        // INTERIOR newline is preserved so a real multi-line answer survives end-to-end (the server
+        // delivers it newline-safely with C-j).
+        val c = offlineController()
+        // Edge whitespace + edge newlines are stripped …
+        assertThat(c.normalizeFreeText("   hello   ")).isEqualTo("hello")
+        assertThat(c.normalizeFreeText("\n\nhello\n\n")).isEqualTo("hello")
+        assertThat(c.normalizeFreeText("  \n hello \n  ")).isEqualTo("hello")
+        // … interior newlines are PRESERVED …
+        assertThat(c.normalizeFreeText("line a\nline b")).isEqualTo("line a\nline b")
+        // … CRLF and lone CR fold to LF …
+        assertThat(c.normalizeFreeText("line a\r\nline b")).isEqualTo("line a\nline b")
+        assertThat(c.normalizeFreeText("line a\rline b")).isEqualTo("line a\nline b")
+        // … combined: trimmed edges, folded + preserved interior.
+        assertThat(c.normalizeFreeText("\r\n  line a\r\nline b  \r\n")).isEqualTo("line a\nline b")
+        // An empty / whitespace-only answer normalizes to empty (treated as no free text downstream).
+        assertThat(c.normalizeFreeText("   \n  ")).isEmpty()
+    }
+
+    @Test
+    fun `the answer watchdog recovers a stuck WORKING spinner to IDLE`() {
+        // AC5 — last-resort safety-net: an answer was submitted (spinner WORKING) but NO forward
+        // frame ever arrives (the ask was declined/failed in the pane). After the conservative
+        // watchdog window, the spinner recovers to IDLE (a usable state) — it is NEVER left pinned
+        // on WORKING forever. Recovery is to IDLE, never an abort.
+        val c = offlineController(watchdogMs = 150L)
+        c.submitAnswer("tuQ", 0, listOf(0), "answer text")
+        assertThat(c.turnPhase.value).isEqualTo(TurnPhase.WORKING) // armed, awaiting
+        // No forward frame is fed → the watchdog fires and recovers the spinner.
+        assertThat(awaitUntil(timeoutMs = 3000) { c.turnPhase.value == TurnPhase.IDLE })
+            .withFailMessage("watchdog must recover a stuck WORKING spinner to IDLE")
+            .isTrue
+    }
+
+    @Test
+    fun `a pending-clear while awaiting an answer recovers the spinner to IDLE`() {
+        // AC5 — event-driven recovery (preferred over the blind timer). A `pending-clear` arriving
+        // while we are still awaiting a submitted answer AND pinned WORKING means the ask was
+        // resolved/declined in the pane with no forward frame. The controller recovers to IDLE.
+        // Uses the DEFAULT (45 s) watchdog, so the IDLE flip is provably from the pending-clear, not
+        // the timer.
+        val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        enqueueCapture(wsRef)
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { c.state.value == TerminalState.Open && wsRef.get() != null }).isTrue
+            c.submitAnswer("pane-k1", 0, listOf(0), "my answer") // arms the safety-net, spinner WORKING
+            assertThat(c.turnPhase.value).isEqualTo(TurnPhase.WORKING)
+            // The pane prompt's chrome vanished with no resolving frame → recover to IDLE.
+            wsRef.get()!!.send("""{"type":"pending-clear","promptKey":"pane-k1"}""")
+            assertThat(awaitUntil { c.turnPhase.value == TurnPhase.IDLE })
+                .withFailMessage("pending-clear while awaiting must recover the spinner to IDLE")
+                .isTrue
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
+    fun `a forward-progress frame disarms the watchdog so a slow-but-valid answer is never flipped early`() {
+        // AC5 (the must-not-regress half) — the safety-net MUST NOT mask a genuinely-delivered, slow
+        // answer. Any forward-progress frame (here assistant-text) proves the answer landed and the
+        // turn is advancing, so it disarms the watchdog. Even after the (short, injected) watchdog
+        // window elapses, the spinner stays WORKING — the watchdog never flips a legitimately-working
+        // turn to IDLE.
+        val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        enqueueCapture(wsRef)
+        val c = networkedController(watchdogMs = 500L)
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { c.state.value == TerminalState.Open && wsRef.get() != null }).isTrue
+            c.submitAnswer("tuQ", 0, listOf(0), "a valid answer") // arms a 500 ms watchdog, WORKING
+            // A forward frame arrives (the answer landed, the turn is progressing) BEFORE the watchdog.
+            wsRef.get()!!.send(
+                """{"type":"assistant-text","uuid":"a1","source":"main","isSidechain":false,"text":"on it"}""",
+            )
+            // Observe the frame is processed (its bubble appears) → the watchdog is disarmed.
+            assertThat(
+                awaitUntil { c.items.value.any { it is ConversationItem.AssistantMessage } },
+            ).isTrue
+            assertThat(c.turnPhase.value).isEqualTo(TurnPhase.WORKING) // still working — answer is processing
+            // Wait well past the 500 ms watchdog window: a DISARMED watchdog must not fire.
+            Thread.sleep(900)
+            assertThat(c.turnPhase.value)
+                .withFailMessage("a forward frame must disarm the watchdog — no spurious WORKING→IDLE flip")
+                .isEqualTo(TurnPhase.WORKING)
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
+    fun `submitAnswer sends normalized free text on the wire — edges trimmed, interior newline preserved`() {
+        // AC4 (wire-level) — the client never sends a raw leading/trailing newline that could commit
+        // the ask early. The submitted "Other" text has its surrounding whitespace/newlines stripped
+        // before it goes on the wire, while a genuine interior newline survives (the server injects it
+        // newline-safely with C-j).
+        val received = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        enqueueRecorder(received, wsRef)
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { c.state.value == TerminalState.Open && wsRef.get() != null }).isTrue
+            c.submitAnswer("tuQ", 0, listOf(2), "\n  line a\nline b  \n")
+            assertThat(awaitUntil { received.any { it.contains(""""type":"answer"""") } }).isTrue
+            val frame = received.first { it.contains(""""type":"answer"""") }
+            // Edges trimmed, interior newline preserved → JSON-escaped as line a\nline b on the wire.
+            assertThat(frame).contains("\"freeText\":\"line a\\nline b\"")
+            // And NO stray leading/trailing escaped newline that would have committed the ask early.
+            assertThat(frame).doesNotContain("\"freeText\":\"\\n")
+        } finally {
+            c.close()
+        }
+    }
 }
