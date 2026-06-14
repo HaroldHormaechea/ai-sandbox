@@ -240,8 +240,11 @@ class SessionEventFacadeTest {
     @Test
     void authorizeSubscribe_rejects_at_the_per_fingerprint_cap() {
         String fp = "aa".repeat(32);
-        // MAX_SUBSCRIPTIONS_PER_FINGERPRINT == 4 — at the cap the next is refused.
-        when(broadcaster.countFor(fp)).thenReturn(4);
+        // UC-69 raised the cap 4→20: the always-on PendingQuestionService keeps its OWN
+        // /v1/sessions/events subscription in ADDITION to the Sessions screen's, so a
+        // single device now needs >1 concurrent subscription per fingerprint. Reference
+        // the constant so a future cap change can't silently re-stale this test.
+        when(broadcaster.countFor(fp)).thenReturn(SessionEventFacade.MAX_SUBSCRIPTIONS_PER_FINGERPRINT);
         assertThat(facade.authorizeSubscribe(identity(fp))).isEqualTo(SubscribeDecision.CAP_EXCEEDED);
     }
 
