@@ -121,6 +121,27 @@ public class InputInjectionService {
         if (text == null || text.isEmpty()) {
             return;
         }
+        typeMultiline(n, target, text);
+        sendKeys(n, target, "Enter"); // CR submits the turn
+    }
+
+    /**
+     * UC-75 — type {@code text} into the focused input as literal segments,
+     * inserting a {@code C-j} (LF) BETWEEN lines so an embedded newline NEVER
+     * commits the turn. <b>Invariant: the line separator is always {@code C-j},
+     * never a bare {@code Enter} on an empty segment</b> — a bare {@code
+     * Enter}/newline on the "Type something" answer row commits or declines the
+     * ask. This helper sends <b>no trailing commit keystroke</b>; callers own the
+     * commit (the composer's {@code Enter}, or the answer path's Enter/Space/Tab
+     * choreography). Extracted from {@link #injectComposer}'s verified line-walk
+     * so the answer free-text path becomes newline-safe in exactly the same way
+     * (AC2/AC3). A blank/whitespace-only interior segment is skipped for content
+     * but still advances with {@code C-j} — identical to the composer.
+     */
+    private void typeMultiline(int n, InjectTarget target, String text) throws IOException {
+        if (text == null || text.isEmpty()) {
+            return;
+        }
         String[] lines = text.split("\n", -1);
         for (int i = 0; i < lines.length; i++) {
             if (!lines[i].isEmpty()) {
@@ -130,7 +151,6 @@ public class InputInjectionService {
                 sendKeys(n, target, "C-j"); // newline-insert, NOT submit
             }
         }
-        sendKeys(n, target, "Enter"); // CR submits the turn
     }
 
     /**
@@ -266,7 +286,9 @@ public class InputInjectionService {
                     //   2. Enter COMMITS the typed text as a real custom option (clears the preview
                     //      check); 3. Space SELECTS that committed option.
                     // The text is always typed before any Enter — Enter on an EMPTY row declines.
-                    sendLiteral(n, target, freeText);
+                    // UC-75: type newline-safe (C-j between lines) so an embedded newline cannot
+                    // commit/decline early; the Enter/Space choreography below is unchanged.
+                    typeMultiline(n, target, freeText);
                     sendKeys(n, target, "Enter");
                     sendKeys(n, target, "Space");
                 } else if (sel.contains(p)) {
@@ -298,7 +320,9 @@ public class InputInjectionService {
             for (int d = 0; d < otherIndex; d++) {
                 sendKeys(n, target, "Down");
             }
-            sendLiteral(n, target, freeText);
+            // UC-75: type newline-safe (C-j between lines, no trailing submit) so an embedded
+            // newline can't decline the ask; the committing Enter below is unchanged.
+            typeMultiline(n, target, freeText);
             sendKeys(n, target, "Enter");
         } else {
             int target0 = sel.isEmpty() ? 0 : Math.max(0, sel.get(0));
