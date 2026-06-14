@@ -1,9 +1,15 @@
 package com.aisandbox.android.ui.screens
 
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.requiredHeight
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import com.aisandbox.android.ui.theme.AiSandboxTheme
 import org.junit.Assert.assertTrue
@@ -22,13 +28,16 @@ import org.junit.runner.RunWith
  * off the real {@code AiSandboxApplication}, so the screen renders on-device with
  * a null server profile / no imported identity — exactly the fresh-install state.
  *
- * <p>The screen is a non-scrolling {@code Column}: every child is composed and
- * positioned even when it falls below the fold, so ordering is asserted from
- * {@code getUnclippedBoundsInRoot} (valid off-screen) and lower items use
- * {@code assertExists} rather than {@code assertIsDisplayed}.
+ * <p>As of UC-68 the content {@code Column} carries a {@code verticalScroll}
+ * modifier (inside the Scaffold {@code innerPadding}, so the top app bar stays
+ * pinned). A scrolling Column still composes and positions every child even
+ * when it falls below the fold, so the ordering assertions below remain valid:
+ * they read {@code getUnclippedBoundsInRoot} (defined off-screen) and use
+ * {@code assertExists} rather than {@code assertIsDisplayed} for lower items.
  *
  * Acceptance-criteria mapping:
  *  - AC1  Appearance group above Info; read-only sections + footer under Info
+ *  - AC1  (UC-68) the footer is reachable by scrolling on a short viewport
  *  - AC5  UC-36 keyboard toggle reachable as a top-level (Appearance) preference
  */
 @RunWith(AndroidJUnit4::class)
@@ -48,6 +57,37 @@ class SettingsScreenInstrumentationTest {
     private fun topOf(text: String, substring: Boolean = false): Float =
         composeTestRule.onNodeWithText(text, substring = substring)
             .getUnclippedBoundsInRoot().top.value
+
+    /**
+     * UC-68 AC1 — the regression target. Settings used to be a plain,
+     * non-scrolling Column, so on a viewport shorter than the full content the
+     * version footer was clipped off the bottom and unreachable. We render the
+     * screen inside a deliberately short ({@code requiredHeight = 360.dp}) box
+     * to force overflow, then prove the footer is brought on-screen by
+     * scrolling. {@code performScrollTo()} succeeds only because UC-68 added the
+     * {@code verticalScroll}; on the pre-fix Column it would throw (no scroll
+     * ancestor), which is exactly the bug this guards against.
+     */
+    @Test
+    fun footer_isReachableByScrolling_onAShortViewport() {
+        composeTestRule.setContent {
+            AiSandboxTheme {
+                Box(Modifier.fillMaxWidth().requiredHeight(360.dp)) {
+                    SettingsScreen(onBack = {})
+                }
+            }
+        }
+
+        // The footer starts below the fold on this short viewport; scrolling
+        // must reveal it (and the TopAppBar title stays pinned — AC4).
+        composeTestRule.onNodeWithText("Settings").assertIsDisplayed()
+        composeTestRule.onNodeWithText("ai-sandbox-android", substring = true)
+            .performScrollTo()
+            .assertIsDisplayed()
+        // App bar title is still displayed after the scroll → chrome is pinned,
+        // only the content region scrolled.
+        composeTestRule.onNodeWithText("Settings").assertIsDisplayed()
+    }
 
     @Test
     fun appearanceGroup_sitsAboveInfoGroup_withReadOnlySectionsAndFooterUnderInfo() {
