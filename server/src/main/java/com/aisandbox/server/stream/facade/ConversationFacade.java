@@ -4,6 +4,7 @@ import com.aisandbox.server.audit.AuditAction;
 import com.aisandbox.server.audit.AuditLogger;
 import com.aisandbox.server.config.ServerProperties;
 import com.aisandbox.server.identity.ClientIdentity;
+import com.aisandbox.server.mcp.McpLoginInitiator;
 import com.aisandbox.server.stream.dto.ConversationServerMessage;
 import com.aisandbox.server.stream.dto.StreamServerMessage.TargetInfo;
 import com.aisandbox.server.stream.facade.StreamFacade.AuthorizeResult;
@@ -37,7 +38,7 @@ import org.springframework.stereotype.Component;
  * reuse of {@link StreamFacade} is a facade-to-facade call, per the same profile.
  */
 @Component
-public class ConversationFacade {
+public class ConversationFacade implements McpLoginInitiator {
 
     private static final Logger LOG = LoggerFactory.getLogger(ConversationFacade.class);
 
@@ -177,6 +178,26 @@ public class ConversationFacade {
                 targetId == null ? "main" : targetId,
                 "fingerprint",
                 identity == null ? "" : identity.fingerprintHex());
+    }
+
+    /**
+     * UC-67 — surface Claude Code's interactive {@code /mcp} menu in the session's
+     * live <b>main</b> pane so a human can complete an MCP server's authentication
+     * there. This only INITIATES the flow: {@code claude mcp} has no headless auth
+     * subcommand, so the server can never complete an OAuth login on the user's
+     * behalf — it injects {@code /mcp} (a slash command, submitted as a composer
+     * line) into the orchestrator pane and the user finishes in that session; the
+     * MCP screen reflects the post-auth state on its next refresh. Cross-domain
+     * callers (the {@code mcp} facade) reach this via a facade-to-facade call, per
+     * {@code profile-java-server-architecture}.
+     */
+    @Override
+    public void openMcpMenu(int n, ClientIdentity identity) throws IOException {
+        // Always the main (orchestrator) pane — MCP config + the /mcp TUI live with
+        // the session's primary claude, not a teammate tile.
+        injection.injectComposer(n, toInjectTarget(resolveBridgeTarget(n, SwarmEnumerationService.MAIN_ID)), "/mcp");
+        audit.logEvent(
+                AuditAction.MCP_LOGIN, "ok", "n", n, "fingerprint", identity == null ? "" : identity.fingerprintHex());
     }
 
     /** AC11 — translate a structured answer into the session's selection keystrokes. */

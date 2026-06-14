@@ -246,6 +246,35 @@ class ConversationFacadeTest {
                         eq("a".repeat(64)));
     }
 
+    // ──────────────────────── UC-67 — openMcpMenu surfaces /mcp + audits ─────
+
+    @Test
+    void openMcpMenu_injects_slash_mcp_into_the_main_pane_and_audits_login() throws Exception {
+        // UC-67 AC6 — login is a facade-to-facade hand-off from McpFacade: it surfaces
+        // Claude Code's interactive /mcp menu in the session's LIVE MAIN pane (never a
+        // teammate tile) so the human can finish auth there. It must resolve the MAIN
+        // target, inject the literal "/mcp" composer line, and audit MCP_LOGIN.
+        when(swarm.resolveTarget(7, SwarmEnumerationService.MAIN_ID)).thenReturn(BridgeTarget.main());
+
+        facade.openMcpMenu(7, identity());
+
+        // Resolves MAIN (not a passed-in target id) and injects the slash command.
+        verify(swarm).resolveTarget(7, SwarmEnumerationService.MAIN_ID);
+        verify(injection).injectComposer(eq(7), any(InjectTarget.class), eq("/mcp"));
+        verify(audit)
+                .logEvent(eq(AuditAction.MCP_LOGIN), eq("ok"), eq("n"), eq(7), eq("fingerprint"), eq("a".repeat(64)));
+    }
+
+    @Test
+    void openMcpMenu_tolerates_a_null_identity() throws Exception {
+        when(swarm.resolveTarget(7, SwarmEnumerationService.MAIN_ID)).thenReturn(BridgeTarget.main());
+
+        facade.openMcpMenu(7, null);
+
+        verify(injection).injectComposer(eq(7), any(InjectTarget.class), eq("/mcp"));
+        verify(audit).logEvent(eq(AuditAction.MCP_LOGIN), eq("ok"), eq("n"), eq(7), eq("fingerprint"), eq(""));
+    }
+
     // ──────────────────────── AC11 — answer inject + audit ───────────────────
 
     @Test

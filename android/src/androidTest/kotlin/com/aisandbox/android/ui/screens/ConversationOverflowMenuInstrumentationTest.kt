@@ -81,6 +81,85 @@ class ConversationOverflowMenuInstrumentationTest {
         assertTrue("Model must render above Clear", modelTop < clearTop)
     }
 
+    // ──────────────────────── UC-67 — MCP overflow item (AC1/AC2) ─────────────
+
+    @Test
+    fun overflow_menu_shows_mcp_item_between_model_and_clear() {
+        // UC-67 AC1 — the menu exposes an MCP item, positioned between Model and Clear.
+        composeTestRule.setContent {
+            AiSandboxTheme {
+                ConversationOverflowMenu(
+                    expanded = true,
+                    onModel = {},
+                    onMcp = {},
+                    onClear = {},
+                    onDisconnect = {},
+                    onDismiss = {},
+                )
+            }
+        }
+
+        composeTestRule.onNodeWithText("MCP").assertIsDisplayed()
+        val modelTop = composeTestRule.onNodeWithText("Model").getBoundsInRoot().top
+        val mcpTop = composeTestRule.onNodeWithText("MCP").getBoundsInRoot().top
+        val clearTop = composeTestRule.onNodeWithText("Clear").getBoundsInRoot().top
+        assertTrue("MCP must render below Model", modelTop < mcpTop)
+        assertTrue("MCP must render above Clear", mcpTop < clearTop)
+    }
+
+    @Test
+    fun tapping_mcp_invokes_onMcp_only() {
+        // UC-67 AC1/AC2 — tapping MCP fires onMcp (which navigates to the full-screen
+        // MCP manager) and neither Model, Clear, nor Disconnect.
+        var modelCalled = false
+        var mcpCalled = false
+        var clearCalled = false
+        var disconnectCalled = false
+        composeTestRule.setContent {
+            AiSandboxTheme {
+                ConversationOverflowMenu(
+                    expanded = true,
+                    onModel = { modelCalled = true },
+                    onMcp = { mcpCalled = true },
+                    onClear = { clearCalled = true },
+                    onDisconnect = { disconnectCalled = true },
+                    onDismiss = {},
+                )
+            }
+        }
+
+        composeTestRule.onNodeWithText("MCP").performClick()
+
+        assertTrue("MCP must invoke onMcp", mcpCalled)
+        assertFalse("MCP must not invoke onModel", modelCalled)
+        assertFalse("MCP must not invoke onClear", clearCalled)
+        assertFalse("MCP must not invoke onDisconnect", disconnectCalled)
+    }
+
+    @Test
+    fun menu_closes_after_mcp_is_chosen() {
+        // UC-67 AC2 — choosing MCP closes the menu (the screen then navigates to the
+        // full-screen MCP manager).
+        composeTestRule.setContent {
+            AiSandboxTheme {
+                var expanded by remember { mutableStateOf(true) }
+                ConversationOverflowMenu(
+                    expanded = expanded,
+                    onModel = { expanded = false },
+                    onMcp = { expanded = false },
+                    onClear = { expanded = false },
+                    onDisconnect = { expanded = false },
+                    onDismiss = { expanded = false },
+                )
+            }
+        }
+
+        composeTestRule.onNodeWithText("MCP").assertIsDisplayed()
+        composeTestRule.onNodeWithText("MCP").performClick()
+        composeTestRule.onNodeWithText("MCP").assertDoesNotExist()
+        composeTestRule.onNodeWithText("Clear").assertDoesNotExist()
+    }
+
     @Test
     fun tapping_model_invokes_onModel_only() {
         // UC-66 AC1/AC2 — tapping Model fires onModel (which opens the dialog) and

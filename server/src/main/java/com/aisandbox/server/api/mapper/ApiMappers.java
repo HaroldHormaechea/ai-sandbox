@@ -72,6 +72,15 @@ public final class ApiMappers {
         return new ApiDtos.ModelSummary(m.id(), m.label());
     }
 
+    public static ApiDtos.McpServerSummary toMcpServerSummary(com.aisandbox.server.mcp.dto.McpServerStatus s) {
+        return new ApiDtos.McpServerSummary(
+                s.name(), s.transport(), s.state().name().toLowerCase(java.util.Locale.ROOT), s.detail());
+    }
+
+    public static ApiDtos.McpActionResult toMcpActionResult(com.aisandbox.server.mcp.dto.McpActionOutcome o) {
+        return new ApiDtos.McpActionResult(o.name(), o.state().name().toLowerCase(java.util.Locale.ROOT), o.message());
+    }
+
     public static ApiDtos.ClientSummary toClientSummary(AllowedClient c) {
         return new ApiDtos.ClientSummary(
                 c.name(),

@@ -19,6 +19,10 @@ public enum AuditAction {
     CONVERSATION_INTERRUPT,
     // UC-41 — on-demand fetch of a tool call's full (untruncated) input + result.
     CONVERSATION_FETCH_DETAIL,
+    // UC-67 — the MCP screen initiated a server's login flow by surfacing the
+    // interactive `/mcp` menu in the session's live main pane (the auth itself
+    // is completed by the human in that session, never headlessly).
+    MCP_LOGIN,
     CLIENT_ADD,
     CLIENT_REMOVE,
     // UC04 — successful POST /v1/enrollment redemption.
