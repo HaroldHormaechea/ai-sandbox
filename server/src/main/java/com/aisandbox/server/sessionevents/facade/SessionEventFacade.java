@@ -40,8 +40,14 @@ public class SessionEventFacade {
      * feed is cheap, but a misbehaving client should still not be able to open
      * an unbounded number of feeds. A constant for now (the use case's optional
      * {@code ServerProperties} knob is deferred).
+     *
+     * <p>UC-69 raised this from 4 to 20: a single device now legitimately holds
+     * <i>two</i> events feeds — the Sessions screen's foreground-bound feed and
+     * the app-wide pending-question watcher's process-lifetime feed — so the
+     * old cap of 4 left little headroom for a handful of devices/tabs sharing one
+     * client certificate (the cap is keyed by fingerprint, not by device).
      */
-    static final int MAX_SUBSCRIPTIONS_PER_FINGERPRINT = 4;
+    static final int MAX_SUBSCRIPTIONS_PER_FINGERPRINT = 20;
 
     private final SessionFacade sessionFacade;
     private final SessionEventBroadcaster broadcaster;

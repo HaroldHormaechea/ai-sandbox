@@ -543,7 +543,9 @@ Full schema in [STREAM_PROTOCOL.md](STREAM_PROTOCOL.md).
 - Driven by a subscriber-gated ~1 s server-side reconcile of the same
   enumeration `GET /v1/sessions` uses, so it catches out-of-band transitions
   (a container dying on its own) too. Worst-case push latency ≈ 2 s.
-- Foreground-bound on the client and capped at 4 subscriptions per cert.
+- Capped at 20 subscriptions per cert (raised from 4 in UC-69, since a device
+  now holds two feeds: the foreground-bound sessions screen plus the app-wide
+  pending-question watcher's background `dataSync` feed).
 
 Full schema in [SESSIONS_EVENTS_PROTOCOL.md](SESSIONS_EVENTS_PROTOCOL.md).
 
