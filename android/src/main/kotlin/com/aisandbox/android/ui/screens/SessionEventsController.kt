@@ -41,10 +41,21 @@ class SessionEventsController(
     private val eventsClientFactory: (AiSandboxHttpClient) -> SessionEventsClient,
     private val onSnapshot: (List<SessionSummary>) -> Unit,
     private val onDelta: (upserts: List<SessionSummary>, removed: List<Int>) -> Unit,
+    // UC-70 — feed-status sink (mirrors onSnapshot/onDelta): the connect loop
+    // pushes a SessionsFeedStatus on every meaningful transition so the sessions
+    // list can render the "Not connected, retrying…" background. Defaulted to a
+    // no-op so pre-UC-70 callers/tests keep compiling.
+    private val onStatus: (SessionsFeedStatus) -> Unit = {},
+    // UC-70 — a SINGLE shared clock instance, handed to BOTH this controller and
+    // its [ReconnectController], so the next-retry/give-up instants the status
+    // carries are computed against the same `now` the back-off schedules against
+    // (no drift between two clocks). Tests inject a fake to drive deterministic
+    // timing.
+    private val nowMs: () -> Long = System::currentTimeMillis,
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
 ) {
 
-    private val reconnect = ReconnectController()
+    private val reconnect = ReconnectController(nowMs = nowMs)
     private var eventsClient: SessionEventsClient? = null
     private var connectJob: Job? = null
 
@@ -79,11 +90,23 @@ class SessionEventsController(
             val profile = profileStore.current()
             if (profile == null) {
                 Log.i(TAG, "no profile — events feed idle")
+                // UC-70 hard-req #5 — the no-profile branch emits NOTHING; the
+                // feed stays silent so an unconfigured client never shows the
+                // retrying background.
                 return@launch
             }
             val http = httpClientFactory(profile)
 
             while (isActive) {
+                // UC-70 hard-req #1 (anti-flicker) — emit CONNECTING (a silent,
+                // non-retrying phase) ONLY before the first failure
+                // (attemptCount == 0). Once any failure has been recorded the
+                // back-off has already emitted RECONNECTING, and we must HOLD it
+                // across the wait + the next attempt — never re-emit CONNECTING
+                // mid-sequence, or the background would flicker away and back.
+                if (reconnect.attemptCount == 0) {
+                    onStatus(SessionsFeedStatus(phase = SessionsFeedStatus.Phase.CONNECTING))
+                }
                 val client = eventsClientFactory(http)
                 eventsClient = client
                 try {
@@ -95,6 +118,8 @@ class SessionEventsController(
                 when (client.state.value) {
                     is SessionEventsClient.State.Open -> {
                         reconnect.reset()
+                        // UC-70 — the socket is up: clear any retrying background.
+                        onStatus(SessionsFeedStatus(phase = SessionsFeedStatus.Phase.CONNECTED))
                         // The server pushes a fresh Snapshot immediately on
                         // connect, so collecting incoming is the whole job —
                         // the resync happens for free (AC5).
@@ -127,9 +152,25 @@ class SessionEventsController(
                     // Cumulative cap hit — defer to the REST fallback (AC5). A
                     // later foreground (re)START reconnects with a fresh resync.
                     Log.i(TAG, "events feed gave up after back-off cap; REST refresh is the fallback")
+                    // UC-70 hard-req #4 — terminal give-up: a static "Not
+                    // connected" background, no countdown.
+                    onStatus(SessionsFeedStatus(phase = SessionsFeedStatus.Phase.STOPPED))
                     return@launch
                 }
+                // UC-70 hard-req #2 — advance the schedule FIRST (nextDelayMs()
+                // records the first-failure instant + bumps attemptCount), THEN
+                // emit RECONNECTING so attempt / nextRetryAtMs / giveUpAtMs are
+                // all the post-increment values. nextRetryAtMs and giveUpAtMs are
+                // computed off the SAME shared `nowMs` clock the controller uses.
                 val delayMs = reconnect.nextDelayMs()
+                onStatus(
+                    SessionsFeedStatus(
+                        phase = SessionsFeedStatus.Phase.RECONNECTING,
+                        attempt = reconnect.attemptCount,
+                        nextRetryAtMs = nowMs() + delayMs,
+                        giveUpAtMs = reconnect.giveUpAtMs(),
+                    ),
+                )
                 delay(delayMs)
             }
         }

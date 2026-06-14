@@ -64,6 +64,10 @@ class SessionsViewModel(application: Application) : AndroidViewModel(application
         eventsClientFactory = { client -> container.sessionEventsClient(client) },
         onSnapshot = { rows -> coordinator.applySnapshot(rows) },
         onDelta = { upserts, removed -> coordinator.applyDelta(upserts, removed) },
+        // UC-70 — route feed connection-status transitions into the coordinator
+        // so a disconnected/reconnecting feed surfaces the "Not connected,
+        // retrying…" background on the same single [state] StateFlow.
+        onStatus = { status -> coordinator.applyFeedStatus(status) },
     )
 
     init {
@@ -152,6 +156,16 @@ data class SessionsUiState(
      * authoritative state arrives on the next refresh / UC-32 push.
      */
     val pendingActions: Set<Int> = emptySet(),
+    /**
+     * UC-70 — the live sessions-events feed's connection status, mirrored from
+     * [SessionEventsController] by [SessionsCoordinator.applyFeedStatus]. Drives
+     * the "Not connected, retrying…" background (via [showRetryingBackground]).
+     * Defaults to a CONNECTED phase so the normal empty/list rendering holds
+     * until a real disconnect occurs. This is deliberately INDEPENDENT of the
+     * UC-54 [connectivity] dot (REST-derived) and the UC-52 [unreachable] banner
+     * state — UC-70 owns only the list-background treatment.
+     */
+    val feedStatus: SessionsFeedStatus = SessionsFeedStatus(),
 ) {
     /**
      * UC-28 — the effective state for display: the UNION of the client-side
@@ -220,6 +234,20 @@ data class SessionsUiState(
             serverResponded -> Connectivity.REACHABLE
             else -> Connectivity.UNKNOWN
         }
+
+    /**
+     * UC-70 — whether the list region should render the light-grey
+     * "Not connected, retrying…" background instead of the rows / normal empty
+     * state (AC1, AC2). True while the feed is actively reconnecting
+     * ([SessionsFeedStatus.reconnecting]) AND, per challenger hard-req #4, once
+     * it has terminally given up (phase STOPPED → a static "Not connected"). The
+     * silent CONNECTING phase (initial connect, no failure yet) and the normal
+     * CONNECTED phase both leave this false, so the message never flashes during
+     * a healthy first connect or distracts from a genuine "zero sessions" empty
+     * state.
+     */
+    val showRetryingBackground: Boolean
+        get() = feedStatus.reconnecting || feedStatus.phase == SessionsFeedStatus.Phase.STOPPED
 }
 
 /** Filter chip selection. */
