@@ -86,7 +86,29 @@ class LayeringTest {
                 .haveSimpleNameEndingWith("Controller")
                 .should()
                 .dependOnClassesThat()
-                .resideInAnyPackage("com.aisandbox.server.sessions.dto", "com.aisandbox.server.clients.dto");
+                .resideInAnyPackage(
+                        "com.aisandbox.server.sessions.dto",
+                        "com.aisandbox.server.clients.dto",
+                        // UC-67 — McpController must use api.dto.McpServerSummary / McpActionResult,
+                        // never the internal mcp.dto.McpServerStatus / McpActionOutcome / McpState.
+                        "com.aisandbox.server.mcp.dto");
+        rule.allowEmptyShould(true).check(PRODUCTION);
+    }
+
+    @Test
+    void mcp_service_does_not_reach_into_the_conversation_stream_service_package() {
+        // UC-67 — the MCP login flow needs the conversation domain's /mcp pane
+        // injection, but that cross-domain hand-off goes facade-to-facade
+        // (McpFacade → ConversationFacade), NOT mcp.service → stream.service.
+        // Reaching directly into stream.service.* from the mcp service tier would
+        // bypass the use-case boundary (and its audit emission), so pin it.
+        // profile-java-server-architecture rule 6.
+        ArchRule rule = noClasses()
+                .that()
+                .resideInAPackage("..mcp.service..")
+                .should()
+                .dependOnClassesThat()
+                .resideInAPackage("..stream.service..");
         rule.allowEmptyShould(true).check(PRODUCTION);
     }
 

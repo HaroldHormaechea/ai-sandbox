@@ -151,4 +151,37 @@ class ApiMappersTest {
         assertThat(s.id()).isEqualTo("claude-opus-4-8");
         assertThat(s.label()).isEqualTo("Opus 4.8");
     }
+
+    // ── UC-67 — MCP internal DTOs → API DTOs, state lowercased (AC3/AC6) ──────
+
+    @Test
+    void toMcpServerSummary_carries_fields_and_lowercases_the_state() {
+        // The controller-boundary mapper translates the internal McpServerStatus
+        // (with the McpState enum) into the REST McpServerSummary the Android screen
+        // decodes — the state enum becomes its lowercase wire value (AC3).
+        com.aisandbox.server.mcp.dto.McpServerStatus status = new com.aisandbox.server.mcp.dto.McpServerStatus(
+                "atlassian",
+                "sse",
+                com.aisandbox.server.mcp.dto.McpState.NEEDS_AUTH,
+                "https://mcp.atlassian.com/v1/sse");
+
+        ApiDtos.McpServerSummary s = ApiMappers.toMcpServerSummary(status);
+
+        assertThat(s.name()).isEqualTo("atlassian");
+        assertThat(s.transport()).isEqualTo("sse");
+        assertThat(s.state()).isEqualTo("needs_auth");
+        assertThat(s.detail()).isEqualTo("https://mcp.atlassian.com/v1/sse");
+    }
+
+    @Test
+    void toMcpActionResult_carries_name_state_and_message_with_lowercased_state() {
+        com.aisandbox.server.mcp.dto.McpActionOutcome outcome = new com.aisandbox.server.mcp.dto.McpActionOutcome(
+                "call-graph", com.aisandbox.server.mcp.dto.McpState.CONNECTED, "Re-checked the server's connection.");
+
+        ApiDtos.McpActionResult r = ApiMappers.toMcpActionResult(outcome);
+
+        assertThat(r.name()).isEqualTo("call-graph");
+        assertThat(r.state()).isEqualTo("connected");
+        assertThat(r.message()).isEqualTo("Re-checked the server's connection.");
+    }
 }
