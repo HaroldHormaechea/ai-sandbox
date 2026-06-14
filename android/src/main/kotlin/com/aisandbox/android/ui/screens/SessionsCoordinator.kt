@@ -213,6 +213,20 @@ class SessionsCoordinator(
     }
 
     /**
+     * UC-70 — mirror a [SessionsFeedStatus] transition from
+     * [SessionEventsController] into the single [state] StateFlow the screen
+     * renders. Pure and surgical: it copies ONLY [SessionsUiState.feedStatus]
+     * and NEVER touches [SessionsUiState.sessions] or
+     * [SessionsUiState.loading] — the live feed must not clear the last-known
+     * list (UC-51 stuck-list/spinner contract) nor drive the REST spinner. The
+     * background-vs-rows decision is derived downstream by
+     * [SessionsUiState.showRetryingBackground].
+     */
+    fun applyFeedStatus(status: SessionsFeedStatus) {
+        state.value = state.value.copy(feedStatus = status)
+    }
+
+    /**
      * UC-28 reconcile, shared by [refresh] and the UC-32 push-apply paths.
      * KEEP an optimistic-terminating `n` only while it is still present AND the
      * server still reports a non-resolving status (running / provisioning /

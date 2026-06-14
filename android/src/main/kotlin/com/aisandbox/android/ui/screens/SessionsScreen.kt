@@ -101,7 +101,9 @@ import com.aisandbox.android.ui.theme.OnSurfaceVariant
 import com.aisandbox.android.ui.theme.SurfaceLow
 import com.aisandbox.android.ui.theme.Success
 import com.aisandbox.android.ui.theme.Warning
+import java.util.Locale
 import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
 /**
@@ -338,7 +340,14 @@ internal fun SessionsBody(
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
         item { FilterChipsRow(state = state, onSelectFilter = onSelectFilter) }
-        if (state.visible.isEmpty()) {
+        if (state.showRetryingBackground) {
+            // UC-70 (AC1/AC2) — the feed is disconnected/reconnecting (or has
+            // given up): override the whole list region with the light-grey
+            // "Not connected, retrying…" background. This takes precedence over
+            // BOTH the rows and the normal empty state, so no stale rows linger
+            // (AC2) while the connection is down.
+            item { RetryingBackground(status = state.feedStatus) }
+        } else if (state.visible.isEmpty()) {
             item { EmptyState(filter = state.filter) }
         } else {
             items(items = state.visible, key = { it.n }) { row ->
@@ -501,6 +510,102 @@ private fun EmptyState(filter: SessionsFilter) {
         contentAlignment = Alignment.Center,
     ) {
         Text(text = msg, style = MaterialTheme.typography.bodyMedium, color = OnSurfaceMuted)
+    }
+}
+
+/**
+ * UC-70 — the light-grey, visually-subordinate list background shown while the
+ * live sessions-events feed is disconnected/reconnecting (or has given up). It
+ * is the empty-state treatment (centered, [OnSurfaceMuted] `bodyMedium` —
+ * matching [EmptyState]), NOT an alarming error banner (AC1/AC7), and never
+ * reintroduces the dismissed UC-52 blocking screen.
+ *
+ * <p>Lines, top to bottom:
+ *  • "Not connected, retrying…" (AC1);
+ *  • the current reconnect attempt (AC3);
+ *  • a live 1-Hz countdown to the next retry over [SessionsFeedStatus.nextRetryAtMs]
+ *    (AC4) — the ticker re-keys on the target so an early/rescheduled attempt
+ *    resyncs rather than showing a stale timer;
+ *  • a "giving up in mm:ss" line ONLY while [SessionsFeedStatus.giveUpAtMs] is
+ *    non-null (AC5) — derived from the controller's budget, so when UC-71 makes
+ *    retries unlimited (null) this line simply disappears with no code change.
+ *
+ * <p>Terminal give-up ([SessionsFeedStatus.Phase.STOPPED]) renders a single
+ * static "Not connected" with no countdown (challenger hard-req #4).
+ *
+ * [nowProvider] is a test seam so an instrumented test can drive the countdown
+ * deterministically; production uses the wall clock.
+ */
+@Composable
+private fun RetryingBackground(
+    status: SessionsFeedStatus,
+    nowProvider: () -> Long = { System.currentTimeMillis() },
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 48.dp)
+            .testTag("sessions_retrying_background"),
+        contentAlignment = Alignment.Center,
+    ) {
+        if (status.phase == SessionsFeedStatus.Phase.STOPPED) {
+            // Hard-req #4 — gave up: static "Not connected", no countdown.
+            Text(
+                text = stringResource(R.string.sessions_feed_disconnected),
+                style = MaterialTheme.typography.bodyMedium,
+                color = OnSurfaceMuted,
+                modifier = Modifier.testTag("sessions_retrying_disconnected"),
+            )
+            return@Box
+        }
+
+        // AC4 — a 1-Hz ticker. Re-key (remember/effect) on the next-retry target
+        // so a new schedule resyncs the clock instead of drifting (Pitfall:
+        // countdown accuracy). `giveUpAtMs` is recomputed off the same `now`.
+        val target = status.nextRetryAtMs
+        var now by remember(target) { mutableStateOf(nowProvider()) }
+        LaunchedEffect(target) {
+            while (true) {
+                now = nowProvider()
+                delay(1_000L)
+            }
+        }
+
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(
+                text = stringResource(R.string.sessions_feed_retrying),
+                style = MaterialTheme.typography.bodyMedium,
+                color = OnSurfaceMuted,
+            )
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = stringResource(R.string.sessions_feed_attempt, status.attempt),
+                style = MaterialTheme.typography.bodyMedium,
+                color = OnSurfaceMuted,
+            )
+            if (target != null) {
+                val secondsToRetry = ((target - now).coerceAtLeast(0L) + 999L) / 1000L
+                Text(
+                    text = stringResource(R.string.sessions_feed_next_retry, secondsToRetry),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = OnSurfaceMuted,
+                    modifier = Modifier.testTag("sessions_retrying_countdown"),
+                )
+            }
+            // AC5 — limit line ONLY when a finite budget exists (controller-
+            // derived). Unlimited budget (UC-71) ⇒ giveUpAtMs == null ⇒ omitted.
+            val giveUpAt = status.giveUpAtMs
+            if (giveUpAt != null) {
+                val remainingSec = ((giveUpAt - now).coerceAtLeast(0L) + 999L) / 1000L
+                val clock = String.format(Locale.US, "%d:%02d", remainingSec / 60, remainingSec % 60)
+                Text(
+                    text = stringResource(R.string.sessions_feed_give_up, clock),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = OnSurfaceMuted,
+                    modifier = Modifier.testTag("sessions_retrying_give_up"),
+                )
+            }
+        }
     }
 }
 

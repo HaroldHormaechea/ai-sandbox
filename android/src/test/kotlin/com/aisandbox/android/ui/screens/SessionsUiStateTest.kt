@@ -513,4 +513,84 @@ class SessionsUiStateTest {
         assertThat(s.visible.map { it.n }).containsExactly(0)
         assertThat(s.countAll).isZero()
     }
+
+    // ── UC-70 — showRetryingBackground truth table (AC1/AC2/AC6 + the edge) ───
+    //
+    // The derived flag the screen reads to decide whether to override the list
+    // region with the light-grey "Not connected, retrying…" background. It must
+    // be TRUE only while the feed is actively reconnecting or has terminally
+    // given up — and crucially FALSE for a healthy connected feed (so a genuine
+    // "zero sessions" empty state is NOT mistaken for a disconnect — the use
+    // case's headline pitfall) and FALSE during the silent initial connect.
+
+    @Test
+    fun `feedStatus defaults to a connected phase (no background until a real drop)`() {
+        assertThat(SessionsUiState().feedStatus.phase).isEqualTo(SessionsFeedStatus.Phase.CONNECTED)
+        assertThat(SessionsUiState().showRetryingBackground).isFalse
+    }
+
+    @Test
+    fun `showRetryingBackground is false for a connected feed (AC6)`() {
+        val s = SessionsUiState(feedStatus = SessionsFeedStatus(phase = SessionsFeedStatus.Phase.CONNECTED))
+        assertThat(s.showRetryingBackground).isFalse
+    }
+
+    @Test
+    fun `connected feed with zero sessions does NOT show the retrying background (pitfall)`() {
+        // The edge the use case calls out: "connected but genuinely empty" must
+        // render the normal empty state, never the retrying message.
+        val s = SessionsUiState(
+            sessions = emptyList(),
+            feedStatus = SessionsFeedStatus(phase = SessionsFeedStatus.Phase.CONNECTED),
+        )
+        assertThat(s.visible).isEmpty()
+        assertThat(s.showRetryingBackground)
+            .`as`("an empty-but-connected list shows EmptyState, not the disconnect message")
+            .isFalse
+    }
+
+    @Test
+    fun `showRetryingBackground is false during the silent initial connect (anti-flicker)`() {
+        // CONNECTING (the first connect, before any failure) is silent — it must
+        // not flash the retrying message on a healthy first load.
+        val s = SessionsUiState(feedStatus = SessionsFeedStatus(phase = SessionsFeedStatus.Phase.CONNECTING))
+        assertThat(s.showRetryingBackground).isFalse
+    }
+
+    @Test
+    fun `showRetryingBackground is true while the feed is reconnecting (AC1)`() {
+        val s = SessionsUiState(
+            feedStatus = SessionsFeedStatus(
+                phase = SessionsFeedStatus.Phase.RECONNECTING,
+                attempt = 3,
+                nextRetryAtMs = 10_000L,
+                giveUpAtMs = 300_000L,
+            ),
+        )
+        assertThat(s.feedStatus.reconnecting).isTrue
+        assertThat(s.showRetryingBackground).isTrue
+    }
+
+    @Test
+    fun `showRetryingBackground is true once the feed has terminally given up (STOPPED)`() {
+        // Hard-req #4 — a gave-up feed still shows the (static) background, not a
+        // blank list, so the operator sees "Not connected" rather than nothing.
+        val s = SessionsUiState(feedStatus = SessionsFeedStatus(phase = SessionsFeedStatus.Phase.STOPPED))
+        assertThat(s.feedStatus.reconnecting).isFalse
+        assertThat(s.showRetryingBackground).isTrue
+    }
+
+    @Test
+    fun `the retrying background overrides even a non-empty last-known list (AC2)`() {
+        // The feed dropping must not leave stale rows: the flag is true regardless
+        // of the working set, so the screen empties the list region.
+        val s = SessionsUiState(
+            sessions = listOf(row(1, "running"), row(2, "running")),
+            feedStatus = SessionsFeedStatus(phase = SessionsFeedStatus.Phase.RECONNECTING, attempt = 1),
+        )
+        assertThat(s.visible).isNotEmpty()
+        assertThat(s.showRetryingBackground)
+            .`as`("a reconnecting feed empties the list region even with rows still in state (AC2)")
+            .isTrue
+    }
 }
