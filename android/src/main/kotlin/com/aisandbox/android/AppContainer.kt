@@ -5,6 +5,7 @@ import com.aisandbox.android.conversation.ConversationController
 import com.aisandbox.android.identity.KeyStoreIdentityManager
 import com.aisandbox.android.net.AiSandboxHttpClient
 import com.aisandbox.android.net.ConversationClient
+import com.aisandbox.android.net.McpApi
 import com.aisandbox.android.net.ModelsApi
 import com.aisandbox.android.net.ServerProfile
 import com.aisandbox.android.net.ServerProfileStore
@@ -99,6 +100,9 @@ class AppContainer(applicationContext: Context) {
 
     /** UC-66 — build a per-profile client for the model-catalogue endpoint (GET /v1/models). */
     fun modelsApi(client: AiSandboxHttpClient): ModelsApi = ModelsApi(client)
+
+    /** UC-67 — build a per-profile client for the per-session MCP management endpoints. */
+    fun mcpApi(client: AiSandboxHttpClient): McpApi = McpApi(client)
 
     fun streamClient(client: AiSandboxHttpClient, sessionN: Int): StreamClient =
         StreamClient(http = client, sessionN = sessionN)

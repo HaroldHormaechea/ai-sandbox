@@ -24,6 +24,8 @@ object Routes {
     const val TerminalPattern = "terminal/{n}"
     /** UC-37 — structured conversation view. Path with `{n}`; use [conversationFor]. */
     const val ConversationPattern = "conversation/{n}"
+    /** UC-67 — full-screen MCP management view for a session. Path with `{n}`; use [mcpFor]. */
+    const val McpPattern = "mcp/{n}"
     const val Settings = "settings"
     const val CertRevoked = "cert-revoked"
     const val ServerIdentityChanged = "server-identity-changed"
@@ -32,4 +34,7 @@ object Routes {
 
     /** UC-37 — single-tap connection-mode destination (long-press → [terminalFor]). */
     fun conversationFor(n: Int): String = "conversation/$n"
+
+    /** UC-67 — full-screen MCP management destination for session [n]. */
+    fun mcpFor(n: Int): String = "mcp/$n"
 }

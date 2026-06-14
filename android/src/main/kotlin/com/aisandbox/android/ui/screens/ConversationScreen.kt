@@ -88,6 +88,9 @@ import com.aisandbox.android.ui.theme.Warning
 fun ConversationScreen(
     sessionN: Int,
     onBack: () -> Unit,
+    // UC-67 — open the full-screen MCP manager from the overflow menu. Defaults to
+    // a no-op so existing call sites / tests that don't wire navigation still compile.
+    onOpenMcp: () -> Unit = {},
     viewModel: ConversationViewModel = viewModel(),
 ) {
     LaunchedEffect(sessionN) { viewModel.attach(sessionN) }
@@ -141,6 +144,10 @@ fun ConversationScreen(
                         onModel = {
                             menuOpen = false // close the menu, then open the model dialog (AC2)
                             viewModel.loadModels() // sets ModelMenuState != Idle, which shows the dialog
+                        },
+                        onMcp = {
+                            menuOpen = false // UC-67 AC1/AC2 — close the menu, then open the full-screen MCP manager
+                            onOpenMcp()
                         },
                         onClear = {
                             menuOpen = false // AC7 — close the menu after Clear is chosen
@@ -227,6 +234,8 @@ fun ConversationScreen(
 internal fun ConversationOverflowMenu(
     expanded: Boolean,
     onModel: () -> Unit,
+    // UC-67 — defaulted so existing same-package tests constructing this menu still compile.
+    onMcp: () -> Unit = {},
     onClear: () -> Unit,
     onDisconnect: () -> Unit,
     onDismiss: () -> Unit,
@@ -236,6 +245,11 @@ internal fun ConversationOverflowMenu(
         DropdownMenuItem(
             text = { Text("Model") },
             onClick = onModel,
+        )
+        // UC-67 — opens the full-screen MCP management screen for this session (AC1).
+        DropdownMenuItem(
+            text = { Text("MCP") },
+            onClick = onMcp,
         )
         DropdownMenuItem(
             text = { Text("Clear") },

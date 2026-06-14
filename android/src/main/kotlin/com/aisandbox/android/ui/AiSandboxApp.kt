@@ -24,6 +24,7 @@ import com.aisandbox.android.net.TlsFailureTranslation
 import com.aisandbox.android.requireContainer
 import com.aisandbox.android.ui.screens.CertRevokedScreen
 import com.aisandbox.android.ui.screens.ConversationScreen
+import com.aisandbox.android.ui.screens.McpScreen
 import com.aisandbox.android.ui.screens.OnboardingScreen
 import com.aisandbox.android.ui.screens.ServerIdentityChangedScreen
 import com.aisandbox.android.ui.screens.SessionsScreen
@@ -186,7 +187,20 @@ fun AiSandboxApp() {
                 arguments = listOf(navArgument("n") { type = NavType.IntType }),
             ) { backStackEntry ->
                 val n = backStackEntry.arguments?.getInt("n") ?: 0
-                ConversationScreen(sessionN = n, onBack = { navController.popBackStack() })
+                ConversationScreen(
+                    sessionN = n,
+                    onBack = { navController.popBackStack() },
+                    // UC-67 — overflow "MCP" item opens the full-screen MCP manager.
+                    onOpenMcp = { navController.navigate(Routes.mcpFor(n)) },
+                )
+            }
+
+            composable(
+                route = Routes.McpPattern,
+                arguments = listOf(navArgument("n") { type = NavType.IntType }),
+            ) { backStackEntry ->
+                val n = backStackEntry.arguments?.getInt("n") ?: 0
+                McpScreen(sessionN = n, onBack = { navController.popBackStack() })
             }
 
             composable(Routes.Settings) {
