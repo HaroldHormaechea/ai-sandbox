@@ -132,7 +132,13 @@ public class SandboxImageService {
                     AuditAction.SANDBOX_IMAGE_WARM, "ok", "image", EnsureSandboxImage.IMAGE_TAG, "durationMs", ms);
             state.set(SandboxImageState.READY);
             return SandboxImageState.READY;
-        } catch (IOException e) {
+        } catch (Exception e) {
+            // Catch ANY failure (not just IOException) — e.g. a RuntimeException
+            // bubbling out of the executor — so the state can NEVER stay stuck at
+            // BUILDING after a non-success exit. Leaving it BUILDING would wedge
+            // the SessionFacade gate at 503 for the life of the JVM (warm()
+            // early-returns on BUILDING and warmAsync() no-ops on it). FAILED is
+            // recoverable: the gate re-kicks warmAsync() on ABSENT/FAILED.
             long ms = (System.nanoTime() - startNanos) / 1_000_000L;
             LOG.warn(
                     "Sandbox image {} warm build failed after {} ms: {}",
@@ -173,6 +179,9 @@ public class SandboxImageService {
     private Staleness classifyImage(String version) throws IOException {
         Duration timeout = Duration.ofSeconds(props.limits().spawnTimeoutSeconds());
         ProcessExecutor.Result res = executor.run(EnsureSandboxImage.inspectLabelArgv(), locator.repoRoot(), timeout);
+        if (res == null) {
+            throw new IOException("docker image inspect returned no result for " + EnsureSandboxImage.IMAGE_TAG);
+        }
         String labelTrim = res.stdout() == null ? "" : res.stdout().trim();
         return EnsureSandboxImage.classify(res.exitCode(), labelTrim, version);
     }
@@ -190,13 +199,16 @@ public class SandboxImageService {
         Duration buildTimeout = Duration.ofSeconds(props.limits().imageBuildTimeoutSeconds());
         ProcessExecutor.Result build =
                 executor.run(EnsureSandboxImage.buildArgv(composeFile, repoRoot, version), repoRoot, buildTimeout);
+        if (build == null) {
+            throw new IOException("warm build of " + EnsureSandboxImage.IMAGE_TAG + " returned no result");
+        }
         if (build.exitCode() != 0) {
             throw new IOException("warm build of " + EnsureSandboxImage.IMAGE_TAG + " failed (exit=" + build.exitCode()
                     + "): " + build.stderr());
         }
         Duration probeTimeout = Duration.ofSeconds(props.limits().spawnTimeoutSeconds());
         ProcessExecutor.Result present = executor.run(EnsureSandboxImage.inspectPresentArgv(), repoRoot, probeTimeout);
-        if (present.exitCode() != 0) {
+        if (present == null || present.exitCode() != 0) {
             throw new IOException(
                     "warm build reported success but " + EnsureSandboxImage.IMAGE_TAG + " is still not present");
         }
