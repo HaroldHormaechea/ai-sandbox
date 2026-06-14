@@ -1,5 +1,6 @@
 package com.aisandbox.server.api.error;
 
+import com.aisandbox.server.sessions.facade.SandboxImageWarmingException;
 import com.aisandbox.server.sessions.facade.SessionFacade;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -68,6 +69,30 @@ public class ProblemDetailsAdvice {
         pd.setProperty("exitCode", ex.exitCode);
         pd.setProperty("consumedN", ex.consumedN);
         return pd;
+    }
+
+    @ExceptionHandler(SessionFacade.SpawnTimeoutException.class)
+    @ResponseBody
+    public ProblemDetail handleSpawnTimeout(SessionFacade.SpawnTimeoutException ex) {
+        // UC-77 — spawn.sh exceeded the (build-free) spawn timeout: a genuinely
+        // stuck `up`. 504 Gateway Timeout, machine code spawn_timeout — distinct
+        // from the 500 spawn_failed (non-zero exit) path so a slow/stuck spawn is
+        // never read identically to a hard failure (AC3). The documented-but-
+        // previously-unwired ErrorCode.SPAWN_TIMEOUT is now in use.
+        ProblemDetail pd = build(HttpStatus.GATEWAY_TIMEOUT, ErrorCode.SPAWN_TIMEOUT, ex.getMessage());
+        pd.setProperty("timeoutSeconds", ex.timeoutSeconds);
+        return pd;
+    }
+
+    @ExceptionHandler(SandboxImageWarmingException.class)
+    @ResponseBody
+    public ProblemDetail handleSandboxImageWarming(SandboxImageWarmingException ex) {
+        // UC-77 — the ai-context:latest sandbox image is still being prepared
+        // (warm build in progress, or just (re)kicked off-request). 503 Service
+        // Unavailable, machine code sandbox_image_warming — the client should
+        // surface a transient "preparing image" state and retry, NOT the
+        // destructive hard-failure / re-enroll path (AC1/edge case).
+        return build(HttpStatus.SERVICE_UNAVAILABLE, ErrorCode.SANDBOX_IMAGE_WARMING, ex.getMessage());
     }
 
     @ExceptionHandler(SessionFacade.InvalidLifecycleTransitionException.class)

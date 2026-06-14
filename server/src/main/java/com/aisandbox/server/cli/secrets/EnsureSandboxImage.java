@@ -66,6 +66,85 @@ public final class EnsureSandboxImage {
         STALE
     }
 
+    // ── Canonical argv builders + pure classifier (UC-77) ───────────────
+    //
+    // These static helpers are the single source of truth for the exact
+    // {@code docker} command vectors and the staleness decision. Both the
+    // CLI / onboarding instance methods below AND the server-side
+    // {@code SandboxImageService} (which warms the same image ahead of the
+    // first interactive spawn) build their argv here, so the warm-built
+    // image is byte-for-byte label-identical to the onboard build —
+    // guaranteeing {@link #classify(int, String, String)} reports CURRENT
+    // and no double build occurs.
+
+    /**
+     * Argv for the label-reading {@code docker image inspect} that drives
+     * {@link Staleness} classification — never runs a container. Pair its
+     * captured result with {@link #classify(int, String, String)}.
+     */
+    public static List<String> inspectLabelArgv() {
+        return List.of(
+                "docker",
+                "image",
+                "inspect",
+                "--format",
+                "{{ index .Config.Labels \"" + LABEL_KEY + "\" }}",
+                IMAGE_TAG);
+    }
+
+    /**
+     * Argv for the plain {@code docker image inspect <tag>} presence probe
+     * (no {@code --format}); a zero exit means {@link #IMAGE_TAG} exists.
+     */
+    public static List<String> inspectPresentArgv() {
+        return List.of("docker", "image", "inspect", IMAGE_TAG);
+    }
+
+    /**
+     * Argv for the {@code docker compose ... build} that produces
+     * {@link #IMAGE_TAG}, stamping {@code version} via
+     * {@code --build-arg IMAGE_VERSION=<version>} and targeting the
+     * {@link #COMPOSE_SERVICE} service. The element order is pinned —
+     * existing argv assertions (EnsureSandboxImageTest, OnboardCommandTest)
+     * and the CI {@code release-install-smoke} step depend on it verbatim.
+     *
+     * @param composeFile the {@code -f} compose file
+     * @param projectDir the {@code --project-directory}
+     * @param version stamped via {@link #BUILD_ARG}
+     */
+    public static List<String> buildArgv(Path composeFile, Path projectDir, String version) {
+        return List.of(
+                "docker",
+                "compose",
+                "-f",
+                composeFile.toString(),
+                "--project-directory",
+                projectDir.toString(),
+                "build",
+                "--build-arg",
+                BUILD_ARG + "=" + version,
+                COMPOSE_SERVICE);
+    }
+
+    /**
+     * Pure staleness decision over the result of an
+     * {@link #inspectLabelArgv()} inspect. A non-zero {@code inspectExitCode}
+     * ⇒ {@link Staleness#ABSENT}; otherwise the trimmed label is compared to
+     * {@code version} — equal ⇒ {@link Staleness#CURRENT}, anything else
+     * (a different version, an empty label, or Docker's {@code <no value>})
+     * ⇒ {@link Staleness#STALE}.
+     *
+     * @param inspectExitCode exit code of the label inspect
+     * @param labelTrim the trimmed label value captured from the inspect
+     * @param version the package version to compare against
+     */
+    public static Staleness classify(int inspectExitCode, String labelTrim, String version) {
+        if (inspectExitCode != 0) {
+            return Staleness.ABSENT;
+        }
+        return version.equals(labelTrim) ? Staleness.CURRENT : Staleness.STALE;
+    }
+
     private final ProcessRunner runner;
     private final ConsoleIO io;
 
@@ -118,17 +197,8 @@ public final class EnsureSandboxImage {
      * for a missing label) ⇒ {@link Staleness#STALE}.
      */
     public Staleness classify(String version) throws IOException, InterruptedException {
-        ProcessRunner.Result res = runner.runAndCapture(List.of(
-                "docker",
-                "image",
-                "inspect",
-                "--format",
-                "{{ index .Config.Labels \"" + LABEL_KEY + "\" }}",
-                IMAGE_TAG));
-        if (res.exitCode() != 0) {
-            return Staleness.ABSENT;
-        }
-        return version.equals(res.stdoutTrim()) ? Staleness.CURRENT : Staleness.STALE;
+        ProcessRunner.Result res = runner.runAndCapture(inspectLabelArgv());
+        return classify(res.exitCode(), res.stdoutTrim(), version);
     }
 
     private void build(Path installDir, String version, String banner) throws IOException, InterruptedException {
@@ -140,17 +210,7 @@ public final class EnsureSandboxImage {
         }
         io.println("");
         io.println("  " + banner);
-        int rc = runner.runInheritIO(List.of(
-                "docker",
-                "compose",
-                "-f",
-                composeFile.toString(),
-                "--project-directory",
-                hostDir.toString(),
-                "build",
-                "--build-arg",
-                BUILD_ARG + "=" + version,
-                COMPOSE_SERVICE));
+        int rc = runner.runInheritIO(buildArgv(composeFile, hostDir, version));
         if (rc != 0) {
             throw new IOException("docker compose build " + COMPOSE_SERVICE + " failed (exit=" + rc + ")");
         }
@@ -161,7 +221,7 @@ public final class EnsureSandboxImage {
     }
 
     private boolean imagePresent() throws IOException, InterruptedException {
-        ProcessRunner.Result res = runner.runAndCapture(List.of("docker", "image", "inspect", IMAGE_TAG));
+        ProcessRunner.Result res = runner.runAndCapture(inspectPresentArgv());
         return res.exitCode() == 0;
     }
 }

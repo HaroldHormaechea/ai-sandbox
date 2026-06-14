@@ -35,6 +35,10 @@ public enum AuditAction {
     // UC-46 — a Docker-lifecycle action (stop/start/pause/unpause) ran for a
     // session. Payload carries {action, n, exitCode}; result is ok / fail.
     SESSION_LIFECYCLE,
+    // UC-77 — a server-side warm build of the ai-context:latest sandbox image
+    // ran. Payload carries {image, durationMs[, error]}; result is ok / fail.
+    // Distinguishes a long "warming up" build from a hard session spawn_failed.
+    SANDBOX_IMAGE_WARM,
     HEALTHZ_FAIL;
 
     public String wire() {
