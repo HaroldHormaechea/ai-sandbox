@@ -90,8 +90,13 @@ ai-sandbox:
       retention-days: 7
 
     shutdown:
-      rest-grace-seconds: 30
-      total-grace-seconds: 60
+      # UC-74 — bounded internal grace so a lingering WebSocket can't pin the
+      # JVM until the systemd backstop. total-grace caps the graceful WS-drain
+      # composite; rest-grace caps each individual stream close. With
+      # spring.lifecycle.timeout-per-shutdown-phase=15s (baked default), the
+      # 15s + 10s = 25s sum stays well under the unit's TimeoutStopSec=70.
+      rest-grace-seconds: 5
+      total-grace-seconds: 10
 
     streams:
       idle-timeout-seconds: 7200       # 2 h, AC28

@@ -20,6 +20,12 @@ spring:
   threads:
     virtual:
       enabled: true
+  # UC-74 — bound each SmartLifecycle shutdown phase so a single stuck
+  # WebSocket cannot pin the JVM. This 15s phase cap plus the 10s
+  # graceful-WS drain budget (ai-sandbox.server.shutdown.total-grace-seconds
+  # below) sum to 25s, comfortably under the systemd TimeoutStopSec=70.
+  lifecycle:
+    timeout-per-shutdown-phase: 15s
 
 # Spring Boot's own server.* properties — we run TLS through a custom
 # NettyServerCustomizer, so most TLS knobs here are intentionally absent.
@@ -94,9 +100,13 @@ ai-sandbox:
     audit:
       file: /var/log/ai-sandbox-server/audit.log
       retention-days: 7
+    # UC-74 — bounded so a lingering WebSocket cannot drag shutdown to the
+    # systemd backstop. total-grace caps the graceful WS-drain composite;
+    # rest-grace caps each individual stream close. 15s (phase) + 10s (total)
+    # = 25s ≪ TimeoutStopSec=70.
     shutdown:
-      rest-grace-seconds: 30
-      total-grace-seconds: 60
+      rest-grace-seconds: 5
+      total-grace-seconds: 10
     streams:
       idle-timeout-seconds: 7200
       per-client-cap: 10
