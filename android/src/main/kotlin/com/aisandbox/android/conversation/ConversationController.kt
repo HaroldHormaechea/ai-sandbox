@@ -54,6 +54,13 @@ class ConversationController(
     private val httpClientFactory: (ServerProfile) -> AiSandboxHttpClient,
     private val clientFactory: (AiSandboxHttpClient, Int) -> ConversationClient,
     private val onClosed: (Int) -> Unit,
+    /**
+     * UC-75 — conservative spinner safety-net timeout. If an answer is submitted and no
+     * forward-progress frame arrives within this window while still pinned WORKING, the
+     * watchdog recovers the spinner to IDLE (usable) — it NEVER aborts the turn. Injectable
+     * so tests can drive it without a 45 s wait.
+     */
+    private val answerWatchdogMs: Long = ANSWER_WATCHDOG_MS,
 ) {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -100,6 +107,19 @@ class ConversationController(
 
     private val _turnPhase = MutableStateFlow(TurnPhase.IDLE)
     val turnPhase: StateFlow<TurnPhase> = _turnPhase.asStateFlow()
+
+    /**
+     * UC-75 — spinner safety-net. [awaitingAnswerKey] holds the `questionUuid` of the
+     * answer most recently submitted while we are still waiting for the turn to advance;
+     * [answerWatchdogJob] is the conservative timeout armed alongside it. Any forward-progress
+     * frame (turn-start/thinking/assistant-text/tool-use/tool-result/turn-end/backfill-start)
+     * proves the answer landed and disarms both; a `pending-clear` while still awaiting + WORKING
+     * recovers the spinner to IDLE; the watchdog is the last-resort fallback. Recovery is ALWAYS
+     * to IDLE (a usable state) and NEVER aborts/interrupts the turn.
+     */
+    @Volatile
+    private var awaitingAnswerKey: String? = null
+    private var answerWatchdogJob: Job? = null
 
     /** UC-41 — the currently-open tool-detail dialog state (AC5/AC9); null when none is open. */
     private val _toolDetail = MutableStateFlow<ToolDetailState?>(null)
@@ -172,6 +192,7 @@ class ConversationController(
         clearSuppressActive = false // UC-65 (AC5) — a new user action deterministically lifts the clear guard
         if (text.isBlank()) return
         if (_pendingSheet.value != null) return // AC12 — composer locked while a sheet is pending
+        clearAnswerWatchdog() // UC-75 — a fresh composer turn supersedes any pending answer safety-net
         _turnPhase.value = TurnPhase.WORKING
         synchronized(itemLock) {
             val seq = localSeqCounter++
@@ -194,9 +215,13 @@ class ConversationController(
     /** AC11 — submit a structured answer; optimistically dismiss the sheet and show the spinner. */
     fun submitAnswer(questionUuid: String, questionIndex: Int, selections: List<Int>, freeText: String) {
         clearSuppressActive = false // UC-65 (AC5) — a new user action deterministically lifts the clear guard
-        client?.sendAnswer(questionUuid, questionIndex, selections, freeText)
+        // UC-75 — normalize the "Other" free text (fold CRLF/CR→LF, trim surrounding newlines/
+        // whitespace) so a stray leading/trailing newline can't commit/decline early; interior
+        // newlines survive end-to-end (server injects them with C-j). Indices are untouched (UC-57).
+        client?.sendAnswer(questionUuid, questionIndex, selections, normalizeFreeText(freeText))
         _pendingSheet.value = null
         _turnPhase.value = TurnPhase.WORKING
+        armAnswerWatchdog(questionUuid) // UC-75 — spinner safety-net
     }
 
     /**
@@ -206,9 +231,51 @@ class ConversationController(
      */
     fun submitAnswerBatch(questionUuid: String, items: List<AnswerItem>) {
         clearSuppressActive = false // UC-65 (AC5) — a new user action deterministically lifts the clear guard
-        client?.sendAnswerBatch(questionUuid, items)
+        // UC-75 — normalize each item's "Other" free text (see [submitAnswer]); copy preserves
+        // questionIndex/selections exactly, so the UC-57 option/Other index mapping is unchanged.
+        val normalized = items.map { it.copy(freeText = normalizeFreeText(it.freeText)) }
+        client?.sendAnswerBatch(questionUuid, normalized)
         _pendingSheet.value = null
         _turnPhase.value = TurnPhase.WORKING
+        armAnswerWatchdog(questionUuid) // UC-75 — spinner safety-net
+    }
+
+    /**
+     * UC-75 — defensively normalize an "Other" free-text answer before it is sent.
+     * CRLF/CR are folded to LF, and leading/trailing newlines + surrounding whitespace
+     * are trimmed so a stray leading/trailing newline can NEVER commit or decline the ask
+     * prematurely. INTERIOR newlines are PRESERVED — the server's newline-safe injection
+     * ([typeMultiline], `C-j` between lines) delivers them, so a genuine multi-line answer
+     * survives end-to-end (AC2/AC4). This only rewrites the text payload — selections and
+     * indices are never touched (no UC-57 regression).
+     */
+    internal fun normalizeFreeText(s: String): String =
+        s.replace("\r\n", "\n").replace("\r", "\n").trim()
+
+    /**
+     * UC-75 — arm the spinner safety-net for the just-submitted answer [key] (its
+     * `questionUuid`). Records [awaitingAnswerKey] and starts a single conservative
+     * [answerWatchdogMs] timeout; if it fires while still awaiting this key AND pinned
+     * WORKING, the spinner is recovered to IDLE (usable) — never aborting the turn. Any
+     * earlier watchdog is cancelled first so only one is ever in flight.
+     */
+    private fun armAnswerWatchdog(key: String) {
+        awaitingAnswerKey = key
+        answerWatchdogJob?.cancel()
+        answerWatchdogJob = scope.launch {
+            delay(answerWatchdogMs)
+            if (awaitingAnswerKey == key && _turnPhase.value == TurnPhase.WORKING) {
+                _turnPhase.value = TurnPhase.IDLE // recover to usable; never interrupt/abort
+            }
+            if (awaitingAnswerKey == key) awaitingAnswerKey = null
+        }
+    }
+
+    /** UC-75 — disarm the spinner safety-net (forward progress, a new user action, or teardown). */
+    private fun clearAnswerWatchdog() {
+        awaitingAnswerKey = null
+        answerWatchdogJob?.cancel()
+        answerWatchdogJob = null
     }
 
     /** AC17 — switch the tailed/inject target; clear the view for the new target's transcript. */
@@ -216,6 +283,7 @@ class ConversationController(
         _selectedTargetId.value = targetId
         clearItems()
         closeDetail() // the open dialog belongs to the old target's tool call
+        clearAnswerWatchdog() // UC-75 — the pending answer belongs to the old target
         _pendingSheet.value = null
         _turnPhase.value = TurnPhase.IDLE
         // UC-66 — re-publish the new target's last-picked model (NOT wiped by the switch).
@@ -226,6 +294,7 @@ class ConversationController(
     /** Interrupt the active turn (ESC). */
     fun interrupt() {
         client?.sendInterrupt()
+        clearAnswerWatchdog() // UC-75 — explicit interrupt resolves the turn; no safety-net needed
         _turnPhase.value = TurnPhase.IDLE
     }
 
@@ -287,6 +356,7 @@ class ConversationController(
         }
         clearItems()
         closeDetail()
+        clearAnswerWatchdog() // UC-75 — /clear resolves the turn locally; drop the safety-net
         _pendingSheet.value = null // AC4 — dismiss any pending sheet immediately
         // Composer enablement is gated on pendingSheet == null, so it stays enabled (AC5).
         _turnPhase.value = TurnPhase.IDLE
@@ -356,6 +426,7 @@ class ConversationController(
 
     fun close(reason: String = "controller-close") {
         connectJob = null
+        clearAnswerWatchdog() // UC-75 — drop the spinner safety-net on teardown
         scope.cancel()
         client?.close(reason)
         client = null
@@ -373,6 +444,11 @@ class ConversationController(
     private fun onFrame(text: String) {
         val obj = runCatching { json.parseToJsonElement(text) }.getOrNull() as? JsonObject ?: return
         val type = obj["type"]?.jsonPrimitive?.contentOrNull
+        // UC-75 — any forward-progress frame proves the submitted answer landed and the turn is
+        // advancing, so disarm the spinner safety-net (the watchdog must not later flip a
+        // legitimately-working turn to IDLE). Checked BEFORE the clear-suppress early-returns so a
+        // genuine forward frame always disarms.
+        if (type != null && type in ANSWER_PROGRESS_FRAMES) clearAnswerWatchdog()
         // UC-65 — while the post-`/clear` suppression guard is active, drop content-producing
         // frames belonging to the pre-clear epoch so a late assistant-text/tool-result (or the
         // `/clear` command echo itself) can't resurrect the locally-wiped transcript (AC3).
@@ -488,6 +564,13 @@ class ConversationController(
                 if (_pendingSheet.value?.questionUuid == promptKey) {
                     _pendingSheet.value = null
                 }
+                // UC-75 — recovery gap: a pending-clear that arrives while we are still awaiting a
+                // submitted answer AND pinned WORKING means the ask was resolved/declined in the pane
+                // with no forward frame to flip the spinner. Recover to IDLE (usable) — never abort.
+                if (awaitingAnswerKey != null && _turnPhase.value == TurnPhase.WORKING) {
+                    _turnPhase.value = TurnPhase.IDLE
+                }
+                clearAnswerWatchdog()
             }
             "turn-end" -> {
                 if (!backfilling) _turnPhase.value = TurnPhase.IDLE
@@ -774,6 +857,7 @@ class ConversationController(
                         pump.cancel()
                         enumerate.cancel()
                         failPendingDetailsOnDisconnect() // AC9 — disconnect-while-pending → Unavailable
+                        clearAnswerWatchdog() // UC-75 — a disconnect ends the turn locally; drop the safety-net
                         if (terminal is ConversationClient.State.Revoked) {
                             _state.value = TerminalState.Revoked
                             return@launch
@@ -828,5 +912,21 @@ class ConversationController(
          * the slash command lands. A heuristic; tunable.
          */
         private const val CLEAR_INTERRUPT_GAP_MS = 150L
+
+        /**
+         * UC-75 — default spinner safety-net timeout. Conservative on purpose: long enough that a
+         * slow-but-valid answer (the harness is still processing) is NOT flipped to IDLE early, but
+         * bounded so a declined/failed answer with no forward frame can't pin the spinner forever.
+         * Event-driven recovery (forward frame / `pending-clear`) is preferred; this is the fallback.
+         */
+        internal const val ANSWER_WATCHDOG_MS = 45_000L
+
+        /**
+         * UC-75 — frame types that prove the turn is advancing after an answer was submitted; any of
+         * them disarms the spinner safety-net so the watchdog can never flip a working turn to IDLE.
+         */
+        private val ANSWER_PROGRESS_FRAMES = setOf(
+            "turn-start", "thinking", "assistant-text", "tool-use", "tool-result", "turn-end", "backfill-start",
+        )
     }
 }
