@@ -148,6 +148,8 @@ class SessionEventsController(
                 }
 
                 if (!isActive) break
+                // UC-71 — this give-up branch only fires under an injected finite
+                // retry budget; with the unlimited default ctor it is unreachable.
                 if (reconnect.shouldGiveUp()) {
                     // Cumulative cap hit — defer to the REST fallback (AC5). A
                     // later foreground (re)START reconnects with a fresh resync.

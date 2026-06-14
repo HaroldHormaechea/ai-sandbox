@@ -787,6 +787,8 @@ class ConversationController(
                     else -> { /* failed to open — fall through to back-off */ }
                 }
                 if (!isActive) break
+                // UC-71 — this give-up branch only fires under an injected finite
+                // retry budget; with the unlimited default ctor it is unreachable.
                 if (reconnect.shouldGiveUp()) {
                     _state.value = TerminalState.GaveUp
                     NetworkEvents.tryEmit(NetworkEvent.StreamGaveUp(c.streamId))
