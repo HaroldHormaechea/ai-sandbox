@@ -5,7 +5,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 import com.aisandbox.server.api.error.ErrorCode;
 import com.aisandbox.server.api.error.ProblemDetailsAdvice;
 import com.aisandbox.server.sessions.dto.LifecycleAction;
+import com.aisandbox.server.sessions.facade.SandboxImageWarmingException;
 import com.aisandbox.server.sessions.facade.SessionFacade;
+import com.aisandbox.server.sessions.service.SandboxImageState;
 import java.net.URI;
 import java.security.cert.CertificateException;
 import java.util.NoSuchElementException;
@@ -63,6 +65,39 @@ class ProblemDetailsAdviceTest {
         assertThat(pd.getProperties()).containsEntry("currentState", "running");
         assertThat(pd.getType()).isEqualTo(URI.create("https://ai-sandbox.dev/problems/session_state_conflict"));
         assertThat(pd.getDetail()).contains("start").contains("running");
+    }
+
+    /**
+     * UC-77 (AC1/AC3) — a stuck {@code spawn.sh} (the build-free spawn timeout
+     * tripped) maps to 504 {@code spawn_timeout}, carrying {@code timeoutSeconds},
+     * DISTINCT from the 500 {@code spawn_failed} path so a slow/stuck spawn is
+     * never read identically to a hard failure.
+     */
+    @Test
+    void spawn_timeout_maps_to_504_spawn_timeout_with_timeout_seconds() {
+        ProblemDetail pd =
+                advice.handleSpawnTimeout(new SessionFacade.SpawnTimeoutException(60, "exec timeout: spawn.sh"));
+        assertThat(pd.getStatus()).isEqualTo(504);
+        assertThat(pd.getProperties()).containsEntry("code", "spawn_timeout");
+        assertThat(pd.getProperties()).containsEntry("timeoutSeconds", 60L);
+        assertThat(pd.getType()).isEqualTo(URI.create("https://ai-sandbox.dev/problems/spawn_timeout"));
+        assertThat(pd.getDetail()).contains("60");
+    }
+
+    /**
+     * UC-77 (AC1/AC3) — a spawn arriving while the sandbox image is still being
+     * prepared maps to 503 {@code sandbox_image_warming}, so the client surfaces
+     * a transient "preparing image" state and retries rather than the
+     * destructive hard-failure / re-enroll path.
+     */
+    @Test
+    void sandbox_image_warming_maps_to_503_sandbox_image_warming() {
+        ProblemDetail pd =
+                advice.handleSandboxImageWarming(new SandboxImageWarmingException(SandboxImageState.BUILDING));
+        assertThat(pd.getStatus()).isEqualTo(503);
+        assertThat(pd.getProperties()).containsEntry("code", "sandbox_image_warming");
+        assertThat(pd.getType()).isEqualTo(URI.create("https://ai-sandbox.dev/problems/sandbox_image_warming"));
+        assertThat(pd.getDetail()).contains("being prepared");
     }
 
     @Test

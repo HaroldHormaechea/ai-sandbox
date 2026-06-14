@@ -54,6 +54,22 @@ class ProcessExecutorTest {
                 .isInstanceOf(IOException.class);
     }
 
+    /**
+     * UC-77 (AC2) — a wall-clock timeout surfaces as the dedicated {@link
+     * ProcessExecutor.ExecTimeoutException} subtype (so {@code SessionFacade}
+     * can map it to 504 spawn_timeout), while REMAINING an {@link IOException}
+     * (so the ~7 other {@code run(...)} callers that only {@code catch
+     * IOException} keep their existing behaviour). The message names the binary.
+     */
+    @Test
+    void timeout_throws_exec_timeout_exception_which_is_an_ioexception() {
+        assertThatThrownBy(() -> exec.run(List.of("/bin/sh", "-c", "sleep 30"), null, Duration.ofMillis(500)))
+                .isInstanceOf(ProcessExecutor.ExecTimeoutException.class)
+                .isInstanceOf(IOException.class)
+                .hasMessageContaining("exec timeout")
+                .hasMessageContaining("/bin/sh");
+    }
+
     @Test
     void truncates_large_output_with_sentinel() throws Exception {
         // Spit > 64 KiB at stdout.
