@@ -1012,4 +1012,139 @@ class SessionsScreenInstrumentationTest {
 
         composeTestRule.onAllNodesWithContentDescription(PENDING_QUESTION_BADGE_DESCRIPTION).assertCountEquals(0)
     }
+
+    // ── UC-70 — "Not connected, retrying…" list background (AC1/AC2/AC4/AC5/AC7) ──
+    //
+    // Drives the same internal SessionsBody render seam seeded with a
+    // SessionsFeedStatus. The RetryingBackground's 1-Hz countdown is an INFINITE
+    // LaunchedEffect, which would keep `waitForIdle` busy forever under the
+    // default auto-advancing clock — so the reconnecting tests freeze the clock
+    // (`mainClock.autoAdvance = false`) to read the initial frame deterministically.
+    // The countdown/give-up instants are pinned relative to a captured `base` so
+    // the ceil-to-seconds + mm:ss formatting render to exact, stable strings
+    // (the composable's `now` is captured at composition, well within 1 s of base).
+
+    @Test
+    fun reconnecting_feed_shows_light_grey_message_attempt_and_countdown_with_rows_hidden() {
+        // Freeze the clock so the countdown's infinite ticker doesn't stall idle.
+        composeTestRule.mainClock.autoAdvance = false
+        val base = System.currentTimeMillis()
+        setBody(
+            SessionsUiState(
+                // Stale rows still in state — must be hidden while reconnecting (AC2).
+                sessions = listOf(
+                    SessionSummary(n = 1, label = "alpha", state = "running"),
+                    SessionSummary(n = 2, label = "beta", state = "running"),
+                ),
+                filter = SessionsFilter.ALL,
+                feedStatus = SessionsFeedStatus(
+                    phase = SessionsFeedStatus.Phase.RECONNECTING,
+                    attempt = 3,
+                    nextRetryAtMs = base + 8_000L, // ceil → "8s"
+                    giveUpAtMs = base + 125_000L, // ceil → 125 s → "2:05"
+                ),
+            ),
+        )
+
+        // AC1 — the centered light-grey background message is shown.
+        composeTestRule.onNodeWithTag("sessions_retrying_background").assertIsDisplayed()
+        composeTestRule.onNodeWithText(ctx.getString(R.string.sessions_feed_retrying)).assertIsDisplayed()
+        // AC3 — the current attempt count.
+        composeTestRule.onNodeWithText(ctx.getString(R.string.sessions_feed_attempt, 3)).assertIsDisplayed()
+        // AC4 — the next-retry countdown (exact, ceil-to-seconds).
+        composeTestRule.onNodeWithTag("sessions_retrying_countdown").assertIsDisplayed()
+        composeTestRule.onNodeWithText(ctx.getString(R.string.sessions_feed_next_retry, 8)).assertIsDisplayed()
+        // AC5 — a finite budget surfaces the give-up line, mm:ss formatted.
+        composeTestRule.onNodeWithTag("sessions_retrying_give_up").assertIsDisplayed()
+        composeTestRule.onNodeWithText(ctx.getString(R.string.sessions_feed_give_up, "2:05")).assertIsDisplayed()
+        // AC2 — no stale rows linger behind the background.
+        composeTestRule.onNodeWithTag("session-card-1").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("session-card-2").assertDoesNotExist()
+    }
+
+    /**
+     * AC5 unlimited branch (the UC-71 forward case) — a RECONNECTING feed whose
+     * controller reports no finite budget (giveUpAtMs == null) shows the attempt
+     * + countdown but OMITS the give-up/limit line entirely.
+     */
+    @Test
+    fun reconnecting_with_unlimited_budget_omits_the_give_up_line() {
+        composeTestRule.mainClock.autoAdvance = false
+        val base = System.currentTimeMillis()
+        setBody(
+            SessionsUiState(
+                filter = SessionsFilter.ALL,
+                feedStatus = SessionsFeedStatus(
+                    phase = SessionsFeedStatus.Phase.RECONNECTING,
+                    attempt = 1,
+                    nextRetryAtMs = base + 2_000L,
+                    giveUpAtMs = null, // unlimited → no limit line
+                ),
+            ),
+        )
+
+        composeTestRule.onNodeWithTag("sessions_retrying_background").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("sessions_retrying_countdown").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("sessions_retrying_give_up")
+            .assertDoesNotExist()
+    }
+
+    /**
+     * AC6 + the headline pitfall — a CONNECTED feed with genuinely zero sessions
+     * shows the normal empty state, NOT the retrying message.
+     */
+    @Test
+    fun connected_with_zero_sessions_shows_empty_state_not_the_retrying_message() {
+        setBody(
+            SessionsUiState(
+                sessions = emptyList(),
+                filter = SessionsFilter.ALL,
+                feedStatus = SessionsFeedStatus(phase = SessionsFeedStatus.Phase.CONNECTED),
+            ),
+        )
+
+        composeTestRule.onNodeWithText(ctx.getString(R.string.sessions_empty_all)).assertIsDisplayed()
+        composeTestRule.onNodeWithTag("sessions_retrying_background").assertDoesNotExist()
+        composeTestRule.onNodeWithText(ctx.getString(R.string.sessions_feed_retrying)).assertDoesNotExist()
+    }
+
+    /** AC6 — a CONNECTED feed with rows shows the rows and no retrying background. */
+    @Test
+    fun connected_with_rows_shows_rows_and_no_retrying_message() {
+        setBody(
+            SessionsUiState(
+                sessions = listOf(SessionSummary(n = 1, label = "alpha", state = "running")),
+                filter = SessionsFilter.ALL,
+                feedStatus = SessionsFeedStatus(phase = SessionsFeedStatus.Phase.CONNECTED),
+            ),
+        )
+
+        composeTestRule.onNodeWithTag("session-card-1").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("sessions_retrying_background").assertDoesNotExist()
+    }
+
+    /**
+     * Hard-req #4 — a terminally STOPPED feed shows a single static "Not
+     * connected" with NO countdown (and no infinite ticker, so the default clock
+     * is fine here).
+     */
+    @Test
+    fun stopped_feed_shows_static_not_connected_without_a_countdown() {
+        setBody(
+            SessionsUiState(
+                sessions = listOf(SessionSummary(n = 1, label = "alpha", state = "running")),
+                filter = SessionsFilter.ALL,
+                feedStatus = SessionsFeedStatus(phase = SessionsFeedStatus.Phase.STOPPED),
+            ),
+        )
+
+        composeTestRule.onNodeWithTag("sessions_retrying_background").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("sessions_retrying_disconnected").assertIsDisplayed()
+        composeTestRule.onNodeWithText(ctx.getString(R.string.sessions_feed_disconnected)).assertIsDisplayed()
+        // STOPPED is static — no countdown / give-up timer.
+        composeTestRule.onNodeWithTag("sessions_retrying_countdown").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("sessions_retrying_give_up").assertDoesNotExist()
+        // Stale rows hidden behind the static background too.
+        composeTestRule.onNodeWithTag("session-card-1").assertDoesNotExist()
+    }
 }

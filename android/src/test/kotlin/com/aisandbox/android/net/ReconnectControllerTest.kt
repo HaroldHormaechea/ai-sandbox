@@ -95,4 +95,89 @@ class ReconnectControllerTest {
         // surfaces with a blame line on this test.
         assertThat(ReconnectController.GIVE_UP_AFTER_MS).isEqualTo(5L * 60 * 1_000L)
     }
+
+    // ── UC-70 — giveUpAtMs() + the constructor-injected retryBudgetMs ─────────
+    //
+    // The sessions feed surfaces the cumulative give-up instant so the
+    // "Not connected, retrying…" background can show its limit/countdown line.
+    // The budget is now ctor-injected (default = the historical 5 min so every
+    // existing caller is unchanged) and a null budget means "unlimited" — the
+    // UC-71 forward case, which must collapse the limit line to nothing.
+
+    @Test
+    fun `giveUpAtMs is null before any failure is recorded`() {
+        val clock = FakeClock(nowMs = 5_000L)
+        val c = ReconnectController(nowMs = clock)
+
+        // No nextDelayMs() yet → no firstFailure → nothing to surface.
+        assertThat(c.giveUpAtMs()).isNull()
+    }
+
+    @Test
+    fun `giveUpAtMs is firstFailure plus the finite budget (default 5 min)`() {
+        val clock = FakeClock(nowMs = 1_000_000L)
+        val c = ReconnectController(nowMs = clock)
+
+        c.nextDelayMs() // records firstFailureAtMs = 1_000_000
+
+        // The instant is anchored to the FIRST failure, not "now": advancing the
+        // clock must not move it.
+        assertThat(c.giveUpAtMs()).isEqualTo(1_000_000L + ReconnectController.GIVE_UP_AFTER_MS)
+        clock.nowMs = 1_200_000L
+        assertThat(c.giveUpAtMs()).isEqualTo(1_000_000L + ReconnectController.GIVE_UP_AFTER_MS)
+    }
+
+    @Test
+    fun `giveUpAtMs honours a custom finite budget`() {
+        val clock = FakeClock(nowMs = 0L)
+        val c = ReconnectController(nowMs = clock, retryBudgetMs = 30_000L)
+
+        c.nextDelayMs() // firstFailure = 0
+        assertThat(c.giveUpAtMs()).isEqualTo(30_000L)
+        assertThat(c.giveUpAfterMs).isEqualTo(30_000L)
+    }
+
+    @Test
+    fun `giveUpAtMs is null for an unlimited (null) budget — the UC-71 forward case`() {
+        val clock = FakeClock(nowMs = 1_000L)
+        val c = ReconnectController(nowMs = clock, retryBudgetMs = null)
+
+        c.nextDelayMs() // firstFailure recorded, but the budget is unlimited
+        // Even with a failure on record, an unlimited budget surfaces no instant,
+        // so the UI's limit line vanishes with no screen change.
+        assertThat(c.giveUpAtMs()).isNull()
+    }
+
+    @Test
+    fun `an unlimited budget never gives up no matter how long it retries`() {
+        val clock = FakeClock(nowMs = 0L)
+        val c = ReconnectController(nowMs = clock, retryBudgetMs = null)
+
+        c.nextDelayMs() // firstFailure = 0
+        // giveUpAfterMs collapses to Long.MAX_VALUE so shouldGiveUp never crosses.
+        assertThat(c.giveUpAfterMs).isEqualTo(Long.MAX_VALUE)
+        clock.nowMs = 24L * 60 * 60 * 1_000L // a full day of failures
+        assertThat(c.shouldGiveUp()).isFalse
+    }
+
+    @Test
+    fun `reset clears the give-up instant too`() {
+        val clock = FakeClock(nowMs = 1_000L)
+        val c = ReconnectController(nowMs = clock)
+
+        c.nextDelayMs()
+        assertThat(c.giveUpAtMs()).isNotNull()
+
+        c.reset()
+        assertThat(c.giveUpAtMs()).isNull()
+    }
+
+    @Test
+    fun `the default budget matches the historical 5-minute cap (caller-compat)`() {
+        // The no-arg/no-budget ctor must behave byte-for-byte like before UC-70:
+        // the terminal / conversation streams rely on the 5-min give-up.
+        val clock = FakeClock(nowMs = 0L)
+        val c = ReconnectController(nowMs = clock)
+        assertThat(c.giveUpAfterMs).isEqualTo(ReconnectController.GIVE_UP_AFTER_MS)
+    }
 }
