@@ -167,7 +167,7 @@ android/
     │   │   ├── EnrollmentClient.kt  — bootstrap POST /v1/enrollment
     │   │   ├── SessionsApi.kt       — typed REST wrappers
     │   │   ├── StreamClient.kt      — WebSocket
-    │   │   └── ReconnectController.kt — backoff schedule + 5-min cap
+    │   │   └── ReconnectController.kt — backoff schedule (≤10 s cap) + unlimited retries (opt-in finite give-up budget)
     │   ├── terminal/service/
     │   │   └── TerminalForegroundService.kt
     │   └── ui/

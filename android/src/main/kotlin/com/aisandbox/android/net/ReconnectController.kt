@@ -1,8 +1,8 @@
 package com.aisandbox.android.net
 
 /**
- * Backoff schedule + 5-minute cumulative cap for the terminal stream
- * reconnect path (UC04 AC24, AC25).
+ * Backoff schedule + optional cumulative give-up budget for the terminal
+ * stream reconnect path (UC04 AC24, AC25; UC-71).
  *
  * <p>Schedule:
  * ```
@@ -10,50 +10,56 @@ package com.aisandbox.android.net
  *  attempt 2 → 2 s
  *  attempt 3 → 4 s
  *  attempt 4 → 8 s
- *  attempt 5 → 16 s
- *  attempt 6 → 30 s (cap; subsequent attempts stay at 30 s)
+ *  attempt 5 → 10 s (cap; subsequent attempts stay at 10 s)
  * ```
  *
- * <p>Once the **cumulative** elapsed time of failed attempts crosses
- * [GIVE_UP_AFTER_MS] (5 min), [shouldGiveUp] returns {@code true}; the
- * caller then dismisses the foreground notification and surfaces
- * "Disconnected — tap to reconnect" in the toolbar. Tapping resets the
- * controller via [reset].
+ * <p>UC-71 — the backoff ceiling is **10 s** (was 30 s): delays grow
+ * exponentially from 1 s and then hold at the 10 s cap. The index clamp in
+ * [nextDelayMs] yields 1, 2, 4, 8, 10, 10, … for all later attempts.
+ *
+ * <p>Give-up is **opt-in**. When a finite [retryBudgetMs] is injected, then
+ * once the **cumulative** elapsed time of failed attempts crosses it,
+ * [shouldGiveUp] returns {@code true}; the caller then dismisses the
+ * foreground notification and surfaces "Disconnected — tap to reconnect" in
+ * the toolbar, and tapping resets the controller via [reset]. The historical
+ * 5-minute value is preserved as [GIVE_UP_AFTER_MS] for callers (and tests)
+ * that still want a finite budget.
  *
  * <p>Stateful (the attempt counter + elapsed counter are mutated on
  * every call). Pair one controller per [StreamClient]; do NOT share
  * across streams.
  *
- * <p>UC-70 — the cumulative give-up budget is now constructor-injected as
- * [retryBudgetMs] (defaulting to the historical [GIVE_UP_AFTER_MS] 5 min so
- * every existing caller — the terminal / conversation streams — is byte-for-
- * byte unchanged). A {@code null} budget means "unlimited retries":
- * [shouldGiveUp] then never fires and [giveUpAtMs] returns {@code null}. This
- * keeps the type forward-compatible with UC-71, which flips the sessions feed
- * to an unlimited budget; the sessions UI derives its "limit" line purely from
- * [giveUpAtMs] being non-null, so it vanishes automatically when the budget
- * becomes {@code null} — no UI change required.
+ * <p>UC-70 / UC-71 — the cumulative give-up budget is constructor-injected as
+ * [retryBudgetMs]. As of UC-71 the **default is {@code null} (unlimited
+ * retries)**: [shouldGiveUp] never fires and [giveUpAtMs] returns
+ * {@code null}, so every consumer using the default ctor (the terminal /
+ * conversation / sessions-events streams) now retries indefinitely. Callers
+ * that still need a finite budget pass an explicit [retryBudgetMs] (e.g.
+ * [GIVE_UP_AFTER_MS]); the give-up machinery stays fully supported as an
+ * injectable seam (UC-70's UI derives its "limit" line purely from
+ * [giveUpAtMs] being non-null, so it vanishes automatically under the
+ * unlimited default — no UI change required).
  */
 class ReconnectController(
     private val nowMs: () -> Long = System::currentTimeMillis,
-    private val retryBudgetMs: Long? = GIVE_UP_AFTER_MS,
+    private val retryBudgetMs: Long? = null,
 ) {
 
-    /** Successive delays in milliseconds, in order. Last value is the cap. */
+    /** Successive delays in milliseconds, in order. Last value is the 10 s cap. */
     private val schedule: LongArray = longArrayOf(
         1_000L,
         2_000L,
         4_000L,
         8_000L,
-        16_000L,
-        30_000L,
+        10_000L,
     )
 
     /**
-     * Cumulative-failure budget in ms (UC04 AC25 — default 5 minutes). Derived
-     * from the injected [retryBudgetMs]; an unlimited budget ({@code null})
-     * collapses to [Long.MAX_VALUE] here so the unchanged [shouldGiveUp]
-     * arithmetic simply never crosses it.
+     * Cumulative-failure budget in ms (UC04 AC25). Derived from the injected
+     * [retryBudgetMs]; the UC-71 default of {@code null} (unlimited) collapses
+     * to [Long.MAX_VALUE] here so the unchanged [shouldGiveUp] arithmetic
+     * simply never crosses it. A finite budget (e.g. [GIVE_UP_AFTER_MS], 5 min)
+     * is still honoured when injected.
      */
     val giveUpAfterMs: Long = retryBudgetMs ?: Long.MAX_VALUE
 
