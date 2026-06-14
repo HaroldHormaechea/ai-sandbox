@@ -115,6 +115,9 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
 
     fun interrupt() = controller?.interrupt() ?: Unit
 
+    /** UC-65 — send `/clear` and wipe the in-app transcript in place (the stream stays connected). */
+    fun clear() = controller?.clear() ?: Unit
+
     /** UC-41 (AC5) — open the detail dialog for a tapped tool bubble. */
     fun openDetail(toolUseId: String, uuid: String) = controller?.openDetail(toolUseId, uuid) ?: Unit
 

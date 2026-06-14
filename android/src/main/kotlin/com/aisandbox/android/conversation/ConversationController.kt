@@ -106,6 +106,16 @@ class ConversationController(
     private var backfilling = false
 
     /**
+     * UC-65 — post-`/clear` suppression guard. While true, [onFrame] drops content-producing
+     * frames belonging to the pre-clear epoch so a late `assistant-text`/`tool-result` (or the
+     * `/clear` command echo itself) can't resurrect the locally-wiped transcript (AC3). Lifted
+     * after [CLEAR_SUPPRESS_MS], or immediately on the next user action (any submit*), whichever
+     * comes first. Control frames (targets/selection/turn boundaries) always pass through.
+     */
+    @Volatile
+    private var clearSuppressActive = false
+
+    /**
      * UC-45 — optimistic local-echo state, all guarded by [itemLock] (same lock as
      * [itemMap], so the optimistic insert and the reconcile mutate the store atomically).
      *
@@ -139,6 +149,7 @@ class ConversationController(
      * unchanged (AC7) — local echo is display-only.
      */
     fun submitComposer(text: String) {
+        clearSuppressActive = false // UC-65 (AC5) — a new user action deterministically lifts the clear guard
         if (text.isBlank()) return
         if (_pendingSheet.value != null) return // AC12 — composer locked while a sheet is pending
         _turnPhase.value = TurnPhase.WORKING
@@ -162,6 +173,7 @@ class ConversationController(
 
     /** AC11 — submit a structured answer; optimistically dismiss the sheet and show the spinner. */
     fun submitAnswer(questionUuid: String, questionIndex: Int, selections: List<Int>, freeText: String) {
+        clearSuppressActive = false // UC-65 (AC5) — a new user action deterministically lifts the clear guard
         client?.sendAnswer(questionUuid, questionIndex, selections, freeText)
         _pendingSheet.value = null
         _turnPhase.value = TurnPhase.WORKING
@@ -173,6 +185,7 @@ class ConversationController(
      * spinner, exactly like [submitAnswer]. [items] are in `questionIndex` order.
      */
     fun submitAnswerBatch(questionUuid: String, items: List<AnswerItem>) {
+        clearSuppressActive = false // UC-65 (AC5) — a new user action deterministically lifts the clear guard
         client?.sendAnswerBatch(questionUuid, items)
         _pendingSheet.value = null
         _turnPhase.value = TurnPhase.WORKING
@@ -192,6 +205,47 @@ class ConversationController(
     fun interrupt() {
         client?.sendInterrupt()
         _turnPhase.value = TurnPhase.IDLE
+    }
+
+    /**
+     * UC-65 — reset the conversation in place: wipe the locally-rendered transcript AND send
+     * `/clear` to the session's Claude so its context is reset too (AC2/AC3). Unlike [close]/
+     * Disconnect, the stream stays connected and the composer stays usable (AC5/AC6).
+     *
+     * Sequencing matters:
+     * - The suppression guard ([clearSuppressActive]) is armed BEFORE anything is sent, so a fast
+     *   `/clear` command echo — or any in-flight pre-clear frame — is dropped by [onFrame] rather
+     *   than resurrecting the wiped transcript. It auto-lifts after [CLEAR_SUPPRESS_MS] or on the
+     *   next user submit, whichever comes first.
+     * - Any pending question/plan sheet is dismissed immediately (AC4). When a sheet was open the
+     *   session is mid-blocking-turn, so we [sendInterrupt] first, wait [CLEAR_INTERRUPT_GAP_MS]
+     *   for the harness to settle, then send `/clear`. The happy path (no sheet) sends `/clear`
+     *   directly with no interrupt.
+     * - `/clear` is sent via the raw [ConversationClient.sendComposer] path, NOT [submitComposer],
+     *   so no optimistic `/clear` user bubble is left behind in the wiped transcript (pitfall).
+     */
+    fun clear() {
+        val hadSheet = _pendingSheet.value != null
+        // Arm the guard BEFORE sending so a fast `/clear` echo is caught (AC3).
+        clearSuppressActive = true
+        scope.launch {
+            delay(CLEAR_SUPPRESS_MS)
+            clearSuppressActive = false
+        }
+        clearItems()
+        closeDetail()
+        _pendingSheet.value = null // AC4 — dismiss any pending sheet immediately
+        // Composer enablement is gated on pendingSheet == null, so it stays enabled (AC5).
+        _turnPhase.value = TurnPhase.IDLE
+        if (hadSheet) {
+            scope.launch {
+                client?.sendInterrupt()
+                delay(CLEAR_INTERRUPT_GAP_MS)
+                client?.sendComposer("/clear")
+            }
+        } else {
+            client?.sendComposer("/clear")
+        }
     }
 
     /**
@@ -265,7 +319,30 @@ class ConversationController(
 
     private fun onFrame(text: String) {
         val obj = runCatching { json.parseToJsonElement(text) }.getOrNull() as? JsonObject ?: return
-        when (obj["type"]?.jsonPrimitive?.contentOrNull) {
+        val type = obj["type"]?.jsonPrimitive?.contentOrNull
+        // UC-65 — while the post-`/clear` suppression guard is active, drop content-producing
+        // frames belonging to the pre-clear epoch so a late assistant-text/tool-result (or the
+        // `/clear` command echo itself) can't resurrect the locally-wiped transcript (AC3).
+        // Control frames (targets/selection/turn boundaries/errors) fall through untouched.
+        if (clearSuppressActive) {
+            when (type) {
+                "turn-start", "thinking", "assistant-text", "tool-use", "tool-result",
+                "system-note", "question", "plan-approval", "pending-question",
+                -> return
+                // Defensive: a fresh transcript stream beginning under the guard means the
+                // session is replaying its (now post-clear) history — re-wipe, lift the guard,
+                // and let the backfill render the clean transcript from the start.
+                "backfill-start" -> {
+                    clearItems()
+                    clearSuppressActive = false
+                    backfilling = true
+                    return
+                }
+                // targets, target-selected, backfill-end, pending-clear, turn-end, error → pass
+                else -> { /* fall through to normal handling */ }
+            }
+        }
+        when (type) {
             "turn-start" -> {
                 val t = str(obj, "text")
                 // Preserve today's non-blank guard: a blank turn-start must neither add a
@@ -676,5 +753,19 @@ class ConversationController(
 
         /** UC-41 (AC9) — client-side timeout on a `fetch-detail` round-trip; matches the server's 8 s helper cap. */
         private const val DETAIL_TIMEOUT_MS = 8_000L
+
+        /**
+         * UC-65 — how long the post-`/clear` suppression guard stays armed before auto-lifting.
+         * Covers the `/clear` command echo + any in-flight pre-clear frames settling. A heuristic
+         * upper bound; the guard also lifts immediately on the next user submit. Tunable.
+         */
+        private const val CLEAR_SUPPRESS_MS = 1_500L
+
+        /**
+         * UC-65 — gap between the interrupt and the `/clear` send when a question/plan sheet was
+         * open at clear time, giving the harness a moment to settle out of the blocking turn before
+         * the slash command lands. A heuristic; tunable.
+         */
+        private const val CLEAR_INTERRUPT_GAP_MS = 150L
     }
 }
