@@ -33,7 +33,15 @@ import org.springframework.stereotype.Service;
 public class McpInventoryService {
 
     private static final Logger LOG = LoggerFactory.getLogger(McpInventoryService.class);
-    private static final Duration TIMEOUT = Duration.ofSeconds(10);
+    // Bounds the WHOLE `docker compose exec … claude mcp list` call, which in turn
+    // runs a health-check sweep across every configured MCP server. A single SSE/HTTP
+    // server (e.g. the Atlassian remote SSE server) can take ~16s to health-check in
+    // this environment, and the cap wraps the entire multi-server sweep — not one
+    // server — so a 10s cap made one slow remote server time out the whole command and
+    // collapse a populated session to the empty inventory. 45s leaves headroom for a
+    // multi-server sweep with one or more slow network health-checks while still
+    // bounding a genuinely hung command (which still degrades to an empty list below).
+    private static final Duration TIMEOUT = Duration.ofSeconds(45);
 
     private final ProcessExecutor exec;
 
