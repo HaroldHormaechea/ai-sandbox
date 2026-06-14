@@ -593,4 +593,149 @@ class SessionsUiStateTest {
             .`as`("a reconnecting feed empties the list region even with rows still in state (AC2)")
             .isTrue
     }
+
+    // ── UC-72 — connectivity-dot reconnect-cycle precedence (AC1/AC2/AC3/AC5/AC6) ─
+    //
+    // Pure derivation on SessionsUiState.connectivity. UC-72 adds two arms driven
+    // by the live-feed reconnect CYCLE (SessionsFeedStatus.activity) that OUTRANK
+    // the UC-54 REST ladder: ATTEMPTING → RETRYING (yellow), WAITING/STOPPED →
+    // BACKOFF (red). Green stays REST-derived (REACHABLE). These are the AC2/AC3
+    // mappings + AC5 (derived from reconnect state, not a timer) + AC6 (consistent
+    // with UC-70, which keys showRetryingBackground off PHASE, not activity).
+
+    private fun feed(
+        phase: SessionsFeedStatus.Phase = SessionsFeedStatus.Phase.CONNECTED,
+        activity: SessionsFeedStatus.ReconnectActivity = SessionsFeedStatus.ReconnectActivity.IDLE,
+    ) = SessionsFeedStatus(phase = phase, activity = activity)
+
+    @Test
+    fun `connectivity is RETRYING while a reconnect attempt is in flight (UC-72 AC2)`() {
+        // activity == ATTEMPTING → the dot is yellow (RETRYING), regardless of the
+        // coarse phase (CONNECTING initial dial or RECONNECTING re-dial).
+        assertThat(
+            SessionsUiState(
+                feedStatus = feed(
+                    SessionsFeedStatus.Phase.RECONNECTING,
+                    SessionsFeedStatus.ReconnectActivity.ATTEMPTING,
+                ),
+            ).connectivity,
+        ).isEqualTo(Connectivity.RETRYING)
+
+        assertThat(
+            SessionsUiState(
+                feedStatus = feed(
+                    SessionsFeedStatus.Phase.CONNECTING,
+                    SessionsFeedStatus.ReconnectActivity.ATTEMPTING,
+                ),
+            ).connectivity,
+        ).`as`("the initial connect dial also reads yellow (AC2 edge)").isEqualTo(Connectivity.RETRYING)
+    }
+
+    @Test
+    fun `connectivity is BACKOFF while waiting out the back-off delay (UC-72 AC3)`() {
+        assertThat(
+            SessionsUiState(
+                feedStatus = feed(
+                    SessionsFeedStatus.Phase.RECONNECTING,
+                    SessionsFeedStatus.ReconnectActivity.WAITING,
+                ),
+            ).connectivity,
+        ).isEqualTo(Connectivity.BACKOFF)
+    }
+
+    @Test
+    fun `connectivity is BACKOFF when the feed has terminally stopped (UC-72)`() {
+        // A gave-up feed (phase STOPPED, activity IDLE) reads red — the dot's
+        // STOPPED arm is keyed off the phase, not the activity.
+        assertThat(
+            SessionsUiState(feedStatus = feed(SessionsFeedStatus.Phase.STOPPED)).connectivity,
+        ).isEqualTo(Connectivity.BACKOFF)
+    }
+
+    @Test
+    fun `RETRYING outranks the REST ladder even when unreachable and answered (UC-72 precedence)`() {
+        // AC5/precedence — while the push feed is actively dialing, that live
+        // signal wins over a possibly-stale REST verdict (loading + unreachable +
+        // serverResponded would otherwise yield CHECKING/UNREACHABLE/REACHABLE).
+        val s = SessionsUiState(
+            loading = true,
+            unreachable = true,
+            serverResponded = true,
+            pendingActions = setOf(1),
+            feedStatus = feed(
+                SessionsFeedStatus.Phase.RECONNECTING,
+                SessionsFeedStatus.ReconnectActivity.ATTEMPTING,
+            ),
+        )
+        assertThat(s.connectivity).isEqualTo(Connectivity.RETRYING)
+    }
+
+    @Test
+    fun `BACKOFF outranks the REST ladder even when the server has answered (UC-72 precedence)`() {
+        val s = SessionsUiState(
+            serverResponded = true,
+            feedStatus = feed(
+                SessionsFeedStatus.Phase.RECONNECTING,
+                SessionsFeedStatus.ReconnectActivity.WAITING,
+            ),
+        )
+        assertThat(s.connectivity)
+            .`as`("the WAITING back-off (red) wins over a prior REACHABLE")
+            .isEqualTo(Connectivity.BACKOFF)
+    }
+
+    @Test
+    fun `with an IDLE feed the REST ladder is unchanged (UC-72 — green stays REST-driven)`() {
+        // activity == IDLE (CONNECTED feed) → the dot falls through to the exact
+        // UC-54 REST ladder: CHECKING / UNREACHABLE / REACHABLE / UNKNOWN.
+        val idle = feed() // CONNECTED + IDLE
+
+        assertThat(SessionsUiState(feedStatus = idle, loading = true).connectivity)
+            .`as`("IDLE + loading → CHECKING").isEqualTo(Connectivity.CHECKING)
+        assertThat(SessionsUiState(feedStatus = idle, spawning = true).connectivity)
+            .`as`("IDLE + spawning → CHECKING").isEqualTo(Connectivity.CHECKING)
+        assertThat(SessionsUiState(feedStatus = idle, pendingActions = setOf(1)).connectivity)
+            .`as`("IDLE + a pending action → CHECKING").isEqualTo(Connectivity.CHECKING)
+        assertThat(SessionsUiState(feedStatus = idle, unreachable = true).connectivity)
+            .`as`("IDLE + unreachable → UNREACHABLE").isEqualTo(Connectivity.UNREACHABLE)
+        assertThat(SessionsUiState(feedStatus = idle, serverResponded = true).connectivity)
+            .`as`("IDLE + answered → REACHABLE (green stays REST-driven)").isEqualTo(Connectivity.REACHABLE)
+        assertThat(SessionsUiState(feedStatus = idle).connectivity)
+            .`as`("IDLE + nothing resolved → UNKNOWN").isEqualTo(Connectivity.UNKNOWN)
+    }
+
+    @Test
+    fun `showRetryingBackground is unaffected by the dot activity (UC-72 orthogonality, AC6)`() {
+        // The UC-70 background is keyed off PHASE/reconnecting, NOT the UC-72 dot
+        // activity, so toggling ATTEMPTING↔WAITING within a phase never changes it
+        // (no conflict between the dot and the background — AC6).
+        val reconnectingAttempt = SessionsUiState(
+            feedStatus = feed(
+                SessionsFeedStatus.Phase.RECONNECTING,
+                SessionsFeedStatus.ReconnectActivity.ATTEMPTING,
+            ),
+        )
+        val reconnectingWait = SessionsUiState(
+            feedStatus = feed(
+                SessionsFeedStatus.Phase.RECONNECTING,
+                SessionsFeedStatus.ReconnectActivity.WAITING,
+            ),
+        )
+        assertThat(reconnectingAttempt.showRetryingBackground)
+            .`as`("RECONNECTING shows the background whether the dot is yellow …").isTrue
+        assertThat(reconnectingWait.showRetryingBackground)
+            .`as`("… or red — the activity does not drive the background").isTrue
+
+        // And the silent initial connect (CONNECTING) keeps the background hidden
+        // even though its activity is ATTEMPTING (the dot is yellow).
+        val connecting = SessionsUiState(
+            feedStatus = feed(
+                SessionsFeedStatus.Phase.CONNECTING,
+                SessionsFeedStatus.ReconnectActivity.ATTEMPTING,
+            ),
+        )
+        assertThat(connecting.connectivity).isEqualTo(Connectivity.RETRYING)
+        assertThat(connecting.showRetryingBackground)
+            .`as`("the CONNECTING dial shows no background despite the yellow dot").isFalse
+    }
 }

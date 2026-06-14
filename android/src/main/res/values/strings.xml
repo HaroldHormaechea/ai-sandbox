@@ -36,6 +36,12 @@
     <string name="sessions_connectivity_checking">Checking server connectivity</string>
     <string name="sessions_connectivity_unreachable">Server unreachable</string>
 
+    <!-- UC-72 — TalkBack descriptions for the two reconnect-cycle dot states:
+         yellow while a reconnect attempt is in flight, red while waiting out the
+         back-off delay between attempts. -->
+    <string name="sessions_connectivity_retrying">Reconnecting to server…</string>
+    <string name="sessions_connectivity_backoff">Waiting to retry…</string>
+
     <!-- UC-70 — light-grey list background shown while the live sessions-events
          feed is disconnected/reconnecting. The attempt count + next-retry
          countdown always show; the give-up line shows only when a finite retry

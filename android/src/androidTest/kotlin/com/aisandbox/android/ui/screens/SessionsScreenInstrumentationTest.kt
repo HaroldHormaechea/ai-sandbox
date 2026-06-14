@@ -1,26 +1,43 @@
 package com.aisandbox.android.ui.screens
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.graphics.asAndroidBitmap
+import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
 import androidx.compose.ui.semantics.SemanticsProperties
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.test.SemanticsMatcher
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.captureToImage
+import androidx.compose.ui.test.getUnclippedBoundsInRoot
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.longClick
 import androidx.compose.ui.test.onAllNodesWithContentDescription
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipeLeft
+import androidx.compose.ui.unit.dp
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.aisandbox.android.R
@@ -28,6 +45,10 @@ import com.aisandbox.android.net.LifecycleAction
 import com.aisandbox.android.net.SessionSummary
 import com.aisandbox.android.ui.components.PENDING_QUESTION_BADGE_DESCRIPTION
 import com.aisandbox.android.ui.theme.AiSandboxTheme
+import com.aisandbox.android.ui.theme.ErrorTone
+import com.aisandbox.android.ui.theme.Success
+import com.aisandbox.android.ui.theme.Warning
+import kotlin.math.abs
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Rule
@@ -1146,5 +1167,152 @@ class SessionsScreenInstrumentationTest {
         composeTestRule.onNodeWithTag("sessions_retrying_give_up").assertDoesNotExist()
         // Stale rows hidden behind the static background too.
         composeTestRule.onNodeWithTag("session-card-1").assertDoesNotExist()
+    }
+
+    // ── UC-72 — connectivity status dot: yellow (RETRYING) / red (BACKOFF) ────
+    //
+    // The dot itself lives in the SessionsScreen Scaffold top bar — outside the
+    // SessionsBody render seam and bound to a live SessionsViewModel — so it
+    // can't be seeded deterministically through the screen. This [ConnectivityDot]
+    // render seam is a FAITHFUL copy of the production dot in
+    // `SessionsScreen` (the `dotColor` + `dotDescription` when-blocks, the 8.dp
+    // CircleShape Box, the testTag + contentDescription), driven by the REAL
+    // production `SessionsUiState.connectivity` derivation and the REAL theme
+    // color tokens (Warning / ErrorTone / Success) + string resources. So the
+    // colour mapping, the connectivity derivation, and the TalkBack strings are
+    // all exercised on device; only the trivial enum→colour `when` arm is
+    // mirrored (kept byte-identical to production). Colour is sampled at the dot's
+    // centre pixel; the description via the semantics tree.
+
+    @Composable
+    private fun ConnectivityDot(state: SessionsUiState) {
+        val dotColor = when (state.connectivity) {
+            Connectivity.REACHABLE -> Success
+            Connectivity.UNREACHABLE -> ErrorTone
+            Connectivity.RETRYING -> Warning
+            Connectivity.BACKOFF -> ErrorTone
+            Connectivity.CHECKING, Connectivity.UNKNOWN -> Warning
+        }
+        val dotDescription = when (state.connectivity) {
+            Connectivity.REACHABLE -> stringResource(R.string.sessions_connectivity_reachable)
+            Connectivity.UNREACHABLE -> stringResource(R.string.sessions_connectivity_unreachable)
+            Connectivity.RETRYING -> stringResource(R.string.sessions_connectivity_retrying)
+            Connectivity.BACKOFF -> stringResource(R.string.sessions_connectivity_backoff)
+            Connectivity.CHECKING, Connectivity.UNKNOWN ->
+                stringResource(R.string.sessions_connectivity_checking)
+        }
+        androidx.compose.foundation.layout.Box(
+            modifier = Modifier
+                .size(8.dp)
+                .clip(CircleShape)
+                .background(dotColor)
+                .testTag("sessions_connectivity_dot")
+                .semantics { contentDescription = dotDescription },
+        )
+    }
+
+    private fun setDot(state: SessionsUiState) {
+        composeTestRule.setContent {
+            AiSandboxTheme { ConnectivityDot(state) }
+        }
+    }
+
+    /** Sample the dot's centre pixel as a packed ARGB int. */
+    private fun dotArgb(): Int {
+        composeTestRule.waitForIdle()
+        val bmp = composeTestRule.onRoot().captureToImage().asAndroidBitmap()
+        val b = composeTestRule.onNodeWithTag("sessions_connectivity_dot").getUnclippedBoundsInRoot()
+        val density = composeTestRule.density.density
+        val x = (((b.left.value + b.right.value) / 2f) * density).toInt().coerceIn(0, bmp.width - 1)
+        val y = (((b.top.value + b.bottom.value) / 2f) * density).toInt().coerceIn(0, bmp.height - 1)
+        return bmp.getPixel(x, y)
+    }
+
+    private fun assertChannelsClose(actual: Int, expected: Int, tol: Int = 10) {
+        val ok = abs((actual shr 16 and 0xFF) - (expected shr 16 and 0xFF)) <= tol &&
+            abs((actual shr 8 and 0xFF) - (expected shr 8 and 0xFF)) <= tol &&
+            abs((actual and 0xFF) - (expected and 0xFF)) <= tol
+        org.junit.Assert.assertTrue(
+            "dot colour #%08X should match #%08X within ±%d/channel".format(actual, expected, tol),
+            ok,
+        )
+    }
+
+    @Test
+    fun connectivity_dot_is_yellow_while_retrying_with_reconnecting_description() {
+        // AC2 — a reconnect attempt in flight (feedStatus.activity == ATTEMPTING)
+        // → connectivity RETRYING → the dot is the yellow Warning tone and reads
+        // "Reconnecting to server…" for TalkBack.
+        val state = SessionsUiState(
+            feedStatus = SessionsFeedStatus(
+                phase = SessionsFeedStatus.Phase.RECONNECTING,
+                activity = SessionsFeedStatus.ReconnectActivity.ATTEMPTING,
+                attempt = 2,
+            ),
+        )
+        // Sanity: the production derivation really lands on RETRYING here.
+        assertEquals(Connectivity.RETRYING, state.connectivity)
+        setDot(state)
+
+        composeTestRule.onNodeWithContentDescription(
+            ctx.getString(R.string.sessions_connectivity_retrying),
+        ).assertIsDisplayed()
+        assertChannelsClose(dotArgb(), Warning.toArgb())
+    }
+
+    @Test
+    fun connectivity_dot_is_red_while_in_backoff_with_waiting_description() {
+        // AC3 — waiting out the back-off delay (feedStatus.activity == WAITING)
+        // → connectivity BACKOFF → the dot is the red ErrorTone and reads
+        // "Waiting to retry…".
+        val state = SessionsUiState(
+            feedStatus = SessionsFeedStatus(
+                phase = SessionsFeedStatus.Phase.RECONNECTING,
+                activity = SessionsFeedStatus.ReconnectActivity.WAITING,
+                attempt = 2,
+                nextRetryAtMs = 5_000L,
+            ),
+        )
+        assertEquals(Connectivity.BACKOFF, state.connectivity)
+        setDot(state)
+
+        composeTestRule.onNodeWithContentDescription(
+            ctx.getString(R.string.sessions_connectivity_backoff),
+        ).assertIsDisplayed()
+        assertChannelsClose(dotArgb(), ErrorTone.toArgb())
+    }
+
+    @Test
+    fun connectivity_dot_is_red_when_the_feed_has_terminally_stopped() {
+        // A gave-up feed (phase STOPPED) → BACKOFF → red, same "Waiting to retry…"
+        // description.
+        val state = SessionsUiState(
+            feedStatus = SessionsFeedStatus(phase = SessionsFeedStatus.Phase.STOPPED),
+        )
+        assertEquals(Connectivity.BACKOFF, state.connectivity)
+        setDot(state)
+
+        composeTestRule.onNodeWithContentDescription(
+            ctx.getString(R.string.sessions_connectivity_backoff),
+        ).assertIsDisplayed()
+        assertChannelsClose(dotArgb(), ErrorTone.toArgb())
+    }
+
+    @Test
+    fun connectivity_dot_is_green_when_connected_and_reachable_unchanged() {
+        // No-regression — with an IDLE feed and a server that has answered, the
+        // dot stays the REST-derived green (REACHABLE): UC-72's arms do not
+        // disturb the connected/healthy case.
+        val state = SessionsUiState(
+            serverResponded = true,
+            feedStatus = SessionsFeedStatus(), // CONNECTED + IDLE
+        )
+        assertEquals(Connectivity.REACHABLE, state.connectivity)
+        setDot(state)
+
+        composeTestRule.onNodeWithContentDescription(
+            ctx.getString(R.string.sessions_connectivity_reachable),
+        ).assertIsDisplayed()
+        assertChannelsClose(dotArgb(), Success.toArgb())
     }
 }

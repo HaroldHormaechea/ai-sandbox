@@ -208,6 +208,10 @@ fun SessionsScreen(
                             val dotColor = when (state.connectivity) {
                                 Connectivity.REACHABLE -> Success
                                 Connectivity.UNREACHABLE -> ErrorTone
+                                // UC-72 — actively attempting a reconnect → yellow.
+                                Connectivity.RETRYING -> Warning
+                                // UC-72 — waiting out the back-off delay → red.
+                                Connectivity.BACKOFF -> ErrorTone
                                 Connectivity.CHECKING, Connectivity.UNKNOWN -> Warning
                             }
                             val dotDescription = when (state.connectivity) {
@@ -215,6 +219,10 @@ fun SessionsScreen(
                                     stringResource(R.string.sessions_connectivity_reachable)
                                 Connectivity.UNREACHABLE ->
                                     stringResource(R.string.sessions_connectivity_unreachable)
+                                Connectivity.RETRYING ->
+                                    stringResource(R.string.sessions_connectivity_retrying)
+                                Connectivity.BACKOFF ->
+                                    stringResource(R.string.sessions_connectivity_backoff)
                                 Connectivity.CHECKING, Connectivity.UNKNOWN ->
                                     stringResource(R.string.sessions_connectivity_checking)
                             }

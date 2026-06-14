@@ -10,6 +10,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
@@ -19,10 +20,11 @@ import org.mockito.Mockito
 import org.mockito.stubbing.Answer
 
 /**
- * UC-70 status-emission contract + **UC-71** unlimited-retry reconciliation for
- * the [SessionEventsController] connect/back-off loop. This is the one place the
- * "Not connected, retrying…" background's source-of-truth is computed, so the
- * invariants are pinned HERE on the controller loop itself, not just on the
+ * UC-70 status-emission contract + **UC-71** unlimited-retry reconciliation +
+ * **UC-72** attempt-vs-backoff activity for the [SessionEventsController]
+ * connect/back-off loop. This is the one place the "Not connected, retrying…"
+ * background AND UC-72's yellow/red status dot derive their source-of-truth, so
+ * the invariants are pinned HERE on the controller loop itself, not just on the
  * rendered surface.
  *
  * <h2>UC-71 — what changed</h2>
@@ -38,6 +40,24 @@ import org.mockito.stubbing.Answer
  *       {@link com.aisandbox.android.net.ReconnectControllerTest}.</li>
  * </ul>
  *
+ * <h2>UC-72 — the activity field</h2>
+ * Each emission now also carries a [SessionsFeedStatus.ReconnectActivity],
+ * ORTHOGONAL to the phase:
+ * <ul>
+ *   <li>before EVERY {@code client.connect()} dial the loop emits
+ *       {@code ATTEMPTING} (status dot → yellow), with {@code nextRetryAtMs ==
+ *       null} (no scheduled retry while the dial is in flight);</li>
+ *   <li>before each back-off {@code delay()} it emits {@code WAITING} (status dot
+ *       → red), carrying the post-increment attempt + the {@code nextRetryAtMs}
+ *       the countdown ticks toward;</li>
+ *   <li>an Open feed and a give-up are {@code IDLE}.</li>
+ * </ul>
+ * The anti-flicker contract from UC-70 is preserved because the ATTEMPTING dial
+ * emit HOLDS the same {@code phase}, {@code attempt}, and {@code giveUpAtMs} as
+ * the preceding WAITING emit — only {@code activity} and {@code nextRetryAtMs}
+ * toggle. That stability is pinned by
+ * [consecutive_waiting_then_attempting_hold_attempt_and_giveUp_only_dot_toggles].
+ *
  * <h2>Deterministic driving</h2>
  * The loop's real back-off delays (1, 2, 4, … s) and its `nowMs` clock are both
  * driven from the [runTest] virtual scheduler: the controller is handed a scope
@@ -47,7 +67,7 @@ import org.mockito.stubbing.Answer
  * clock the schedule advances against). The feed [SessionEventsClient] is a
  * Mockito mock whose `state` is scripted per attempt, so we choose exactly when
  * a connect "fails" (→ Disconnected) versus "succeeds" (→ Open). The injected
- * scope is cancelled at the end of each test so the loop's final park (collecting
+ * scope is cancelled at the end of each run so the loop's final park (collecting
  * on an Open feed) never leaks.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -74,21 +94,24 @@ class SessionEventsControllerStatusTest {
             if (inv.method.name == "current") profile else Mockito.RETURNS_DEFAULTS.answer(inv)
         })
 
-    @Test
-    fun connecting_then_reconnecting_sequence_never_re_emits_connecting() = runTest {
+    /**
+     * Drive the connect/back-off loop until idle and return every emitted
+     * [SessionsFeedStatus] in order. The first [failuresBeforeOpen] dials fail
+     * (→ Disconnected → back-off); the next one opens. `failuresBeforeOpen == 0`
+     * opens on the very first dial (a clean initial connect).
+     */
+    private fun TestScope.collectFeedEmissions(failuresBeforeOpen: Int): List<SessionsFeedStatus> {
         val loopScope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
         val emissions = mutableListOf<SessionsFeedStatus>()
         val profile = Mockito.mock(ServerProfile::class.java)
         val profileStore = profileStoreReturning(profile)
-
-        // First two connects fail (→ Disconnected → back-off); the third opens.
         var attempt = 0
         val controller = SessionEventsController(
             profileStore = profileStore,
             httpClientFactory = { Mockito.mock(AiSandboxHttpClient::class.java) },
             eventsClientFactory = {
                 val state =
-                    if (attempt < 2) {
+                    if (attempt < failuresBeforeOpen) {
                         SessionEventsClient.State.Disconnected("forced-fail")
                     } else {
                         SessionEventsClient.State.Open
@@ -106,79 +129,177 @@ class SessionEventsControllerStatusTest {
         controller.connect()
         advanceUntilIdle()
         loopScope.cancel()
+        return emissions
+    }
 
-        // The full phase sequence — and the #1 invariant: CONNECTING is the FIRST
-        // emission and the ONLY one; it is never re-emitted between attempts.
+    @Test
+    fun connecting_then_reconnecting_sequence_never_re_emits_connecting() = runTest {
+        // Two connects fail (→ Disconnected → back-off); the third opens. The
+        // UC-72 dial+backoff emits double the entries vs. UC-70: every loop top
+        // now emits an ATTEMPTING dial, and each back-off emits a WAITING.
+        val emissions = collectFeedEmissions(failuresBeforeOpen = 2)
+
+        // The full (phase, activity) sequence — and the #1 invariant: CONNECTING
+        // is the FIRST emission and the ONLY one; it is never re-emitted.
         assertThat(emissions.map { it.phase }).containsExactly(
-            SessionsFeedStatus.Phase.CONNECTING,
-            SessionsFeedStatus.Phase.RECONNECTING,
-            SessionsFeedStatus.Phase.RECONNECTING,
-            SessionsFeedStatus.Phase.CONNECTED,
+            SessionsFeedStatus.Phase.CONNECTING, // dial #1 (initial, attempt 0)
+            SessionsFeedStatus.Phase.RECONNECTING, // back-off after fail #1
+            SessionsFeedStatus.Phase.RECONNECTING, // dial #2 (attempt 1)
+            SessionsFeedStatus.Phase.RECONNECTING, // back-off after fail #2
+            SessionsFeedStatus.Phase.RECONNECTING, // dial #3 (attempt 2)
+            SessionsFeedStatus.Phase.CONNECTED, // open
+        )
+        assertThat(emissions.map { it.activity }).containsExactly(
+            SessionsFeedStatus.ReconnectActivity.ATTEMPTING, // dial #1 → yellow
+            SessionsFeedStatus.ReconnectActivity.WAITING, // back-off → red
+            SessionsFeedStatus.ReconnectActivity.ATTEMPTING, // dial #2 → yellow
+            SessionsFeedStatus.ReconnectActivity.WAITING, // back-off → red
+            SessionsFeedStatus.ReconnectActivity.ATTEMPTING, // dial #3 → yellow
+            SessionsFeedStatus.ReconnectActivity.IDLE, // open → dot rejoins REST ladder
         )
         assertThat(emissions.count { it.phase == SessionsFeedStatus.Phase.CONNECTING })
             .`as`("CONNECTING is emitted exactly once (anti-flicker hard-req #1)")
             .isEqualTo(1)
 
-        // #2/#3 — the first RECONNECTING carries attempt 1, next-retry at now(0)+1s.
-        // UC-71 — giveUpAtMs is null: production uses the unlimited default so no
-        // finite give-up instant is surfaced (was GIVE_UP_AFTER_MS).
-        val first = emissions[1]
-        assertThat(first.attempt).isEqualTo(1)
-        assertThat(first.nextRetryAtMs).isEqualTo(1_000L)
-        assertThat(first.giveUpAtMs)
+        // #2/#3 — the first WAITING back-off carries attempt 1, next-retry at
+        // now(0)+1s. UC-71 — giveUpAtMs is null: production uses the unlimited
+        // default so no finite give-up instant is surfaced.
+        val firstWait = emissions[1]
+        assertThat(firstWait.activity).isEqualTo(SessionsFeedStatus.ReconnectActivity.WAITING)
+        assertThat(firstWait.attempt).isEqualTo(1)
+        assertThat(firstWait.nextRetryAtMs).isEqualTo(1_000L)
+        assertThat(firstWait.giveUpAtMs)
             .`as`("UC-71 — unlimited default surfaces no give-up instant")
             .isNull()
-        assertThat(first.reconnecting).isTrue()
+        assertThat(firstWait.reconnecting).isTrue()
 
-        // The second RECONNECTING fires after the 1s delay elapsed: attempt 2,
+        // The second WAITING fires after the 1s delay elapsed: attempt 2,
         // next-retry at now(1_000)+2s = 3_000, still no give-up instant (UC-71).
-        val second = emissions[2]
-        assertThat(second.attempt).isEqualTo(2)
-        assertThat(second.nextRetryAtMs).isEqualTo(3_000L)
-        assertThat(second.giveUpAtMs).isNull()
+        val secondWait = emissions[3]
+        assertThat(secondWait.activity).isEqualTo(SessionsFeedStatus.ReconnectActivity.WAITING)
+        assertThat(secondWait.attempt).isEqualTo(2)
+        assertThat(secondWait.nextRetryAtMs).isEqualTo(3_000L)
+        assertThat(secondWait.giveUpAtMs).isNull()
 
         // CONNECTED clears the surface (default phase carries no timing/attempt).
         val connected = emissions.last()
         assertThat(connected.phase).isEqualTo(SessionsFeedStatus.Phase.CONNECTED)
+        assertThat(connected.activity).isEqualTo(SessionsFeedStatus.ReconnectActivity.IDLE)
+        assertThat(connected.reconnecting).isFalse()
+    }
+
+    @Test
+    fun initial_dial_emits_connecting_attempting_with_no_retrying_background() = runTest {
+        // AC2 (initial-connect edge) — the first-ever dial, before any failure,
+        // is CONNECTING + ATTEMPTING: the dot reads yellow (RETRYING) while the
+        // initial connect is in flight, yet phase stays CONNECTING so UC-70's
+        // retrying BACKGROUND never flashes on a healthy first load.
+        val emissions = collectFeedEmissions(failuresBeforeOpen = 0)
+
+        val firstDial = emissions.first()
+        assertThat(firstDial.phase).isEqualTo(SessionsFeedStatus.Phase.CONNECTING)
+        assertThat(firstDial.activity).isEqualTo(SessionsFeedStatus.ReconnectActivity.ATTEMPTING)
+        assertThat(firstDial.attempt).isEqualTo(0)
+        assertThat(firstDial.nextRetryAtMs)
+            .`as`("no scheduled retry while the dial is in flight (countdown hidden)")
+            .isNull()
+
+        // The dot reads yellow (RETRYING) on the initial dial …
+        assertThat(SessionsUiState(feedStatus = firstDial).connectivity)
+            .isEqualTo(Connectivity.RETRYING)
+        // … but the retrying background stays hidden (CONNECTING is silent).
+        assertThat(SessionsUiState(feedStatus = firstDial).showRetryingBackground)
+            .`as`("AC6/anti-flicker — the silent initial connect shows no retrying background")
+            .isFalse()
+
+        // It opens immediately on the first dial → CONNECTED + IDLE.
+        val connected = emissions.last()
+        assertThat(connected.phase).isEqualTo(SessionsFeedStatus.Phase.CONNECTED)
+        assertThat(connected.activity).isEqualTo(SessionsFeedStatus.ReconnectActivity.IDLE)
+    }
+
+    @Test
+    fun reconnect_cycle_oscillates_attempting_then_waiting_per_back_off() = runTest {
+        // AC4 — across the reconnect cycle the activity oscillates: each back-off
+        // is WAITING (red) and is immediately followed by the next dial's
+        // ATTEMPTING (yellow), so the dot cycles red→yellow→red→yellow until the
+        // feed opens. (Two fails → two WAITING, plus the dials at attempts 1 & 2.)
+        val reconnecting = collectFeedEmissions(failuresBeforeOpen = 2)
+            .filter { it.phase == SessionsFeedStatus.Phase.RECONNECTING }
+
+        assertThat(reconnecting.map { it.activity }).containsExactly(
+            SessionsFeedStatus.ReconnectActivity.WAITING, // after fail #1 → red
+            SessionsFeedStatus.ReconnectActivity.ATTEMPTING, // dial #2 → yellow
+            SessionsFeedStatus.ReconnectActivity.WAITING, // after fail #2 → red
+            SessionsFeedStatus.ReconnectActivity.ATTEMPTING, // dial #3 → yellow
+        )
+
+        // Map each through the dot's connectivity: the oscillation the user sees.
+        assertThat(reconnecting.map { SessionsUiState(feedStatus = it).connectivity })
+            .containsExactly(
+                Connectivity.BACKOFF, // red
+                Connectivity.RETRYING, // yellow
+                Connectivity.BACKOFF, // red
+                Connectivity.RETRYING, // yellow
+            )
+    }
+
+    @Test
+    fun consecutive_waiting_then_attempting_hold_attempt_and_giveUp_only_dot_toggles() = runTest {
+        // UC-70 ANTI-REGRESSION pinned at the SOURCE — a WAITING emit and the
+        // ATTEMPTING dial that immediately follows it carry the SAME attempt and
+        // giveUpAtMs; only `activity` flips (red→yellow) and `nextRetryAtMs` drops
+        // to null (the countdown hides during the dial). This is exactly what
+        // keeps UC-70's "attempt N" / give-up lines stable while the dot toggles.
+        val emissions = collectFeedEmissions(failuresBeforeOpen = 2)
+
+        // (WAITING #1 → ATTEMPTING #2) and (WAITING #2 → ATTEMPTING #3).
+        val pairs = listOf(emissions[1] to emissions[2], emissions[3] to emissions[4])
+        for ((waiting, attempting) in pairs) {
+            assertThat(waiting.activity).isEqualTo(SessionsFeedStatus.ReconnectActivity.WAITING)
+            assertThat(attempting.activity).isEqualTo(SessionsFeedStatus.ReconnectActivity.ATTEMPTING)
+
+            assertThat(attempting.attempt)
+                .`as`("attempt is HELD across the WAITING→ATTEMPTING boundary")
+                .isEqualTo(waiting.attempt)
+            assertThat(attempting.giveUpAtMs)
+                .`as`("giveUpAtMs is HELD across the WAITING→ATTEMPTING boundary")
+                .isEqualTo(waiting.giveUpAtMs)
+            assertThat(attempting.phase)
+                .`as`("phase is HELD (RECONNECTING) so UC-70's background never flickers")
+                .isEqualTo(waiting.phase)
+
+            assertThat(waiting.nextRetryAtMs)
+                .`as`("WAITING carries the scheduled next-retry instant")
+                .isNotNull()
+            assertThat(attempting.nextRetryAtMs)
+                .`as`("ATTEMPTING hides the countdown — no retry scheduled mid-dial")
+                .isNull()
+        }
+    }
+
+    @Test
+    fun open_after_back_off_emits_connected_and_idle() = runTest {
+        // AC4 tail — once a dial finally opens, the controller emits CONNECTED +
+        // IDLE, so the dot leaves the reconnect cycle and rejoins the REST ladder
+        // (green when the server has answered).
+        val connected = collectFeedEmissions(failuresBeforeOpen = 2).last()
+
+        assertThat(connected.phase).isEqualTo(SessionsFeedStatus.Phase.CONNECTED)
+        assertThat(connected.activity).isEqualTo(SessionsFeedStatus.ReconnectActivity.IDLE)
+        assertThat(connected.attempt).isEqualTo(0)
+        assertThat(connected.nextRetryAtMs).isNull()
         assertThat(connected.reconnecting).isFalse()
     }
 
     @Test
     fun never_gives_up_past_the_old_5min_budget_then_reconnects_when_the_server_returns() = runTest {
-        val loopScope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
-        val emissions = mutableListOf<SessionsFeedStatus>()
-        val profile = Mockito.mock(ServerProfile::class.java)
-        val profileStore = profileStoreReturning(profile)
-
         // The first 50 connects fail; the 51st opens. With the 10 s cap the
         // cumulative back-off is 1+2+4+8 + 10·46 = 475 s — WELL past the old
         // 5-minute (300 s) give-up budget. Pre-UC-71 the loop would have emitted
         // a terminal STOPPED long before; UC-71 must keep retrying and recover.
         val failuresBeforeOpen = 50
-        var attempt = 0
-        val controller = SessionEventsController(
-            profileStore = profileStore,
-            httpClientFactory = { Mockito.mock(AiSandboxHttpClient::class.java) },
-            eventsClientFactory = {
-                val state =
-                    if (attempt < failuresBeforeOpen) {
-                        SessionEventsClient.State.Disconnected("down")
-                    } else {
-                        SessionEventsClient.State.Open
-                    }
-                attempt++
-                fakeClient(state)
-            },
-            onSnapshot = {},
-            onDelta = { _, _ -> },
-            onStatus = { emissions.add(it) },
-            nowMs = { testScheduler.currentTime },
-            scope = loopScope,
-        )
-
-        controller.connect()
-        advanceUntilIdle()
-        loopScope.cancel()
+        val emissions = collectFeedEmissions(failuresBeforeOpen = failuresBeforeOpen)
 
         // AC1/AC4 — the loop NEVER gives up on its own: no terminal STOPPED is
         // ever emitted, no matter how long the outage runs.
@@ -192,24 +313,39 @@ class SessionEventsControllerStatusTest {
         assertThat(emissions.last().phase)
             .`as`("AC7 — the server returns and the feed reconnects")
             .isEqualTo(SessionsFeedStatus.Phase.CONNECTED)
+        assertThat(emissions.last().activity).isEqualTo(SessionsFeedStatus.ReconnectActivity.IDLE)
 
+        // UC-72 — the WAITING back-off emits are the per-failed-attempt signal:
+        // one per failure, attempt climbing to 50. (The interleaved ATTEMPTING
+        // dial emits double the RECONNECTING count but carry no next-retry.)
         val reconnects = emissions.filter { it.phase == SessionsFeedStatus.Phase.RECONNECTING }
-        // One RECONNECTING per failed attempt — well past the old 6-entry cap (AC5/AC6).
-        assertThat(reconnects).hasSize(failuresBeforeOpen)
-        assertThat(reconnects.last().attempt)
+        val waiting = reconnects.filter { it.activity == SessionsFeedStatus.ReconnectActivity.WAITING }
+        val attempting = reconnects.filter { it.activity == SessionsFeedStatus.ReconnectActivity.ATTEMPTING }
+        assertThat(waiting).hasSize(failuresBeforeOpen)
+        assertThat(attempting)
+            .`as`("one ATTEMPTING dial per reconnect (attempts 1..50)")
+            .hasSize(failuresBeforeOpen)
+        assertThat(waiting.last().attempt)
             .`as`("attemptCount keeps climbing past the former cap (AC5/AC6)")
             .isEqualTo(failuresBeforeOpen)
 
-        // AC5 — under the unlimited default every RECONNECTING surfaces NO give-up
-        // instant (the UI's "giving up / limit" line stays hidden).
+        // AC5 — under the unlimited default every RECONNECTING (dial OR wait)
+        // surfaces NO give-up instant (the UI's "giving up / limit" line stays
+        // hidden).
         assertThat(reconnects)
             .`as`("UC-71 — unlimited default: no RECONNECTING carries a give-up instant")
             .allMatch { it.giveUpAtMs == null }
 
-        // AC2 — inter-attempt back-off never exceeds the 10 s cap. nextRetryAtMs
-        // is now()+delay at emission time; since the scheduler advances by exactly
-        // each delay, successive emitted instants step by ≤ 10 s.
-        val retryInstants = reconnects.map { it.nextRetryAtMs!! }
+        // UC-72 — the ATTEMPTING dial emits hide the countdown (no scheduled retry
+        // mid-dial); only WAITING emits carry next-retry.
+        assertThat(attempting)
+            .`as`("UC-72 — the dial-in-flight emit carries no next-retry instant")
+            .allMatch { it.nextRetryAtMs == null }
+
+        // AC2 — inter-attempt back-off never exceeds the 10 s cap. The WAITING
+        // emits' nextRetryAtMs is now()+delay at emission time; since the
+        // scheduler advances by exactly each delay, successive instants step ≤10s.
+        val retryInstants = waiting.map { it.nextRetryAtMs!! }
         for (i in 1 until retryInstants.size) {
             assertThat(retryInstants[i] - retryInstants[i - 1])
                 .`as`("back-off step never exceeds the 10 s cap (AC2)")
