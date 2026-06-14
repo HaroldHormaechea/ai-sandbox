@@ -226,6 +226,18 @@ data class SessionSummary(
      */
     val pendingQuestion: Boolean = false,
     /**
+     * UC-69 — the first pending question's text (the body of the local push
+     * notification posted when this session enters the pending-question state;
+     * the first question when several are raised together). Null when no question
+     * is up, the session is non-running, or the body was not parseable. The server
+     * omits the field when null (@JsonInclude(NON_NULL)); the default keeps decode
+     * lenient against older payloads. Covers REST and the UC-32 push (which reuses
+     * this DTO). The app-wide pending-question watcher
+     * ([com.aisandbox.android.notifications.PendingQuestionService]) builds the
+     * notification body from it; the in-app row does not render it.
+     */
+    val pendingQuestionText: String? = null,
+    /**
      * UC-61 — client-only marker for an optimistic placeholder row inserted by
      * [com.aisandbox.android.ui.screens.SessionsCoordinator.spawn] before the
      * server has assigned the real session number `n`. `@Transient` (the

@@ -57,5 +57,15 @@
             android:foregroundServiceType="dataSync"
             android:stopWithTask="false" />
 
+        <!-- UC-69 — app-wide dataSync foreground service that keeps the
+             sessions-events feed connected in the background so a session
+             raising a question can post a local push notification even when no
+             screen is open. Subject to Android 14's ~6h/day dataSync budget. -->
+        <service
+            android:name=".notifications.PendingQuestionService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync"
+            android:stopWithTask="false" />
+
     </application>
 </manifest>

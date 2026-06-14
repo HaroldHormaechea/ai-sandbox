@@ -5,6 +5,7 @@ import com.aisandbox.android.conversation.ConversationController
 import com.aisandbox.android.identity.KeyStoreIdentityManager
 import com.aisandbox.android.net.AiSandboxHttpClient
 import com.aisandbox.android.net.ConversationClient
+import com.aisandbox.android.net.DeepLinkEvents
 import com.aisandbox.android.net.McpApi
 import com.aisandbox.android.net.ModelsApi
 import com.aisandbox.android.net.ServerProfile
@@ -65,6 +66,15 @@ class AppContainer(applicationContext: Context) {
      * pill + delete-guard survive back-navigation between them.
      */
     val terminatingSessions: TerminatingSessionsStore = TerminatingSessionsStore()
+
+    /**
+     * UC-69 — process-scoped, consume-once deep-link carrier. A tapped
+     * pending-question notification opens [com.aisandbox.android.MainActivity]
+     * with the target session id; the activity calls [DeepLinkEvents.request]
+     * and the app shell ([com.aisandbox.android.ui.AiSandboxApp]) collects it,
+     * navigates to that session's conversation, then consumes it.
+     */
+    val deepLinkEvents: DeepLinkEvents = DeepLinkEvents()
 
     /**
      * Process-lifetime scope for container-internal observers (UC-28 only,
