@@ -7,6 +7,7 @@ import com.aisandbox.server.stream.dto.ControlMessage;
 import com.aisandbox.server.stream.dto.StreamServerMessage;
 import com.aisandbox.server.stream.facade.StreamFacade;
 import com.aisandbox.server.stream.service.OutputRingBuffer;
+import com.aisandbox.server.stream.service.StreamBridgeRegistry;
 import com.aisandbox.server.stream.service.StreamControlMessageService;
 import com.aisandbox.server.stream.service.StreamRegistryService;
 import com.aisandbox.server.stream.service.StreamRegistryService.StreamId;
@@ -85,6 +86,17 @@ public class SessionStreamHandler implements WebSocketHandler {
      */
     private volatile ActiveStreamRegistry streamRegistry;
 
+    /**
+     * UC-74 — set by {@code WebSocketConfiguration} so the handler registers
+     * each live PTY {@link TmuxBridgeService.Bridge} (keyed by stream id) for
+     * deterministic teardown on graceful shutdown. The shutdown handler
+     * iterates this registry and closes any remaining bridge, killing the
+     * pty4j child + per-client tmux session so they cannot pin the JVM (AC4).
+     * Tests that don't exercise shutdown leave it unset; the handler treats a
+     * null registry as a no-op.
+     */
+    private volatile StreamBridgeRegistry bridgeRegistry;
+
     public SessionStreamHandler(
             StreamFacade facade,
             StreamControlMessageService controlSvc,
@@ -116,6 +128,15 @@ public class SessionStreamHandler implements WebSocketHandler {
      */
     public void setActiveStreamRegistry(ActiveStreamRegistry streamRegistry) {
         this.streamRegistry = streamRegistry;
+    }
+
+    /**
+     * UC-74 — late binding of the {@link StreamBridgeRegistry}. Tests that
+     * don't exercise the shutdown teardown leave this unset; the handler
+     * treats it as a no-op.
+     */
+    public void setStreamBridgeRegistry(StreamBridgeRegistry bridgeRegistry) {
+        this.bridgeRegistry = bridgeRegistry;
     }
 
     @Override
@@ -171,6 +192,14 @@ public class SessionStreamHandler implements WebSocketHandler {
                         TmuxBridgeService.Bridge bridge =
                                 facade.tmux().start(n, streamId.value(), cols.get(), rows.get());
                         bridgeRef.set(bridge);
+                        // UC-74 — track the live bridge for deterministic
+                        // teardown on graceful shutdown (unregistered in the
+                        // doFinally below; re-registered on a mid-stream
+                        // re-bridge so the backstop always sees the live one).
+                        StreamBridgeRegistry br = this.bridgeRegistry;
+                        if (br != null) {
+                            br.register(streamId, bridge);
+                        }
                     } catch (IOException io) {
                         LOG.warn("tmux bridge failed for stream {}: {}", streamId.value(), io.toString());
                         return session.send(Mono.just(session.textMessage(
@@ -206,6 +235,12 @@ public class SessionStreamHandler implements WebSocketHandler {
                     }
                     StreamId id = idRef.get();
                     if (id != null) {
+                        // UC-74 — drop the bridge from the shutdown-teardown
+                        // registry; the close above already destroyed it.
+                        StreamBridgeRegistry br = this.bridgeRegistry;
+                        if (br != null) {
+                            br.unregister(id);
+                        }
                         facade.closeStream(id, 1000, sig.name());
                     }
                     if (streams != null) {
@@ -385,6 +420,13 @@ public class SessionStreamHandler implements WebSocketHandler {
             // ── guardrail #1 swap ordering: new started above → swap + bump → close old ──
             TmuxBridgeService.Bridge old = ctx.bridgeRef.getAndSet(fresh); // swap
             ctx.generation.incrementAndGet(); // bump → the pump picks up `fresh`
+            // UC-74 — point the shutdown-teardown registry at the fresh bridge
+            // (same stream id) so the backstop tracks the live one, not the
+            // about-to-be-closed old bridge.
+            StreamBridgeRegistry br = this.bridgeRegistry;
+            if (br != null) {
+                br.register(ctx.streamId, fresh);
+            }
             if (old != null) {
                 old.close(); // close old LAST (unblocks the pump's now-stale read)
             }
