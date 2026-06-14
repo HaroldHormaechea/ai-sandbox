@@ -78,6 +78,26 @@ class ConversationController(
     private val _pendingSheet = MutableStateFlow<PendingSheet?>(null)
     val pendingSheet: StateFlow<PendingSheet?> = _pendingSheet.asStateFlow()
 
+    /**
+     * UC-66 — last model the user picked for each target (targetId → model id), so the
+     * picker can highlight it (AC5). Best-effort, client-side last-selection ONLY: Claude
+     * Code does not surface the active model over the conversation frames, so this is what
+     * the user last chose in-app, not an authoritative read of the running model. Written by
+     * [selectModel]; deliberately NOT wiped by [selectTarget]/[clearItems] (a model choice
+     * outlives a transcript reset). Guarded by [modelLock].
+     */
+    private val modelLock = Any()
+    private val selectedModelByTarget = HashMap<String, String>()
+
+    /**
+     * UC-66 — the selected model id for the CURRENTLY-selected target, re-published whenever
+     * the target changes ([selectTarget] / `targets` / `target-selected`) or the user picks a
+     * model ([selectModel]). Null when no model has been chosen for the current target. The
+     * picker reflects this as the highlighted row (AC5).
+     */
+    private val _selectedModelId = MutableStateFlow<String?>(null)
+    val selectedModelId: StateFlow<String?> = _selectedModelId.asStateFlow()
+
     private val _turnPhase = MutableStateFlow(TurnPhase.IDLE)
     val turnPhase: StateFlow<TurnPhase> = _turnPhase.asStateFlow()
 
@@ -198,6 +218,8 @@ class ConversationController(
         closeDetail() // the open dialog belongs to the old target's tool call
         _pendingSheet.value = null
         _turnPhase.value = TurnPhase.IDLE
+        // UC-66 — re-publish the new target's last-picked model (NOT wiped by the switch).
+        republishSelectedModel(targetId)
         client?.sendSelectTarget(targetId)
     }
 
@@ -205,6 +227,37 @@ class ConversationController(
     fun interrupt() {
         client?.sendInterrupt()
         _turnPhase.value = TurnPhase.IDLE
+    }
+
+    /**
+     * UC-66 — change the model of the currently-selected target by sending Claude Code's
+     * `/model <id>` slash command down the SAME composer-input path the server already routes
+     * to `ctx.selectedTarget` (AC4: main conversation when none selected, else the
+     * AgentSwitcherBar selection).
+     *
+     * Deliberate decisions (documented per the proposal):
+     * - Sent via the RAW [ConversationClient.sendComposer] path, NOT [submitComposer], so it
+     *   leaves NO optimistic `/model …` user bubble in the transcript. The command echo and
+     *   Claude's confirmation render normally through the live frames — the model change is
+     *   observable that way, so no optimistic UI is needed.
+     * - Does NOT touch [_turnPhase] and arms NO suppression guard: a model switch is a quick
+     *   command, not a content turn, so the spinner/clear-guard machinery stays out of it.
+     * - Records the choice in [selectedModelByTarget] for the current target and re-publishes
+     *   [selectedModelId] so the picker can highlight it (AC5, best-effort last-selection).
+     */
+    fun selectModel(id: String) {
+        if (id.isBlank()) return
+        val target = _selectedTargetId.value
+        synchronized(modelLock) {
+            selectedModelByTarget[target] = id
+        }
+        _selectedModelId.value = id
+        client?.sendComposer("/model $id")
+    }
+
+    /** UC-66 — re-publish [selectedModelId] for [targetId] (null when none chosen yet). */
+    private fun republishSelectedModel(targetId: String) {
+        _selectedModelId.value = synchronized(modelLock) { selectedModelByTarget[targetId] }
     }
 
     /**
@@ -442,7 +495,10 @@ class ConversationController(
                 _pendingSheet.value = null
             }
             "targets" -> onTargets(obj)
-            "target-selected" -> str(obj, "targetId")?.let { _selectedTargetId.value = it }
+            "target-selected" -> str(obj, "targetId")?.let {
+                _selectedTargetId.value = it
+                republishSelectedModel(it) // UC-66 — keep the highlighted model in sync with the target
+            }
             "backfill-start" -> backfilling = true
             "backfill-end" -> {
                 backfilling = false
@@ -470,7 +526,10 @@ class ConversationController(
                 pendingQuestion = o["pendingQuestion"]?.jsonPrimitive?.booleanOrNull ?: false,
             )
         }
-        str(obj, "selectedId")?.let { _selectedTargetId.value = it }
+        str(obj, "selectedId")?.let {
+            _selectedTargetId.value = it
+            republishSelectedModel(it) // UC-66 — keep the highlighted model in sync with the target
+        }
     }
 
     private fun parseQuestions(arr: JsonArray?): List<ConvQuestion> {

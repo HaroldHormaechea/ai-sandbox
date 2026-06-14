@@ -9,6 +9,8 @@ import com.aisandbox.android.conversation.ConversationItem
 import com.aisandbox.android.conversation.PendingSheet
 import com.aisandbox.android.conversation.ToolDetailState
 import com.aisandbox.android.conversation.TurnPhase
+import com.aisandbox.android.net.ApiResult
+import com.aisandbox.android.net.ModelInfo
 import com.aisandbox.android.terminal.StreamTarget
 import com.aisandbox.android.terminal.TerminalStreamController
 import com.aisandbox.android.ui.settings.AppearanceSettingsStore
@@ -57,6 +59,23 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
     val toolDetail: StateFlow<ToolDetailState?> = _toolDetail.asStateFlow()
 
     /**
+     * UC-66 — state of the model-selection dialog: the catalogue fetch from
+     * `GET /v1/models` (loading / empty / error / loaded). [Idle] is the closed
+     * state before the first [loadModels]. The screen opens the dialog and calls
+     * [loadModels] when the "Model" overflow item is tapped.
+     */
+    private val _modelMenu = MutableStateFlow<ModelMenuState>(ModelMenuState.Idle)
+    val modelMenu: StateFlow<ModelMenuState> = _modelMenu.asStateFlow()
+
+    /**
+     * UC-66 (AC5) — the model id last selected for the current target, mirrored from the
+     * controller so the dialog can highlight the matching row. Best-effort, client-side
+     * last-selection (the harness doesn't surface the active model).
+     */
+    private val _selectedModelId = MutableStateFlow<String?>(null)
+    val selectedModelId: StateFlow<String?> = _selectedModelId.asStateFlow()
+
+    /**
      * UC-53 (AC2) — the conversation-view font scale, projected live from the
      * process-scoped [AppearanceSettingsStore]. Independent of [attach]/the
      * controller — it tracks the user's preference, not the stream — so a change
@@ -100,6 +119,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
         viewModelScope.launch { c.pendingSheet.collect { _pendingSheet.value = it } }
         viewModelScope.launch { c.turnPhase.collect { _turnPhase.value = it } }
         viewModelScope.launch { c.toolDetail.collect { _toolDetail.value = it } }
+        viewModelScope.launch { c.selectedModelId.collect { _selectedModelId.value = it } }
     }
 
     fun submitComposer(text: String) = controller?.submitComposer(text) ?: Unit
@@ -124,6 +144,45 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
     /** UC-41 — dismiss the detail dialog. */
     fun closeDetail() = controller?.closeDetail() ?: Unit
 
+    /**
+     * UC-66 — fetch the server's model catalogue for the dialog. Publishes
+     * [ModelMenuState.Loading] immediately, then [Loaded] / [Empty] / [Error]
+     * from `GET /v1/models`. A null profile (not enrolled) or any transport /
+     * HTTP failure surfaces as [ModelMenuState.Error] so the dialog can render a
+     * clear message rather than spinning forever.
+     */
+    fun loadModels() {
+        _modelMenu.value = ModelMenuState.Loading
+        viewModelScope.launch {
+            val profile = container.profileStore.current()
+            if (profile == null) {
+                _modelMenu.value = ModelMenuState.Error("Not enrolled")
+                return@launch
+            }
+            val result = try {
+                container.modelsApi(container.httpClient(profile)).list()
+            } catch (t: Throwable) {
+                _modelMenu.value = ModelMenuState.Error(t.message ?: t.javaClass.simpleName)
+                return@launch
+            }
+            _modelMenu.value = when (result) {
+                is ApiResult.Success ->
+                    if (result.value.isEmpty()) ModelMenuState.Empty
+                    else ModelMenuState.Loaded(result.value)
+                is ApiResult.HttpFailure ->
+                    ModelMenuState.Error(result.detail.ifBlank { result.code })
+            }
+        }
+    }
+
+    /** UC-66 — apply a model choice to the current target (sends `/model <id>`). */
+    fun selectModel(id: String) = controller?.selectModel(id) ?: Unit
+
+    /** UC-66 — close the model dialog and reset its state. */
+    fun dismissModelMenu() {
+        _modelMenu.value = ModelMenuState.Idle
+    }
+
     fun userTriggeredReconnect() = controller?.userTriggeredReconnect() ?: Unit
 
     /** Disconnect: tear down the conversation stream; the screen navigates back after. */
@@ -132,4 +191,21 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
         controller = null
         sessionN = -1
     }
+}
+
+/**
+ * UC-66 — state of the model-selection dialog's catalogue fetch.
+ *
+ * - [Idle] — dialog closed (pre-fetch / dismissed).
+ * - [Loading] — `GET /v1/models` in flight; the dialog shows a spinner.
+ * - [Loaded] — the server's catalogue (one or more models).
+ * - [Empty] — the server returned an empty catalogue.
+ * - [Error] — transport / HTTP / not-enrolled failure, with a display [message].
+ */
+sealed interface ModelMenuState {
+    data object Idle : ModelMenuState
+    data object Loading : ModelMenuState
+    data class Loaded(val models: List<ModelInfo>) : ModelMenuState
+    data object Empty : ModelMenuState
+    data class Error(val message: String) : ModelMenuState
 }
