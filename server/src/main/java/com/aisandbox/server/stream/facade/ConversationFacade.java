@@ -179,6 +179,25 @@ public class ConversationFacade {
                 identity == null ? "" : identity.fingerprintHex());
     }
 
+    /**
+     * UC-67 — surface Claude Code's interactive {@code /mcp} menu in the session's
+     * live <b>main</b> pane so a human can complete an MCP server's authentication
+     * there. This only INITIATES the flow: {@code claude mcp} has no headless auth
+     * subcommand, so the server can never complete an OAuth login on the user's
+     * behalf — it injects {@code /mcp} (a slash command, submitted as a composer
+     * line) into the orchestrator pane and the user finishes in that session; the
+     * MCP screen reflects the post-auth state on its next refresh. Cross-domain
+     * callers (the {@code mcp} facade) reach this via a facade-to-facade call, per
+     * {@code profile-java-server-architecture}.
+     */
+    public void openMcpMenu(int n, ClientIdentity identity) throws IOException {
+        // Always the main (orchestrator) pane — MCP config + the /mcp TUI live with
+        // the session's primary claude, not a teammate tile.
+        injection.injectComposer(n, toInjectTarget(resolveBridgeTarget(n, SwarmEnumerationService.MAIN_ID)), "/mcp");
+        audit.logEvent(
+                AuditAction.MCP_LOGIN, "ok", "n", n, "fingerprint", identity == null ? "" : identity.fingerprintHex());
+    }
+
     /** AC11 — translate a structured answer into the session's selection keystrokes. */
     public void injectAnswer(
             int n,

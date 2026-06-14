@@ -108,6 +108,42 @@ public final class ApiDtos {
             @Schema(description = "Model id/alias sent to Claude Code via `/model <id>`.", example = "opus") String id,
             @Schema(description = "Human-readable label for the model picker.", example = "Opus 4.8") String label) {}
 
+    @Schema(description = "UC-67 — one of a session's MCP servers, returned by GET /v1/sessions/{n}/mcp.")
+    public record McpServerSummary(
+            @Schema(description = "MCP server identifier (its key in the session's MCP config).", example = "atlassian")
+                    String name,
+            @Schema(
+                            description = "Best-effort transport hint.",
+                            allowableValues = {"stdio", "http", "sse", "unknown"},
+                            example = "sse")
+                    String transport,
+            @Schema(
+                            description = "Coarse connection state derived defensively from `claude mcp list`."
+                                    + " connected = healthy; needs_auth = an interactive login the client must"
+                                    + " initiate; failed = configured but the health check failed; pending = a"
+                                    + " check is in flight; unknown = the status text was unrecognised.",
+                            allowableValues = {"connected", "needs_auth", "failed", "pending", "unknown"},
+                            example = "needs_auth")
+                    String state,
+            @Schema(
+                            description = "Raw connection detail from the list line (command or URL); display-only.",
+                            example = "https://mcp.atlassian.com/v1/sse")
+                    String detail) {}
+
+    @Schema(description = "UC-67 — outcome of an MCP control action (login/reconnect/refresh).")
+    public record McpActionResult(
+            @Schema(description = "The MCP server the action targeted.", example = "atlassian") String name,
+            @Schema(
+                            description = "The server's state after the action (from a fresh inventory).",
+                            allowableValues = {"connected", "needs_auth", "failed", "pending", "unknown"},
+                            example = "needs_auth")
+                    String state,
+            @Schema(
+                            description = "Short, honest note about what happened. login only INITIATES the flow in"
+                                    + " the live session — it never completes OAuth headlessly.",
+                            example = "Opens MCP authentication in the live session — complete it there, then refresh.")
+                    String message) {}
+
     /**
      * Body of {@code POST /v1/enrollment} (UC04 AC33). The endpoint is
      * the only mTLS-exempt path on the server; redeeming a one-time

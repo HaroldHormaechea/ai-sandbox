@@ -83,6 +83,44 @@ paths:
           description: lifecycle.sh exited non-zero.
           content:
             application/problem+json: {}
+  /v1/sessions/{n}/mcp/{name}/{action}:
+    post:
+      tags:
+      - mcp-controller
+      summary: Drive an MCP control action (login/reconnect/refresh) on one server.
+      description: 200 with the server's post-action state. login initiates the auth
+        flow in the live session (it cannot complete OAuth headlessly); reconnect/refresh
+        re-run the health check. An unknown server name yields state=unknown rather
+        than a 404.
+      operationId: operate
+      parameters:
+      - name: "n"
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int32
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
+      - name: action
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          description: Action applied; carries the server's post-action state.
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/McpActionResult"
+        "500":
+          description: The underlying claude mcp / pane-injection call failed.
+          content:
+            application/problem+json: {}
   /v1/sessions/server-ssh:
     post:
       tags:
@@ -232,11 +270,37 @@ paths:
           description: clean.sh exited non-zero.
           content:
             application/problem+json: {}
+  /v1/sessions/{n}/mcp:
+    get:
+      tags:
+      - mcp-controller
+      summary: List the MCP servers configured for a session.
+      description: "Returns the session's MCP servers and their current state, as\
+        \ known to the embedded Claude Code (claude mcp list). Degrades to an empty\
+        \ list for a non-running session or an unrecognised MCP surface — never a\
+        \ 4xx for those cases."
+      operationId: list_2
+      parameters:
+      - name: "n"
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int32
+      responses:
+        "200":
+          description: The session's MCP servers (possibly empty).
+          content:
+            '*/*':
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/McpServerSummary"
   /v1/models:
     get:
       tags:
       - model-controller
-      operationId: list_2
+      operationId: list_3
       responses:
         "200":
           description: OK
@@ -294,6 +358,30 @@ components:
           type: string
           default: shared
           description: shared | isolated
+    McpActionResult:
+      type: object
+      description: UC-67 — outcome of an MCP control action (login/reconnect/refresh).
+      properties:
+        name:
+          type: string
+          description: The MCP server the action targeted.
+          example: atlassian
+        state:
+          type: string
+          description: The server's state after the action (from a fresh inventory).
+          enum:
+          - connected
+          - needs_auth
+          - failed
+          - pending
+          - unknown
+          example: needs_auth
+        message:
+          type: string
+          description: "Short, honest note about what happened. login only INITIATES\
+            \ the flow in the live session — it never completes OAuth headlessly."
+          example: "Opens MCP authentication in the live session — complete it there,\
+            \ then refresh."
     SessionSummary:
       type: object
       description: A summary row returned by GET /v1/sessions.
@@ -412,6 +500,41 @@ components:
           type: array
           items:
             type: string
+    McpServerSummary:
+      type: object
+      description: "UC-67 — one of a session's MCP servers, returned by GET /v1/sessions/{n}/mcp."
+      properties:
+        name:
+          type: string
+          description: MCP server identifier (its key in the session's MCP config).
+          example: atlassian
+        transport:
+          type: string
+          description: Best-effort transport hint.
+          enum:
+          - stdio
+          - http
+          - sse
+          - unknown
+          example: sse
+        state:
+          type: string
+          description: Coarse connection state derived defensively from `claude mcp
+            list`. connected = healthy; needs_auth = an interactive login the client
+            must initiate; failed = configured but the health check failed; pending
+            = a check is in flight; unknown = the status text was unrecognised.
+          enum:
+          - connected
+          - needs_auth
+          - failed
+          - pending
+          - unknown
+          example: needs_auth
+        detail:
+          type: string
+          description: Raw connection detail from the list line (command or URL);
+            display-only.
+          example: https://mcp.atlassian.com/v1/sse
     ModelSummary:
       type: object
       description: UC-66 — an advertised Claude model returned by GET /v1/models.
