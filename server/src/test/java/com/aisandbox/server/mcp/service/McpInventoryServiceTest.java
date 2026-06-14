@@ -178,6 +178,71 @@ class McpInventoryServiceTest {
     }
 
     @Test
+    void parseList_handles_the_ACTUAL_upstream_claude_mcp_list_output_verbatim() {
+        // QA live-captured this EXACT output from the real `claude mcp list` binary
+        // (same version the session container runs), with the call-graph MCP from the
+        // project's .mcp.json. The parser is "the single point where reality can
+        // diverge", so this fixture is the genuine upstream shape, NOT a hand-built
+        // approximation: a banner with a Unicode ellipsis (…), a blank line, and one
+        // stdio server whose health text is "⏸ Pending approval (run `claude` to
+        // approve)" (U+23F8 PAUSE glyph) — a status none of the other fixtures cover.
+        // The command itself contains many "--classpath/--src" double-dashes (no
+        // " - "), so the LAST " - " split must isolate only the trailing health text.
+        String realStdout = "Checking MCP server health…\n"
+                + "\n"
+                + "java-class-call-scanning: java -jar /home/claude/.cache/project-builder/"
+                + "java-class-call-scanning/v0.2.0/java-class-call-scanning.jar serve "
+                + "--classpath /workspace/ai-sandbox/server/build/classes/java/main "
+                + "--classpath /workspace/ai-sandbox/server/build/classes/java/test "
+                + "--src /workspace/ai-sandbox/server/src/main/java "
+                + "--src /workspace/ai-sandbox/server/src/test/java "
+                + "- ⏸ Pending approval (run `claude` to approve)\n";
+
+        List<McpServerStatus> out = McpInventoryService.parseList(realStdout);
+
+        // Banner + blank line dropped; exactly one server surfaced.
+        assertThat(out).singleElement().satisfies(s -> {
+            assertThat(s.name()).isEqualTo("java-class-call-scanning");
+            assertThat(s.transport()).isEqualTo("stdio");
+            // "Pending approval" → PENDING (a check still in flight), never UNKNOWN.
+            assertThat(s.state()).isEqualTo(McpState.PENDING);
+            // The full command (with every --flag) stays in the display-only detail,
+            // and the trailing health text is split off the LAST " - ".
+            assertThat(s.detail())
+                    .startsWith("java -jar /home/claude/.cache/project-builder/")
+                    .endsWith("--src /workspace/ai-sandbox/server/src/test/java")
+                    .doesNotContain("Pending approval");
+        });
+    }
+
+    @Test
+    void parseList_handles_REAL_atlassian_needsAuth_and_failed_health_lines_from_a_live_session() {
+        // QA live-captured this EXACT output by running the server's own command —
+        // `docker compose -p ai-sandbox-7 exec -T claude-sandbox claude mcp list` —
+        // against a real session container holding a user-scoped Atlassian SSE MCP
+        // and a deliberately-broken stdio MCP. The genuine health glyphs upstream
+        // emits differ from this suite's other fixtures: needs-auth is "! Needs
+        // authentication" (a bare "!", not "⚠") and failed is "✘ Failed to
+        // connect" (U+2718 HEAVY BALLOT X, not the "✗" the multi-state fixture
+        // uses). The keyword-based parser must still classify both correctly — this
+        // pins that the defensive design survives the real glyph variance.
+        String realStdout = "Checking MCP server health…\n"
+                + "\n"
+                + "atlassian: https://mcp.atlassian.com/v1/sse (SSE) - ! Needs authentication\n"
+                + "broken-tool: /usr/local/bin/definitely-not-here --serve - ✘ Failed to connect\n";
+
+        List<McpServerStatus> out = McpInventoryService.parseList(realStdout);
+
+        assertThat(out).extracting(McpServerStatus::name).containsExactly("atlassian", "broken-tool");
+        // Real Atlassian → NEEDS_AUTH (drives the Login enable-condition); broken stdio → FAILED.
+        assertThat(out).extracting(McpServerStatus::state).containsExactly(McpState.NEEDS_AUTH, McpState.FAILED);
+        assertThat(out).extracting(McpServerStatus::transport).containsExactly("sse", "stdio");
+        // The "--serve" double-dash in the broken command stays in the detail; only
+        // the trailing " - <glyph> Failed to connect" is split off as the status.
+        assertThat(out.get(1).detail()).isEqualTo("/usr/local/bin/definitely-not-here --serve");
+    }
+
+    @Test
     void parseList_returns_empty_for_blank_or_null() {
         assertThat(McpInventoryService.parseList(null)).isEmpty();
         assertThat(McpInventoryService.parseList("")).isEmpty();
