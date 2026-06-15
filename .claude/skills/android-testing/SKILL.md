@@ -25,9 +25,13 @@ emulator**, starting from nothing running. There are two test levels:
 > camera faces a non-overridable test-card; the `wall`/`table` posters aren't in
 > the default view and there's no headless way to navigate the 3D scene
 > (`-virtualscene-poster` requires RGB power-of-two images and still leaves the
-> QR off-camera). Enrollment is driven by the on-device probe in **Phase 4**,
-> which exercises the same production networking (`EnrollmentClient` →
-> `POST /v1/enrollment` → SPKI pin) without a camera.
+> QR off-camera). Instead, enroll through the **UC-83 "read QR from file" path**
+> (Phase 4): generate the invite as a QR **PNG**, hand it to the production
+> `QrImageDecoder`, and let the same production parse+enroll seam
+> (`onQrPayload` → `EnrollmentClient` → `POST /v1/enrollment` → SPKI pin) run —
+> camera-free, but exercising the real decode path a user hits, not a side
+> channel. This replaces the older `E2eEnrollmentProbeTest` workaround (which
+> injected an already-decoded QR string and so never covered the image decode).
 
 ## One-time prerequisites (skip if already provisioned)
 
@@ -120,19 +124,57 @@ echo "test server up on 18443"
 "$ADB" -s "$DEV" install -r "$REPO/android/build/outputs/apk/androidTest/debug/android-debug-androidTest.apk"
 ```
 
-## Phase 4 — Enroll the AVD against the server (proven, camera-free)
+## Phase 4 — Enroll the AVD against the server (QR-from-file, camera-free)
 
-Issue a fresh single-use invite (token TTL ~10 min) and run the on-device probe,
-which makes the real mTLS `POST /v1/enrollment` call from the emulator.
+Issue a fresh single-use invite (token TTL ~10 min), render it as a **QR PNG**,
+and run the UC-83 file-enrollment instrumented test. The test decodes the PNG
+through the **production** `QrImageDecoder` and feeds the result into the same
+production seam the "Read QR from file" button uses
+(`OnboardingViewModel.onQrPayload` → `EnrollmentClient` → mTLS
+`POST /v1/enrollment` → SPKI pin). This is the documented headless-enrollment
+route: it covers the real image-decode + parse + enroll path end-to-end, no
+camera and no picker UI.
 
 ```bash
+# 4a. fresh single-use invite as raw JSON payload
 PAYLOAD=$(java -jar "$CTL_JAR" client invite probe-vm \
   --pki-dir "$E2E/pki" --enrollment-dir "$E2E/enrollment" \
   --server-url https://10.0.2.2:18443 --json)
 
+# 4b. render the payload to a QR PNG. Use a ZXing-based generator (do NOT assume
+#     `qrencode` is installed). The one-liner below drives the same ZXing core
+#     jar the app already depends on — adjust the jar path to your Gradle cache,
+#     or use any ZXing QRCodeWriter snippet. It writes invite-qr.png.
+ZXING_JAR=$(find ~/.gradle/caches -name 'core-3.5.4.jar' | head -1)
+cat > /tmp/QrGen.java <<'JAVA'
+import com.google.zxing.*;
+import com.google.zxing.common.BitMatrix;
+import com.google.zxing.qrcode.QRCodeWriter;
+import javax.imageio.ImageIO;
+import java.awt.image.BufferedImage;
+import java.io.File;
+import java.nio.file.Files;
+public class QrGen {
+  public static void main(String[] a) throws Exception {
+    String payload = new String(Files.readAllBytes(new File(a[0]).toPath())).trim();
+    BitMatrix m = new QRCodeWriter().encode(payload, BarcodeFormat.QR_CODE, 600, 600);
+    BufferedImage img = new BufferedImage(600, 600, BufferedImage.TYPE_INT_RGB);
+    for (int y = 0; y < 600; y++) for (int x = 0; x < 600; x++)
+      img.setRGB(x, y, m.get(x, y) ? 0x000000 : 0xFFFFFF);
+    ImageIO.write(img, "png", new File(a[1]));
+  }
+}
+JAVA
+printf '%s' "$PAYLOAD" > /tmp/invite.json
+(cd /tmp && "$JAVA_HOME/bin/javac" -cp "$ZXING_JAR" QrGen.java \
+  && "$JAVA_HOME/bin/java" -cp ".:$ZXING_JAR" QrGen /tmp/invite.json /tmp/invite-qr.png)
+
+# 4c. push the PNG to the device and run the file-enrollment test, which decodes
+#     it via the production QrImageDecoder and enrolls through onQrPayload.
+"$ADB" -s "$DEV" push /tmp/invite-qr.png /sdcard/Download/invite-qr.png
 "$ADB" -s "$DEV" shell "am instrument -w \
-  -e class com.aisandbox.android.net.E2eEnrollmentProbeTest \
-  -e qrPayload '$PAYLOAD' \
+  -e class com.aisandbox.android.net.E2eQrFileEnrollmentTest \
+  -e qrImagePath /sdcard/Download/invite-qr.png \
   com.aisandbox.android.debug.test/androidx.test.runner.AndroidJUnitRunner"
 #   expect: OK (1 test)
 
@@ -140,9 +182,18 @@ PAYLOAD=$(java -jar "$CTL_JAR" client invite probe-vm \
 grep -o 'client_enroll' "$E2E/log/audit.log" && ls "$E2E/clients/"
 ```
 
-The payload is single-quoted so its JSON double-quotes survive the device shell;
-the invite JSON contains no single-quote chars, so this is safe. The probe is
-`android/src/androidTest/kotlin/com/aisandbox/android/net/E2eEnrollmentProbeTest.kt`.
+The test is
+`android/src/androidTest/kotlin/com/aisandbox/android/net/E2eQrFileEnrollmentTest.kt`.
+It reads the pushed PNG, runs it through the production `QrImageDecoder`
+(`decodeInviteFromUri` / `decodeInviteCandidates`), and drives
+`OnboardingViewModel.onQrImageSelected` → `onQrPayload` so the assertion covers
+the exact decode+enroll path a user exercises with the "Read QR from file"
+button — not a pre-decoded string injected past the decoder.
+
+> Alternatively, bundle a known invite-QR PNG as an **androidTest asset** under
+> `android/src/androidTest/assets/` and have the test read it from the test APK
+> instead of `adb push`; use that when the invite is fixed/recorded rather than
+> freshly minted per run.
 
 ## Phase 5 — (optional) seed a session so a card renders (REQUIRES DOCKER)
 
