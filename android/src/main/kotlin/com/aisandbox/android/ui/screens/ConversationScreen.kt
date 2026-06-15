@@ -418,14 +418,19 @@ internal fun ConversationContent(
     // threshold of the top (and we're not already loading or at the start), capture the
     // anchor and request the next older page. The controller single-in-flights, so a fast
     // fling that fires this repeatedly never produces overlapping fetches.
-    LaunchedEffect(listState, atTranscriptStart, loadingOlder, items) {
+    LaunchedEffect(listState, atTranscriptStart, loadingOlder, backfilling, items) {
         snapshotFlow { listState.firstVisibleItemIndex }
             .collect { firstVisible ->
+                // `!backfilling` (AC1, UC-78): during the initial replay the list is small, so
+                // firstVisibleItemIndex is trivially within the prefetch threshold — without this
+                // gate the trigger would fire mid-backfill, capture an anchor, and let the
+                // restore compete with the bottom-anchor on the next growth (landing one item
+                // short of the bottom). No paging until the initial window has finished replaying.
                 // `pendingAnchorKey == null` prevents a cascade: while a fired load's anchor
                 // restore is still pending we never trigger again, and the restore repositions
                 // the viewport (~one page down) so the trigger naturally rests until the user
                 // scrolls back up near the top.
-                if (!atTranscriptStart && !loadingOlder && pendingAnchorKey == null &&
+                if (!backfilling && !atTranscriptStart && !loadingOlder && pendingAnchorKey == null &&
                     items.isNotEmpty() && firstVisible <= LOAD_OLDER_PREFETCH_THRESHOLD
                 ) {
                     val topVisibleKey = listState.layoutInfo.visibleItemsInfo
