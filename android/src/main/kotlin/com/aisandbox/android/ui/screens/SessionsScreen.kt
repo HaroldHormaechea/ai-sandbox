@@ -242,46 +242,13 @@ fun SessionsScreen(
                     }
                 },
                 actions = {
-                    // UC-84 (AC1) — a single overflow/hamburger menu replaces the
-                    // separate Terminal + Settings top-bar icons. It exposes
-                    // exactly two items: "Start SSH session" (same create-or-focus
-                    // host-shell behavior as the old UC-62 shell icon — AC2) and
-                    // "Settings". Test tags are preserved/migrated:
-                    // sessions_overflow_action on the button,
-                    // sessions_server_ssh_action on the SSH item.
-                    var menuExpanded by remember { mutableStateOf(false) }
-                    Box {
-                        IconButton(
-                            onClick = { menuExpanded = true },
-                            modifier = Modifier.testTag("sessions_overflow_action"),
-                        ) {
-                            Icon(
-                                Icons.Filled.MoreVert,
-                                contentDescription = stringResource(R.string.sessions_overflow_description),
-                            )
-                        }
-                        DropdownMenu(
-                            expanded = menuExpanded,
-                            onDismissRequest = { menuExpanded = false },
-                        ) {
-                            DropdownMenuItem(
-                                text = { Text(stringResource(R.string.server_ssh_action)) },
-                                modifier = Modifier.testTag("sessions_server_ssh_action"),
-                                onClick = {
-                                    menuExpanded = false
-                                    viewModel.openServerSsh { n -> onOpenTerminal(n) }
-                                },
-                            )
-                            DropdownMenuItem(
-                                text = { Text(stringResource(R.string.sessions_menu_settings)) },
-                                modifier = Modifier.testTag("sessions_menu_settings"),
-                                onClick = {
-                                    menuExpanded = false
-                                    onOpenSettings()
-                                },
-                            )
-                        }
-                    }
+                    // UC-84 (AC1) — single overflow/hamburger menu. Rendering lives
+                    // in the stateless [SessionsOverflowMenu] seam so an instrumented
+                    // test can assert the two items independently of the ViewModel.
+                    SessionsOverflowMenu(
+                        onStartSsh = { viewModel.openServerSsh { n -> onOpenTerminal(n) } },
+                        onOpenSettings = onOpenSettings,
+                    )
                 },
                 scrollBehavior = scrollBehavior,
             )
@@ -792,6 +759,62 @@ private fun SessionRow(
                 serverSshOnly = isServerSsh,
                 onRemove = onRemove,
                 onLifecycle = onLifecycle,
+            )
+        }
+    }
+}
+
+/**
+ * UC-84 (AC1/AC2) — the top-bar overflow/hamburger menu seam. Stateless +
+ * `internal` so an instrumented test can drive it directly (mirrors the
+ * `internal fun SessionsBody` pattern). Exposes exactly two items behind a
+ * single [Icons.Filled.MoreVert] button:
+ *
+ * <ul>
+ *   <li>"Start SSH session" — same create-or-focus host-shell behavior as the
+ *       old UC-62 shell icon ([onStartSsh]).</li>
+ *   <li>"Settings" — navigates to the Settings screen ([onOpenSettings]).</li>
+ * </ul>
+ *
+ * Stable testTags: {@code sessions_overflow_action} (button),
+ * {@code sessions_server_ssh_action} (SSH item),
+ * {@code sessions_menu_settings} (Settings item).
+ */
+@Composable
+internal fun SessionsOverflowMenu(
+    onStartSsh: () -> Unit,
+    onOpenSettings: () -> Unit,
+) {
+    var menuExpanded by remember { mutableStateOf(false) }
+    Box {
+        IconButton(
+            onClick = { menuExpanded = true },
+            modifier = Modifier.testTag("sessions_overflow_action"),
+        ) {
+            Icon(
+                Icons.Filled.MoreVert,
+                contentDescription = stringResource(R.string.sessions_overflow_description),
+            )
+        }
+        DropdownMenu(
+            expanded = menuExpanded,
+            onDismissRequest = { menuExpanded = false },
+        ) {
+            DropdownMenuItem(
+                text = { Text(stringResource(R.string.server_ssh_action)) },
+                modifier = Modifier.testTag("sessions_server_ssh_action"),
+                onClick = {
+                    menuExpanded = false
+                    onStartSsh()
+                },
+            )
+            DropdownMenuItem(
+                text = { Text(stringResource(R.string.sessions_menu_settings)) },
+                modifier = Modifier.testTag("sessions_menu_settings"),
+                onClick = {
+                    menuExpanded = false
+                    onOpenSettings()
+                },
             )
         }
     }

@@ -351,7 +351,40 @@ private fun KeyboardSection(container: com.aisandbox.android.AppContainer) {
 private fun ServerUpdateSection(viewModel: ServerUpdateViewModel = viewModel()) {
     val context = LocalContext.current
     val state by viewModel.state.collectAsState()
+    // Thin wiring layer: bind the ViewModel actions to the stateless render seam
+    // below so the latter can be driven directly from an instrumented test with
+    // a fabricated ServerUpdateUiState (no ViewModel / network needed).
+    ServerUpdateContent(
+        state = state,
+        onCheck = viewModel::check,
+        onUpdateClick = viewModel::requestConfirm,
+        onConfirm = viewModel::confirmApply,
+        onDismiss = viewModel::cancelConfirm,
+        onChangelog = { url -> openChangelog(context, url) },
+    )
+}
 
+/**
+ * UC-84 — stateless render seam for the "Server updates" section (mirrors the
+ * `internal fun SessionsBody` pattern). Takes the [ServerUpdateUiState] + action
+ * callbacks and renders the button / per-state copy / changelog link / confirm
+ * dialog, so an instrumented test can assert AC-3/6/7 against a fabricated state
+ * without standing up the whole [SettingsScreen] or [ServerUpdateViewModel].
+ *
+ * Stable testTags: {@code settings_update_check} (check/re-check button),
+ * {@code settings_update_apply} ("Update to version X"),
+ * {@code settings_update_changelog} (Changelog link),
+ * {@code settings_update_confirm} / {@code settings_update_cancel} (dialog).
+ */
+@Composable
+internal fun ServerUpdateContent(
+    state: ServerUpdateUiState,
+    onCheck: () -> Unit,
+    onUpdateClick: () -> Unit,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit,
+    onChangelog: (String) -> Unit,
+) {
     Section(title = stringResource(R.string.settings_section_server_updates)) {
         when (val s = state) {
             is ServerUpdateUiState.Checking -> {
@@ -373,7 +406,7 @@ private fun ServerUpdateSection(viewModel: ServerUpdateViewModel = viewModel()) 
                     color = OnSurface,
                 )
                 Spacer(Modifier.height(12.dp))
-                CheckButton(viewModel, labelRes = R.string.settings_update_recheck)
+                CheckButton(onCheck, labelRes = R.string.settings_update_recheck)
             }
 
             is ServerUpdateUiState.UpdateAvailable -> {
@@ -384,14 +417,15 @@ private fun ServerUpdateSection(viewModel: ServerUpdateViewModel = viewModel()) 
                 )
                 Spacer(Modifier.height(12.dp))
                 Button(
-                    onClick = { viewModel.requestConfirm() },
+                    onClick = onUpdateClick,
                     modifier = Modifier.fillMaxWidth().testTag("settings_update_apply"),
                 ) {
                     Text(stringResource(R.string.settings_update_available, s.latest))
                 }
                 if (!s.releaseHtmlUrl.isNullOrBlank()) {
+                    val url = s.releaseHtmlUrl
                     TextButton(
-                        onClick = { openChangelog(context, s.releaseHtmlUrl) },
+                        onClick = { onChangelog(url) },
                         modifier = Modifier.testTag("settings_update_changelog"),
                     ) {
                         Text(stringResource(R.string.settings_update_changelog))
@@ -407,19 +441,22 @@ private fun ServerUpdateSection(viewModel: ServerUpdateViewModel = viewModel()) 
                     color = OnSurface,
                 )
                 AlertDialog(
-                    onDismissRequest = { viewModel.cancelConfirm() },
+                    onDismissRequest = onDismiss,
                     title = { Text(stringResource(R.string.settings_update_confirm_title)) },
                     text = { Text(stringResource(R.string.settings_update_confirm_body, s.latest)) },
                     confirmButton = {
                         TextButton(
-                            onClick = { viewModel.confirmApply() },
+                            onClick = onConfirm,
                             modifier = Modifier.testTag("settings_update_confirm"),
                         ) {
                             Text(stringResource(R.string.settings_update_confirm_yes))
                         }
                     },
                     dismissButton = {
-                        TextButton(onClick = { viewModel.cancelConfirm() }) {
+                        TextButton(
+                            onClick = onDismiss,
+                            modifier = Modifier.testTag("settings_update_cancel"),
+                        ) {
                             Text(stringResource(R.string.settings_update_confirm_cancel))
                         }
                     },
@@ -445,7 +482,7 @@ private fun ServerUpdateSection(viewModel: ServerUpdateViewModel = viewModel()) 
                     color = OnSurface,
                 )
                 Spacer(Modifier.height(12.dp))
-                CheckButton(viewModel, labelRes = R.string.settings_update_recheck)
+                CheckButton(onCheck, labelRes = R.string.settings_update_recheck)
             }
 
             is ServerUpdateUiState.Error -> {
@@ -455,7 +492,7 @@ private fun ServerUpdateSection(viewModel: ServerUpdateViewModel = viewModel()) 
                     color = ErrorTone,
                 )
                 Spacer(Modifier.height(12.dp))
-                CheckButton(viewModel, labelRes = R.string.settings_update_recheck)
+                CheckButton(onCheck, labelRes = R.string.settings_update_recheck)
             }
 
             ServerUpdateUiState.Idle -> {
@@ -465,16 +502,16 @@ private fun ServerUpdateSection(viewModel: ServerUpdateViewModel = viewModel()) 
                     color = OnSurfaceMuted,
                 )
                 Spacer(Modifier.height(12.dp))
-                CheckButton(viewModel, labelRes = R.string.settings_update_check)
+                CheckButton(onCheck, labelRes = R.string.settings_update_check)
             }
         }
     }
 }
 
 @Composable
-private fun CheckButton(viewModel: ServerUpdateViewModel, labelRes: Int) {
+private fun CheckButton(onCheck: () -> Unit, labelRes: Int) {
     Button(
-        onClick = { viewModel.check() },
+        onClick = onCheck,
         modifier = Modifier.fillMaxWidth().testTag("settings_update_check"),
     ) {
         Text(stringResource(labelRes))
