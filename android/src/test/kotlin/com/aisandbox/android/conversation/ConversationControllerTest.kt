@@ -1719,23 +1719,35 @@ class ConversationControllerTest {
         // AC2/AC6 — the loaded window holds [win-a, win-b]; an older page brings [old-1, old-2]
         // plus an OVERLAP line (same key as win-a). At page-end the page's items are prepended in
         // arrival (oldest→newest) order ABOVE the window, and the overlap is deduped (one render).
-        enqueuePush(
+        // Agent-switcher fix — the page is requested via loadOlder() so it carries the live
+        // window's transcriptEpoch (the server emits page-start ONLY in response to load-older —
+        // SessionConversationHandler.loadOlder), exactly as in production. A two-phase capture
+        // delivers the backfill window first, then the requested page, so the epoch matches.
+        val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        enqueueCapture(wsRef)
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { c.state.value == TerminalState.Open && wsRef.get() != null }).isTrue
+            val ws = wsRef.get()!!
             listOf(
                 """{"type":"backfill-start","source":"main"}""",
                 """{"type":"assistant-text","uuid":"wa","source":"main","isSidechain":false,"text":"win-a"}""",
                 """{"type":"assistant-text","uuid":"wb","source":"main","isSidechain":false,"text":"win-b"}""",
                 """{"type":"backfill-end","source":"main"}""",
+            ).forEach { ws.send(it) }
+            assertThat(awaitUntil { assistantTexts(c) == listOf("win-a", "win-b") }).isTrue
+            // User scrolls up → request the older page (captures the live window's epoch).
+            c.loadOlder()
+            assertThat(awaitUntil { c.loadingOlder.value }).isTrue
+            listOf(
                 """{"type":"page-start"}""",
                 """{"type":"assistant-text","uuid":"o1","source":"main","isSidechain":false,"text":"old-1"}""",
                 """{"type":"assistant-text","uuid":"o2","source":"main","isSidechain":false,"text":"old-2"}""",
                 // Overlap with the window's win-a (same uuid+text → same key) — must dedupe (AC6).
                 """{"type":"assistant-text","uuid":"wa","source":"main","isSidechain":false,"text":"win-a"}""",
                 """{"type":"page-end","atStart":false}""",
-            ),
-        )
-        val c = networkedController()
-        c.attach(7)
-        try {
+            ).forEach { ws.send(it) }
             assertThat(awaitUntil { assistantTexts(c) == listOf("old-1", "old-2", "win-a", "win-b") })
                 .withFailMessage("expected prepended+deduped order, got ${assistantTexts(c)}")
                 .isTrue
@@ -1752,21 +1764,30 @@ class ConversationControllerTest {
         // AC6 — the window already holds the tool_result for X (a result-first placeholder row);
         // an older page brings the matching tool_use for X. They must merge into ONE ToolActivity
         // (keyed on toolUseId), and that merged row moves to its correct OLDER position in the page.
-        enqueuePush(
+        // Agent-switcher fix — the page is requested via loadOlder() so it carries the live
+        // window's epoch (server emits page-start only in response to load-older), as in production.
+        val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        enqueueCapture(wsRef)
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { c.state.value == TerminalState.Open && wsRef.get() != null }).isTrue
+            val ws = wsRef.get()!!
             listOf(
                 """{"type":"backfill-start","source":"main"}""",
                 """{"type":"tool-result","uuid":"tr","source":"main","isSidechain":false,"toolUseId":"X","isError":false,"summary":"RESULT"}""",
                 """{"type":"assistant-text","uuid":"wb","source":"main","isSidechain":false,"text":"win-b"}""",
                 """{"type":"backfill-end","source":"main"}""",
+            ).forEach { ws.send(it) }
+            assertThat(awaitUntil { c.items.value.size == 2 }).isTrue
+            c.loadOlder()
+            assertThat(awaitUntil { c.loadingOlder.value }).isTrue
+            listOf(
                 """{"type":"page-start"}""",
                 """{"type":"assistant-text","uuid":"o1","source":"main","isSidechain":false,"text":"old-1"}""",
                 """{"type":"tool-use","uuid":"tu","source":"main","isSidechain":false,"toolName":"Bash","toolUseId":"X","inputSummary":"ls -la","primaryText":""}""",
                 """{"type":"page-end","atStart":false}""",
-            ),
-        )
-        val c = networkedController()
-        c.attach(7)
-        try {
+            ).forEach { ws.send(it) }
             // 3 rows total: old-1, the single merged tool row, win-b (no duplicate tool row).
             assertThat(awaitUntil { c.items.value.size == 3 })
                 .withFailMessage("expected 3 rows, got ${c.items.value.map { it.key }}")
@@ -1814,18 +1835,27 @@ class ConversationControllerTest {
         // AC4 — a page that prepends NOTHING (cursor already at 0 server-side) is delivered as a
         // page-start immediately followed by page-end(atStart=true) with no frames. The loading
         // affordance still clears and the controller reaches atTranscriptStart (no hang).
-        enqueuePush(
+        // Agent-switcher fix — the page is requested via loadOlder() so it carries the live
+        // window's epoch (server emits page-start only in response to load-older), as in production.
+        val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        enqueueCapture(wsRef)
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { c.state.value == TerminalState.Open && wsRef.get() != null }).isTrue
+            val ws = wsRef.get()!!
             listOf(
                 """{"type":"backfill-start","source":"main"}""",
                 """{"type":"assistant-text","uuid":"wa","source":"main","isSidechain":false,"text":"only"}""",
                 """{"type":"backfill-end","source":"main"}""",
+            ).forEach { ws.send(it) }
+            assertThat(awaitUntil { assistantTexts(c) == listOf("only") }).isTrue
+            c.loadOlder()
+            assertThat(awaitUntil { c.loadingOlder.value }).isTrue
+            listOf(
                 """{"type":"page-start"}""",
                 """{"type":"page-end","atStart":true}""",
-            ),
-        )
-        val c = networkedController()
-        c.attach(7)
-        try {
+            ).forEach { ws.send(it) }
             assertThat(awaitUntil { c.atTranscriptStart.value }).isTrue
             assertThat(awaitUntil { !c.loadingOlder.value }).isTrue
             // The existing window is untouched by an empty page.
@@ -1886,6 +1916,193 @@ class ConversationControllerTest {
             wsRef.get()!!.send("""{"type":"backfill-start","source":"main"}""")
             assertThat(awaitUntil { !c.atTranscriptStart.value }).isTrue
             assertThat(c.loadingOlder.value).isFalse
+        } finally {
+            c.close()
+        }
+    }
+
+    // ──────────── Part H — agent-switcher selection fix: stale-page epoch drain ─────────────
+    //
+    // THE regression: "every member shows the same conversation". The UC-79 older-page machinery
+    // was not target/epoch-aware — a `load-older` page requested for target A could land AFTER a
+    // switch to B (or a reconnect/`backfill-start`), and the burst then either grafted A's history
+    // into B's store or swallowed B's own `backfill-start`. The fix adds a monotonic
+    // [transcriptEpoch] (bumped on selectTarget / clear / every `backfill-start`), captured at
+    // `load-older` send-time and re-checked at `page-start`: a mismatch marks the page STALE and
+    // drains its whole burst (dropping CONTENT only — `targets`/`target-selected`/`backfill-end`
+    // pass through), while `backfill-start` is handled BEFORE the drain gate so a fresh window can
+    // never be swallowed. These guards pin that behaviour; the private page-state flags
+    // (pageMode/pageDiscarding) are asserted BEHAVIOURALLY — a later live line must render — since
+    // they are not exposed.
+
+    @Test
+    fun `a stale older page for the prior target is fully discarded after switching, including its content`() {
+        // Guard 1 — a load-older page requested on target A lands AFTER the user switched to B and
+        // B's backfill rendered. The whole stale burst (page-start, the page's assistant-text +
+        // tool-use CONTENT, page-end) is drained and dropped, so A's history never leaks into B's
+        // transcript; B's window + selection stay intact and a later live B line still renders
+        // (proving the drain and page-assembly state were both cleared).
+        val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        enqueueCapture(wsRef)
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { c.state.value == TerminalState.Open && wsRef.get() != null }).isTrue
+            val ws = wsRef.get()!!
+            // On target A the user scrolls up → an older page is requested (captures the epoch).
+            c.loadOlder()
+            assertThat(awaitUntil { c.loadingOlder.value }).isTrue
+            // The user switches to B before the page arrives → fresh window (epoch bumps).
+            c.selectTarget("swarm:main:0.1")
+            // B's backfill renders its own two lines (its backfill-start bumps the epoch again).
+            listOf(
+                """{"type":"backfill-start","source":"main"}""",
+                """{"type":"assistant-text","uuid":"b1","source":"main","isSidechain":false,"text":"b1"}""",
+                """{"type":"assistant-text","uuid":"b2","source":"main","isSidechain":false,"text":"b2"}""",
+                """{"type":"backfill-end","source":"main"}""",
+            ).forEach { ws.send(it) }
+            assertThat(awaitUntil { assistantTexts(c) == listOf("b1", "b2") })
+                .withFailMessage("B backfill did not render; got ${assistantTexts(c)}")
+                .isTrue
+            // Now the STALE page for A lands (requested for the prior window): page-start, CONTENT
+            // (assistant-text + tool-use), page-end — every frame must be drained/dropped.
+            listOf(
+                """{"type":"page-start"}""",
+                """{"type":"assistant-text","uuid":"a0","source":"main","isSidechain":false,"text":"a0"}""",
+                """{"type":"tool-use","uuid":"at","source":"main","isSidechain":false,"toolName":"Bash",""" +
+                    """"toolUseId":"aT","inputSummary":"ls","primaryText":"ls"}""",
+                """{"type":"page-end","atStart":false}""",
+            ).forEach { ws.send(it) }
+            // A subsequent LIVE line for B proves the drain ended cleanly (pageDiscarding cleared)
+            // and the live path is active again (pageMode false → it publishes immediately).
+            ws.send("""{"type":"assistant-text","uuid":"b3","source":"main","isSidechain":false,"text":"b3"}""")
+            assertThat(awaitUntil { assistantTexts(c) == listOf("b1", "b2", "b3") })
+                .withFailMessage("stale A page leaked / live B frame lost; items=${c.items.value.map { it.key }}")
+                .isTrue
+            // No A content survived: the stale tool-use never created a row, and B is still selected.
+            assertThat(c.items.value.none { it is ConversationItem.ToolActivity }).isTrue
+            assertThat(c.selectedTargetId.value).isEqualTo("swarm:main:0.1")
+            assertThat(c.loadingOlder.value).isFalse
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
+    fun `B's backfill-start clears a stale-page drain even with interleaved stale content`() {
+        // Guard 2 — the page for A begins draining (stale), an interleaved stale CONTENT line is
+        // dropped, then B's backfill-start arrives BEFORE the stale page's page-end. backfill-start
+        // is handled (epoch bump + full page-state reset) BEFORE the discard gate, so it can never
+        // be swallowed by the drain: B's window renders cleanly and the drain is cleared.
+        val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        enqueueCapture(wsRef)
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { c.state.value == TerminalState.Open && wsRef.get() != null }).isTrue
+            val ws = wsRef.get()!!
+            c.loadOlder() // on A — captures the current epoch
+            assertThat(awaitUntil { c.loadingOlder.value }).isTrue
+            c.selectTarget("swarm:main:0.1") // epoch bump → the in-flight page is now stale
+            listOf(
+                // Stale page for A starts draining; the interleaved stale CONTENT line is dropped …
+                """{"type":"page-start"}""",
+                """{"type":"assistant-text","uuid":"a0","source":"main","isSidechain":false,"text":"stale-a0"}""",
+                // … then B's backfill-start lands (NO page-end for the stale page) and must NOT be swallowed.
+                """{"type":"backfill-start","source":"main"}""",
+                """{"type":"assistant-text","uuid":"b1","source":"main","isSidechain":false,"text":"b1"}""",
+                """{"type":"assistant-text","uuid":"b2","source":"main","isSidechain":false,"text":"b2"}""",
+                """{"type":"backfill-end","source":"main"}""",
+            ).forEach { ws.send(it) }
+            assertThat(awaitUntil { assistantTexts(c) == listOf("b1", "b2") })
+                .withFailMessage("B backfill swallowed or stale A content leaked; got ${assistantTexts(c)}")
+                .isTrue
+            // The drain was cleared by backfill-start: a later live line renders normally.
+            ws.send("""{"type":"assistant-text","uuid":"b3","source":"main","isSidechain":false,"text":"b3"}""")
+            assertThat(awaitUntil { assistantTexts(c) == listOf("b1", "b2", "b3") })
+                .withFailMessage("stale drain not cleared by backfill-start; got ${assistantTexts(c)}")
+                .isTrue
+            assertThat(c.selectedTargetId.value).isEqualTo("swarm:main:0.1")
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
+    fun `bare stale content frames during a page drain are dropped from the store`() {
+        // Guard 3 — while a stale page is draining (pageDiscarding), the discard gate drops every
+        // CONTENT frame (assistant-text / thinking / tool-use / tool-result) so the prior window's
+        // history can never leak into the freshly-switched transcript. A later live line is then
+        // the FIRST and only item, proving the burst added nothing.
+        val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        enqueueCapture(wsRef)
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { c.state.value == TerminalState.Open && wsRef.get() != null }).isTrue
+            val ws = wsRef.get()!!
+            c.loadOlder() // on A — captures the current epoch
+            assertThat(awaitUntil { c.loadingOlder.value }).isTrue
+            c.selectTarget("swarm:main:0.1") // epoch bump → the in-flight page is now stale
+            assertThat(c.items.value).isEmpty()
+            listOf(
+                """{"type":"page-start"}""",
+                """{"type":"assistant-text","uuid":"c1","source":"main","isSidechain":false,"text":"ghost-text"}""",
+                """{"type":"thinking","uuid":"c2","source":"main","isSidechain":false,"text":"ghost-think"}""",
+                """{"type":"tool-use","uuid":"c3","source":"main","isSidechain":false,"toolName":"Bash",""" +
+                    """"toolUseId":"gT","inputSummary":"x","primaryText":"x"}""",
+                """{"type":"tool-result","uuid":"c4","source":"main","isSidechain":false,""" +
+                    """"toolUseId":"gT","isError":false,"summary":"y"}""",
+                """{"type":"page-end","atStart":false}""",
+            ).forEach { ws.send(it) }
+            // A later LIVE line proves the drain finished and dropped everything before it.
+            ws.send("""{"type":"assistant-text","uuid":"live","source":"main","isSidechain":false,"text":"live"}""")
+            assertThat(awaitUntil { assistantTexts(c) == listOf("live") })
+                .withFailMessage("stale content leaked; items=${c.items.value.map { it.key }}")
+                .isTrue
+            assertThat(c.items.value.none { it is ConversationItem.ToolActivity }).isTrue // gT dropped
+            assertThat(c.items.value).hasSize(1)
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
+    fun `legit same-window paging still prepends older history in order (epoch match, no regression)`() {
+        // Guard 4 (UC-79 no-regression) — a load-older page requested AND delivered within the SAME
+        // transcript window (no target switch / clear / backfill between the request and the page)
+        // matches the captured epoch, so it is ASSEMBLED (not discarded) and prepended in order.
+        // Drives a real loadOlder() so the epoch-match path is genuinely exercised.
+        val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        enqueueCapture(wsRef)
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { c.state.value == TerminalState.Open && wsRef.get() != null }).isTrue
+            val ws = wsRef.get()!!
+            // Render the live window first.
+            listOf(
+                """{"type":"backfill-start","source":"main"}""",
+                """{"type":"assistant-text","uuid":"wa","source":"main","isSidechain":false,"text":"win-a"}""",
+                """{"type":"assistant-text","uuid":"wb","source":"main","isSidechain":false,"text":"win-b"}""",
+                """{"type":"backfill-end","source":"main"}""",
+            ).forEach { ws.send(it) }
+            assertThat(awaitUntil { assistantTexts(c) == listOf("win-a", "win-b") }).isTrue
+            // User scrolls up → request an older page (captures the CURRENT epoch).
+            c.loadOlder()
+            assertThat(awaitUntil { c.loadingOlder.value }).isTrue
+            // The page arrives in the SAME window (epoch unchanged) → assembled, not discarded.
+            listOf(
+                """{"type":"page-start"}""",
+                """{"type":"assistant-text","uuid":"o1","source":"main","isSidechain":false,"text":"old-1"}""",
+                """{"type":"assistant-text","uuid":"o2","source":"main","isSidechain":false,"text":"old-2"}""",
+                """{"type":"page-end","atStart":false}""",
+            ).forEach { ws.send(it) }
+            assertThat(awaitUntil { assistantTexts(c) == listOf("old-1", "old-2", "win-a", "win-b") })
+                .withFailMessage("legit same-window paging broke; got ${assistantTexts(c)}")
+                .isTrue
+            assertThat(awaitUntil { !c.loadingOlder.value }).isTrue
+            assertThat(c.atTranscriptStart.value).isFalse
         } finally {
             c.close()
         }
