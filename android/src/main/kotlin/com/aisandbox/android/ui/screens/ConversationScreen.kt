@@ -50,6 +50,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -106,6 +107,9 @@ fun ConversationScreen(
     val turnPhase by viewModel.turnPhase.collectAsState()
     // UC-78 — true while history replays over SSE; drives the instant (no-animation) anchor.
     val backfilling by viewModel.backfilling.collectAsState()
+    // UC-79 — older-page (infinite scroll) state: loading affordance + stop-at-start gate.
+    val loadingOlder by viewModel.loadingOlder.collectAsState()
+    val atTranscriptStart by viewModel.atTranscriptStart.collectAsState()
     val toolDetail by viewModel.toolDetail.collectAsState()
     // UC-66 — model-selection dialog state + the highlighted last-selected model (AC5).
     val modelMenu by viewModel.modelMenu.collectAsState()
@@ -205,6 +209,9 @@ fun ConversationScreen(
                     modifier = Modifier.fillMaxSize(),
                     listState = listState,
                     backfilling = backfilling,
+                    loadingOlder = loadingOlder,
+                    atTranscriptStart = atTranscriptStart,
+                    onLoadOlder = viewModel::loadOlder,
                     fontScale = fontScale,
                     useAgentColor = useAgentColor,
                     onToolTap = { toolUseId ->
@@ -306,6 +313,12 @@ private fun SpinnerRow(phase: TurnPhase) {
     }
 }
 
+/** UC-79 — how close to the top (in items) the user must scroll before the next older page is prefetched (AC2). */
+private const val LOAD_OLDER_PREFETCH_THRESHOLD = 3
+
+/** UC-79 — stable LazyColumn key for the top loading affordance, kept distinct from any item key (AC3). */
+private const val LOADING_OLDER_ROW_KEY = "__loading_older__"
+
 /**
  * The scrollable transcript list. Extracted from [ConversationScreen] as an
  * `internal` seam so same-package instrumented tests can render representative
@@ -335,28 +348,99 @@ internal fun ConversationContent(
     modifier: Modifier = Modifier,
     listState: LazyListState = rememberLazyListState(),
     backfilling: Boolean = false,
+    // UC-79 — older-page (infinite scroll) wiring. [loadingOlder] shows the top affordance
+    // (AC3) and gates the trigger; [atTranscriptStart] stops paging at the start (AC4);
+    // [onLoadOlder] requests the next older page when the user scrolls near the top (AC2).
+    loadingOlder: Boolean = false,
+    atTranscriptStart: Boolean = false,
+    onLoadOlder: () -> Unit = {},
     fontScale: Float = 1f,
     useAgentColor: Boolean = false,
     onToolTap: (String) -> Unit = {},
 ) {
-    // UC-78 — growth-gated anchor. Keyed on items.size ONLY; `backfilling` is read
-    // as a plain value so its flips never re-arm the effect.
-    var lastAnchoredSize by rememberSaveable { mutableStateOf(-1) }
-    LaunchedEffect(items.size) {
-        val size = items.size
+    // UC-78/UC-79 (AC8) — bottom-anchor keyed on the LAST item's KEY, not items.size. A
+    // top-prepend (older page) grows the size WITHOUT changing the last item, so it must
+    // never yank the viewport to the bottom (the UC-78 regression UC-79 must avoid). A
+    // genuinely new trailing message changes the last key and re-fires this effect.
+    var lastBottomKey by rememberSaveable { mutableStateOf<String?>(null) }
+    LaunchedEffect(items.lastOrNull()?.key) {
+        val lastKey = items.lastOrNull()?.key
         when {
-            size == 0 -> lastAnchoredSize = -1 // re-arm (AC5 empty / target switch)
-            size > lastAnchoredSize -> {
-                val target = size - 1
-                if (backfilling || lastAnchoredSize < 0) {
-                    listState.scrollToItem(target) // replay / first content — instant (AC1/AC6)
-                } else {
-                    listState.animateScrollToItem(target) // live growth — stick (AC4)
+            lastKey == null -> lastBottomKey = null // re-arm (AC5 empty / target switch)
+            lastKey != lastBottomKey -> {
+                val firstAnchor = lastBottomKey == null
+                val target = items.size - 1
+                // AC5 — only stick to the bottom for a live new message when the user is
+                // already at/near the bottom; a user scrolled up reading history (or paging)
+                // is never yanked down. Replay / first content always snaps (AC1/AC6).
+                val nearBottom = run {
+                    val last = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
+                    last >= target - 1
                 }
-                lastAnchoredSize = size
+                if (backfilling || firstAnchor) {
+                    listState.scrollToItem(target) // replay / first content — instant (AC1/AC6)
+                } else if (nearBottom) {
+                    listState.animateScrollToItem(target) // live growth, user at bottom — stick (AC4)
+                }
+                lastBottomKey = lastKey
             }
-            // else: stable size (recomposition/rotation/backfill-flip/deduped reconnect) — no pin (AC3)
+            // else: stable last key (recomposition/rotation/backfill-flip/dedup) — no pin (AC3)
         }
+    }
+
+    // UC-79 (AC2) — scroll-anchor preservation across an older-page prepend. The capture
+    // (key + pixel offset of the top-visible real item) is taken at trigger time, BEFORE the
+    // request; when the prepend lands (this effect re-fires on the new [items]) we re-pin that
+    // same item at the same offset via scrollToItem(newIndex, offset) so the viewport doesn't
+    // teleport. Cleared once restored; a non-prepend items change (live append) is a no-op
+    // because no anchor was captured.
+    var pendingAnchorKey by remember { mutableStateOf<String?>(null) }
+    var pendingAnchorOffset by remember { mutableStateOf(0) }
+    LaunchedEffect(items) {
+        val key = pendingAnchorKey ?: return@LaunchedEffect
+        val idx = items.indexOfFirst { it.key == key }
+        if (idx >= 0) {
+            listState.scrollToItem(idx, pendingAnchorOffset)
+        }
+        pendingAnchorKey = null
+    }
+    // UC-79 — release a stale captured anchor when paging is (re-)enabled. A page that
+    // prepended NOTHING (cursor already at the start, or an empty page) doesn't change
+    // [items], so the restore above never fires and the cascade guard would stay armed; a
+    // later reconnect/target switch flips [atTranscriptStart] back to false, and this clears
+    // it then. On a real prepend [atTranscriptStart] doesn't change, so this never races the
+    // restore above.
+    LaunchedEffect(atTranscriptStart) {
+        if (!atTranscriptStart) pendingAnchorKey = null
+    }
+
+    // UC-79 (AC2) — scroll-up trigger: when the first visible item is within the prefetch
+    // threshold of the top (and we're not already loading or at the start), capture the
+    // anchor and request the next older page. The controller single-in-flights, so a fast
+    // fling that fires this repeatedly never produces overlapping fetches.
+    LaunchedEffect(listState, atTranscriptStart, loadingOlder, backfilling, items) {
+        snapshotFlow { listState.firstVisibleItemIndex }
+            .collect { firstVisible ->
+                // `!backfilling` (AC1, UC-78): during the initial replay the list is small, so
+                // firstVisibleItemIndex is trivially within the prefetch threshold — without this
+                // gate the trigger would fire mid-backfill, capture an anchor, and let the
+                // restore compete with the bottom-anchor on the next growth (landing one item
+                // short of the bottom). No paging until the initial window has finished replaying.
+                // `pendingAnchorKey == null` prevents a cascade: while a fired load's anchor
+                // restore is still pending we never trigger again, and the restore repositions
+                // the viewport (~one page down) so the trigger naturally rests until the user
+                // scrolls back up near the top.
+                if (!backfilling && !atTranscriptStart && !loadingOlder && pendingAnchorKey == null &&
+                    items.isNotEmpty() && firstVisible <= LOAD_OLDER_PREFETCH_THRESHOLD
+                ) {
+                    val topVisibleKey = listState.layoutInfo.visibleItemsInfo
+                        .firstOrNull { it.key is String && it.key != LOADING_OLDER_ROW_KEY }
+                        ?.key as? String
+                    pendingAnchorKey = topVisibleKey
+                    pendingAnchorOffset = listState.firstVisibleItemScrollOffset
+                    onLoadOlder()
+                }
+            }
     }
 
     LazyColumn(
@@ -365,9 +449,27 @@ internal fun ConversationContent(
         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
+        // UC-79 (AC3) — top loading affordance while an older page is being fetched/parsed.
+        if (loadingOlder) {
+            item(key = LOADING_OLDER_ROW_KEY) { LoadingOlderRow() }
+        }
         items(items = items, key = { it.key }) { item ->
             ConversationItemRow(item, onToolTap, fontScale, useAgentColor)
         }
+    }
+}
+
+/** UC-79 (AC3) — a compact top-of-list spinner shown while an older page is loading. */
+@Composable
+private fun LoadingOlderRow() {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+        horizontalArrangement = Arrangement.Center,
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        CircularProgressIndicator(modifier = Modifier.size(16.dp), strokeWidth = 2.dp)
+        Spacer(Modifier.width(10.dp))
+        Text("Loading earlier messages…", style = MaterialTheme.typography.bodySmall, color = OnSurfaceMuted)
     }
 }
 

@@ -143,12 +143,44 @@ class ConversationController(
     private val itemMap = LinkedHashMap<String, ConversationItem>()
 
     /**
+     * UC-79 — infinite-scroll page-load state, all guarded by [itemLock] / driven on the
+     * single [onFrame] collector. While [pageMode] is true (between a `page-start` and its
+     * `page-end`) the frame handler ONLY adds items — never touches the turn phase, pending
+     * sheet, spinner, watchdog, or clear guard — and per-frame publishing is suppressed so
+     * the half-built page never flashes at the bottom (AC2). [pageKeys] records, in arrival
+     * (oldest→newest) order, every item key the page touched (a new line OR a tool merged
+     * across the page boundary); at `page-end` [prependPageItems] moves exactly those keys
+     * to the FRONT of [itemMap], so older history lands above the existing window in correct
+     * transcript order with no duplicates (AC6).
+     */
+    @Volatile
+    private var pageMode = false
+    private val pageKeys = LinkedHashSet<String>()
+
+    /**
      * UC-78 — exposed as a [StateFlow] (was a plain `@Volatile var`) so the UI can read
      * the replay/backfill phase and anchor the conversation to the bottom WITHOUT animating.
      * Internal turn-phase gating still reads/writes [_backfilling].value exactly as before.
      */
     private val _backfilling = MutableStateFlow(false)
     val backfilling: StateFlow<Boolean> = _backfilling.asStateFlow()
+
+    /**
+     * UC-79 (AC3) — true while an older page is being fetched/parsed (between sending
+     * `load-older` and the server's `page-end`). The UI shows a top loading affordance while
+     * set and uses it as the single-in-flight guard so a fast scroll-up fling never fires
+     * overlapping requests.
+     */
+    private val _loadingOlder = MutableStateFlow(false)
+    val loadingOlder: StateFlow<Boolean> = _loadingOlder.asStateFlow()
+
+    /**
+     * UC-79 (AC4) — true once the beginning of the transcript has been reached (a `page-end`
+     * with `atStart=true`), after which [loadOlder] no-ops so the client stops paging. Reset
+     * on a new backfill window / target switch (more/other history may then exist).
+     */
+    private val _atTranscriptStart = MutableStateFlow(false)
+    val atTranscriptStart: StateFlow<Boolean> = _atTranscriptStart.asStateFlow()
 
     /**
      * UC-65 — post-`/clear` suppression guard. While true, [onFrame] drops content-producing
@@ -414,6 +446,22 @@ class ConversationController(
         }
     }
 
+    /**
+     * UC-79 (AC2/AC4) — request the next OLDER page of transcript, called when the user
+     * scrolls up near the top of the loaded window. Single-in-flight: no-ops while a page is
+     * already loading (so a fast scroll-up fling never fires overlapping requests) and once
+     * the transcript start has been reached. [loadingOlder] is raised optimistically so the
+     * affordance shows immediately; the server's `page-start` keeps it set and `page-end`
+     * clears it. A failed send (not connected) resets the flag so a later scroll can retry.
+     */
+    fun loadOlder() {
+        if (_atTranscriptStart.value || _loadingOlder.value) return
+        _loadingOlder.value = true
+        if (client?.sendLoadOlder() != true) {
+            _loadingOlder.value = false
+        }
+    }
+
     /** UC-41 — dismiss the detail dialog and cancel+prune every in-flight fetch (no leaks). */
     fun closeDetail() {
         activeDetailId = null
@@ -449,6 +497,24 @@ class ConversationController(
     private fun onFrame(text: String) {
         val obj = runCatching { json.parseToJsonElement(text) }.getOrNull() as? JsonObject ?: return
         val type = obj["type"]?.jsonPrimitive?.contentOrNull
+        // UC-79 — older-page (infinite scroll) frames. page-start/page-end bracket a run of
+        // purely HISTORICAL frames that must ONLY add (prepended) items — never disarm the
+        // answer watchdog, touch the clear guard, the turn phase, the pending sheet, or the
+        // live spinner. Handle them (and any frame arriving while a page is open) up front.
+        when (type) {
+            "page-start" -> {
+                beginPage()
+                return
+            }
+            "page-end" -> {
+                endPage(obj["atStart"]?.jsonPrimitive?.booleanOrNull ?: false)
+                return
+            }
+        }
+        if (pageMode) {
+            handlePageFrame(type, obj)
+            return
+        }
         // UC-75 — any forward-progress frame proves the submitted answer landed and the turn is
         // advancing, so disarm the spinner safety-net (the watchdog must not later flip a
         // legitimately-working turn to IDLE). Checked BEFORE the clear-suppress early-returns so a
@@ -470,6 +536,8 @@ class ConversationController(
                     clearItems()
                     clearSuppressActive = false
                     _backfilling.value = true
+                    _atTranscriptStart.value = false // UC-79 — fresh window, paging re-enabled
+                    _loadingOlder.value = false
                     return
                 }
                 // targets, target-selected, backfill-end, pending-clear, turn-end, error → pass
@@ -600,7 +668,13 @@ class ConversationController(
                 _selectedTargetId.value = it
                 republishSelectedModel(it) // UC-66 — keep the highlighted model in sync with the target
             }
-            "backfill-start" -> _backfilling.value = true
+            "backfill-start" -> {
+                _backfilling.value = true
+                // UC-79 — a fresh/re-seeded window: the server re-seeds its oldest-line cursor,
+                // so reset our paging flags (older history may now exist again; nothing in flight).
+                _atTranscriptStart.value = false
+                _loadingOlder.value = false
+            }
             "backfill-end" -> {
                 _backfilling.value = false
                 if (_pendingSheet.value == null) _turnPhase.value = TurnPhase.IDLE
@@ -654,12 +728,136 @@ class ConversationController(
 
     private fun addItem(item: ConversationItem) {
         synchronized(itemLock) {
-            if (itemMap.containsKey(item.key)) return // AC6/AC22 — dedupe backfill overlap
+            if (itemMap.containsKey(item.key)) return // AC6/AC22 — dedupe backfill/page overlap
             // UC-45 (AC8) — a reconnect/backfill replay of a user line we already reconciled
             // into an optimistic bubble must not re-add a second (server-keyed) bubble.
             if (item is ConversationItem.UserMessage && reconciledServerKeys.contains(item.key)) return
             itemMap[item.key] = item
+            if (pageMode) pageKeys.add(item.key) // UC-79 — move to front at page-end (AC6)
+            publishItems()
+        }
+    }
+
+    /**
+     * UC-79 — publish the item list to the UI, EXCEPT while a page is being assembled
+     * ([pageMode]): the half-built page would otherwise flash at the bottom before being
+     * prepended. [prependPageItems] publishes once when the page is complete (AC2). Must be
+     * called under [itemLock].
+     */
+    private fun publishItems() {
+        if (!pageMode) _items.value = itemMap.values.toList()
+    }
+
+    // ──────────────────────── older-page (infinite scroll) ────────────────────────
+
+    /** UC-79 — enter page-assembly mode and raise the loading affordance (AC3). */
+    private fun beginPage() {
+        synchronized(itemLock) {
+            pageMode = true
+            pageKeys.clear()
+        }
+        _loadingOlder.value = true
+    }
+
+    /**
+     * UC-79 (AC2/AC4) — finish the older page: prepend the page's items to the front of the
+     * store in one atomic publish (no viewport jump), record whether the transcript start was
+     * reached, and clear the loading affordance. Tolerates a `page-end` with no preceding
+     * `page-start` (e.g. the cursor was already at 0) — it simply applies [atStart] and clears.
+     */
+    private fun endPage(atStart: Boolean) {
+        prependPageItems()
+        _atTranscriptStart.value = atStart
+        _loadingOlder.value = false
+    }
+
+    /**
+     * UC-79 (AC6) — move every key the page touched ([pageKeys], in arrival/oldest→newest
+     * order) to the FRONT of [itemMap], preserving the existing window's order after them, then
+     * publish once. A tool whose `tool_use` arrived in the page but whose `tool_result` was
+     * already in the existing window was merged in place by [upsertToolUse] (key retained) and
+     * is moved to its correct older position here. Must run on the [onFrame] collector.
+     */
+    private fun prependPageItems() {
+        synchronized(itemLock) {
+            if (pageKeys.isNotEmpty()) {
+                val reordered = LinkedHashMap<String, ConversationItem>(itemMap.size)
+                for (k in pageKeys) itemMap[k]?.let { reordered[k] = it }
+                for ((k, v) in itemMap) if (!reordered.containsKey(k)) reordered[k] = v
+                itemMap.clear()
+                itemMap.putAll(reordered)
+            }
+            pageKeys.clear()
+            pageMode = false
             _items.value = itemMap.values.toList()
+        }
+    }
+
+    /**
+     * UC-79 — handle one HISTORICAL frame inside a page (between `page-start`/`page-end`).
+     * Builds the item and routes it through the same [addItem]/[upsertToolUse]/[upsertToolResult]
+     * the live path uses (so dedupe keys, ordering, and tool-pair merging are identical), but
+     * deliberately performs NONE of the live side effects (turn phase, pending sheet, spinner,
+     * watchdog). Non-content frames (tool-detail, pending-*, turn boundaries, targets, errors)
+     * are ignored inside a page.
+     */
+    private fun handlePageFrame(type: String?, obj: JsonObject) {
+        when (type) {
+            "turn-start" -> {
+                val t = str(obj, "text")
+                if (!t.isNullOrBlank()) {
+                    addItem(ConversationItem.UserMessage(uuid(obj), source(obj), sidechain(obj), t))
+                }
+            }
+            "thinking" -> addItem(
+                ConversationItem.Thinking(uuid(obj), source(obj), sidechain(obj), str(obj, "text") ?: ""),
+            )
+            "assistant-text" -> addItem(
+                ConversationItem.AssistantMessage(uuid(obj), source(obj), sidechain(obj), str(obj, "text") ?: ""),
+            )
+            "teammate-message" -> addItem(
+                ConversationItem.TeammateMessage(
+                    uuid(obj), source(obj), sidechain(obj),
+                    teammateId = str(obj, "teammateId") ?: "",
+                    color = str(obj, "color"),
+                    text = str(obj, "text") ?: "",
+                ),
+            )
+            "tool-use" -> upsertToolUse(
+                uuid(obj), source(obj), sidechain(obj),
+                toolName = str(obj, "toolName") ?: "tool",
+                toolUseId = str(obj, "toolUseId") ?: "",
+                inputSummary = str(obj, "inputSummary") ?: "",
+                primaryText = str(obj, "primaryText") ?: "",
+            )
+            "tool-result" -> upsertToolResult(
+                uuid(obj), source(obj), sidechain(obj),
+                toolUseId = str(obj, "toolUseId") ?: "",
+                isError = obj["isError"]?.jsonPrimitive?.booleanOrNull ?: false,
+                summary = str(obj, "summary") ?: "",
+            )
+            "system-note" -> addItem(
+                ConversationItem.SystemNote(
+                    uuid(obj), source(obj), sidechain(obj),
+                    label = str(obj, "label") ?: "",
+                    detail = str(obj, "detail") ?: "",
+                ),
+            )
+            "question" -> addItem(
+                ConversationItem.Question(
+                    uuid(obj), source(obj), sidechain(obj),
+                    str(obj, "toolUseId") ?: uuid(obj),
+                    parseQuestions(obj["questions"] as? JsonArray),
+                ),
+            )
+            "plan-approval" -> addItem(
+                ConversationItem.PlanApproval(
+                    uuid(obj), source(obj), sidechain(obj),
+                    str(obj, "toolUseId") ?: uuid(obj),
+                    str(obj, "plan") ?: "",
+                ),
+            )
+            else -> { /* tool-detail / pending-* / turn boundaries / targets / errors — ignore in a page */ }
         }
     }
 
@@ -759,7 +957,11 @@ class ConversationController(
                 primaryText = primaryText,
                 result = existing?.result, // preserve a result that arrived first
             )
-            _items.value = itemMap.values.toList()
+            // UC-79 — a page's tool_use whose tool_result is already in the existing window
+            // merges in place above; record it so prependPageItems moves the merged bubble to
+            // its correct older position (AC6 tool-pair merge across the page boundary).
+            if (pageMode) pageKeys.add(key)
+            publishItems()
         }
     }
 
@@ -796,7 +998,8 @@ class ConversationController(
                     result = data,
                 )
             }
-            _items.value = itemMap.values.toList()
+            if (pageMode) pageKeys.add(key) // UC-79 — prepend this page tool row at page-end (AC6)
+            publishItems()
         }
     }
 
@@ -832,8 +1035,14 @@ class ConversationController(
             // target switch can't reconcile a new target's echo against a stale pending bubble.
             pendingEchoes.clear()
             reconciledServerKeys.clear()
+            // UC-79 — wiping the store ends any page in progress and re-enables paging for the
+            // new transcript; its backfill-start re-seeds the cursor and these flags.
+            pageMode = false
+            pageKeys.clear()
             _items.value = emptyList()
         }
+        _loadingOlder.value = false
+        _atTranscriptStart.value = false
     }
 
     // ──────────────────────── connect loop ────────────────────────

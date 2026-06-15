@@ -18,6 +18,7 @@ import com.aisandbox.android.ui.theme.AiSandboxTheme
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -306,5 +307,194 @@ class ConversationAnchorInstrumentationTest {
         composeTestRule.waitForIdle()
         assertEquals("single-item list is anchored at index 0", 0, firstVisible(state))
         composeTestRule.onNodeWithText("[E] Message #0", substring = true).assertIsDisplayed()
+    }
+
+    // ════════════════════════ UC-79 — infinite-scroll older pages ════════════════════════
+    //
+    // These exercise the SAME ConversationContent seam with the UC-79 wiring (loadingOlder /
+    // atTranscriptStart / onLoadOlder). They drive the REAL scroll-up trigger + anchor capture/
+    // restore on the emulator and assert the viewport does not teleport when an older page is
+    // prepended (AC2), the bottom-anchor is not triggered by a top-prepend (AC8), a live message
+    // arriving while scrolled up does not yank to the bottom (AC5), and the top loading affordance
+    // shows while a page loads (AC3).
+
+    private fun firstVisibleOffset(state: LazyListState): Int = ui { state.firstVisibleItemScrollOffset }
+
+    /** The viewport-relative pixel offset of the visible item with [key], or null if offscreen. */
+    private fun layoutOffsetOfKey(state: LazyListState, key: String): Int? =
+        ui { state.layoutInfo.visibleItemsInfo.firstOrNull { it.key == key }?.offset }
+
+    @Test
+    fun olderPagePrepend_preservesScrollAnchor_noJump_andDoesNotAnchorToBottom() {
+        // AC2 + AC8 — scroll up near the top of the loaded window so the prefetch trigger fires and
+        // captures the top-visible item's key + pixel offset; an older page is then loaded (the
+        // real loadingOlder gate is modeled). The SAME item must remain at the SAME viewport pixel
+        // offset (its index shifts by the page size, but it does NOT visually move), and the
+        // top-prepend must NOT yank the view to the bottom.
+        val window = msgs("W", 24)
+        val anchorKey = window[2].key // the item the user is reading when paging fires
+        val items = mutableStateOf(window)
+        val loadingOlder = mutableStateOf(false)
+        val atStart = mutableStateOf(false)
+        var loadRequested = false
+        lateinit var state: LazyListState
+        composeTestRule.setContent {
+            AiSandboxTheme {
+                val s = rememberLazyListState()
+                state = s
+                ConversationContent(
+                    items = items.value,
+                    modifier = Modifier.fillMaxSize(),
+                    listState = s,
+                    backfilling = false,
+                    loadingOlder = loadingOlder.value,
+                    atTranscriptStart = atStart.value,
+                    // Model the controller: a scroll-up request raises loadingOlder (which gates
+                    // the trigger to single-in-flight and shows the affordance) until page-end.
+                    onLoadOlder = {
+                        loadRequested = true
+                        loadingOlder.value = true
+                    },
+                )
+            }
+        }
+        composeTestRule.waitForIdle() // first content anchors to the bottom
+
+        // The user scrolls up to within the prefetch threshold of the top, leaving a non-zero
+        // offset so "same offset" is a meaningful (non-trivial) assertion.
+        composeTestRule.runOnIdle { runBlocking { state.scrollToItem(2, 50) } }
+        composeTestRule.waitForIdle()
+        assertEquals("precondition: scrolled near the top (item 2)", 2, firstVisible(state))
+        // The scroll-up must have requested an older page and raised the loading affordance (AC2/AC3).
+        assertTrue("scrolling near the top must request an older page", loadRequested)
+        assertTrue("an in-flight page load must raise loadingOlder", ui { loadingOlder.value })
+        // Capture the anchored item's viewport pixel offset BEFORE the prepend.
+        val offsetBefore = layoutOffsetOfKey(state, anchorKey)
+        assertTrue("the anchored item must be visible before paging", offsetBefore != null)
+
+        // The server delivers an older page (page-end): prepend 10 strictly-older items AND clear
+        // the in-flight flag, exactly as the controller does at page-end.
+        val older = msgs("O", 10)
+        ui {
+            items.value = older + window
+            loadingOlder.value = false
+        }
+        composeTestRule.waitForIdle()
+
+        // AC2 — the anchored item is re-pinned at the SAME viewport pixel offset (no jump/teleport),
+        // even though its index shifted down by the prepended page size.
+        val offsetAfter = layoutOffsetOfKey(state, anchorKey)
+        assertTrue("the anchored item must still be visible after the prepend", offsetAfter != null)
+        assertTrue(
+            "the anchored item must stay at the SAME viewport offset (no jump): before=$offsetBefore after=$offsetAfter",
+            kotlin.math.abs((offsetAfter ?: 0) - (offsetBefore ?: 0)) <= 2,
+        )
+        // Its index shifted down by exactly the page size (proving the prepend happened above it).
+        assertEquals(
+            "the anchored item must shift down by exactly the prepended page size",
+            2 + older.size,
+            ui { state.layoutInfo.visibleItemsInfo.first { it.key == anchorKey }.index },
+        )
+        // AC8 — a top-prepend must NOT trigger the UC-78 bottom anchor (the newest item is offscreen).
+        assertFalse(
+            "a top-prepend must not yank the viewport to the bottom",
+            lastVisible(state) >= (older.size + window.size) - 1,
+        )
+
+        // Visual gate — dump the paged-older view so QA can confirm the anchor is preserved by eye.
+        dumpScreenshot("uc79_paged_older_anchor_preserved.png")
+    }
+
+    @Test
+    fun liveMessageWhileScrolledUp_doesNotYankToBottom() {
+        // AC5 — a new live message arriving while the user is scrolled up reading history must NOT
+        // force-scroll the view to the bottom. atTranscriptStart=true here isolates the live-append
+        // behavior by disabling the scroll-up prefetch trigger (no anchor capture in play).
+        val items = mutableStateOf(msgs("W", 24))
+        val atStart = mutableStateOf(true)
+        lateinit var state: LazyListState
+        composeTestRule.setContent {
+            AiSandboxTheme {
+                val s = rememberLazyListState()
+                state = s
+                ConversationContent(
+                    items = items.value,
+                    modifier = Modifier.fillMaxSize(),
+                    listState = s,
+                    backfilling = false,
+                    loadingOlder = false,
+                    atTranscriptStart = atStart.value,
+                    onLoadOlder = {},
+                )
+            }
+        }
+        composeTestRule.waitForIdle()
+        composeTestRule.runOnIdle { runBlocking { state.scrollToItem(0) } }
+        composeTestRule.waitForIdle()
+        assertEquals("precondition: the user is scrolled to the top reading history", 0, firstVisible(state))
+
+        // A live message appends at the bottom (changes the last key).
+        ui { items.value = items.value + msg("W", 24) }
+        composeTestRule.waitForIdle()
+
+        assertEquals(
+            "a live message must not yank a scrolled-up user to the bottom (AC5)",
+            0,
+            firstVisible(state),
+        )
+        assertFalse("the view must not be at the bottom after a live append while scrolled up", ui { state.isScrollInProgress })
+    }
+
+    @Test
+    fun loadingAffordance_showsWhileLoadingOlder_andClearsAfter() {
+        // AC3 — while an older page is being fetched the top loading row ("Loading earlier messages…")
+        // is shown, and it disappears once the page is ready.
+        val items = mutableStateOf(msgs("W", 24))
+        val loadingOlder = mutableStateOf(false)
+        lateinit var state: LazyListState
+        composeTestRule.setContent {
+            AiSandboxTheme {
+                val s = rememberLazyListState()
+                state = s
+                ConversationContent(
+                    items = items.value,
+                    modifier = Modifier.fillMaxSize(),
+                    listState = s,
+                    backfilling = false,
+                    loadingOlder = loadingOlder.value,
+                    atTranscriptStart = false,
+                    onLoadOlder = {},
+                )
+            }
+        }
+        composeTestRule.waitForIdle()
+        composeTestRule.runOnIdle { runBlocking { state.scrollToItem(0) } } // bring the top row into view
+        composeTestRule.waitForIdle()
+
+        // No affordance before a page is requested.
+        composeTestRule.onNodeWithText("Loading earlier messages", substring = true).assertDoesNotExist()
+
+        // page-start raises the loading affordance: the loading row is prepended at index 0, so
+        // scroll to the very top to bring it into the viewport (a keyed prepend keeps the prior
+        // top item pinned, leaving the new row just above the fold).
+        ui { loadingOlder.value = true }
+        composeTestRule.waitForIdle()
+        composeTestRule.runOnIdle { runBlocking { state.scrollToItem(0) } }
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithText("Loading earlier messages", substring = true).assertIsDisplayed()
+        dumpScreenshot("uc79_loading_older_affordance.png")
+
+        // page-end clears it.
+        ui { loadingOlder.value = false }
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithText("Loading earlier messages", substring = true).assertDoesNotExist()
+    }
+
+    /** Capture the rendered tree to the app's external files dir so QA can pull and eyeball it. */
+    private fun dumpScreenshot(name: String) {
+        val bmp: Bitmap = composeTestRule.onRoot().captureToImage().asAndroidBitmap()
+        val dir: File = InstrumentationRegistry.getInstrumentation().targetContext
+            .getExternalFilesDir(null) ?: error("no external files dir")
+        FileOutputStream(File(dir, name)).use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
     }
 }

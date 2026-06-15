@@ -16,8 +16,15 @@
  *
  * OUTPUT ENVELOPE (helper → server), one line each:
  *   <source>\t<raw-transcript-json>      source = "main" | "subagent:<agentId>"
- *   __ctrl__\tbackfill-start             begins the bounded backfill window
+ *   __ctrl__\tbackfill-start\t<startIdx> begins the bounded backfill window; the
+ *                                        primary reader carries its window start
+ *                                        line index so the server can seed its
+ *                                        UC-79 oldest-line (load-older) cursor
  *   __ctrl__\tbackfill-end               ends it; live append follows
+ *   __ctrl__\tpage-meta\t<start>\t<at0>  (--fetch-page only) leads an older-page
+ *                                        emission: <start> = oldest line index
+ *                                        delivered (new cursor), <at0> = 1 at the
+ *                                        transcript start
  *   __ctrl__\trebaseline                 the entrypoint restart loop spawned a
  *                                        fresh claude → new transcript file
  *   __ctrl__\tno-transcript              resolution yielded nothing after a
@@ -112,6 +119,15 @@ function parseArgs(argv) {
     // UC-41 — one-shot detail fetch for a single tool call (AC5).
     fetchDetail: false,
     toolUseId: null,
+    // UC-79 — one-shot "load older page" fetch (infinite scroll). Emits the
+    // transcript slice [max(0, beforeLine - count), beforeLine) of the resolved
+    // PRIMARY file, each line in the normal `<source>\t<raw-json>` envelope,
+    // preceded by a `__ctrl__\tpage-meta\t<startIdx>\t<atStart(0|1)>` control line
+    // so the server can advance its per-connection oldest-line cursor and stop at
+    // the transcript start. Sibling of --fetch-detail (resolve once, read, exit).
+    fetchPage: false,
+    beforeLine: null,
+    count: 100,
     // UC-47 — one-shot conversation-name derivation for the sessions-list row.
     conversationName: false,
     // UC-55 — one-shot read-only per-tab parse of the CURRENTLY-FOCUSED wizard tab
@@ -143,6 +159,9 @@ function parseArgs(argv) {
       case '--scan-pending': a.scanPending = true; break;
       case '--fetch-detail': a.fetchDetail = true; break;
       case '--tool-use-id': a.toolUseId = argv[++i]; break;
+      case '--fetch-page': a.fetchPage = true; break;
+      case '--before-line': a.beforeLine = Math.max(0, parseInt(argv[++i], 10) || 0); break;
+      case '--count': a.count = Math.max(1, parseInt(argv[++i], 10) || 100); break;
       case '--conversation-name': a.conversationName = true; break;
       case '--parse-pane': a.parsePane = true; break;
       case '--list-subagents': a.listSubagents = true; break;
@@ -160,6 +179,12 @@ const CTRL_BACKFILL_START = 'backfill-start';
 const CTRL_BACKFILL_END = 'backfill-end';
 const CTRL_REBASELINE = 'rebaseline';
 const CTRL_NO_TRANSCRIPT = 'no-transcript';
+// UC-79 — leading control line of a --fetch-page emission. Carries TWO extra
+// tab-delimited fields after the kind: the start line index of the slice actually
+// delivered (the server's new oldest-line cursor) and atStart (1 when that start
+// is the very beginning of the transcript, so no further paging is attempted):
+// `__ctrl__\tpage-meta\t<startIdx>\t<atStart(0|1)>`.
+const CTRL_PAGE_META = 'page-meta';
 // UC-41 — emitted (instead of matched lines) when a --fetch-detail id is not found.
 const CTRL_DETAIL_NOT_FOUND = 'detail-not-found';
 // UC-50 — pane-signal pending-prompt control kinds (lock-step with
@@ -1179,6 +1204,61 @@ function fetchDetail() {
   for (const line of matched) out(line);
 }
 
+// ──────────────────────── fetch-page (one-shot) ────────────────────────
+
+/**
+ * UC-79 (AC2/AC6/AC7) — compute the older "page" slice for an infinite-scroll
+ * load-older request (PURE — exported for QA). Given the file's complete-line
+ * array (the readAllLines index space) and the server's current oldest-line
+ * cursor `beforeLine`, returns the contiguous slice ending just below `beforeLine`
+ * with at most `count` lines, BUDGETED to `capBytes`. To stay contiguous with the
+ * already-loaded window the budget is spent from the NEWEST line of the slice
+ * downward, so a cap truncation drops the OLDEST lines (never leaving a gap next
+ * to `beforeLine`); the returned `start` is the index of the oldest line actually
+ * delivered (the server's NEW cursor) and `atStart` is true iff that start is 0.
+ * Each delivered line is the normal `main\t<raw>` envelope.
+ */
+function computePageSlice(allLines, beforeLine, count, capBytes) {
+  const cap = capBytes || DETAIL_OUTPUT_CAP_BYTES;
+  const end = Math.min(Math.max(0, beforeLine || 0), allLines.length);
+  const lowerBound = Math.max(0, end - Math.max(1, count || 1));
+  let total = 0;
+  let start = end;
+  const picked = [];
+  for (let i = end - 1; i >= lowerBound; i--) {
+    const line = 'main\t' + allLines[i];
+    const bytes = Buffer.byteLength(line, 'utf8');
+    if (total > 0 && total + bytes > cap) break; // budget spent; keep lines whole
+    picked.push(line);
+    total += bytes;
+    start = i;
+  }
+  picked.reverse(); // emit oldest→newest so the prepend keeps transcript order (AC6)
+  return { start: start, atStart: start === 0, lines: picked };
+}
+
+/**
+ * UC-79 — one-shot "load older page": resolve the active PRIMARY transcript once,
+ * read its complete lines, and print the slice [max(0, before-count), before) each
+ * as a `main\t<raw>` envelope, preceded by `__ctrl__\tpage-meta\t<start>\t<atStart>`.
+ * Empty/rotated/unresolvable transcript degrades gracefully (mirrors --fetch-detail
+ * NOT_FOUND): emit a page-meta with no lines and atStart=1 so the client stops
+ * paging rather than hanging.
+ */
+function fetchPage() {
+  const before = ARGS.beforeLine == null ? 0 : ARGS.beforeLine;
+  const count = ARGS.count;
+  const mainPath = resolveTranscriptOnce();
+  if (!mainPath) {
+    out('__ctrl__\t' + CTRL_PAGE_META + '\t' + before + '\t1');
+    return;
+  }
+  const all = readAllLines(mainPath);
+  const slice = computePageSlice(all, before, count, DETAIL_OUTPUT_CAP_BYTES);
+  out('__ctrl__\t' + CTRL_PAGE_META + '\t' + slice.start + '\t' + (slice.atStart ? 1 : 0));
+  for (const line of slice.lines) out(line);
+}
+
 // ──────────────────────── conversation-name (one-shot) ────────────────────────
 
 // UC-47 — codepoint cap on an emitted conversation name. The server re-caps at
@@ -1801,12 +1881,16 @@ function listSubagents(nowMs) {
 
 // ──────────────────────── streaming mode ────────────────────────
 
-function backfill(reader, n, nowMs) {
+function backfill(reader, n, nowMs, emitStartCtrl) {
   if (nowMs === undefined) nowMs = Date.now();
   let buf;
   try {
     buf = fs.readFileSync(reader.filePath);
   } catch (e) {
+    // UC-79 — the PRIMARY reader still owes the server a backfill-start cursor seed
+    // even when its file does not exist yet (start at 0): otherwise the server's
+    // oldest-line cursor would never be seeded and a load-older could never page.
+    if (emitStartCtrl) out('__ctrl__\t' + CTRL_BACKFILL_START + '\t0');
     return;
   }
   // Split at the last newline so a trailing PARTIAL line is preserved in the
@@ -1819,6 +1903,11 @@ function backfill(reader, n, nowMs) {
   if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
   lines = lines.filter((l) => l.length > 0);
   const start = Math.max(0, lines.length - n);
+  // UC-79 — the primary reader carries its window's start line index on the
+  // backfill-start control so the server seeds its oldest-line cursor from it. The
+  // index space matches readAllLines (non-empty complete lines), so a later
+  // --fetch-page --before-line <start> reads contiguously older lines (AC2/AC6).
+  if (emitStartCtrl) out('__ctrl__\t' + CTRL_BACKFILL_START + '\t' + start);
   for (let i = start; i < lines.length; i++) {
     out(reader.source + '\t' + lines[i]);
   }
@@ -1859,8 +1948,10 @@ async function streamLoop() {
     mainPath = newMain;
     mainReader = makeReader(mainPath, 'main');
     subReaders.clear();
-    emitCtrl(CTRL_BACKFILL_START);
-    backfill(mainReader, ARGS.backfill);
+    // UC-79 — the PRIMARY (main) reader emits backfill-start itself, carrying its
+    // window start index so the server seeds its oldest-line cursor (AC2). Subagent
+    // backfills follow inside the same window and carry no cursor of their own.
+    backfill(mainReader, ARGS.backfill, undefined, true);
     for (const sf of listSubagentFiles(mainPath)) {
       const r = makeReader(sf, subagentSource(sf));
       backfill(r, ARGS.backfill);
@@ -2027,8 +2118,10 @@ async function streamSubagentLoop(id) {
       mainPath = resolvedMain;
       const sf = path.join(subagentDir(mainPath), 'agent-' + id + '.jsonl');
       reader = makeReader(sf, source);
-      emitCtrl(CTRL_BACKFILL_START);
-      if (statSafe(sf)) backfill(reader, ARGS.backfill);
+      // UC-79 — in subagent-stream mode the subagent file IS the primary, so its
+      // backfill emits the cursor-seeding backfill-start (start=0 when absent).
+      if (statSafe(sf)) backfill(reader, ARGS.backfill, undefined, true);
+      else out('__ctrl__\t' + CTRL_BACKFILL_START + '\t0');
       emitCtrl(CTRL_BACKFILL_END);
       graceStart = null;
       noTranscriptEmitted = false;
@@ -2080,6 +2173,15 @@ if (require.main === module) {
       fetchDetail();
     } catch (e) {
       emitCtrl(CTRL_DETAIL_NOT_FOUND);
+    }
+    process.exit(0);
+  } else if (ARGS.fetchPage) {
+    try {
+      fetchPage();
+    } catch (e) {
+      // UC-79 — any failure degrades to "no older lines, at start" so the client
+      // simply stops paging (never a hang); mirrors --fetch-detail's graceful miss.
+      out('__ctrl__\t' + CTRL_PAGE_META + '\t' + (ARGS.beforeLine == null ? 0 : ARGS.beforeLine) + '\t1');
     }
     process.exit(0);
   } else if (ARGS.conversationName) {
@@ -2140,6 +2242,9 @@ module.exports = {
   idleFlush,
   backfill,
   collectToolDetail,
+  // UC-79 — infinite-scroll load-older page-slice seam (QA unit tests): pure
+  // computation of the older slice + its new oldest-line cursor / atStart flag.
+  computePageSlice,
   // UC-47 — conversation-name derivation seams (QA unit tests).
   sanitizeOneLine,
   capCodepoints,
@@ -2184,6 +2289,7 @@ module.exports = {
   CONVERSATION_NAME_MAX_CP,
   CTRL_NO_TRANSCRIPT,
   CTRL_DETAIL_NOT_FOUND,
+  CTRL_PAGE_META,
   DETAIL_OUTPUT_CAP_BYTES,
   FLUSH_IDLE_MS,
   POLL_MS,

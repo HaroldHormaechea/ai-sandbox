@@ -72,6 +72,9 @@ class ConversationClient(
             """{"type":"fetch-detail","toolUseId":"${jsonEscape(toolUseId)}","uuid":"${jsonEscape(uuid)}"}""",
         )
 
+    /** UC-79 (AC2) — request the next OLDER page of transcript (infinite scroll); server-local read, not injected. */
+    fun sendLoadOlder(): Boolean = sendText("""{"type":"load-older"}""")
+
     /**
      * Send a structured answer. [selections] are option indices; [freeText] is
      * the always-present "Other" value (empty when unused).

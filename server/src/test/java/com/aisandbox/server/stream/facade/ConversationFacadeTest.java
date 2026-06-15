@@ -691,4 +691,74 @@ class ConversationFacadeTest {
                 .as("injectAnswer proceeds once the pane lock is free")
                 .isTrue();
     }
+
+    // ──────────────────────── UC-79 AC2/AC6 — fetchOlderPage ─────────────────
+
+    @Test
+    void fetchOlderPage_maps_each_envelope_line_and_carries_the_cursor_and_atStart() {
+        when(swarm.resolveTarget(7, SwarmEnumerationService.MAIN_ID)).thenReturn(BridgeTarget.main());
+        // The service returns the older envelope lines (oldest→newest) plus the new cursor.
+        TranscriptTailService.PageLines page =
+                new TranscriptTailService.PageLines(List.of("main\t{\"a\":1}", "main\t{\"b\":2}"), 50, false);
+        when(tail.fetchPageLines(eq(7), any(), eq(150), eq(100))).thenReturn(page);
+        // The SAME mapper the live tail uses — so paged history renders identically.
+        ConversationServerMessage f1 = new ConversationServerMessage.AssistantText("u1", false, "main", "older-1");
+        ConversationServerMessage f2 = new ConversationServerMessage.AssistantText("u2", false, "main", "older-2");
+        when(mapper.map("main", "{\"a\":1}")).thenReturn(List.of(f1));
+        when(mapper.map("main", "{\"b\":2}")).thenReturn(List.of(f2));
+
+        ConversationFacade.OlderPage out = facade.fetchOlderPage(7, "main", 150, 100);
+
+        // Frames collected in transcript (oldest→newest) order; cursor + atStart carried through.
+        assertThat(out.frames()).containsExactly(f1, f2);
+        assertThat(out.newOldestLine()).isEqualTo(50);
+        assertThat(out.atStart()).isFalse();
+        verify(audit)
+                .logEvent(
+                        eq(AuditAction.CONVERSATION_FETCH_PAGE),
+                        eq("ok"),
+                        eq("n"),
+                        eq(7),
+                        eq("targetId"),
+                        eq("main"),
+                        eq("beforeLine"),
+                        eq(150),
+                        eq("frames"),
+                        eq(2));
+    }
+
+    @Test
+    void fetchOlderPage_splits_the_source_prefix_before_mapping() {
+        when(swarm.resolveTarget(7, SwarmEnumerationService.MAIN_ID)).thenReturn(BridgeTarget.main());
+        // A subagent-sourced envelope must be mapped with its own source, not "main".
+        when(tail.fetchPageLines(eq(7), any(), eq(80), eq(100)))
+                .thenReturn(new TranscriptTailService.PageLines(List.of("subagent:abc\t{\"x\":1}"), 0, true));
+        ConversationServerMessage f = new ConversationServerMessage.AssistantText("u", true, "subagent:abc", "s");
+        when(mapper.map("subagent:abc", "{\"x\":1}")).thenReturn(List.of(f));
+
+        ConversationFacade.OlderPage out = facade.fetchOlderPage(7, "main", 80, 100);
+
+        assertThat(out.frames()).containsExactly(f);
+        assertThat(out.atStart()).isTrue();
+        verify(mapper).map("subagent:abc", "{\"x\":1}");
+    }
+
+    @Test
+    void fetchOlderPage_empty_page_yields_no_frames_and_pins_atStart() {
+        when(swarm.resolveTarget(7, SwarmEnumerationService.MAIN_ID)).thenReturn(BridgeTarget.main());
+        when(tail.fetchPageLines(eq(7), any(), eq(120), eq(100)))
+                .thenReturn(new TranscriptTailService.PageLines(List.of(), 120, true));
+
+        ConversationFacade.OlderPage out = facade.fetchOlderPage(7, "main", 120, 100);
+
+        assertThat(out.frames()).isEmpty();
+        assertThat(out.newOldestLine()).isEqualTo(120);
+        assertThat(out.atStart()).isTrue();
+        verify(mapper, never()).map(any(), any());
+    }
+
+    @Test
+    void conversationPageLines_exposes_the_configured_older_page_size() {
+        assertThat(facade.conversationPageLines()).isEqualTo(ServerProperties.CONVERSATION_PAGE_LINES_DEFAULT);
+    }
 }

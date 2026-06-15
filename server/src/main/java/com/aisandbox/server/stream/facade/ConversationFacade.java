@@ -210,6 +210,47 @@ public class ConversationFacade implements McpLoginInitiator {
                 toolUseId, render.toolName(), render.input(), render.result(), render.isError(), true);
     }
 
+    /**
+     * UC-79 (AC2/AC6) — fetch the next OLDER page of {@code targetId}'s transcript, ending
+     * just below {@code beforeLine}, and map each raw transcript line to its conversation
+     * frames via the SAME {@link ConversationEventMapper#map} the live tail uses — so paged
+     * history renders identically to backfilled history (same dedupe keys, ordering, and
+     * tool-pair merging). Resolves the target's tail coordinates, runs the helper's bounded
+     * {@code --fetch-page} read, splits each {@code <source>\t<raw>} envelope, and collects
+     * the frames in transcript (oldest→newest) order. Returns an {@link OlderPage} with the
+     * mapped frames, the new oldest-line cursor, and {@code atStart}. Best-effort and never
+     * throws: a miss/timeout yields an empty page pinned at {@code beforeLine} with
+     * {@code atStart=true}, so the client stops paging rather than hanging (AC4).
+     */
+    public OlderPage fetchOlderPage(int n, String targetId, int beforeLine, int pageSize) {
+        TailTarget target = toTailTarget(resolveBridgeTarget(n, targetId));
+        TranscriptTailService.PageLines page = tail.fetchPageLines(n, target, beforeLine, pageSize);
+        List<ConversationServerMessage> frames = new ArrayList<>();
+        for (String envelope : page.lines()) {
+            int tab = envelope.indexOf('\t');
+            String source = tab < 0 ? "main" : envelope.substring(0, tab);
+            String raw = tab < 0 ? envelope : envelope.substring(tab + 1);
+            frames.addAll(mapper.map(source, raw));
+        }
+        audit.logEvent(
+                AuditAction.CONVERSATION_FETCH_PAGE,
+                "ok",
+                "n",
+                n,
+                "targetId",
+                targetId == null ? "main" : targetId,
+                "beforeLine",
+                beforeLine,
+                "frames",
+                frames.size());
+        return new OlderPage(frames, page.cursor(), page.atStart());
+    }
+
+    /** UC-79 — the older-page size (transcript lines) fetched per {@code load-older} (AC2/AC7). */
+    public int conversationPageLines() {
+        return props.streams().conversationPageLines();
+    }
+
     /** AC8/AC9 — inject a composer submission into {@code targetId}'s session. */
     public void injectComposer(int n, String targetId, String text, ClientIdentity identity) throws IOException {
         // UC-60 (the Major fix) — a subagent pill is READ-ONLY: it has no pane, so an
@@ -484,4 +525,14 @@ public class ConversationFacade implements McpLoginInitiator {
             return new ToolDetailView(toolUseId, null, "", "", false, false);
         }
     }
+
+    /**
+     * UC-79 — internal (domain-layer) view of one older page fetched by {@link
+     * #fetchOlderPage}: the mapped {@code frames} (transcript oldest→newest order; the
+     * client prepends them at the front of the list), the new {@code newOldestLine}
+     * cursor (the handler stores it as the connection's oldest-line cursor), and
+     * {@code atStart} (true at the transcript beginning so paging stops). The handler
+     * emits a {@code page-start}, the frames, then a {@code page-end(atStart)}.
+     */
+    public record OlderPage(List<ConversationServerMessage> frames, int newOldestLine, boolean atStart) {}
 }
