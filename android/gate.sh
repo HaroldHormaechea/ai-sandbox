@@ -24,6 +24,9 @@
 #   JAVA_HOME            required — JDK 21
 #   ANDROID_HOME         required — Android SDK with platform-tools + emulator
 #   GATE_TEST_PACKAGE    instrumented gate suite package (default com.aisandbox.android.gate)
+#   GATE_MIN_TESTS       minimum tests the gate suite MUST run, else hard-fail (default 1) —
+#                        guards against a missing/misnamed suite silently passing the gate
+#                        (`am instrument` exits 0 even when it runs ZERO tests)
 #   GATE_ENROLL_CLASS    UC-83 enrollment test FQN (default com.aisandbox.android.net.E2eQrFileEnrollmentTest)
 #   GATE_PORT            server TLS port (default 18443)
 #   GATE_AVD             AVD name (default ai_sandbox_gate)
@@ -40,6 +43,7 @@ REPO="$(cd "$SCRIPT_DIR/.." && pwd)"
 : "${ANDROID_HOME:?set ANDROID_HOME to the Android SDK}"
 
 GATE_TEST_PACKAGE="${GATE_TEST_PACKAGE:-com.aisandbox.android.gate}"
+GATE_MIN_TESTS="${GATE_MIN_TESTS:-1}"
 GATE_ENROLL_CLASS="${GATE_ENROLL_CLASS:-com.aisandbox.android.net.E2eQrFileEnrollmentTest}"
 PORT="${GATE_PORT:-18443}"
 AVD="${GATE_AVD:-ai_sandbox_gate}"
@@ -55,6 +59,32 @@ GATE_DIR="$REPO/.gate-run"
 mkdir -p "$GATE_DIR"/{pki,clients,enrollment,secrets,sessions,log}
 
 log() { printf '\n\033[1;36m[gate] %s\033[0m\n' "$*"; }
+
+# Assert an `am instrument` run PASSED and actually ran at least $min tests.
+# Args: <min> <output-file> <label>. `am instrument` exits 0 even when it runs
+# ZERO tests (missing/misnamed package) and prints "OK (0 tests)", so a plain
+# "OK (" check would let an empty suite silently pass the gate. We parse the test
+# count from the AndroidJUnitRunner output ("OK (N test(s))" on success, else
+# "Tests run: N") and hard-fail on a test failure, a count below the minimum, or
+# a missing count line (instrumentation did not run at all).
+assert_tests_ran() {
+  local min="$1" out="$2" label="$3" count=""
+  if grep -q "FAILURES!!!" "$out"; then
+    echo "::error:: $label: test failures — see $out"; exit 1
+  fi
+  if grep -qE 'OK \([0-9]+ test' "$out"; then
+    count="$(grep -oE 'OK \([0-9]+ test' "$out" | grep -oE '[0-9]+' | head -1)"
+  elif grep -qE 'Tests run: [0-9]+' "$out"; then
+    count="$(grep -oE 'Tests run: [0-9]+' "$out" | grep -oE '[0-9]+' | head -1)"
+  fi
+  if [ -z "$count" ]; then
+    echo "::error:: $label: no test-count line in the runner output — instrumentation did not run (missing/misnamed suite?). See $out"; exit 1
+  fi
+  if [ "$count" -lt "$min" ]; then
+    echo "::error:: $label ran $count test(s); require >= $min. A green gate with zero tests is a gate failure. See $out"; exit 1
+  fi
+  log "$label: $count test(s) passed"
+}
 
 SERVER_PID=""
 cleanup() {
@@ -188,7 +218,7 @@ JAVA
   -e class $GATE_ENROLL_CLASS \
   -e qrImagePath /sdcard/Download/invite-qr.png \
   com.aisandbox.android.debug.test/androidx.test.runner.AndroidJUnitRunner" | tee "$GATE_DIR/log/enroll.out"
-grep -q "OK (" "$GATE_DIR/log/enroll.out" || { echo "::error:: enrollment failed"; exit 1; }
+assert_tests_ran 1 "$GATE_DIR/log/enroll.out" "enrollment"
 log "device enrolled"
 
 # ── 5. run the instrumented gate suite (testTag-driven, QA-owned) ────────────────
@@ -196,8 +226,5 @@ log "running the deterministic gate suite ($GATE_TEST_PACKAGE)"
 "$ADB" -s "$DEV" shell "am instrument -w \
   -e package $GATE_TEST_PACKAGE \
   com.aisandbox.android.debug.test/androidx.test.runner.AndroidJUnitRunner" | tee "$GATE_DIR/log/gate.out"
-if grep -q "FAILURES!!!" "$GATE_DIR/log/gate.out" || ! grep -q "OK (" "$GATE_DIR/log/gate.out"; then
-  echo "::error:: deterministic gate suite FAILED — see $GATE_DIR/log/gate.out"
-  exit 1
-fi
+assert_tests_ran "$GATE_MIN_TESTS" "$GATE_DIR/log/gate.out" "deterministic gate suite"
 log "DETERMINISTIC GATE PASSED ✅"
