@@ -142,8 +142,13 @@ class ConversationController(
     private val itemLock = Any()
     private val itemMap = LinkedHashMap<String, ConversationItem>()
 
-    @Volatile
-    private var backfilling = false
+    /**
+     * UC-78 — exposed as a [StateFlow] (was a plain `@Volatile var`) so the UI can read
+     * the replay/backfill phase and anchor the conversation to the bottom WITHOUT animating.
+     * Internal turn-phase gating still reads/writes [_backfilling].value exactly as before.
+     */
+    private val _backfilling = MutableStateFlow(false)
+    val backfilling: StateFlow<Boolean> = _backfilling.asStateFlow()
 
     /**
      * UC-65 — post-`/clear` suppression guard. While true, [onFrame] drops content-producing
@@ -464,7 +469,7 @@ class ConversationController(
                 "backfill-start" -> {
                     clearItems()
                     clearSuppressActive = false
-                    backfilling = true
+                    _backfilling.value = true
                     return
                 }
                 // targets, target-selected, backfill-end, pending-clear, turn-end, error → pass
@@ -483,15 +488,15 @@ class ConversationController(
                 }
                 // A new turn means any prior question resolved/aborted (AC12).
                 _pendingSheet.value = null
-                if (!backfilling) _turnPhase.value = TurnPhase.WORKING
+                if (!_backfilling.value) _turnPhase.value = TurnPhase.WORKING
             }
             "thinking" -> {
                 addItem(ConversationItem.Thinking(uuid(obj), source(obj), sidechain(obj), str(obj, "text") ?: ""))
-                if (!backfilling) _turnPhase.value = TurnPhase.THINKING
+                if (!_backfilling.value) _turnPhase.value = TurnPhase.THINKING
             }
             "assistant-text" -> {
                 addItem(ConversationItem.AssistantMessage(uuid(obj), source(obj), sidechain(obj), str(obj, "text") ?: ""))
-                if (!backfilling && _turnPhase.value != TurnPhase.IDLE) _turnPhase.value = TurnPhase.WORKING
+                if (!_backfilling.value && _turnPhase.value != TurnPhase.IDLE) _turnPhase.value = TurnPhase.WORKING
             }
             // UC-58 — an inbound teammate/subagent message (a user-role line the server
             // reclassified from a <teammate-message …> envelope). Render-only, like
@@ -586,7 +591,7 @@ class ConversationController(
                 clearAnswerWatchdog()
             }
             "turn-end" -> {
-                if (!backfilling) _turnPhase.value = TurnPhase.IDLE
+                if (!_backfilling.value) _turnPhase.value = TurnPhase.IDLE
                 // The transcript advanced past any pending question (AC12/AC15).
                 _pendingSheet.value = null
             }
@@ -595,9 +600,9 @@ class ConversationController(
                 _selectedTargetId.value = it
                 republishSelectedModel(it) // UC-66 — keep the highlighted model in sync with the target
             }
-            "backfill-start" -> backfilling = true
+            "backfill-start" -> _backfilling.value = true
             "backfill-end" -> {
-                backfilling = false
+                _backfilling.value = false
                 if (_pendingSheet.value == null) _turnPhase.value = TurnPhase.IDLE
             }
             "error" -> Log.w(TAG, "conversation error frame: ${text.take(200)}")
@@ -680,7 +685,7 @@ class ConversationController(
                 addItem(serverMsg)
                 return
             }
-            if (!backfilling) {
+            if (!_backfilling.value) {
                 val localKey = pendingEchoes.removeFirst()
                 reconcileInPlace(localKey, serverMsg)
                 return

@@ -221,6 +221,38 @@ class ConversationControllerTest {
     }
 
     @Test
+    fun `backfill replay does not flip the spinner to working or thinking (UC-78 no-regression)`() {
+        // UC-78 turn-phase no-regression — converting `backfilling` from a plain @Volatile var to a
+        // MutableStateFlow must NOT change the gating: while history replays (between backfill-start
+        // and backfill-end) the turn-start / thinking / assistant-text frames that would otherwise
+        // drive WORKING/THINKING are suppressed, so the spinner stays IDLE. No backfill-end is sent,
+        // so any flip would be observable.
+        enqueuePush(
+            listOf(
+                """{"type":"backfill-start","source":"main"}""",
+                // These would set WORKING / THINKING / WORKING respectively if NOT gated.
+                """{"type":"turn-start","uuid":"r1","source":"main","isSidechain":false,"text":"replayed user"}""",
+                """{"type":"thinking","uuid":"r2","source":"main","isSidechain":false,"text":"replayed reasoning"}""",
+                """{"type":"assistant-text","uuid":"r3","source":"main","isSidechain":false,"text":"replayed answer"}""",
+            ),
+        )
+        val c = networkedController()
+        c.attach(7)
+        try {
+            // The replayed items land …
+            assertThat(awaitUntil { c.items.value.size >= 2 })
+                .withFailMessage("expected replayed items, got ${c.items.value.map { it.key }}")
+                .isTrue
+            // … and the spinner never flips out of IDLE during the replay (gated by _backfilling).
+            assertThat(awaitUntil(500) { c.turnPhase.value != TurnPhase.IDLE })
+                .withFailMessage("spinner must stay IDLE during backfill, was ${c.turnPhase.value}")
+                .isFalse
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
     fun `a question frame raises a pending sheet`() {
         enqueuePush(
             listOf(

@@ -48,6 +48,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -103,6 +104,8 @@ fun ConversationScreen(
     val selectedTargetId by viewModel.selectedTargetId.collectAsState()
     val pendingSheet by viewModel.pendingSheet.collectAsState()
     val turnPhase by viewModel.turnPhase.collectAsState()
+    // UC-78 — true while history replays over SSE; drives the instant (no-animation) anchor.
+    val backfilling by viewModel.backfilling.collectAsState()
     val toolDetail by viewModel.toolDetail.collectAsState()
     // UC-66 — model-selection dialog state + the highlighted last-selected model (AC5).
     val modelMenu by viewModel.modelMenu.collectAsState()
@@ -114,10 +117,9 @@ fun ConversationScreen(
     var menuOpen by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
 
-    // Auto-scroll to the newest item as the transcript grows.
-    LaunchedEffect(items.size) {
-        if (items.isNotEmpty()) listState.animateScrollToItem(items.size - 1)
-    }
+    // UC-78 — the anchor-to-bottom effect now lives in [ConversationContent], keyed on
+    // items.size only and gated on `backfilling`, so the initial replay snaps to the bottom
+    // instantly (no top→bottom animation) while live growth still animates the stick.
 
     Scaffold(
         modifier = Modifier.fillMaxSize(),
@@ -202,6 +204,7 @@ fun ConversationScreen(
                     items = items,
                     modifier = Modifier.fillMaxSize(),
                     listState = listState,
+                    backfilling = backfilling,
                     fontScale = fontScale,
                     useAgentColor = useAgentColor,
                     onToolTap = { toolUseId ->
@@ -306,21 +309,56 @@ private fun SpinnerRow(phase: TurnPhase) {
 /**
  * The scrollable transcript list. Extracted from [ConversationScreen] as an
  * `internal` seam so same-package instrumented tests can render representative
- * conversation items deterministically. Pure extraction — `state`,
- * `contentPadding`, `verticalArrangement`, item keys, and row rendering are
- * verbatim from the inline `LazyColumn` it replaced; no visual or
- * scroll/ordering change. The working spinner stays in [ConversationScreen] as
- * a sibling below this list, exactly as before.
+ * conversation items deterministically.
+ *
+ * UC-78 — this seam now OWNS the anchor-to-bottom behavior (previously a
+ * `LaunchedEffect(items.size)` in [ConversationScreen] that always *animated*,
+ * causing the ugly top→bottom chase as the transcript replayed frame-by-frame
+ * over SSE). The anchor is a pure function of list *growth*:
+ *  - The list grows 0→N during replay; while [backfilling] (or before the first
+ *    anchor) each growth snaps INSTANTLY via `scrollToItem` — no animation, so
+ *    the screen opens already at the bottom (AC1/AC6).
+ *  - Live growth afterwards `animateScrollToItem`, preserving the existing
+ *    stick-to-bottom-on-new-message feel (AC4).
+ *  - Non-growth recompositions (rotation, backfilling flips, deduped reconnects
+ *    with a stable size) are no-ops, so the view is never pinned and the user can
+ *    freely scroll up (AC3). An empty list re-arms the anchor for target switches
+ *    and AC5.
+ * `backfilling` is read as a plain value — NEVER a [LaunchedEffect] key — so a
+ * backfilling flip alone can't re-trigger an anchor. `contentPadding`,
+ * `verticalArrangement`, item keys, and row rendering are otherwise verbatim. The
+ * working spinner stays in [ConversationScreen] as a sibling below this list.
  */
 @Composable
 internal fun ConversationContent(
     items: List<ConversationItem>,
     modifier: Modifier = Modifier,
     listState: LazyListState = rememberLazyListState(),
+    backfilling: Boolean = false,
     fontScale: Float = 1f,
     useAgentColor: Boolean = false,
     onToolTap: (String) -> Unit = {},
 ) {
+    // UC-78 — growth-gated anchor. Keyed on items.size ONLY; `backfilling` is read
+    // as a plain value so its flips never re-arm the effect.
+    var lastAnchoredSize by rememberSaveable { mutableStateOf(-1) }
+    LaunchedEffect(items.size) {
+        val size = items.size
+        when {
+            size == 0 -> lastAnchoredSize = -1 // re-arm (AC5 empty / target switch)
+            size > lastAnchoredSize -> {
+                val target = size - 1
+                if (backfilling || lastAnchoredSize < 0) {
+                    listState.scrollToItem(target) // replay / first content — instant (AC1/AC6)
+                } else {
+                    listState.animateScrollToItem(target) // live growth — stick (AC4)
+                }
+                lastAnchoredSize = size
+            }
+            // else: stable size (recomposition/rotation/backfill-flip/deduped reconnect) — no pin (AC3)
+        }
+    }
+
     LazyColumn(
         state = listState,
         modifier = modifier,
