@@ -1,6 +1,5 @@
 package com.aisandbox.android.ui.screens
 
-import android.app.Application
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -15,7 +14,6 @@ import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipeLeft
-import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.aisandbox.android.R
@@ -56,13 +54,13 @@ import org.junit.runner.RunWith
  *
  * <p>The UC-62 top-bar shell IconButton (formerly immediately left of the
  * Settings gear) was REPLACED in UC-84 by a single overflow/hamburger menu.
- * That migration lives in the `SessionsScreen` Scaffold top bar — outside the
- * `SessionsBody` seam — so
- * {@link #overflow_menu_exposes_ssh_and_settings_actions_and_settings_still_works()}
- * renders the real screen (with a [SessionsViewModel] from the instrumented app),
- * opens the overflow, and asserts it exposes the two migrated actions — "Start
- * SSH session" (the preserved `sessions_server_ssh_action` testTag) and
- * "Settings" — and that Settings still fires unchanged (UC-84 AC1/AC2).
+ * That migration is covered by
+ * {@link #overflow_menu_seam_shows_the_two_items_and_fires_each_callback()},
+ * which renders the stateless [SessionsOverflowMenu] seam directly, opens the
+ * overflow, and asserts it exposes the two migrated actions — "Start SSH
+ * session" (the preserved `sessions_server_ssh_action` testTag) and "Settings"
+ * (`sessions_menu_settings`) — each firing its own callback only (UC-84
+ * AC1/AC2).
  */
 @RunWith(AndroidJUnit4::class)
 class ServerSshRowInstrumentationTest {
@@ -207,49 +205,6 @@ class ServerSshRowInstrumentationTest {
         assertEquals("AC9 — Remove fires for the reserved id", SessionsApi.SERVER_SSH_N, deletedN)
         assertEquals("the host shell removes with force=false", false, deletedForce)
         composeTestRule.onNodeWithTag("session-card-0").assertDoesNotExist()
-    }
-
-    @Test
-    fun overflow_menu_exposes_ssh_and_settings_actions_and_settings_still_works() {
-        // UC-84 AC1/AC2 — the UC-62 separate top-bar shell IconButton + the
-        // Settings gear are REPLACED by a single overflow/hamburger button. Render
-        // the real SessionsScreen top bar (a SessionsViewModel from the
-        // instrumented app under test), open the overflow, and assert it exposes
-        // the two migrated actions — "Start SSH session" (testTag
-        // sessions_server_ssh_action, PRESERVED from UC-62) and "Settings"
-        // (sessions_menu_settings) — and that Settings still fires onOpenSettings
-        // unchanged. This is the screen-tier assertion the SessionsBody seam can't
-        // reach; it also replaces the obsolete "shell icon left of the gear"
-        // placement check (there is no longer a separate gear).
-        var settingsClicked = false
-        val app = ApplicationProvider.getApplicationContext<Application>()
-        composeTestRule.setContent {
-            AiSandboxTheme {
-                SessionsScreen(
-                    onOpen = {},
-                    onOpenTerminal = {},
-                    onOpenSettings = { settingsClicked = true },
-                    viewModel = SessionsViewModel(app),
-                )
-            }
-        }
-
-        // The single overflow/hamburger button is the only top-bar action now.
-        val overflow = composeTestRule.onNodeWithTag("sessions_overflow_action")
-        overflow.assertIsDisplayed().assertHasClickAction()
-
-        // Closed menu: neither item is present (the menu is not auto-expanded).
-        composeTestRule.onNodeWithTag("sessions_server_ssh_action").assertDoesNotExist()
-        composeTestRule.onNodeWithTag("sessions_menu_settings").assertDoesNotExist()
-
-        // Open the overflow → the two migrated items appear, both tappable.
-        overflow.performClick()
-        composeTestRule.onNodeWithTag("sessions_server_ssh_action").assertIsDisplayed().assertHasClickAction()
-        composeTestRule.onNodeWithTag("sessions_menu_settings").assertIsDisplayed().assertHasClickAction()
-
-        // AC2 — Settings continues to work unchanged via the menu item.
-        composeTestRule.onNodeWithTag("sessions_menu_settings").performClick()
-        assertEquals("the Settings menu item still fires onOpenSettings", true, settingsClicked)
     }
 
     @Test
