@@ -188,7 +188,18 @@ const TAIL_SCAN_BYTES = 131072;
 // completion; the only cost of an over-long window is a cosmetically lingering
 // spinner (benign — the lead's own turn-state covers the common resume-to-process
 // case), whereas too short a window would flicker a busy subagent to idle.
-const SUBAGENT_STALE_MS = 45000;
+//
+// 300s is a deliberate balance, not a cover-everything bound. Observed real
+// subagent transcripts have inter-line gaps ranging from tens of seconds up to
+// ~2619s (a long silent tool call), and chasing that tail would make a FINISHED
+// subagent linger as "working" for the same duration — defeating UC-48's whole
+// idle-vs-working purpose. ACCEPTED LIMITATION: a background subagent in a >300s
+// SILENT tool call WHILE THE LEAD IS IDLE may briefly read idle until its next
+// transcript write. This is bounded by the common-case mitigation that when a
+// subagent finishes the lead resumes to process its result, so deriveWorking(lead)
+// keeps the session "working" via the OR in conversationName through the
+// post-completion window.
+const SUBAGENT_STALE_MS = 300000;
 
 // Bounded grace before we FAIL LOUD with `no-transcript`. Covers the entrypoint
 // restart `sleep 1` window and a teammate spawn settling; resolution normally
