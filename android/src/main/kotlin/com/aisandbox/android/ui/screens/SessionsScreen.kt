@@ -28,8 +28,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Delete
-import androidx.compose.material.icons.outlined.Settings
-import androidx.compose.material.icons.outlined.Terminal
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -244,24 +242,13 @@ fun SessionsScreen(
                     }
                 },
                 actions = {
-                    // UC-62 (AC1) — shell icon immediately to the LEFT of the
-                    // gear: actions render left→right, so placing this IconButton
-                    // BEFORE Settings puts it on Settings' left. Tapping it
-                    // creates-or-focuses the singleton server host-shell session
-                    // and opens its terminal (the server enforces the singleton,
-                    // so a second tap focuses the same row — AC2).
-                    IconButton(
-                        onClick = { viewModel.openServerSsh { n -> onOpenTerminal(n) } },
-                        modifier = Modifier.testTag("sessions_server_ssh_action"),
-                    ) {
-                        Icon(
-                            Icons.Outlined.Terminal,
-                            contentDescription = stringResource(R.string.server_ssh_action_description),
-                        )
-                    }
-                    IconButton(onClick = onOpenSettings) {
-                        Icon(Icons.Outlined.Settings, contentDescription = "Settings")
-                    }
+                    // UC-84 (AC1) — single overflow/hamburger menu. Rendering lives
+                    // in the stateless [SessionsOverflowMenu] seam so an instrumented
+                    // test can assert the two items independently of the ViewModel.
+                    SessionsOverflowMenu(
+                        onStartSsh = { viewModel.openServerSsh { n -> onOpenTerminal(n) } },
+                        onOpenSettings = onOpenSettings,
+                    )
                 },
                 scrollBehavior = scrollBehavior,
             )
@@ -772,6 +759,62 @@ private fun SessionRow(
                 serverSshOnly = isServerSsh,
                 onRemove = onRemove,
                 onLifecycle = onLifecycle,
+            )
+        }
+    }
+}
+
+/**
+ * UC-84 (AC1/AC2) — the top-bar overflow/hamburger menu seam. Stateless +
+ * `internal` so an instrumented test can drive it directly (mirrors the
+ * `internal fun SessionsBody` pattern). Exposes exactly two items behind a
+ * single [Icons.Filled.MoreVert] button:
+ *
+ * <ul>
+ *   <li>"Start SSH session" — same create-or-focus host-shell behavior as the
+ *       old UC-62 shell icon ([onStartSsh]).</li>
+ *   <li>"Settings" — navigates to the Settings screen ([onOpenSettings]).</li>
+ * </ul>
+ *
+ * Stable testTags: {@code sessions_overflow_action} (button),
+ * {@code sessions_server_ssh_action} (SSH item),
+ * {@code sessions_menu_settings} (Settings item).
+ */
+@Composable
+internal fun SessionsOverflowMenu(
+    onStartSsh: () -> Unit,
+    onOpenSettings: () -> Unit,
+) {
+    var menuExpanded by remember { mutableStateOf(false) }
+    Box {
+        IconButton(
+            onClick = { menuExpanded = true },
+            modifier = Modifier.testTag("sessions_overflow_action"),
+        ) {
+            Icon(
+                Icons.Filled.MoreVert,
+                contentDescription = stringResource(R.string.sessions_overflow_description),
+            )
+        }
+        DropdownMenu(
+            expanded = menuExpanded,
+            onDismissRequest = { menuExpanded = false },
+        ) {
+            DropdownMenuItem(
+                text = { Text(stringResource(R.string.server_ssh_action)) },
+                modifier = Modifier.testTag("sessions_server_ssh_action"),
+                onClick = {
+                    menuExpanded = false
+                    onStartSsh()
+                },
+            )
+            DropdownMenuItem(
+                text = { Text(stringResource(R.string.sessions_menu_settings)) },
+                modifier = Modifier.testTag("sessions_menu_settings"),
+                onClick = {
+                    menuExpanded = false
+                    onOpenSettings()
+                },
             )
         }
     }

@@ -55,7 +55,27 @@ public enum ErrorCode {
     // or I/O error). Mapped to 500.
     MCP_ADD_FAILED,
     // UC-82 — the underlying `claude mcp remove` invocation failed. Mapped to 500.
-    MCP_REMOVE_FAILED;
+    MCP_REMOVE_FAILED,
+    // UC-84 — the server-self-update check could not complete for a reason that
+    // is not one of the more specific cases below (unexpected GitHub response
+    // shape, parse failure, etc.). Mapped to 502 Bad Gateway. The server stays
+    // up on its current version (AC14).
+    UPDATE_CHECK_FAILED,
+    // UC-84 — the GitHub Releases API was unreachable (DNS/connect/read failure
+    // or timeout) during a check. Mapped to 502 Bad Gateway (AC14).
+    UPDATE_GITHUB_UNREACHABLE,
+    // UC-84 — the unauthenticated GitHub Releases API returned a rate-limit
+    // response (HTTP 403 with the rate-limit budget exhausted). No token
+    // fallback exists by design (AC13). Mapped to 429 Too Many Requests (AC14).
+    UPDATE_RATE_LIMITED,
+    // UC-84 — a newer server-v* release exists but it ships no matching
+    // `*_amd64.deb` asset (wrong arch / asset missing). Mapped to 502 Bad
+    // Gateway; the install can't proceed so the check surfaces it (AC14).
+    UPDATE_NO_ASSET,
+    // UC-84 — the apply endpoint could not write the parameter-free update
+    // trigger marker (I/O failure on the trigger dir). Mapped to 500; the
+    // server keeps running on its current version (AC14).
+    UPDATE_TRIGGER_FAILED;
 
     public String wire() {
         return name().toLowerCase();

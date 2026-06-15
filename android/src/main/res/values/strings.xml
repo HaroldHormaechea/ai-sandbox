@@ -85,6 +85,10 @@
     <!-- UC-62 — server host-shell ("SERVER SSH SESSION") row. -->
     <string name="server_ssh_badge">SERVER SSH SESSION</string>
     <string name="server_ssh_action_description">Open server shell</string>
+    <!-- UC-84 — sessions-list overflow/hamburger menu -->
+    <string name="sessions_overflow_description">More options</string>
+    <string name="server_ssh_action">Start SSH session</string>
+    <string name="sessions_menu_settings">Settings</string>
     <string name="server_ssh_row_title">Server shell</string>
     <string name="server_ssh_row_hint">Login shell on the management server · tap to open</string>
     <!-- SSH-specific delete-dialog copy (the host tmux, not a sandbox container). -->
@@ -158,6 +162,24 @@
     <string name="settings_section_diagnostics">Diagnostics</string>
     <string name="settings_group_appearance">Appearance</string>
     <string name="settings_group_info">Info</string>
+    <!-- UC-84 — server self-update -->
+    <string name="settings_group_maintenance">Maintenance</string>
+    <string name="settings_section_server_updates">Server updates</string>
+    <string name="settings_update_subtitle">Check GitHub for a newer server release.</string>
+    <string name="settings_update_check">Look for server updates</string>
+    <string name="settings_update_recheck">Check again</string>
+    <string name="settings_update_checking">Checking for updates…</string>
+    <string name="settings_update_current">Current version: v%1$s</string>
+    <string name="settings_update_up_to_date">Up to date (v%1$s)</string>
+    <string name="settings_update_available">Update to version %1$s</string>
+    <string name="settings_update_changelog">Changelog</string>
+    <string name="settings_update_confirm_title">Update server?</string>
+    <string name="settings_update_confirm_body">The server will install v%1$s and restart. The app will disconnect briefly while it comes back online.</string>
+    <string name="settings_update_confirm_yes">Update</string>
+    <string name="settings_update_confirm_cancel">Cancel</string>
+    <string name="settings_update_updating">Updating… the server is restarting and will reconnect.</string>
+    <string name="settings_update_done">Now running v%1$s</string>
+    <string name="settings_update_error">Update failed: %1$s</string>
     <string name="settings_section_appearance">Conversation view</string>
     <string name="settings_appearance_font_size">Font size</string>
     <string name="settings_appearance_font_size_subtitle">Rescales text in the conversation/agent view only. Other screens are unaffected.</string>

@@ -10,6 +10,7 @@ import com.aisandbox.android.net.McpApi
 import com.aisandbox.android.net.ModelsApi
 import com.aisandbox.android.net.ServerProfile
 import com.aisandbox.android.net.ServerProfileStore
+import com.aisandbox.android.net.ServerUpdateApi
 import com.aisandbox.android.net.SessionEventsClient
 import com.aisandbox.android.net.SessionsApi
 import com.aisandbox.android.net.StreamClient
@@ -113,6 +114,9 @@ class AppContainer(applicationContext: Context) {
 
     /** UC-67 — build a per-profile client for the per-session MCP management endpoints. */
     fun mcpApi(client: AiSandboxHttpClient): McpApi = McpApi(client)
+
+    /** UC-84 — build a per-profile client for the server self-update endpoints (+ healthz probe). */
+    fun serverUpdateApi(client: AiSandboxHttpClient): ServerUpdateApi = ServerUpdateApi(client)
 
     fun streamClient(client: AiSandboxHttpClient, sessionN: Int): StreamClient =
         StreamClient(http = client, sessionN = sessionN)

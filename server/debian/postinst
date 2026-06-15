@@ -90,6 +90,28 @@ case "$1" in
         # Idempotent on re-installs.
         install -d -m 0700 -o ai-sandbox-server -g ai-sandbox-server /var/lib/ai-sandbox-server/sessions/server-ssh-home
         install -d -m 0750 -o ai-sandbox-server -g ai-sandbox-server /var/log/ai-sandbox-server
+        # UC-84 — the self-update trigger dir. The (non-root) server drops its
+        # bare, payload-free marker here; the root ai-sandbox-updater.path watch
+        # fires the updater. Owned by ai-sandbox-server 0750 so the service can
+        # write the marker (it sits under the unit's
+        # ReadWritePaths=/var/lib/ai-sandbox-server) but cannot touch the root
+        # updater unit/script. The path literal MUST match
+        # UpdateTriggerService.TRIGGER_DIR and the .path unit (CI cross-checks).
+        # Purge cleanup is already covered by `rm -rf /var/lib/ai-sandbox-server`
+        # in postrm. Idempotent on re-installs.
+        install -d -m 0750 -o ai-sandbox-server -g ai-sandbox-server /var/lib/ai-sandbox-server/update-trigger
+
+        # 3a. UC-84 — enable the self-update trigger watch. Guarded + container-
+        # tolerant (no systemd in chroots/containers → `|| true`). Enabled after
+        # the trigger dir exists so the DirectoryNotEmpty watch arms cleanly.
+        # `enable --now` starts the .path watch immediately and on every boot.
+        # NOTE: the updater.service is intentionally NOT enabled (it is path-
+        # activated only), and ai-sandbox-server's own `systemctl enable` is
+        # performed by the updater on self-update, not here (so a plain operator
+        # install keeps its manual-enable choice).
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl enable --now ai-sandbox-updater.path >/dev/null 2>&1 || true
+        fi
 
         # 3b. UC-38 — versioned session-image rebuild on upgrade. On an UPGRADE
         #     (IS_UPGRADE=1) with Docker available, refresh ai-context:latest

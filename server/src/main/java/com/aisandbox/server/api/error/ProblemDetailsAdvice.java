@@ -113,6 +113,32 @@ public class ProblemDetailsAdvice {
         return build(HttpStatus.BAD_REQUEST, ErrorCode.INVALID_CERT_PEM, ex.getMessage());
     }
 
+    /**
+     * UC-84 — server self-update failures. Each typed subtype maps to a clean
+     * Problem-Details response while the server keeps running on its current
+     * version (AC14). The {@code serverupdate} package deliberately does not
+     * import {@link ErrorCode} (it would form an {@code api ↔ serverupdate}
+     * package cycle — see {@code ServerUpdateException}); the subtype → code
+     * mapping therefore lives here, in the {@code api} package, which is allowed
+     * to depend on {@code serverupdate}.
+     */
+    @ExceptionHandler(com.aisandbox.server.serverupdate.service.ServerUpdateException.class)
+    @ResponseBody
+    public ProblemDetail handleServerUpdate(com.aisandbox.server.serverupdate.service.ServerUpdateException ex) {
+        return switch (ex) {
+            case com.aisandbox.server.serverupdate.service.ServerUpdateException.RateLimited e -> build(
+                    HttpStatus.TOO_MANY_REQUESTS, ErrorCode.UPDATE_RATE_LIMITED, e.getMessage());
+            case com.aisandbox.server.serverupdate.service.ServerUpdateException.GitHubUnreachable e -> build(
+                    HttpStatus.BAD_GATEWAY, ErrorCode.UPDATE_GITHUB_UNREACHABLE, e.getMessage());
+            case com.aisandbox.server.serverupdate.service.ServerUpdateException.NoAsset e -> build(
+                    HttpStatus.BAD_GATEWAY, ErrorCode.UPDATE_NO_ASSET, e.getMessage());
+            case com.aisandbox.server.serverupdate.service.ServerUpdateException.TriggerFailed e -> build(
+                    HttpStatus.INTERNAL_SERVER_ERROR, ErrorCode.UPDATE_TRIGGER_FAILED, e.getMessage());
+            case com.aisandbox.server.serverupdate.service.ServerUpdateException.CheckFailed e -> build(
+                    HttpStatus.BAD_GATEWAY, ErrorCode.UPDATE_CHECK_FAILED, e.getMessage());
+        };
+    }
+
     @ExceptionHandler(IllegalArgumentException.class)
     @ResponseBody
     public ProblemDetail handleBadArg(IllegalArgumentException ex) {

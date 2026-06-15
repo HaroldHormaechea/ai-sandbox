@@ -203,6 +203,23 @@ paths:
             '*/*':
               schema:
                 $ref: "#/components/schemas/SessionSummary"
+  /v1/server/update/apply:
+    post:
+      tags:
+      - server-update-controller
+      summary: Trigger a self-update to the latest server-v* release.
+      description: "Emits a parameter-free trigger consumed by the independent root\
+        \ ai-sandbox-updater unit, which self-determines the latest server-v* target,\
+        \ installs the .deb, and restarts the service. Returns promptly without blocking\
+        \ on the restart. The server passes the updater no version, path, or arguments."
+      operationId: apply
+      responses:
+        "200":
+          description: The update trigger was emitted (accepted=true).
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/UpdateApplyResponse"
   /v1/enrollment:
     post:
       tags:
@@ -335,6 +352,23 @@ paths:
           description: clean.sh exited non-zero.
           content:
             application/problem+json: {}
+  /v1/server/update/check:
+    get:
+      tags:
+      - server-update-controller
+      summary: Check GitHub for a newer server-v* release.
+      description: "Unauthenticated (no GitHub credentials) lookup of the newest server-v*\
+        \ release, compared with the running version by semantic-version ordering.\
+        \ Degrades to updateAvailable=false outside a packaged jar."
+      operationId: check
+      responses:
+        "200":
+          description: "Current + latest version, updateAvailable flag, changelog\
+            \ + .deb URLs."
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/UpdateCheckResponse"
   /v1/models:
     get:
       tags:
@@ -591,6 +625,17 @@ components:
             \ (class-level @JsonInclude(NON_NULL)): an idle / working / non-running\
             \ session, or one whose body was not parseable, simply has no field. Derived\
             \ from the visible pane, not the transcript."
+    UpdateApplyResponse:
+      type: object
+      description: Response of POST /v1/server/update/apply (UC-84).
+      properties:
+        accepted:
+          type: boolean
+          description: Always true on success (failures return a problem+json instead).
+        targetVersion:
+          type: string
+          description: "Best-effort latest server-v* version the update targets, or\
+            \ omitted if unresolved."
     EnrollmentRequest:
       type: object
       description: Body of POST /v1/enrollment (UC04).
@@ -668,6 +713,29 @@ components:
           description: Raw connection detail from the list line (command or URL);
             display-only.
           example: https://mcp.atlassian.com/v1/sse
+    UpdateCheckResponse:
+      type: object
+      description: Response of GET /v1/server/update/check (UC-84).
+      properties:
+        currentVersion:
+          type: string
+          description: "The server's running version (jar manifest), or 'dev' outside\
+            \ a packaged jar."
+        latestVersion:
+          type: string
+          description: "Newest server-v* release version, or omitted when none is\
+            \ found."
+        updateAvailable:
+          type: boolean
+          description: True iff latestVersion is strictly newer than currentVersion.
+        releaseHtmlUrl:
+          type: string
+          description: The latest release's GitHub HTML page — the external-browser
+            Changelog link.
+        debAssetUrl:
+          type: string
+          description: Download URL of the matching *_amd64.deb asset. Informational
+            only.
     ModelSummary:
       type: object
       description: UC-66 — an advertised Claude model returned by GET /v1/models.

@@ -1,0 +1,25 @@
+[Unit]
+Description=ai-sandbox server self-update trigger watch (UC-84)
+Documentation=file:///opt/ai-sandbox-server/README.md
+
+[Path]
+# UC-84 — the ONLY privileged action the (non-root) server can cause. When the
+# server drops its bare, payload-free marker into the trigger dir, this watch
+# activates ai-sandbox-updater.service. The dir is server-writable
+# (ai-sandbox-server:ai-sandbox-server, 0750, under the service's
+# ReadWritePaths=/var/lib/ai-sandbox-server); the updater clears it BLINDLY at
+# start, so the empty→non-empty transition re-arms this watch for the next run.
+#
+# DirectoryNotEmpty fires on the marker appearing AND on unit start if the dir
+# is already non-empty (so a marker written while the watch was momentarily
+# down is not lost).
+#
+# SECURITY: the watched path MUST be byte-identical to
+# UpdateTriggerService.TRIGGER_DIR (Java constant) and the postinst `install -d`
+# target. A CI grep cross-check asserts all three equal this exact string so
+# none can silently drift.
+DirectoryNotEmpty=/var/lib/ai-sandbox-server/update-trigger
+Unit=ai-sandbox-updater.service
+
+[Install]
+WantedBy=multi-user.target

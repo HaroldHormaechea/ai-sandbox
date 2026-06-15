@@ -48,7 +48,17 @@ public enum AuditAction {
     // ran. Payload carries {image, durationMs[, error]}; result is ok / fail.
     // Distinguishes a long "warming up" build from a hard session spawn_failed.
     SANDBOX_IMAGE_WARM,
-    HEALTHZ_FAIL;
+    HEALTHZ_FAIL,
+    // UC-84 — the Android client asked the server to check GitHub for a newer
+    // server-v* release (GET /v1/server/update/check). Payload carries
+    // {current, latest, updateAvailable}; result is ok / the failure code.
+    SERVER_UPDATE_CHECK,
+    // UC-84 — the Android client confirmed a self-update (POST /v1/server/update/apply).
+    // The server emits the parameter-free trigger marker; payload carries
+    // {target}; result is ok / update_trigger_failed. The privileged install +
+    // restart is performed by the independent root ai-sandbox-updater unit, NOT
+    // by the server — so this line records only that the trigger was emitted.
+    SERVER_UPDATE_APPLY;
 
     public String wire() {
         return name().toLowerCase();
