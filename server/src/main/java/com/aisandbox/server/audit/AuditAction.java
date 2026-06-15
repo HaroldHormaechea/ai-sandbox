@@ -25,6 +25,13 @@ public enum AuditAction {
     // interactive `/mcp` menu in the session's live main pane (the auth itself
     // is completed by the human in that session, never headlessly).
     MCP_LOGIN,
+    // UC-82 — a new MCP server was registered for a session via the MCP screen
+    // (`claude mcp add`). Payload carries {n, name, transport}; NEVER the
+    // server's env / header / secret VALUES.
+    MCP_ADD,
+    // UC-82 — an MCP server was deregistered for a session (`claude mcp remove`).
+    // Payload carries {n, name}.
+    MCP_REMOVE,
     CLIENT_ADD,
     CLIENT_REMOVE,
     // UC04 — successful POST /v1/enrollment redemption.

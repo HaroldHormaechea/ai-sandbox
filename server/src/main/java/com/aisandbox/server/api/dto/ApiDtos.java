@@ -7,6 +7,7 @@ import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Pattern;
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 
 /**
  * REST request / response DTOs. Disjoint from the internal record types
@@ -153,6 +154,41 @@ public final class ApiDtos {
                                     + " the live session — it never completes OAuth headlessly.",
                             example = "Opens MCP authentication in the live session — complete it there, then refresh.")
                     String message) {}
+
+    /**
+     * UC-82 — body of {@code POST /v1/sessions/{n}/mcp}: register a new MCP server.
+     * Transport-dependent: a {@code stdio} server carries {@code command} (+ optional
+     * {@code args} / {@code env}); an {@code http} / {@code sse} server carries
+     * {@code url} (+ optional {@code headers}). The server validates which fields are
+     * required per transport and rejects malformed input / duplicate names with
+     * {@code application/problem+json} (AC6). All values are passed to process
+     * execution as discrete argv elements — never a shell string (AC4).
+     */
+    @Schema(description = "Body of POST /v1/sessions/{n}/mcp (UC-82) — register a new MCP server.")
+    public record McpAddRequest(
+            @Schema(
+                            description = "MCP server identifier. [A-Za-z0-9._-], 1-128 chars, no spaces,"
+                                    + " no leading '-'.",
+                            example = "atlassian")
+                    @NotBlank
+                    @Pattern(regexp = "[A-Za-z0-9._-]{1,128}", message = "name must be config-safe with no spaces")
+                    String name,
+            @Schema(
+                            description = "Transport/type of the MCP server.",
+                            allowableValues = {"stdio", "http", "sse"},
+                            example = "stdio")
+                    String transport,
+            @Schema(description = "stdio transport — the executable to run (required for stdio).", example = "npx")
+                    String command,
+            @Schema(description = "stdio transport — arguments passed to the command.") List<String> args,
+            @Schema(
+                            description = "http / sse transport — the server URL (required for those; http(s) only).",
+                            example = "https://mcp.atlassian.com/v1/sse")
+                    String url,
+            @Schema(description = "stdio transport — environment variables for the command (K=V). Values are secret.")
+                    Map<String, String> env,
+            @Schema(description = "http / sse transport — \"Header: value\" strings. Values are secret.")
+                    List<String> headers) {}
 
     /**
      * Body of {@code POST /v1/enrollment} (UC04 AC33). The endpoint is
