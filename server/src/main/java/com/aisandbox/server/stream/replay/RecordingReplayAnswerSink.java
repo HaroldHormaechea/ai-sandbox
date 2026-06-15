@@ -52,7 +52,10 @@ public class RecordingReplayAnswerSink implements ReplayAnswerSink {
     public void recordAnswer(int n, List<Integer> selections, String freeText) {
         recorded.add(new Recorded(n, false, selections == null ? List.of() : List.copyOf(selections), freeText, 1));
         gate(n).offer(SIGNAL);
-        LOG.info("replay recorded single answer for n={} selections={} freeText.len={}", n, selections,
+        LOG.info(
+                "replay recorded single answer for n={} selections={} freeText.len={}",
+                n,
+                selections,
                 freeText == null ? 0 : freeText.length());
     }
 

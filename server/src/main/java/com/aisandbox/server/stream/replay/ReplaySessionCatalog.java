@@ -67,7 +67,8 @@ public class ReplaySessionCatalog {
                     io);
         }
         if (manifest == null || !manifest.isObject()) {
-            throw new IllegalStateException("replay: manifest " + manifestPath.toAbsolutePath() + " is not a JSON object");
+            throw new IllegalStateException(
+                    "replay: manifest " + manifestPath.toAbsolutePath() + " is not a JSON object");
         }
         int schemaVersion = manifest.path("schemaVersion").asInt(-1);
         if (schemaVersion != ReplayFixtureValidator.SCHEMA_VERSION) {
@@ -76,8 +77,8 @@ public class ReplaySessionCatalog {
         }
         JsonNode arr = manifest.path("scenarios");
         if (!arr.isArray() || arr.isEmpty()) {
-            throw new IllegalStateException("replay: manifest " + manifestPath.toAbsolutePath()
-                    + " has no scenarios[]");
+            throw new IllegalStateException(
+                    "replay: manifest " + manifestPath.toAbsolutePath() + " has no scenarios[]");
         }
         Map<Integer, Scenario> map = new LinkedHashMap<>();
         List<Scenario> list = new ArrayList<>();
@@ -87,7 +88,8 @@ public class ReplaySessionCatalog {
             String title = s.path("title").asText("");
             String fixture = s.path("fixture").asText("");
             if (n <= 0 || fixture.isBlank()) {
-                throw new IllegalStateException("replay: manifest scenario must have a positive 'n' and a 'fixture': " + s);
+                throw new IllegalStateException(
+                        "replay: manifest scenario must have a positive 'n' and a 'fixture': " + s);
             }
             if (n == SpecialSessions.SERVER_SSH_N) {
                 throw new IllegalStateException(
@@ -101,7 +103,8 @@ public class ReplaySessionCatalog {
                 lines = Files.readAllLines(dir.resolve(fixture), StandardCharsets.UTF_8);
             } catch (IOException io) {
                 throw new IllegalStateException(
-                        "replay: cannot read fixture '" + fixture + "' for scenario n=" + n + ": " + io.getMessage(), io);
+                        "replay: cannot read fixture '" + fixture + "' for scenario n=" + n + ": " + io.getMessage(),
+                        io);
             }
             validator.validate(fixture, lines);
             Scenario scenario = new Scenario(n, target, title, fixture, List.copyOf(lines));
@@ -110,7 +113,10 @@ public class ReplaySessionCatalog {
         }
         this.scenarios = List.copyOf(list);
         this.byN = Map.copyOf(map);
-        LOG.info("replay catalog loaded {} scenario(s) from {}: {}", scenarios.size(), dir.toAbsolutePath(),
+        LOG.info(
+                "replay catalog loaded {} scenario(s) from {}: {}",
+                scenarios.size(),
+                dir.toAbsolutePath(),
                 scenarios.stream().map(Scenario::target).toList());
     }
 

@@ -51,6 +51,95 @@ class UnitFileContractTest {
 
     private static final Path UNIT_FILE = PROJECT_DIR.resolve("systemd").resolve("ai-sandbox-server.service");
 
+    /** Repo root (parent of {@code server/}) — where {@code .github/workflows} live. */
+    private static final Path REPO_ROOT = PROJECT_DIR.getParent();
+
+    /**
+     * UC-85 (AC-11, layer 2) — NO shipped/packaged surface may ever activate the deterministic-gate
+     * {@code replay} Spring profile. The profile substitutes recorded fixtures for the live docker
+     * transcript, exposes synthetic sessions, and echoes answers instead of injecting them — it must
+     * only ever be turned on by the gate harness ({@code android/gate.sh} + the {@code android-gate}
+     * CI job), never by anything an operator installs or runs in production.
+     *
+     * <p>This reads EACH packaging / launch surface and asserts none of them name {@code replay}
+     * (case-insensitive). Because the profile name appears in NONE of these files today, the simplest
+     * and strongest contract is "the literal token {@code replay} is absent" — any future edit that
+     * pipes {@code --spring.profiles.active=replay} or {@code SPRING_PROFILES_ACTIVE=replay} into a
+     * shipped artifact reintroduces the token and fails here. Project history shows one packaging
+     * surface always gets missed, so every surface is read explicitly:
+     *
+     * <ul>
+     *   <li>the systemd unit's {@code ExecStart} + {@code Environment} (run on the host);</li>
+     *   <li>the {@code .deb} maintainer scripts ({@code debian/postinst,prerm,postrm,config});</li>
+     *   <li>{@code server/build.gradle.kts} (the jdeb staging + {@code releaseBundle} operator zip
+     *       are assembled here, and the only profile activation it may contain is the unrelated
+     *       {@code docs-only} OpenAPI-generation task — never {@code replay});</li>
+     *   <li>the bundled reference config ({@code sample-config.yaml}) and the baked default
+     *       {@code application.yaml};</li>
+     *   <li>the production CI workflows ({@code server-ci}, {@code server-release}, {@code android-ci},
+     *       {@code android-release}) — the {@code android-gate*} workflows are intentionally excluded
+     *       (they ARE the gate).</li>
+     * </ul>
+     */
+    @Test
+    void no_packaging_surface_activates_the_replay_profile() throws IOException {
+        List<Path> surfaces = new ArrayList<>(List.of(
+                UNIT_FILE,
+                PROJECT_DIR.resolve("debian").resolve("postinst"),
+                PROJECT_DIR.resolve("debian").resolve("prerm"),
+                PROJECT_DIR.resolve("debian").resolve("postrm"),
+                PROJECT_DIR.resolve("debian").resolve("config"),
+                PROJECT_DIR.resolve("debian").resolve("control"),
+                PROJECT_DIR.resolve("build.gradle.kts"),
+                PROJECT_DIR.resolve("sample-config.yaml"),
+                PROJECT_DIR.resolve("src/main/resources/application.yaml"),
+                REPO_ROOT.resolve(".github/workflows/server-ci.yml"),
+                REPO_ROOT.resolve(".github/workflows/server-release.yml"),
+                REPO_ROOT.resolve(".github/workflows/android-ci.yml"),
+                REPO_ROOT.resolve(".github/workflows/android-release.yml")));
+
+        int checked = 0;
+        for (Path surface : surfaces) {
+            if (!Files.isRegularFile(surface)) {
+                continue; // a surface that does not exist on this checkout cannot activate replay
+            }
+            checked++;
+            String body = Files.readString(surface);
+            assertThat(body.toLowerCase(java.util.Locale.ROOT))
+                    .as(
+                            "AC-11 — packaging/launch surface %s MUST NOT name the deterministic-gate "
+                                    + "'replay' profile (only android/gate.sh + the android-gate CI job may)",
+                            surface)
+                    .doesNotContain("replay");
+        }
+        assertThat(checked)
+                .as("the packaging-surface scan must actually have read the core surfaces "
+                        + "(unit file, debian scripts, build.gradle.kts, configs)")
+                .isGreaterThanOrEqualTo(8);
+    }
+
+    /**
+     * UC-85 (AC-11) — the profile's own config file must NOT self-activate. {@code
+     * application-replay.yaml} is a profile-specific document: it only applies when something else
+     * names {@code replay} on the command line / environment. If it ever set {@code
+     * spring.profiles.active} (or a {@code spring.config.activate.on-profile}-less self-include) it
+     * could leak the profile on; pin it as inert configuration only.
+     */
+    @Test
+    void replay_profile_config_does_not_self_activate() throws IOException {
+        Path replayYaml = PROJECT_DIR.resolve("src/main/resources/application-replay.yaml");
+        assumeTrue(Files.isRegularFile(replayYaml), "application-replay.yaml not found at " + replayYaml);
+        // Ignore comment lines (the file documents how the gate activates the profile via the CLI);
+        // only real YAML must be inert.
+        String yamlBody = Files.readAllLines(replayYaml).stream()
+                .filter(l -> !l.strip().startsWith("#"))
+                .reduce("", (a, b) -> a + "\n" + b);
+        assertThat(yamlBody)
+                .as("application-replay.yaml MUST NOT set spring.profiles.active (it would self-activate)")
+                .doesNotContain("profiles.active")
+                .doesNotContain("active:");
+    }
+
     @Test
     void read_write_paths_includes_clients_allowlist_carve_out() throws IOException {
         assumeTrue(

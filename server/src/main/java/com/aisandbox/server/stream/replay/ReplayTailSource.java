@@ -41,8 +41,12 @@ public class ReplayTailSource implements TailSource {
         if (scenario.isEmpty()) {
             throw new IOException("replay: no fixture scenario for session n=" + n);
         }
-        LOG.info("replay tail opening for n={} scenario={} ({} lines, backfill={})",
-                n, scenario.get().target(), scenario.get().lines().size(), backfillLines);
+        LOG.info(
+                "replay tail opening for n={} scenario={} ({} lines, backfill={})",
+                n,
+                scenario.get().target(),
+                scenario.get().lines().size(),
+                backfillLines);
         ReplayEnvelopeReader reader =
                 new ReplayEnvelopeReader(scenario.get().lines(), n, answerSink, props.answerTimeoutMs());
         return new Tail(reader);
