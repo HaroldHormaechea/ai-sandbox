@@ -61,6 +61,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.customActions
@@ -85,6 +86,7 @@ import com.aisandbox.android.ui.components.QuestionSheet
 import com.aisandbox.android.ui.components.agentColor
 import com.aisandbox.android.ui.components.bubbleTintForSource
 import com.aisandbox.android.ui.components.subtleBubbleTint
+import com.aisandbox.android.ui.testtags.ConversationTestTags
 import com.aisandbox.android.ui.theme.AiSandboxMonoTypography
 import com.aisandbox.android.ui.theme.OnSurface
 import com.aisandbox.android.ui.theme.OnSurfaceMuted
@@ -476,7 +478,7 @@ internal fun ConversationContent(
 
     LazyColumn(
         state = listState,
-        modifier = modifier,
+        modifier = modifier.testTag(ConversationTestTags.LIST),
         contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
@@ -494,7 +496,7 @@ internal fun ConversationContent(
 @Composable
 private fun LoadingOlderRow() {
     Row(
-        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp),
+        modifier = Modifier.fillMaxWidth().padding(vertical = 8.dp).testTag(ConversationTestTags.LOADING_OLDER),
         horizontalArrangement = Arrangement.Center,
         verticalAlignment = Alignment.CenterVertically,
     ) {
@@ -514,12 +516,12 @@ private fun ConversationItemRow(
 ) {
     when (item) {
         is ConversationItem.UserMessage ->
-            Bubble(label = null, body = item.text, isUser = true, isSidechain = item.isSidechain, fontScale = fontScale, tint = null, onCopy = onCopy)
+            Bubble(label = null, body = item.text, isUser = true, isSidechain = item.isSidechain, fontScale = fontScale, tint = null, onCopy = onCopy, testTag = ConversationTestTags.BUBBLE_USER)
         is ConversationItem.AssistantMessage -> {
             // UC-53 (AC3/AC4) — toggle ON + a non-null chromatic tint for this
             // source → subtle background; else today's neutral SurfaceLow.
             val tint = if (useAgentColor) bubbleTintForSource(item.source)?.let { subtleBubbleTint(it) } else null
-            Bubble(label = labelFor(item.source), body = item.text, isUser = false, isSidechain = item.isSidechain, fontScale = fontScale, tint = tint, onCopy = onCopy)
+            Bubble(label = labelFor(item.source), body = item.text, isUser = false, isSidechain = item.isSidechain, fontScale = fontScale, tint = tint, onCopy = onCopy, testTag = ConversationTestTags.BUBBLE_ASSISTANT)
         }
         is ConversationItem.Thinking -> MetaLine(prefix = "thinking", body = item.text, fontScale = fontScale)
         is ConversationItem.ToolActivity -> ToolBubble(item = item, onTap = { onToolTap(item.toolUseId) }, fontScale = fontScale)
@@ -543,6 +545,7 @@ private fun ConversationItemRow(
             tint = null,
             labelColor = agentColor(item.color),
             onCopy = onCopy,
+            testTag = ConversationTestTags.BUBBLE_TEAMMATE,
         )
     }
 }
@@ -857,6 +860,9 @@ private fun Bubble(
     // UC-81 — long-press a bubble to copy its FULL body to the clipboard (AC1/AC2/AC4).
     // Defaulted to a no-op so non-copy call sites / previews compile unchanged.
     onCopy: (String) -> Unit = {},
+    // UC-85 — stable testTag for the deterministic gate (role-keyed: user/assistant/teammate).
+    // Defaulted null so previews / non-gate call sites are unchanged.
+    testTag: String? = null,
 ) {
     // UC-81 (AC6) — TalkBack-discoverable, named "Copy" action so the long-press copy
     // affordance is reachable without the gesture. Resolved here (composable context).
@@ -864,7 +870,7 @@ private fun Bubble(
     BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
         val maxBubbleWidth = maxWidth * 0.8f
         Column(
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier.fillMaxWidth().let { if (testTag != null) it.testTag(testTag) else it },
             horizontalAlignment = if (isUser) Alignment.End else Alignment.Start,
         ) {
             if (label != null) {
