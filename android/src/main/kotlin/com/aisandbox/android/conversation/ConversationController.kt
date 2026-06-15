@@ -158,6 +158,33 @@ class ConversationController(
     private val pageKeys = LinkedHashSet<String>()
 
     /**
+     * Agent-switcher selection fix — transcript epoch + stale-page drain.
+     *
+     * The UC-79 older-page machinery is not target/epoch-aware: a `load-older` page requested
+     * for target A can land AFTER a switch to target B (or a reconnect/`backfill-start`), and the
+     * page-burst frames then either graft A's history into B's store or swallow B's own
+     * `backfill-start` — both surface as "every member shows the same conversation".
+     *
+     * [transcriptEpoch] is a monotonic counter bumped on every transcript-window reset that can
+     * orphan an in-flight page: [selectTarget], [clear], and every `backfill-start` frame.
+     * [loadOlderEpoch] captures the epoch in effect when a `load-older` request is SENT; when the
+     * matching `page-start` arrives with a different current epoch, that page was requested for a
+     * prior window and is STALE. [pageDiscarding] is the explicit drain state entered for a stale
+     * page: every frame of the burst is dropped until its `page-end`, so a late page for A can
+     * never leak into B's live transcript. All guarded on the single [onFrame] collector; the
+     * counters are [Volatile] because they are also written from the UI thread ([selectTarget]/
+     * [clear]) and only ever compared for inequality (exact monotonicity is not required).
+     */
+    @Volatile
+    private var transcriptEpoch = 0L
+
+    @Volatile
+    private var loadOlderEpoch = 0L
+
+    @Volatile
+    private var pageDiscarding = false
+
+    /**
      * UC-78 — exposed as a [StateFlow] (was a plain `@Volatile var`) so the UI can read
      * the replay/backfill phase and anchor the conversation to the bottom WITHOUT animating.
      * Internal turn-phase gating still reads/writes [_backfilling].value exactly as before.
@@ -317,6 +344,11 @@ class ConversationController(
 
     /** AC17 — switch the tailed/inject target; clear the view for the new target's transcript. */
     fun selectTarget(targetId: String) {
+        // Agent-switcher fix — a target switch opens a fresh transcript window: bump the epoch so
+        // any in-flight `load-older` page requested for the OLD target is recognised as stale (and
+        // drained) when its `page-start` lands after the switch, instead of grafting the old
+        // target's history into the new target's store.
+        transcriptEpoch++
         _selectedTargetId.value = targetId
         clearItems()
         closeDetail() // the open dialog belongs to the old target's tool call
@@ -385,6 +417,10 @@ class ConversationController(
      */
     fun clear() {
         val hadSheet = _pendingSheet.value != null
+        // Agent-switcher fix — a `/clear` wipes the window, so bump the epoch: an in-flight
+        // `load-older` page must not repopulate the just-cleared transcript when its (now stale)
+        // `page-start` arrives.
+        transcriptEpoch++
         // Arm the guard BEFORE sending so a fast `/clear` echo is caught (AC3).
         clearSuppressActive = true
         scope.launch {
@@ -457,6 +493,10 @@ class ConversationController(
     fun loadOlder() {
         if (_atTranscriptStart.value || _loadingOlder.value) return
         _loadingOlder.value = true
+        // Agent-switcher fix — capture the epoch at request time. If the transcript window resets
+        // (target switch / `/clear` / `backfill-start`) before this page's `page-start` arrives,
+        // the captured epoch will no longer match and the page is drained as stale.
+        loadOlderEpoch = transcriptEpoch
         if (client?.sendLoadOlder() != true) {
             _loadingOlder.value = false
         }
@@ -497,19 +537,45 @@ class ConversationController(
     private fun onFrame(text: String) {
         val obj = runCatching { json.parseToJsonElement(text) }.getOrNull() as? JsonObject ?: return
         val type = obj["type"]?.jsonPrimitive?.contentOrNull
+        // Agent-switcher fix — a `backfill-start` opens a fresh transcript window and must be
+        // handled BEFORE the page / discard gates below, so a new target's (or a reconnect's)
+        // backfill can never be swallowed by an in-flight stale-page drain. Bump the epoch (any
+        // page requested for the prior window is now stale) and force-reset all page/discard
+        // state, then FALL THROUGH to the normal `backfill-start` handling (which resets the
+        // backfill flags and renders the fresh window).
+        if (type == "backfill-start") {
+            resetPagingForNewWindow()
+        }
         // UC-79 — older-page (infinite scroll) frames. page-start/page-end bracket a run of
         // purely HISTORICAL frames that must ONLY add (prepended) items — never disarm the
         // answer watchdog, touch the clear guard, the turn phase, the pending sheet, or the
         // live spinner. Handle them (and any frame arriving while a page is open) up front.
         when (type) {
             "page-start" -> {
-                beginPage()
+                // Agent-switcher fix — if the captured request epoch no longer matches the live
+                // epoch, this page was requested for a prior target/window. Drain & DROP the whole
+                // burst (DISCARD) so it can't leak into the current transcript; otherwise assemble
+                // it normally.
+                if (loadOlderEpoch != transcriptEpoch) {
+                    beginPageDiscard()
+                } else {
+                    beginPage()
+                }
                 return
             }
             "page-end" -> {
-                endPage(obj["atStart"]?.jsonPrimitive?.booleanOrNull ?: false)
+                if (pageDiscarding) {
+                    endPageDiscard()
+                } else {
+                    endPage(obj["atStart"]?.jsonPrimitive?.booleanOrNull ?: false)
+                }
                 return
             }
+        }
+        // Agent-switcher fix — while draining a stale page, drop EVERY frame of the burst until
+        // its `page-end` (handled above). backfill-start is exempt: it was handled before this gate.
+        if (pageDiscarding) {
+            return
         }
         if (pageMode) {
             handlePageFrame(type, obj)
@@ -757,6 +823,43 @@ class ConversationController(
             pageKeys.clear()
         }
         _loadingOlder.value = true
+    }
+
+    /**
+     * Agent-switcher fix — enter the stale-page DRAIN: the `page-start` that just arrived belongs
+     * to a `load-older` requested for a prior transcript window/target. Every subsequent frame is
+     * dropped (see the [onFrame] discard gate) until the matching `page-end`. Deliberately does
+     * NOT raise [_loadingOlder] or touch any item/turn state — the affordance and store belong to
+     * the CURRENT window, which the originating switch/`backfill-start` already reset.
+     */
+    private fun beginPageDiscard() {
+        synchronized(itemLock) {
+            pageDiscarding = true
+            pageMode = false
+            pageKeys.clear()
+        }
+    }
+
+    /** Agent-switcher fix — end the stale-page drain at its `page-end`; the burst was fully dropped. */
+    private fun endPageDiscard() {
+        synchronized(itemLock) {
+            pageDiscarding = false
+        }
+    }
+
+    /**
+     * Agent-switcher fix — a `backfill-start` opened a fresh transcript window. Bump the epoch so
+     * any in-flight `load-older` page is recognised as stale, and tear down any page-assembly or
+     * stale-page drain in progress so a leftover burst from the prior window cannot leak. Items are
+     * NOT touched here — the `backfill-start` handler / replay owns the store content.
+     */
+    private fun resetPagingForNewWindow() {
+        transcriptEpoch++
+        synchronized(itemLock) {
+            pageMode = false
+            pageDiscarding = false
+            pageKeys.clear()
+        }
     }
 
     /**
@@ -1038,6 +1141,8 @@ class ConversationController(
             // UC-79 — wiping the store ends any page in progress and re-enables paging for the
             // new transcript; its backfill-start re-seeds the cursor and these flags.
             pageMode = false
+            // Agent-switcher fix — also end any stale-page drain; the wipe supersedes it.
+            pageDiscarding = false
             pageKeys.clear()
             _items.value = emptyList()
         }
