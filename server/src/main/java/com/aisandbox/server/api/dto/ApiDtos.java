@@ -215,4 +215,44 @@ public final class ApiDtos {
                             regexp = "[A-Za-z0-9._-]{32,256}",
                             message = "Token must be 32–256 chars of [A-Za-z0-9._-]")
                     String token) {}
+
+    /**
+     * UC-84 — response of {@code GET /v1/server/update/check}. Reports the
+     * server's running version, the newest {@code server-v*} release, whether an
+     * update is available (semantic-version ordering), and the release's HTML
+     * page + matching {@code _amd64.deb} download URL.
+     *
+     * <p>{@code debAssetUrl} is INFORMATIONAL ONLY (the privileged updater
+     * self-determines and downloads its own target — AC8/AC11); the client uses
+     * {@code releaseHtmlUrl} for the "Changelog" external-browser link (AC6).
+     * Null-valued fields are omitted from the JSON (class-level
+     * {@code @JsonInclude(NON_NULL)}).
+     */
+    @Schema(description = "Response of GET /v1/server/update/check (UC-84).")
+    public record UpdateCheckResponse(
+            @Schema(description = "The server's running version (jar manifest), or 'dev' outside a packaged jar.")
+                    String currentVersion,
+            @Schema(description = "Newest server-v* release version, or omitted when none is found.")
+                    String latestVersion,
+            @Schema(description = "True iff latestVersion is strictly newer than currentVersion.")
+                    boolean updateAvailable,
+            @Schema(description = "The latest release's GitHub HTML page — the external-browser Changelog link.")
+                    String releaseHtmlUrl,
+            @Schema(description = "Download URL of the matching *_amd64.deb asset. Informational only.")
+                    String debAssetUrl) {}
+
+    /**
+     * UC-84 — response of {@code POST /v1/server/update/apply}. Acknowledges
+     * that the parameter-free update trigger was emitted; the actual install +
+     * restart is performed asynchronously by the independent root
+     * {@code ai-sandbox-updater} unit, so this returns promptly without blocking
+     * on the restart (AC9). {@code targetVersion} is a best-effort hint for the
+     * client's "updating…" copy (the updater self-determines the real target).
+     */
+    @Schema(description = "Response of POST /v1/server/update/apply (UC-84).")
+    public record UpdateApplyResponse(
+            @Schema(description = "Always true on success (failures return a problem+json instead).")
+                    boolean accepted,
+            @Schema(description = "Best-effort latest server-v* version the update targets, or omitted if unresolved.")
+                    String targetVersion) {}
 }

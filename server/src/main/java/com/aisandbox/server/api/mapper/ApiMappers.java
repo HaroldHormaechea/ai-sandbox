@@ -97,6 +97,18 @@ public final class ApiMappers {
                 req.name(), transport, req.command(), req.args(), req.url(), req.env(), req.headers());
     }
 
+    /** UC-84 — internal update-check result → API response DTO (rule 5). */
+    public static ApiDtos.UpdateCheckResponse toUpdateCheckResponse(
+            com.aisandbox.server.serverupdate.dto.UpdateStatus s) {
+        return new ApiDtos.UpdateCheckResponse(
+                s.currentVersion(), s.latestVersion(), s.updateAvailable(), s.releaseHtmlUrl(), s.debAssetUrl());
+    }
+
+    /** UC-84 — internal apply result → API response DTO (rule 5). */
+    public static ApiDtos.UpdateApplyResponse toUpdateApplyResponse(com.aisandbox.server.serverupdate.dto.ApplyResult r) {
+        return new ApiDtos.UpdateApplyResponse(r.accepted(), r.targetVersion());
+    }
+
     public static ApiDtos.ClientSummary toClientSummary(AllowedClient c) {
         return new ApiDtos.ClientSummary(
                 c.name(),
