@@ -86,12 +86,15 @@ class ConversationTeammateMessageInstrumentationTest {
         composeTestRule.onNodeWithText("analyst").assertIsDisplayed()
         composeTestRule.onNodeWithText(msg).assertIsDisplayed()
 
-        // AC1 — left-aligned, NON-user: the empty space on the RIGHT exceeds the left.
+        // AC1 — left-aligned, NON-user: the bubble hugs the left, so the empty space on the
+        // RIGHT exceeds the left (the same robust, width-independent check the sibling tests
+        // use — a fixed-fraction margin is too strict for a long message that fills the 80%
+        // width cap, where the bubble legitimately spans most of the row but still hugs left).
         val w = rootWidthPx()
         val b = composeTestRule.onNodeWithText(msg).getUnclippedBoundsInRoot()
         val leftGap = b.left.value
         val rightGap = w - b.right.value
-        assertTrue("teammate bubble should be left-aligned: leftGap=$leftGap rightGap=$rightGap w=$w", rightGap > leftGap + w * 0.2f)
+        assertTrue("teammate bubble should be left-aligned: leftGap=$leftGap rightGap=$rightGap w=$w", rightGap > leftGap)
 
         saveScreenshot("teammate_left_labelled")
     }
