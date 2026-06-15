@@ -23,7 +23,9 @@ import com.aisandbox.android.net.SessionSummary
 import com.aisandbox.android.net.SessionsApi
 import com.aisandbox.android.ui.theme.AiSandboxTheme
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -248,5 +250,44 @@ class ServerSshRowInstrumentationTest {
         // AC2 — Settings continues to work unchanged via the menu item.
         composeTestRule.onNodeWithTag("sessions_menu_settings").performClick()
         assertEquals("the Settings menu item still fires onOpenSettings", true, settingsClicked)
+    }
+
+    @Test
+    fun overflow_menu_seam_shows_the_two_items_and_fires_each_callback() {
+        // UC-84 AC1/AC2 — the SessionsOverflowMenu render seam in isolation: the
+        // single overflow button opens to the two migrated items — "Start SSH
+        // session" (preserved tag sessions_server_ssh_action) and "Settings"
+        // (sessions_menu_settings) — and each item fires its OWN callback only.
+        // Complements the full-screen migration above with a focused seam render.
+        var sshFired = false
+        var settingsFired = false
+        composeTestRule.setContent {
+            AiSandboxTheme {
+                SessionsOverflowMenu(
+                    onStartSsh = { sshFired = true },
+                    onOpenSettings = { settingsFired = true },
+                )
+            }
+        }
+
+        // Collapsed: only the overflow button is present; items are not yet shown.
+        composeTestRule.onNodeWithTag("sessions_overflow_action").assertIsDisplayed().assertHasClickAction()
+        composeTestRule.onNodeWithTag("sessions_server_ssh_action").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("sessions_menu_settings").assertDoesNotExist()
+
+        // Open → the two items appear.
+        composeTestRule.onNodeWithTag("sessions_overflow_action").performClick()
+        composeTestRule.onNodeWithText(ctx.getString(R.string.server_ssh_action)).assertIsDisplayed()
+        composeTestRule.onNodeWithText(ctx.getString(R.string.sessions_menu_settings)).assertIsDisplayed()
+
+        // "Start SSH session" fires onStartSsh only (preserved UC-62 behavior + tag).
+        composeTestRule.onNodeWithTag("sessions_server_ssh_action").performClick()
+        assertTrue("Start SSH session fires onStartSsh", sshFired)
+        assertFalse("the SSH item must not fire Settings", settingsFired)
+
+        // Re-open → "Settings" fires onOpenSettings.
+        composeTestRule.onNodeWithTag("sessions_overflow_action").performClick()
+        composeTestRule.onNodeWithTag("sessions_menu_settings").performClick()
+        assertTrue("Settings fires onOpenSettings", settingsFired)
     }
 }
