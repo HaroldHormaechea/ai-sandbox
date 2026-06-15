@@ -2107,4 +2107,102 @@ class ConversationControllerTest {
             c.close()
         }
     }
+
+    // ── Part H (optional edge cases, per the developer's change notes) ──────────────────────────
+    // These pin CURRENT behaviour for two orderings the approved design treats as out-of-scope
+    // because real server flows do not produce them. They are documentation guards: if the contract
+    // is ever tightened around these orderings, they will flag the change for review.
+
+    @Test
+    fun `a server target-selected frame is a selection echo, not a window reset, so a same-epoch page still assembles`() {
+        // Edge case (a) — a server-pushed `target-selected` frame only updates the selected target
+        // label; it does NOT bump transcriptEpoch (it is not a transcript-window reset, and it does
+        // not wipe the store). So an in-flight load-older page requested in the SAME epoch still
+        // matches and assembles onto the still-displayed window. In real flows a `backfill-start`
+        // ALWAYS follows the selection and IS the window reset (it bumps the epoch + re-renders).
+        val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        enqueueCapture(wsRef)
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { c.state.value == TerminalState.Open && wsRef.get() != null }).isTrue
+            val ws = wsRef.get()!!
+            // Render the current window (A).
+            listOf(
+                """{"type":"backfill-start","source":"main"}""",
+                """{"type":"assistant-text","uuid":"a1","source":"main","isSidechain":false,"text":"a1"}""",
+                """{"type":"assistant-text","uuid":"a2","source":"main","isSidechain":false,"text":"a2"}""",
+                """{"type":"backfill-end","source":"main"}""",
+            ).forEach { ws.send(it) }
+            assertThat(awaitUntil { assistantTexts(c) == listOf("a1", "a2") }).isTrue
+            c.loadOlder() // captures the live epoch
+            assertThat(awaitUntil { c.loadingOlder.value }).isTrue
+            // A server `target-selected` echo arrives (no trailing backfill) — selection updates,
+            // but the epoch is NOT bumped, so the in-flight page is NOT stale.
+            ws.send("""{"type":"target-selected","targetId":"swarm:main:0.1"}""")
+            assertThat(awaitUntil { c.selectedTargetId.value == "swarm:main:0.1" }).isTrue
+            listOf(
+                """{"type":"page-start"}""",
+                """{"type":"assistant-text","uuid":"o1","source":"main","isSidechain":false,"text":"old-1"}""",
+                """{"type":"assistant-text","uuid":"o2","source":"main","isSidechain":false,"text":"old-2"}""",
+                """{"type":"page-end","atStart":false}""",
+            ).forEach { ws.send(it) }
+            // The page assembled (epoch matched) — pinning that target-selected alone is not a reset.
+            assertThat(awaitUntil { assistantTexts(c) == listOf("old-1", "old-2", "a1", "a2") })
+                .withFailMessage("target-selected wrongly treated as a window reset; got ${assistantTexts(c)}")
+                .isTrue
+            assertThat(awaitUntil { !c.loadingOlder.value }).isTrue
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
+    fun `a mid-burst backfill-start clears the drain and B's window survives a trailing stale page-end`() {
+        // Edge case (b) — a `backfill-start` arriving BETWEEN a stale `page-start` and its `page-end`
+        // clears `pageDiscarding` (it is handled before the discard gate), so the trailing stale
+        // `page-end` then takes the normal endPage() path. The load-bearing invariant: B's freshly
+        // backfilled window is NEVER corrupted — the stale page's content does not leak and B renders
+        // cleanly. (Server bursts are contiguous, so this interleaving is not expected live; the
+        // atTranscriptStart side-effect of the trailing page-end is the documented out-of-scope quirk.)
+        val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        enqueueCapture(wsRef)
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { c.state.value == TerminalState.Open && wsRef.get() != null }).isTrue
+            val ws = wsRef.get()!!
+            c.loadOlder() // on A — captures the current epoch
+            assertThat(awaitUntil { c.loadingOlder.value }).isTrue
+            c.selectTarget("swarm:main:0.1") // epoch bump → the in-flight page is now stale
+            listOf(
+                // Stale page begins draining; an interleaved stale CONTENT line is dropped …
+                """{"type":"page-start"}""",
+                """{"type":"assistant-text","uuid":"sx","source":"main","isSidechain":false,"text":"stale-x"}""",
+                // … then B's backfill-start lands mid-burst (clears the drain) and renders B …
+                """{"type":"backfill-start","source":"main"}""",
+                """{"type":"assistant-text","uuid":"b1","source":"main","isSidechain":false,"text":"b1"}""",
+                """{"type":"assistant-text","uuid":"b2","source":"main","isSidechain":false,"text":"b2"}""",
+                """{"type":"backfill-end","source":"main"}""",
+                // … and only NOW the stale page-end arrives (drain already cleared → endPage path).
+                """{"type":"page-end","atStart":true}""",
+            ).forEach { ws.send(it) }
+            // Load-bearing invariant: B's window is intact and the stale page's content never leaked.
+            assertThat(awaitUntil { assistantTexts(c) == listOf("b1", "b2") })
+                .withFailMessage("B window corrupted by the interleaving; got ${assistantTexts(c)}")
+                .isTrue
+            assertThat(c.selectedTargetId.value).isEqualTo("swarm:main:0.1")
+            // A later live line still renders (the controller is not wedged in a drain).
+            ws.send("""{"type":"assistant-text","uuid":"b3","source":"main","isSidechain":false,"text":"b3"}""")
+            assertThat(awaitUntil { assistantTexts(c) == listOf("b1", "b2", "b3") }).isTrue
+            // Documented out-of-scope quirk: the trailing stale page-end(atStart=true) took the
+            // endPage path and flipped atTranscriptStart on B's window. Pinned so any future change
+            // to make page-end epoch-aware surfaces here for review.
+            assertThat(c.atTranscriptStart.value)
+                .withFailMessage("known quirk changed: trailing stale page-end no longer sets atTranscriptStart")
+                .isTrue
+        } finally {
+            c.close()
+        }
+    }
 }
