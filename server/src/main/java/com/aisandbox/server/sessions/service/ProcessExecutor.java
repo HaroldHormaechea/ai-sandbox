@@ -34,6 +34,23 @@ public class ProcessExecutor {
 
     public record Result(int exitCode, String stdout, String stderr) {}
 
+    /**
+     * UC-77 — raised when the child process exceeds its wall-clock
+     * {@code timeout} and is killed. A dedicated {@link IOException} subtype
+     * so the one caller that needs to distinguish a timeout from any other
+     * I/O failure ({@code SessionFacade.spawnSession} → 504 {@code
+     * spawn_timeout}) can {@code catch} it specifically, while the ~7 other
+     * {@code run(...)} callers — which only {@code catch IOException} — keep
+     * their existing behaviour unchanged.
+     */
+    public static class ExecTimeoutException extends IOException {
+        private static final long serialVersionUID = 1L;
+
+        public ExecTimeoutException(String message) {
+            super(message);
+        }
+    }
+
     public Result run(List<String> argv, Path workingDir, Duration timeout) throws IOException {
         return run(argv, workingDir, Map.of(), timeout);
     }
@@ -78,7 +95,12 @@ public class ProcessExecutor {
                 if (p.isAlive()) {
                     p.destroyForcibly();
                 }
-                throw new TimeoutException("exec timeout: " + argv.get(0));
+                // UC-77 — surface the wall-clock timeout as a distinct IOException
+                // subtype (not the generic IOException wrap below) so the spawn
+                // facade can map it to 504 spawn_timeout. ExecTimeoutException
+                // extends IOException (not TimeoutException), so it propagates
+                // straight out and is NOT re-wrapped by the catch clause below.
+                throw new ExecTimeoutException("exec timeout: " + argv.get(0));
             }
             String stdout = outFut.get(2, TimeUnit.SECONDS);
             String stderr = errFut.get(2, TimeUnit.SECONDS);

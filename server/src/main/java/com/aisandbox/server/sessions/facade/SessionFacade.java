@@ -12,6 +12,7 @@ import com.aisandbox.server.sessions.facade.internal.PerSessionMutexRegistry;
 import com.aisandbox.server.sessions.facade.internal.SpawnMutex;
 import com.aisandbox.server.sessions.service.HostShellSessionService;
 import com.aisandbox.server.sessions.service.ProcessExecutor;
+import com.aisandbox.server.sessions.service.SandboxImageState;
 import com.aisandbox.server.sessions.service.ScriptExecutorService;
 import com.aisandbox.server.sessions.service.SessionRegistryService;
 import com.aisandbox.server.sessions.service.TerminatingSessions;
@@ -58,6 +59,16 @@ public class SessionFacade {
      */
     private volatile HostShellSessionService hostShell;
 
+    /**
+     * UC-77 — the sandbox-image warm-up facade. Injected via a setter (not the
+     * constructor) so the existing unit-test constructions of this facade
+     * compile unchanged — the same late-binding pattern {@link #hostShell}
+     * uses. In production it is always present; when unset (pre-UC-77 tests that
+     * don't wire it) the spawn gate is skipped and spawning behaves exactly as
+     * before.
+     */
+    private volatile SandboxImageFacade sandboxImage;
+
     public SessionFacade(
             SessionRegistryService registry,
             ScriptExecutorService executor,
@@ -79,6 +90,12 @@ public class SessionFacade {
     @Autowired(required = false)
     public void setHostShell(HostShellSessionService hostShell) {
         this.hostShell = hostShell;
+    }
+
+    /** Late-binding injection of the UC-77 sandbox-image facade (see field doc). */
+    @Autowired(required = false)
+    public void setSandboxImage(SandboxImageFacade sandboxImage) {
+        this.sandboxImage = sandboxImage;
     }
 
     /**
@@ -135,9 +152,48 @@ public class SessionFacade {
      * @throws SpawnFailedException on non-zero exit from {@code spawn.sh}
      */
     public int spawnSession(SpawnCommand cmd) throws IOException, InterruptedException {
+        // UC-77 — sandbox-image gate. The first interactive spawn on a cold
+        // cache used to run spawn.sh's `docker compose up`, which builds the
+        // absent image inside the tight spawn timeout → hard 500. The request
+        // path now NEVER runs the heavy build: the image is warmed ahead of
+        // time (startup runner + this gate's async kick), and a spawn arriving
+        // before it is ready is rejected fast with 503 sandbox_image_warming.
+        // READY → proceed unchanged (warm path byte-identical to pre-UC-77).
+        SandboxImageFacade img = this.sandboxImage;
+        if (img != null) {
+            SandboxImageState imgState = img.state();
+            switch (imgState) {
+                case READY -> {
+                    // image present + current — fall through to the normal spawn.
+                }
+                case BUILDING -> throw new SandboxImageWarmingException(imgState);
+                case ABSENT, FAILED -> {
+                    // Kick the warm build off-request and reject fast; the request
+                    // thread must never run the minutes-long build.
+                    img.warmAsync();
+                    throw new SandboxImageWarmingException(imgState);
+                }
+            }
+        }
         spawnMutex.acquire();
         try {
-            ProcessExecutor.Result result = executor.spawn(cmd, spawnTimeout);
+            ProcessExecutor.Result result;
+            try {
+                result = executor.spawn(cmd, spawnTimeout);
+            } catch (ProcessExecutor.ExecTimeoutException te) {
+                // UC-77 — spawn.sh exceeded the (build-free, still-tight) spawn
+                // timeout: a genuinely stuck `up`. Surface as 504 spawn_timeout,
+                // distinct from a 500 spawn_failed (non-zero exit). With the image
+                // warmed up-front, this is no longer triggered by a cold build.
+                audit.logEvent(
+                        AuditAction.SESSION_SPAWN,
+                        "timeout",
+                        "timeoutSeconds",
+                        spawnTimeout.toSeconds(),
+                        "label",
+                        String.valueOf(cmd.label()));
+                throw new SpawnTimeoutException(spawnTimeout.toSeconds(), te.getMessage());
+            }
             int assignedN = parseAssignedN(result.stdout(), result.stderr());
             if (result.exitCode() != 0) {
                 if (assignedN > 0) {
@@ -371,6 +427,24 @@ public class SessionFacade {
             this.exitCode = exitCode;
             this.stderr = stderr;
             this.consumedN = consumedN;
+        }
+    }
+
+    /**
+     * UC-77 — thrown when {@code spawn.sh} exceeds the per-request spawn
+     * timeout (a genuinely stuck {@code up}, no longer a cold build — the image
+     * is warmed ahead of time). Mapped to 504 {@code spawn_timeout} by
+     * {@code ProblemDetailsAdvice}, distinct from the 500 {@code spawn_failed}
+     * (non-zero exit) path, so a slow/stuck spawn is distinguishable from a hard
+     * failure (AC3).
+     */
+    public static final class SpawnTimeoutException extends RuntimeException {
+        private static final long serialVersionUID = 1L;
+        public final long timeoutSeconds;
+
+        public SpawnTimeoutException(long timeoutSeconds, String detail) {
+            super("spawn.sh timed out after " + timeoutSeconds + "s" + (detail == null ? "" : " (" + detail + ")"));
+            this.timeoutSeconds = timeoutSeconds;
         }
     }
 

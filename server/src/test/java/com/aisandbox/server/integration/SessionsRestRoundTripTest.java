@@ -8,10 +8,13 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.reset;
 import static org.mockito.Mockito.when;
 
+import com.aisandbox.server.cli.secrets.ServerVersion;
 import com.aisandbox.server.identity.ClientIdentity;
 import com.aisandbox.server.identity.ClientIdentityExtractor;
+import com.aisandbox.server.sessions.facade.SandboxImageFacade;
 import com.aisandbox.server.sessions.service.DockerEnumerationService;
 import com.aisandbox.server.sessions.service.ProcessExecutor;
+import com.aisandbox.server.sessions.service.SandboxImageState;
 import com.aisandbox.server.sessions.service.SessionRegistryService;
 import com.aisandbox.server.test.CertFixtures;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -228,6 +231,9 @@ class SessionsRestRoundTripTest {
     @Autowired
     SessionRegistryService registry;
 
+    @Autowired
+    SandboxImageFacade sandboxImage;
+
     @BeforeEach
     void resetSeams() throws Exception {
         reset(executor);
@@ -241,6 +247,13 @@ class SessionsRestRoundTripTest {
      */
     @Test
     void create_list_delete_round_trip() throws Exception {
+        // UC-77 — the full context now boots the SandboxImageWarmupRunner + the
+        // SessionFacade spawn gate. With ProcessExecutor mocked, the startup warm
+        // can't reach the real `docker image inspect`, so the image is not READY
+        // and the gate would 503 the spawn. Drive it to READY (image present +
+        // current ⇒ no build) BEFORE the POST so the round trip exercises the
+        // warm spawn path, byte-identical to pre-UC-77.
+        markSandboxImageReady();
         stubSpawnReturnsProject3();
         stubEnumerationReportsProject3Running();
         stubCleanExitZero();
@@ -346,6 +359,23 @@ class SessionsRestRoundTripTest {
 
     // ── stub helpers ─────────────────────────────────────────────────────
 
+    /**
+     * UC-77 — stub the sandbox-image classify inspect so the image reads as
+     * present + current ({@code label == ServerVersion.current()} ⇒ CURRENT, no
+     * build), then synchronously warm the facade to READY. Deterministic: warm()
+     * runs the classify on this thread; the startup warmup already settled the
+     * state (to FAILED, since its inspect was un-stubbed), and FAILED is
+     * recoverable, so this drives it cleanly to READY before any spawn POST.
+     */
+    private void markSandboxImageReady() throws IOException {
+        when(executor.run(argThat(SessionsRestRoundTripTest::isSandboxImageInspectArgv), any(), any()))
+                .thenReturn(new ProcessExecutor.Result(0, ServerVersion.current(), ""));
+        SandboxImageState state = sandboxImage.warm();
+        assertThat(state)
+                .as("sandbox image must warm to READY (present+current) before the spawn round trip")
+                .isEqualTo(SandboxImageState.READY);
+    }
+
     /** spawn.sh argv → exit 0 + stdout containing the assigned project tag. */
     private void stubSpawnReturnsProject3() throws IOException {
         when(executor.run(argThat(SessionsRestRoundTripTest::isSpawnArgv), any(), any(), any()))
@@ -390,6 +420,21 @@ class SessionsRestRoundTripTest {
 
     private static boolean isSpawnArgv(List<String> argv) {
         return argv != null && !argv.isEmpty() && argv.get(0).endsWith("spawn.sh");
+    }
+
+    /**
+     * UC-77 — the sandbox-image classify probe: {@code docker image inspect
+     * --format '{{ index .Config.Labels "…" }}' ai-context:latest}. Distinct
+     * from {@link #isInspectArgv} (the per-container {@code docker inspect}) by
+     * the {@code image} subcommand.
+     */
+    private static boolean isSandboxImageInspectArgv(List<String> argv) {
+        return argv != null
+                && !argv.isEmpty()
+                && "docker".equals(argv.get(0))
+                && argv.contains("image")
+                && argv.contains("inspect")
+                && argv.contains("--format");
     }
 
     private static boolean isAnyCleanArgv(List<String> argv) {

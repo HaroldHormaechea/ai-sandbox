@@ -157,7 +157,27 @@ public record ServerProperties(
             @Min(1) int perIpWindowSeconds,
             @Min(1) int perIpConcurrent,
             @Min(1) int spawnTimeoutSeconds,
-            @Min(1) int maxRequestBytes) {}
+            @Min(1) int maxRequestBytes) {
+
+        /**
+         * UC-77 — wall-clock bound (seconds) for the server-side warm build
+         * of the {@code ai-context:latest} sandbox image
+         * ({@code SandboxImageService}). The cold first build legitimately
+         * takes minutes, so it must NOT be bounded by the tight per-request
+         * {@link #spawnTimeoutSeconds()} (which stays a build-free stuck-spawn
+         * guard). Like {@link Streams#conversationBackfillLines()} this is a
+         * defaulted accessor rather than a new YAML-bound, {@code @Min}-validated
+         * field, so existing {@code config.yaml}, {@code sample-config.yaml}, and
+         * QA test fixtures bind unchanged. Promote to a bound field if
+         * per-deployment tuning is ever needed.
+         */
+        public int imageBuildTimeoutSeconds() {
+            return IMAGE_BUILD_TIMEOUT_SECONDS_DEFAULT;
+        }
+    }
+
+    /** UC-77 default warm-build timeout (30&nbsp;min) — see {@link Limits#imageBuildTimeoutSeconds()}. */
+    public static final int IMAGE_BUILD_TIMEOUT_SECONDS_DEFAULT = 1800;
 
     public record Audit(@NotNull Path file, @Min(1) int retentionDays) {}
 

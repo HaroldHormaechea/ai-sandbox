@@ -18,10 +18,13 @@ import com.aisandbox.server.sessions.dto.LifecycleAction;
 import com.aisandbox.server.sessions.dto.SessionRecord;
 import com.aisandbox.server.sessions.dto.SpawnCommand;
 import com.aisandbox.server.sessions.dto.WorkspaceMode;
+import com.aisandbox.server.sessions.facade.SandboxImageFacade;
+import com.aisandbox.server.sessions.facade.SandboxImageWarmingException;
 import com.aisandbox.server.sessions.facade.SessionFacade;
 import com.aisandbox.server.sessions.facade.internal.PerSessionMutexRegistry;
 import com.aisandbox.server.sessions.facade.internal.SpawnMutex;
 import com.aisandbox.server.sessions.service.ProcessExecutor;
+import com.aisandbox.server.sessions.service.SandboxImageState;
 import com.aisandbox.server.sessions.service.ScriptExecutorService;
 import com.aisandbox.server.sessions.service.SessionRegistryService;
 import com.aisandbox.server.sessions.service.TerminatingSessions;
@@ -145,6 +148,170 @@ class SessionFacadeTest {
                 .isInstanceOf(SessionFacade.SpawnFailedException.class);
 
         verify(exec, never()).clean(anyInt(), any());
+    }
+
+    // ── UC-77 — sandbox-image spawn gate (AC1/AC2/AC4) ───────────────────
+    //
+    // The first interactive spawn on a cold cache used to run spawn.sh's
+    // `docker compose up`, which builds the absent image inside the tight
+    // spawn timeout → hard 500. The gate now consults the warmed image state
+    // BEFORE running spawn.sh: READY → proceed (warm path byte-identical to
+    // pre-UC-77); BUILDING → reject fast (503) WITHOUT running spawn.sh;
+    // ABSENT/FAILED → kick an off-request warm and reject fast. The
+    // SandboxImageFacade is setter-injected, so pre-UC-77 constructions (which
+    // never call the setter) skip the gate entirely.
+
+    private static SessionFacade facadeWithImage(
+            SessionRegistryService registry, ScriptExecutorService exec, AuditLogger audit, SandboxImageFacade image) {
+        SessionFacade facade = new SessionFacade(
+                registry,
+                exec,
+                new SpawnMutex(),
+                new PerSessionMutexRegistry(),
+                audit,
+                new TerminatingSessions(),
+                props());
+        facade.setSandboxImage(image);
+        return facade;
+    }
+
+    @Test
+    void spawn_ready_image_proceeds_with_a_byte_identical_spawn() throws Exception {
+        SessionRegistryService registry = mock(SessionRegistryService.class);
+        ScriptExecutorService exec = mock(ScriptExecutorService.class);
+        AuditLogger audit = mock(AuditLogger.class);
+        SandboxImageFacade image = mock(SandboxImageFacade.class);
+        when(image.state()).thenReturn(SandboxImageState.READY);
+        when(exec.spawn(any(), any())).thenReturn(new ProcessExecutor.Result(0, "ai-sandbox-9 ready", ""));
+
+        SessionFacade facade = facadeWithImage(registry, exec, audit, image);
+
+        int n = facade.spawnSession(new SpawnCommand("foo", WorkspaceMode.SHARED, ClaudeConfigMode.SHARED));
+
+        assertThat(n).isEqualTo(9);
+        verify(exec).spawn(any(), any());
+        verify(registry).invalidate();
+        // READY never re-kicks a warm — the warm path adds no latency (AC4).
+        verify(image, never()).warmAsync();
+    }
+
+    @Test
+    void spawn_while_building_rejects_fast_without_running_spawn_sh() throws Exception {
+        SessionRegistryService registry = mock(SessionRegistryService.class);
+        ScriptExecutorService exec = mock(ScriptExecutorService.class);
+        AuditLogger audit = mock(AuditLogger.class);
+        SandboxImageFacade image = mock(SandboxImageFacade.class);
+        when(image.state()).thenReturn(SandboxImageState.BUILDING);
+
+        SessionFacade facade = facadeWithImage(registry, exec, audit, image);
+
+        assertThatThrownBy(() ->
+                        facade.spawnSession(new SpawnCommand("foo", WorkspaceMode.SHARED, ClaudeConfigMode.SHARED)))
+                .isInstanceOf(SandboxImageWarmingException.class)
+                .hasFieldOrPropertyWithValue("state", SandboxImageState.BUILDING);
+
+        // The request thread MUST NOT run the heavy build (no spawn.sh) and a
+        // build already in flight is not re-kicked.
+        verify(exec, never()).spawn(any(), any());
+        verify(image, never()).warmAsync();
+    }
+
+    @Test
+    void spawn_while_absent_kicks_async_warm_and_rejects_fast() throws Exception {
+        SessionRegistryService registry = mock(SessionRegistryService.class);
+        ScriptExecutorService exec = mock(ScriptExecutorService.class);
+        AuditLogger audit = mock(AuditLogger.class);
+        SandboxImageFacade image = mock(SandboxImageFacade.class);
+        when(image.state()).thenReturn(SandboxImageState.ABSENT);
+
+        SessionFacade facade = facadeWithImage(registry, exec, audit, image);
+
+        assertThatThrownBy(() ->
+                        facade.spawnSession(new SpawnCommand("foo", WorkspaceMode.SHARED, ClaudeConfigMode.SHARED)))
+                .isInstanceOf(SandboxImageWarmingException.class)
+                .hasFieldOrPropertyWithValue("state", SandboxImageState.ABSENT);
+
+        // Off-request warm is kicked; the heavy build never runs in-request.
+        verify(image).warmAsync();
+        verify(exec, never()).spawn(any(), any());
+    }
+
+    @Test
+    void spawn_while_failed_re_kicks_async_warm_and_rejects_fast() throws Exception {
+        SessionRegistryService registry = mock(SessionRegistryService.class);
+        ScriptExecutorService exec = mock(ScriptExecutorService.class);
+        AuditLogger audit = mock(AuditLogger.class);
+        SandboxImageFacade image = mock(SandboxImageFacade.class);
+        when(image.state()).thenReturn(SandboxImageState.FAILED);
+
+        SessionFacade facade = facadeWithImage(registry, exec, audit, image);
+
+        assertThatThrownBy(() ->
+                        facade.spawnSession(new SpawnCommand("foo", WorkspaceMode.SHARED, ClaudeConfigMode.SHARED)))
+                .isInstanceOf(SandboxImageWarmingException.class)
+                .hasFieldOrPropertyWithValue("state", SandboxImageState.FAILED);
+
+        verify(image).warmAsync();
+        verify(exec, never()).spawn(any(), any());
+    }
+
+    /**
+     * AC2 — with the image warmed up-front the per-request spawn timeout stays a
+     * tight, build-free stuck-spawn guard. A genuinely stuck {@code spawn.sh}
+     * surfaces as {@link ProcessExecutor.ExecTimeoutException} (an IOException
+     * subtype) from the executor; the facade maps it to {@link
+     * SessionFacade.SpawnTimeoutException} (→ 504 spawn_timeout), distinct from
+     * the 500 {@code spawn_failed} (non-zero exit) path, and {@code clean.sh} is
+     * NOT run for a timeout.
+     */
+    @Test
+    void spawn_timeout_maps_to_spawn_timeout_exception_distinct_from_spawn_failed() throws Exception {
+        SessionRegistryService registry = mock(SessionRegistryService.class);
+        ScriptExecutorService exec = mock(ScriptExecutorService.class);
+        AuditLogger audit = mock(AuditLogger.class);
+        SandboxImageFacade image = mock(SandboxImageFacade.class);
+        when(image.state()).thenReturn(SandboxImageState.READY);
+        when(exec.spawn(any(), any())).thenThrow(new ProcessExecutor.ExecTimeoutException("exec timeout: spawn.sh"));
+
+        SessionFacade facade = facadeWithImage(registry, exec, audit, image);
+
+        assertThatThrownBy(() ->
+                        facade.spawnSession(new SpawnCommand("foo", WorkspaceMode.SHARED, ClaudeConfigMode.SHARED)))
+                .isInstanceOf(SessionFacade.SpawnTimeoutException.class)
+                .isNotInstanceOf(SessionFacade.SpawnFailedException.class)
+                // props() pins spawn-timeout-seconds = 5.
+                .hasFieldOrPropertyWithValue("timeoutSeconds", 5L);
+
+        verify(exec, never()).clean(anyInt(), any());
+    }
+
+    /**
+     * AC4 — a pre-UC-77 construction (the {@code SandboxImageFacade} setter is
+     * never called) skips the gate entirely and spawns exactly as before, so the
+     * existing spawn tests stay green and the warm path adds nothing when the
+     * facade is absent.
+     */
+    @Test
+    void spawn_with_no_sandbox_image_facade_skips_the_gate() throws Exception {
+        SessionRegistryService registry = mock(SessionRegistryService.class);
+        ScriptExecutorService exec = mock(ScriptExecutorService.class);
+        AuditLogger audit = mock(AuditLogger.class);
+        when(exec.spawn(any(), any())).thenReturn(new ProcessExecutor.Result(0, "ai-sandbox-3 ready", ""));
+
+        SessionFacade facade = new SessionFacade(
+                registry,
+                exec,
+                new SpawnMutex(),
+                new PerSessionMutexRegistry(),
+                audit,
+                new TerminatingSessions(),
+                props());
+        // NOTE: setSandboxImage(...) intentionally NOT called.
+
+        int n = facade.spawnSession(new SpawnCommand("foo", WorkspaceMode.SHARED, ClaudeConfigMode.SHARED));
+
+        assertThat(n).isEqualTo(3);
+        verify(exec).spawn(any(), any());
     }
 
     @Test

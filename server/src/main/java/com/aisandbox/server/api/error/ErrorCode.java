@@ -40,7 +40,11 @@ public enum ErrorCode {
     // UC-46 — a lifecycle action (stop/start/pause/unpause) was requested
     // for a session whose current state does not permit it (e.g. START on a
     // running session, PAUSE on a stopped one). Mapped to 409 Conflict.
-    SESSION_STATE_CONFLICT;
+    SESSION_STATE_CONFLICT,
+    // UC-77 — a spawn arrived while the ai-context:latest sandbox image is
+    // still being prepared (warm build in progress, or just (re)kicked).
+    // Mapped to 503; the request never runs the heavy build itself.
+    SANDBOX_IMAGE_WARMING;
 
     public String wire() {
         return name().toLowerCase();
