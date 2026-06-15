@@ -3,7 +3,7 @@ Version: @aiSandboxServerVersion@
 Section: admin
 Priority: optional
 Architecture: amd64
-Depends: openjdk-21-jre-headless | openjdk-21-jdk-headless, docker.io | docker-ce, unzip, openssh-client, debconf (>= 0.5) | debconf-2.0
+Depends: openjdk-21-jre-headless | openjdk-21-jdk-headless, docker.io | docker-ce, unzip, openssh-client, curl, ca-certificates, debconf (>= 0.5) | debconf-2.0
 Maintainer: ai-sandbox <noreply@example.com>
 Homepage: https://github.com/HaroldHormaechea/ai-sandbox
 Description: ai-sandbox mTLS management server (UC03)

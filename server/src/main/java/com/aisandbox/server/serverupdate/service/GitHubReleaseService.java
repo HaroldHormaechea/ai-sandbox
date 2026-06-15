@@ -65,6 +65,7 @@ public class GitHubReleaseService {
     private final ObjectMapper mapper;
     private final String apiBaseUrl;
 
+    @org.springframework.beans.factory.annotation.Autowired
     public GitHubReleaseService(@Value("${ai-sandbox.update.github-api-base:https://api.github.com}") String apiBaseUrl) {
         this(
                 HttpClient.newBuilder()

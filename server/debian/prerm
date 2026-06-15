@@ -15,6 +15,12 @@ case "$1" in
         if command -v systemctl >/dev/null 2>&1; then
             systemctl stop ai-sandbox-server >/dev/null 2>&1 || true
             systemctl disable ai-sandbox-server >/dev/null 2>&1 || true
+            # UC-84 — stop + disable the self-update trigger watch. On `upgrade`
+            # (incl. a self-update via dpkg -i) the new postinst re-enables it;
+            # the in-flight ai-sandbox-updater.service oneshot is an independent
+            # unit and completes regardless. Guarded/`|| true` like the server
+            # unit above (unit may be unknown, or no systemd in a container).
+            systemctl disable --now ai-sandbox-updater.path >/dev/null 2>&1 || true
         fi
         ;;
 

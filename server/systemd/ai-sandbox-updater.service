@@ -1,0 +1,23 @@
+[Unit]
+Description=ai-sandbox server self-updater (UC-84)
+Documentation=file:///opt/ai-sandbox-server/README.md
+# The download needs the network; the install/restart needs dpkg + systemd.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+
+# Runs as root (the unit's default) — this is the SINGLE privileged executable
+# the server can cause to run, and it takes NO parameters (AC11/AC12). The
+# server passes it nothing: no version, no path, no flags, and — critically —
+# NO env. There is deliberately NO EnvironmentFile here (especially none from a
+# server-writable path), so the script runs under a clean systemd environment
+# and cannot be steered by injected/poisoned env vars. The script derives its
+# own target (latest server-v* release) entirely from its own trusted logic.
+ExecStart=/opt/ai-sandbox-server/updater/ai-sandbox-updater.sh
+
+# A self-update restarts ai-sandbox-server; because this updater is its OWN unit
+# (not a child of ai-sandbox-server), it survives that restart and the oneshot
+# completes normally.
+TimeoutStartSec=600

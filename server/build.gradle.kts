@@ -355,6 +355,13 @@ val releaseBundle by tasks.registering(Zip::class) {
     from("$projectDir/README.md") { into(".") }
     from("$projectDir/sample-config.yaml") { into(".") }
     from("$projectDir/systemd") { into("systemd") }
+    // UC-84 — the root-owned self-updater script. Shipped under updater/ in the
+    // operator zip (the .deb installs it to /opt/ai-sandbox-server/updater/),
+    // separate from host/. Executable bit preserved like the host scripts.
+    from(rootProject.file("ai-sandbox-updater.sh")) {
+        into("updater")
+        filePermissions { unix("rwxr-xr-x") }
+    }
     // UC05 § AC3,AC5 — POSIX shell scripts shipped under host/ with mode 0755.
     from(rootProject.file("spawn.sh")) {
         into("host")
@@ -592,12 +599,25 @@ val prepDebStaging by tasks.registering(Copy::class) {
         filePermissions { unix("rwxr-xr-x") }
     }
 
-    // /lib/systemd/system/ai-sandbox-server.service — Debian-canonical
-    // location for distro-provided units (vs /etc/systemd/system/ which
-    // is reserved for local-admin overrides per systemd.unit(5)).
-    from("$projectDir/systemd/ai-sandbox-server.service") {
+    // /lib/systemd/system/*.{service,path} — Debian-canonical location for
+    // distro-provided units (vs /etc/systemd/system/ which is reserved for
+    // local-admin overrides per systemd.unit(5)). Copies the whole systemd/
+    // dir so ai-sandbox-server.service AND the UC-84 self-update units
+    // (ai-sandbox-updater.service + ai-sandbox-updater.path) all land here at
+    // 0644 (block-2 in jdeb; these are data files, not *.sh scripts).
+    from("$projectDir/systemd") {
         into("lib/systemd/system")
         filePermissions { unix("rw-r--r--") }
+    }
+
+    // UC-84 — /opt/ai-sandbox-server/updater/ai-sandbox-updater.sh — the
+    // root-owned, parameter-free self-updater. Lives in a dedicated dir,
+    // SEPARATE from host/ (which the server can shell out to) and NOT in
+    // HostScriptLocator, so the server has no exec path to it. *.sh → 0755 via
+    // jdeb block-1 (named-pattern), matching the host scripts.
+    from(rootProject.file("ai-sandbox-updater.sh")) {
+        into("opt/ai-sandbox-server/updater")
+        filePermissions { unix("rwxr-xr-x") }
     }
 
     // /usr/bin/aisandboxctl — UC08 § AC1. Thin POSIX shell wrapper that
