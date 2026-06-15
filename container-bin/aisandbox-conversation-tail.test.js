@@ -2722,3 +2722,70 @@ test('UC-79 AC4 — `--fetch-page` against an unresolvable transcript degrades t
     fs.rmSync(empty, { recursive: true, force: true });
   }
 });
+
+// ──────────────────────── UC-80 — long message bodies survive the helper whole ────────────────────────
+//
+// The fix that un-crops long chat messages lives server-side (ConversationEventMapper now
+// byte-bounds the user prompt to 48 KB instead of 600 chars). The challenger/analyst flagged
+// the upstream survival question: does a realistically-long line survive the helper itself
+// (helper → mapper → client), or is it truncated/dropped BEFORE the mapper ever sees it?
+// The helper keeps each transcript line WHOLE — it only ever drops whole oldest lines when a
+// TOTAL-bytes page budget is exceeded; it never truncates a single line's content. These
+// tests prove a ~5–10 KB assistant (and user) line is delivered intact, in full, on both the
+// backfill path and the live readNewLines path, so the full body reaches the server mapper.
+
+// A multi-KB assistant text line, byte-size controllable via `chars`.
+const longAssistantLine = (chars) => assistantTextLine('BODYSTART ' + 'A'.repeat(chars) + ' BODYEND');
+// Pull the JSON half out of a `<source>\t<raw-json>` envelope line the helper emits.
+const rawOf = (envelope) => envelope.slice(envelope.indexOf('\t') + 1);
+
+test('UC-80 — a ~5KB assistant line survives backfill WHOLE (full body reaches the mapper, not truncated)', () => {
+  const dir = mkTmp('uc80-survive-backfill-');
+  try {
+    const file = path.join(dir, 'main.jsonl');
+    const big = longAssistantLine(5000); // ~5 KB single assistant text line
+    // Sanity: the source line really is multi-KB and far past the old 600-char crop.
+    assert.ok(Buffer.byteLength(big, 'utf8') > 5000, 'fixture assistant line is >5KB');
+    fs.writeFileSync(file, body([userLine('please summarise the doc'), big, turnEndLine()]));
+    const reader = helper.makeReader(file, 'main');
+
+    const emitted = captureOut(() => helper.backfill(reader, 200, 1_000_000));
+
+    // The big assistant line is present, emitted WHOLE (envelope = `main\t<raw>`), byte-for-byte.
+    const match = emitted.find((l) => l.includes('BODYSTART') && l.includes('BODYEND'));
+    assert.ok(match, 'the long assistant line must be emitted by backfill');
+    assert.strictEqual(rawOf(match), big, 'the raw JSON half is delivered verbatim — not truncated/altered');
+    // The mapper-relevant payload survives in full: parse + assert the text block is intact.
+    const parsed = JSON.parse(rawOf(match));
+    const text = parsed.message.content[0].text;
+    assert.ok(text.length > 5000 && text.startsWith('BODYSTART') && text.endsWith('BODYEND'),
+      'the assistant text block survives end-to-end in full');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('UC-80 — a ~10KB assistant line appended live survives readNewLines WHOLE', () => {
+  const dir = mkTmp('uc80-survive-live-');
+  try {
+    const file = path.join(dir, 'main.jsonl');
+    fs.writeFileSync(file, body([userLine('go')]));
+    const reader = helper.makeReader(file, 'main');
+    const t0 = 2_000_000;
+    // Drain the existing line so the reader is positioned at EOF.
+    captureOut(() => helper.backfill(reader, 200, t0));
+
+    // claude appends a fat ~10 KB assistant line, newline-terminated.
+    const big = longAssistantLine(10000);
+    fs.appendFileSync(file, big + '\n');
+
+    const emitted = helper.readNewLines(reader, t0 + helper.POLL_MS);
+    assert.strictEqual(emitted.length, 1, 'exactly the one new line is emitted');
+    // readNewLines returns the RAW line (no source envelope) — it must be the full line, intact.
+    assert.strictEqual(emitted[0], big, 'the ~10KB line is delivered whole on the live path');
+    const text = JSON.parse(emitted[0]).message.content[0].text;
+    assert.ok(text.length > 10000, 'the live-delivered assistant body is full (>10KB), not cropped');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

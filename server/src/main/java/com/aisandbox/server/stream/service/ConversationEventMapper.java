@@ -609,7 +609,9 @@ public class ConversationEventMapper {
             return "";
         }
         if (content.isTextual()) {
-            return bound(content.asText(), MAX_SUMMARY_LEN);
+            // UC-80 — render the full user prompt (no 600-char crop), byte-bounded to
+            // CONVERSATION_DETAIL_MAX_BYTES (UTF-8-boundary-safe) like renderContentFull/renderInputFull.
+            return boundBytes(content.asText(), CONVERSATION_DETAIL_MAX_BYTES);
         }
         StringBuilder sb = new StringBuilder();
         for (JsonNode block : blocks(content)) {
@@ -623,7 +625,8 @@ public class ConversationEventMapper {
                 }
             }
         }
-        return bound(sb.toString(), MAX_SUMMARY_LEN);
+        // UC-80 — full user text, byte-bounded (not 600-char cropped).
+        return boundBytes(sb.toString(), CONVERSATION_DETAIL_MAX_BYTES);
     }
 
     /** Normalize a message {@code content} (string | array | object) to an iterable of block nodes. */
