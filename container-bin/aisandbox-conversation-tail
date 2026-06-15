@@ -989,6 +989,8 @@ function finalizeName(raw) {
  *   • content array carrying a tool_result block → a tool result, not a prompt
  *   • string content that is a <command-name>…</command-name> + <command-args>
  *     wrapper, or a <local-command-stdout> wrapper → a slash-command echo
+ *   • string content that is a <teammate-message …>…</teammate-message> envelope
+ *     → an inbound teammate/subagent message (UC-58), not the lead's own prompt
  */
 function isNonPromptUserLine(o) {
   if (!o) return true;
@@ -1006,6 +1008,14 @@ function isNonPromptUserLine(o) {
       return true;
     }
     if (s.startsWith('<local-command-stdout>')) return true;
+    // UC-58 — a teammate-message envelope is an inbound teammate/subagent message, not the
+    // user's own prompt, so it must never name the conversation or drive turn-state. Keyed
+    // off the opening tag at the START of content (the char after the tag name must be a tag
+    // boundary), so a genuine prompt that merely mentions the text is not skipped.
+    if (s.startsWith('<teammate-message')) {
+      const after = s.charAt('<teammate-message'.length);
+      if (after === '' || after === '>' || after === '/' || /\s/.test(after)) return true;
+    }
   }
   return false;
 }
