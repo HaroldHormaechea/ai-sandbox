@@ -50,6 +50,12 @@ public class ConversationEventMapper {
     /** UC-41 — the shell tool; {@code primaryText} is its command (AC2). */
     public static final String TOOL_BASH = "Bash";
 
+    /** UC-58 — the teammate-message envelope tag name. */
+    private static final String TEAMMATE_TAG = "teammate-message";
+
+    /** UC-58 — the opening-tag prefix used as the structural reclassification marker (AC3). */
+    private static final String TEAMMATE_OPEN_TAG = "<" + TEAMMATE_TAG;
+
     /** Cap on a rendered tool-input summary so internal tool noise is summarized, not dumped (AC4). */
     private static final int MAX_SUMMARY_LEN = 600;
 
@@ -310,6 +316,26 @@ public class ConversationEventMapper {
         if (stringContent != null && stringContent.startsWith("<local-command-stdout>")) {
             return List.of(new ConversationServerMessage.SystemNote(
                     uuid, sidechain, source, "Command output", renderContentFull(content)));
+        }
+        // UC-58 (rule 5) — a teammate/subagent message delivered to a team-lead session
+        // as a user-role line whose string content is a <teammate-message …>…</teammate-message>
+        // envelope. Reclassify it to a dedicated TeammateMessage frame so it renders as a
+        // distinct, sender-attributed, NON-user bubble — never right-aligned as the user's
+        // own message. Keyed off the STRUCTURAL marker at the start of content (the opening
+        // tag), so a genuine prompt that merely mentions the literal text stays a TurnStart
+        // (AC3). A malformed envelope (no closing '>') degrades to TurnStart rather than
+        // dropping the line. BEFORE the rule-6 TurnStart fallback.
+        if (stringContent != null && stringContent.startsWith(TEAMMATE_OPEN_TAG)) {
+            TeammateEnvelope env = parseTeammateEnvelope(stringContent);
+            if (env != null) {
+                return List.of(new ConversationServerMessage.TeammateMessage(
+                        uuid,
+                        sidechain,
+                        source,
+                        env.teammateId(),
+                        env.color() == null ? "" : env.color(),
+                        cleanTeammateContent(env.inner())));
+            }
         }
         String prompt = extractUserText(content);
         return List.of(new ConversationServerMessage.TurnStart(uuid, sidechain, source, prompt));
@@ -643,6 +669,179 @@ public class ConversationEventMapper {
             }
         }
         return null;
+    }
+
+    // ──────────────────── UC-58 teammate-message envelope parsing ────────────────────
+
+    /** The parsed pieces of a {@code <teammate-message …>…</teammate-message>} envelope. */
+    private record TeammateEnvelope(String teammateId, String color, String inner) {}
+
+    /**
+     * UC-58 — parse a {@code <teammate-message teammate_id="…" color="…">…</teammate-message>}
+     * envelope (the harness's representation of an inbound teammate/subagent message on a
+     * team-lead session). Returns {@code null} when {@code content} is not a <b>well-formed</b>
+     * envelope — i.e. it does not begin with the opening tag, the opening tag has no
+     * terminating {@code '>'}, it carries no {@code teammate_id} attribute, or it has no
+     * closing {@code </teammate-message>} tag — so the caller falls back to a
+     * {@link ConversationServerMessage.TurnStart} rather than dropping the line.
+     *
+     * <p>The opening tag's end is located by scanning for the {@code '>'} that terminates
+     * it <b>while respecting quoted attribute values</b> — an attribute such as
+     * {@code summary="… > …"} contains a {@code '>'} that must NOT be mistaken for the tag
+     * end (challenger Minor #1), or the markup would leak into the rendered bubble. The
+     * inner content runs from just after the opening tag to the LAST closing
+     * {@code </teammate-message>}.
+     */
+    private TeammateEnvelope parseTeammateEnvelope(String content) {
+        if (content == null) {
+            return null;
+        }
+        String s = content.strip();
+        if (!s.startsWith(TEAMMATE_OPEN_TAG)) {
+            return null;
+        }
+        // The char right after the tag NAME must be a tag boundary, so "<teammate-messageX>"
+        // is not matched as a teammate envelope.
+        if (s.length() > TEAMMATE_OPEN_TAG.length()) {
+            char after = s.charAt(TEAMMATE_OPEN_TAG.length());
+            if (after != '>' && after != '/' && !Character.isWhitespace(after)) {
+                return null;
+            }
+        }
+        // Find the '>' that ends the opening tag, respecting quoted attribute values.
+        int i = TEAMMATE_OPEN_TAG.length();
+        char quote = 0;
+        int tagEnd = -1;
+        while (i < s.length()) {
+            char c = s.charAt(i);
+            if (quote != 0) {
+                if (c == quote) {
+                    quote = 0;
+                }
+            } else if (c == '"' || c == '\'') {
+                quote = c;
+            } else if (c == '>') {
+                tagEnd = i;
+                break;
+            }
+            i++;
+        }
+        if (tagEnd < 0) {
+            return null; // malformed — no terminating '>' for the opening tag
+        }
+        String attrs = s.substring(TEAMMATE_OPEN_TAG.length(), tagEnd);
+        String closeTag = "</" + TEAMMATE_TAG + ">";
+        int close = s.lastIndexOf(closeTag);
+        if (close < tagEnd + 1) {
+            return null; // malformed / half envelope — no closing tag
+        }
+        java.util.Map<String, String> attrMap = parseAttributes(attrs);
+        String teammateId = attrMap.get("teammate_id");
+        if (teammateId == null || teammateId.isBlank()) {
+            return null; // not well-formed — a teammate envelope must name its sender
+        }
+        String inner = s.substring(tagEnd + 1, close);
+        return new TeammateEnvelope(teammateId, attrMap.get("color"), inner);
+    }
+
+    /**
+     * UC-58 — parse XML-ish {@code name="value"} (or {@code name='value'}, or bare
+     * {@code name=value}, or valueless {@code name}) attribute pairs from an opening-tag
+     * attribute string into a map. Robust to whitespace and to a trailing {@code '/'} on a
+     * self-closing tag. Keyed exactly so {@code teammate_id} is never confused with a
+     * shorter {@code id} substring.
+     */
+    private static java.util.Map<String, String> parseAttributes(String attrs) {
+        java.util.Map<String, String> map = new java.util.HashMap<>();
+        if (attrs == null) {
+            return map;
+        }
+        int i = 0;
+        int n = attrs.length();
+        while (i < n) {
+            while (i < n && !isAttrNameChar(attrs.charAt(i))) {
+                i++;
+            }
+            int start = i;
+            while (i < n && isAttrNameChar(attrs.charAt(i))) {
+                i++;
+            }
+            if (i == start) {
+                break;
+            }
+            String key = attrs.substring(start, i);
+            while (i < n && Character.isWhitespace(attrs.charAt(i))) {
+                i++;
+            }
+            if (i < n && attrs.charAt(i) == '=') {
+                i++;
+                while (i < n && Character.isWhitespace(attrs.charAt(i))) {
+                    i++;
+                }
+                if (i < n && (attrs.charAt(i) == '"' || attrs.charAt(i) == '\'')) {
+                    char q = attrs.charAt(i++);
+                    int vs = i;
+                    while (i < n && attrs.charAt(i) != q) {
+                        i++;
+                    }
+                    map.put(key, attrs.substring(vs, Math.min(i, n)));
+                    if (i < n) {
+                        i++; // consume closing quote
+                    }
+                } else {
+                    int vs = i;
+                    while (i < n && !Character.isWhitespace(attrs.charAt(i)) && attrs.charAt(i) != '/') {
+                        i++;
+                    }
+                    map.put(key, attrs.substring(vs, i));
+                }
+            } else {
+                map.put(key, "");
+            }
+        }
+        return map;
+    }
+
+    private static boolean isAttrNameChar(char c) {
+        return Character.isLetterOrDigit(c) || c == '_' || c == '-' || c == ':';
+    }
+
+    /**
+     * UC-58 — clean a teammate envelope's inner content for rendering (AC6). Plain inner
+     * text is returned as-is (stripped). When the inner content is a nested JSON envelope
+     * (e.g. {@code {"type":"idle_notification",…}}), a short readable label is derived from
+     * it instead — preferring a {@code summary}/{@code text}/{@code message}/{@code content}
+     * field, prefixed by its {@code type} when present — so raw JSON never leaks into the
+     * bubble. The JSON-derived label is bounded to {@link #MAX_SUMMARY_LEN}; plain text is
+     * returned in full (the renderer handles wrapping), mirroring assistant-text rendering.
+     */
+    private String cleanTeammateContent(String inner) {
+        if (inner == null) {
+            return "";
+        }
+        String t = inner.strip();
+        if (t.isEmpty()) {
+            return "";
+        }
+        if (t.startsWith("{") || t.startsWith("[")) {
+            try {
+                JsonNode node = json.readTree(t);
+                if (node != null && node.isObject()) {
+                    String type = text(node, "type");
+                    String summary = firstNonNull(
+                            text(node, "summary"), text(node, "text"), text(node, "message"), text(node, "content"));
+                    if (summary != null && !summary.isBlank()) {
+                        return type != null ? "[" + type + "] " + bound(summary) : bound(summary);
+                    }
+                    if (type != null) {
+                        return "[" + type + "]";
+                    }
+                }
+            } catch (com.fasterxml.jackson.core.JsonProcessingException jpe) {
+                // not valid JSON — fall through and render the inner text as-is
+            }
+        }
+        return t;
     }
 
     private static String bound(String s) {

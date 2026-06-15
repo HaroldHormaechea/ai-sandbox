@@ -41,6 +41,7 @@ import java.util.List;
     @JsonSubTypes.Type(value = ConversationServerMessage.TurnStart.class, name = "turn-start"),
     @JsonSubTypes.Type(value = ConversationServerMessage.ThinkingState.class, name = "thinking"),
     @JsonSubTypes.Type(value = ConversationServerMessage.AssistantText.class, name = "assistant-text"),
+    @JsonSubTypes.Type(value = ConversationServerMessage.TeammateMessage.class, name = "teammate-message"),
     @JsonSubTypes.Type(value = ConversationServerMessage.ToolUse.class, name = "tool-use"),
     @JsonSubTypes.Type(value = ConversationServerMessage.ToolResult.class, name = "tool-result"),
     @JsonSubTypes.Type(value = ConversationServerMessage.ToolDetail.class, name = "tool-detail"),
@@ -60,6 +61,7 @@ public sealed interface ConversationServerMessage
         permits ConversationServerMessage.TurnStart,
                 ConversationServerMessage.ThinkingState,
                 ConversationServerMessage.AssistantText,
+                ConversationServerMessage.TeammateMessage,
                 ConversationServerMessage.ToolUse,
                 ConversationServerMessage.ToolResult,
                 ConversationServerMessage.ToolDetail,
@@ -91,6 +93,39 @@ public sealed interface ConversationServerMessage
 
     /** An {@code assistant:text} block (AC3) — a conversation message rendered as-is, no ANSI. */
     record AssistantText(String uuid, boolean isSidechain, String source, String text)
+            implements ConversationServerMessage {}
+
+    /**
+     * UC-58 — a {@code user}-role transcript line that is actually an inbound message
+     * from a <em>teammate / subagent</em> in a team-lead session, NOT a message the
+     * human typed. The Claude Code harness delivers inbound teammate messages to the
+     * team lead as {@code user} turns whose string content is a
+     * {@code <teammate-message teammate_id="…" color="…">…</teammate-message>}
+     * envelope (no {@code isMeta}, no {@code sourceToolUseID}). Left un-reclassified
+     * they fall through {@link com.aisandbox.server.stream.service.ConversationEventMapper}'s
+     * {@code mapUser} rules to the {@code turn-start} fallback and render right-aligned
+     * as the user's own message.
+     *
+     * <p>{@code mapUser} detects the envelope structurally (content starts with the
+     * {@code <teammate-message>} tag), parses the sender identity and the inner
+     * content, and emits this dedicated frame instead of a {@link TurnStart} — so the
+     * client renders a distinct, NON-user, sender-attributed bubble (AC1/AC2). Genuine
+     * user turns and the lead's assistant turns are unaffected (AC3/AC4); single-agent
+     * sessions never carry the envelope, so they see no behaviour change (AC7).
+     *
+     * <p>{@code teammateId} is the {@code teammate_id} attribute (the sender's name,
+     * shown as the bubble label); {@code color} is the {@code color} attribute (may be
+     * empty — the client falls back to its default muted label colour). {@code text} is
+     * the cleaned inner content: plain inner text as-is, or — when the inner content is a
+     * nested JSON envelope (e.g. {@code {"type":"idle_notification",…}}) — a short readable
+     * label derived from it, so raw JSON never leaks into the bubble (AC6).
+     *
+     * <p>An envelope is only reclassified to this frame when it is well-formed (carries a
+     * {@code teammate_id} and a closing {@code </teammate-message>} tag); a malformed /
+     * half envelope falls through to {@link TurnStart} rather than being dropped.
+     */
+    record TeammateMessage(
+            String uuid, boolean isSidechain, String source, String teammateId, String color, String text)
             implements ConversationServerMessage {}
 
     /**

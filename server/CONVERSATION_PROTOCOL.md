@@ -50,6 +50,7 @@ subagent/teammate lines), and `source` (`main` | `subagent:<agentId>`).
 | `turn-start`      | `uuid`, `isSidechain`, `source`, `text` (user prompt)               | 14, 6 |
 | `thinking`        | `…`, `text` (thinking block)                                        | 5  |
 | `assistant-text`  | `…`, `text`                                                         | 3  |
+| `teammate-message`| `uuid`, `isSidechain`, `source`, `teammateId`, `color`, `text` (UC-58 — an inbound teammate/subagent message delivered to a team-lead session as a `user` line) | 58 |
 | `tool-use`        | `…`, `toolName`, `toolUseId`, `inputSummary` (bounded), `primaryText` | 4, 41 |
 | `tool-result`     | `…`, `toolUseId`, `isError`, `summary`                             | 4  |
 | `tool-detail`     | `toolUseId`, `toolName`, `input`, `result`, `isError`, `available` (UC-41 on-demand, untruncated) | 41 |
@@ -175,7 +176,8 @@ heuristics, so a real prompt is never eaten), in this exact priority order:
 | 2 | `isMeta == true` | `system-note`, label `System note` | collapsed, left-aligned note |
 | 3 | string content starts `<command-name>` AND contains `</command-name>` AND `<command-args>` | `system-note`, label `Command: <name>` | collapsed, left-aligned note |
 | 4 | string content starts `<local-command-stdout>` | `system-note`, label `Command output` | collapsed, left-aligned note |
-| 5 | none of the above | `turn-start` (unchanged) | right-aligned user message |
+| 5 | string content starts with a `<teammate-message …>` opening tag (UC-58) | `teammate-message`, sender-attributed | distinct, left-aligned, NON-user bubble |
+| 6 | none of the above | `turn-start` (unchanged) | right-aligned user message |
 
 `tool_result` `user` lines are unaffected — they still map to `tool-result` before this
 classifier runs. Rule 3 requires the harness's exact structural placement (whole-content
@@ -183,6 +185,42 @@ prefix + the sibling `</command-name>`/`<command-args>` tags), not a substring m
 genuine prompt that merely *mentions* `<command-name>` mid-text stays a `turn-start`.
 `[Request interrupted by user for tool use]` lines carry no structural marker and remain
 `turn-start` by design (no content-sniffing).
+
+**UC-58 — teammate/subagent messages never render as the user's own message.** In a
+team-lead session, the harness delivers inbound teammate/subagent messages to the lead as
+`user`-role transcript lines whose string content is a
+`<teammate-message teammate_id="…" color="…">…</teammate-message>` envelope (no `isMeta`,
+no `sourceToolUseID`). Left unclassified they fall to rule 6 (`turn-start`) and render
+right-aligned as the user's own message. Rule 5 reclassifies them to a `teammate-message`
+frame:
+
+- **Structural detection (AC3).** Only a line whose content (after `strip()`) *starts with*
+  the `<teammate-message` opening tag, with a tag-boundary char (`>`, `/`, or whitespace)
+  right after the tag name, AND that is **well-formed** (carries a `teammate_id` attribute
+  and a closing `</teammate-message>`), is reclassified. A genuine user message that merely
+  contains the literal text stays a `turn-start`. A malformed / half envelope (no terminating
+  `>`, no `teammate_id`, or no closing tag) degrades to `turn-start` rather than dropping the
+  line.
+- **Envelope parsing.** The opening tag's end is found by scanning for the `>` that
+  terminates it **while respecting quoted attribute values** — an attribute like
+  `summary="… > …"` contains a `>` that must not be mistaken for the tag end, or markup
+  would leak into the bubble. `teammate_id` → `teammateId` (the bubble label); `color` →
+  `color`. The inner content runs to the LAST `</teammate-message>`.
+- **Nested-JSON inner content (AC6).** When the inner content is itself a JSON envelope
+  (e.g. `{"type":"idle_notification",…}`), a short readable label is derived from it
+  (`[<type>] <summary/text/message/content>`), so raw JSON never leaks into the bubble.
+  Plain inner text is rendered as-is.
+- **Client render (AC1/AC2).** The Android client renders a distinct, left-aligned,
+  NON-user bubble labelled with the sender's name and tinted by `color`. Genuine user
+  (right-aligned) and assistant turns are unchanged; single-agent sessions never carry the
+  envelope, so they see no behaviour change (AC7).
+- **Tail-helper companion (AC5).** The UC-37 `aisandbox-conversation-tail` mirror classifier
+  `isNonPromptUserLine` also treats a teammate-message envelope as non-prompt, so a
+  team-lead conversation is never *named* after a teammate message and turn-state derivation
+  ignores teammate lines.
+- **Not in the OpenAPI surface.** `ConversationServerMessage` frames are WebSocket frames,
+  not REST bodies — `server/openapi.yaml` documents only REST endpoints — so the new
+  `teammate-message` frame requires no OAS regeneration.
 
 - **Rule-1 Skill-host assumption.** A top-level `sourceToolUseID` is the id of the
   `Skill` `tool_use` whose `SKILL.md` body this line carries; the `Skill` bubble already
