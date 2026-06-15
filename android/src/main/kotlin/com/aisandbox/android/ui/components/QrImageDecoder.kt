@@ -135,11 +135,20 @@ sealed interface QrDecodeResult {
 internal fun decodeInviteFromUri(context: Context, uri: Uri): QrDecodeResult {
     val resolver = context.contentResolver
     // First pass: bounds only, so we can compute a downsample factor
-    // without decoding the full bitmap into memory.
+    // without decoding the full bitmap into memory. NOTE: with
+    // inJustDecodeBounds = true, BitmapFactory.decodeStream returns null
+    // BY DESIGN (it only fills outWidth/outHeight) — so the null check has
+    // to be on the *stream*, not on the decode return, otherwise every
+    // image is misreported as Unreadable.
     val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    val boundsStream = try {
+        resolver.openInputStream(uri)
+    } catch (t: Throwable) {
+        Log.w(TAG, "Cannot open image: ${t.javaClass.simpleName}")
+        return QrDecodeResult.Unreadable
+    } ?: return QrDecodeResult.Unreadable
     try {
-        resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
-            ?: return QrDecodeResult.Unreadable
+        boundsStream.use { BitmapFactory.decodeStream(it, null, bounds) }
     } catch (t: Throwable) {
         Log.w(TAG, "Cannot read image bounds: ${t.javaClass.simpleName}")
         return QrDecodeResult.Unreadable
