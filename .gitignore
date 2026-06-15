@@ -45,3 +45,6 @@ server/.gradle/
 
 # Machine-specific Android SDK location (written by local dev setup; never commit).
 local.properties
+
+# UC-85 — the deterministic gate's throwaway run dir (PKI, server/emulator logs, QR PNG).
+.gate-run/
