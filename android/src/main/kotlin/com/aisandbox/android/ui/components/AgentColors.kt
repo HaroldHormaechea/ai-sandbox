@@ -64,9 +64,23 @@ private val CHROMATIC_PALETTE: List<Color> = listOf(
 fun bubbleTintForSource(source: String?): Color? {
     if (source.isNullOrBlank()) return null
     if (source == MAIN_TARGET_ID || source == "user") return null
-    // Stable, non-negative index — `and 0xFFFFFFFFL` avoids the Int.MIN_VALUE
-    // abs() foot-gun while keeping the mapping deterministic across runs.
-    val index = ((source.hashCode().toLong() and 0xFFFFFFFFL) % CHROMATIC_PALETTE.size).toInt()
+    return chromaticColorForKey(source)
+}
+
+/**
+ * UC-60 (AC2) — the shared deterministic hash from an arbitrary [key] into
+ * [CHROMATIC_PALETTE]. Extracted from [bubbleTintForSource] so a subagent's switcher
+ * dot can hash the FULL `subagent:<id>` target id through the EXACT same logic the
+ * conversation bubble tint uses for the same `subagent:<id>` source — so the pill dot
+ * and that subagent's message bubbles read as the same colour (no second, divergent
+ * palette or hash). Caller is responsible for any null/blank/neutral exclusions;
+ * this always returns a chromatic colour.
+ *
+ * <p>`and 0xFFFFFFFFL` keeps the index non-negative (avoids the `Int.MIN_VALUE`
+ * abs() foot-gun) while staying deterministic across runs.
+ */
+fun chromaticColorForKey(key: String): Color {
+    val index = ((key.hashCode().toLong() and 0xFFFFFFFFL) % CHROMATIC_PALETTE.size).toInt()
     return CHROMATIC_PALETTE[index]
 }
 

@@ -118,6 +118,18 @@ function parseArgs(argv) {
     // (the server steps the live pane and calls this once per tab to recover every
     // tab's options for a multi-question AskUserQuestion). Capture-only (no keystroke).
     parsePane: false,
+    // UC-60 — one-shot enumeration of the lead's LIVE background subagents (each
+    // <mainStem>/subagents/agent-<id>.jsonl whose mtime is within SUBAGENT_STALE_MS),
+    // printed one JSON object per line ({id,label,working}). Feeds the conversation
+    // enumerate path so each live subagent surfaces as a pill, with the same
+    // working/idle parity team-agent pills carry.
+    listSubagents: false,
+    // UC-60 — streaming mode that tails ONLY one subagent's transcript
+    // (<mainStem>/subagents/agent-<id>.jsonl), emitting `subagent:<id>\t<line>`. The
+    // id is the BARE agent id (no `subagent:` prefix); the server passes it from the
+    // pill's `subagent:<id>` target id. Tapping a subagent pill opens this stream so
+    // its transcript is viewable, NEVER routed to the lead's pane.
+    subagentId: null,
   };
   for (let i = 2; i < argv.length; i++) {
     const k = argv[i];
@@ -133,6 +145,8 @@ function parseArgs(argv) {
       case '--tool-use-id': a.toolUseId = argv[++i]; break;
       case '--conversation-name': a.conversationName = true; break;
       case '--parse-pane': a.parsePane = true; break;
+      case '--list-subagents': a.listSubagents = true; break;
+      case '--subagent': a.subagentId = argv[++i]; break;
       default: /* ignore unknown flag */ break;
     }
   }
@@ -730,9 +744,71 @@ function listSubagentFiles(mainPath) {
 }
 
 function subagentSource(filePath) {
+  return 'subagent:' + subagentId(filePath);
+}
+
+/** The bare subagent agent id from a <…>/subagents/agent-<id>.jsonl path. (PURE) */
+function subagentId(filePath) {
   const bn = path.basename(filePath, '.jsonl'); // agent-<id>
-  const id = bn.startsWith('agent-') ? bn.substring('agent-'.length) : bn;
-  return 'subagent:' + id;
+  return bn.startsWith('agent-') ? bn.substring('agent-'.length) : bn;
+}
+
+/**
+ * UC-60 — a short, stable display label for a subagent pill (PURE — exported for QA).
+ * Sniffs the bounded file head for the subagent's TYPE/DESCRIPTION (the harness writes
+ * `subagentType`/`agent_type`/`agentType` and/or a `description`/`task` at the top of a
+ * subagent transcript), preferring a concise `<type>` and otherwise floors to
+ * `agent <shortid>` (the first 8 chars of the id) so a pill is never blank. `headText`
+ * is the already-read head of the file (kept impure-free for unit testing).
+ */
+function subagentLabelFromHead(headText, id) {
+  const floor = 'agent ' + String(id || '').slice(0, 8);
+  if (typeof headText !== 'string' || headText.length === 0) return floor;
+  const lines = headText.split('\n');
+  // Drop a trailing partial line our head window may have sliced through.
+  if (lines.length > 0) lines.pop();
+  for (const l of lines) {
+    if (!l) continue;
+    if (
+      l.indexOf('subagentType') < 0 &&
+      l.indexOf('agent_type') < 0 &&
+      l.indexOf('agentType') < 0 &&
+      l.indexOf('subagent_type') < 0
+    ) {
+      continue;
+    }
+    let o;
+    try { o = JSON.parse(l); } catch (e) { continue; }
+    if (!o || typeof o !== 'object') continue;
+    const type = o.subagentType || o.subagent_type || o.agentType || o.agent_type;
+    if (typeof type === 'string' && type.trim() !== '') {
+      return sanitizeOneLine(type);
+    }
+  }
+  return floor;
+}
+
+/** Read a subagent file's head and derive its pill label (impure FS read). */
+function subagentLabel(filePath, id) {
+  let headText = '';
+  let fd;
+  try {
+    fd = fs.openSync(filePath, 'r');
+    const st = fs.fstatSync(fd);
+    const len = Math.min(ID_SCAN_BYTES, st.size);
+    if (len > 0) {
+      const buf = Buffer.allocUnsafe(len);
+      const read = fs.readSync(fd, buf, 0, len, 0);
+      headText = buf.toString('utf8', 0, read);
+    }
+  } catch (e) {
+    /* best-effort — fall through to the floor label */
+  } finally {
+    if (fd !== undefined) {
+      try { fs.closeSync(fd); } catch (e) { /* ignore */ }
+    }
+  }
+  return subagentLabelFromHead(headText, id);
 }
 
 /**
@@ -1700,6 +1776,29 @@ function conversationName() {
   }
 }
 
+// ──────────────────────── list-subagents (one-shot, UC-60) ────────────────────────
+
+/**
+ * UC-60 — one-shot {@code --list-subagents} mode: resolve the MAIN pane's transcript,
+ * enumerate its {@code subagents/agent-*.jsonl}, and print one JSON object per LIVE
+ * subagent ({@code {id,label,working}}). A no-transcript / no-subagents state prints
+ * nothing (exit 0) so the server simply appends no subagent pills. Never blocks.
+ */
+function listSubagents(nowMs) {
+  if (nowMs === undefined) nowMs = Date.now();
+  const mainPath = resolveTranscriptOnce();
+  if (!mainPath) return;
+  for (const sf of listSubagentFiles(mainPath)) {
+    const st = statSafe(sf);
+    if (!st) continue;
+    if (nowMs - st.mtimeMs > SUBAGENT_STALE_MS) continue; // aged out → finished/crashed
+    const id = subagentId(sf);
+    const working = deriveWorking(readBoundedTailLines(sf, TAIL_SCAN_BYTES));
+    const label = subagentLabel(sf, id);
+    out(JSON.stringify({ id, label, working }));
+  }
+}
+
 // ──────────────────────── streaming mode ────────────────────────
 
 function backfill(reader, n, nowMs) {
@@ -1902,6 +2001,66 @@ async function streamLoop() {
   }
 }
 
+/**
+ * UC-60 — streaming tail of ONE subagent's transcript (the {@code --subagent <id>}
+ * mode). Unlike {@link streamLoop} (which follows a tmux pane's claude transcript and
+ * re-globs subagent files), this follows exactly one
+ * {@code <mainStem>/subagents/agent-<id>.jsonl} and emits only {@code subagent:<id>}
+ * lines — so tapping a subagent pill views THAT subagent's transcript and nothing
+ * else (AC3). The subagent dir is derived from the MAIN pane's resolved transcript, so
+ * a main rebaseline (entrypoint restart / `/clear` rotation) re-anchors the subagent
+ * file under the new main stem. The file may not exist yet when a freshly-spawned
+ * subagent is selected; we fail LOUD with {@code no-transcript} only after the same
+ * bounded grace the main loop uses, then keep polling so it streams once it appears.
+ */
+async function streamSubagentLoop(id) {
+  const source = 'subagent:' + id;
+  let mainPath = null;
+  let reader = null;
+  let graceStart = null;
+  let noTranscriptEmitted = false;
+
+  while (true) {
+    const resolvedMain = resolveTranscriptOnce();
+    if (resolvedMain && resolvedMain !== mainPath) {
+      // (Re)anchor the subagent file under the current main stem and backfill it.
+      mainPath = resolvedMain;
+      const sf = path.join(subagentDir(mainPath), 'agent-' + id + '.jsonl');
+      reader = makeReader(sf, source);
+      emitCtrl(CTRL_BACKFILL_START);
+      if (statSafe(sf)) backfill(reader, ARGS.backfill);
+      emitCtrl(CTRL_BACKFILL_END);
+      graceStart = null;
+      noTranscriptEmitted = false;
+    }
+
+    // Fail LOUD if we never resolve a main transcript OR the subagent file never
+    // appears within the grace — instead of hanging silently (the UC-37 bug class).
+    const haveFile = reader != null && statSafe(reader.filePath) != null;
+    if (!haveFile) {
+      if (graceStart == null) {
+        graceStart = Date.now();
+      } else if (!noTranscriptEmitted && Date.now() - graceStart >= GRACE_MS) {
+        emitCtrl(CTRL_NO_TRANSCRIPT);
+        noTranscriptEmitted = true;
+      }
+      await sleep(POLL_MS);
+      continue;
+    }
+
+    for (const line of readNewLines(reader)) {
+      out(source + '\t' + line);
+    }
+    // Idle/safety-net flush (UC-40) — a subagent that wrote a complete trailing line
+    // with no newline (rare for a background subagent, but symmetric with the main
+    // tail) is still delivered live.
+    const fl = idleFlush(reader, Date.now());
+    if (fl) out(source + '\t' + fl);
+
+    await sleep(POLL_MS);
+  }
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -1939,6 +2098,18 @@ if (require.main === module) {
       out('{}');
     }
     process.exit(0);
+  } else if (ARGS.listSubagents) {
+    try {
+      listSubagents();
+    } catch (e) {
+      // Any failure → print nothing; the server appends no subagent pills (UC-60).
+    }
+    process.exit(0);
+  } else if (ARGS.subagentId) {
+    // UC-60 — stream ONE subagent's transcript (tapping a subagent pill).
+    streamSubagentLoop(ARGS.subagentId).catch((e) => {
+      process.exit(0);
+    });
   } else {
     streamLoop().catch((e) => {
       // Never crash the session on an internal error — exit quietly so the server
@@ -1985,6 +2156,11 @@ module.exports = {
   readBoundedTailLines,
   SUBAGENT_STALE_MS,
   TAIL_SCAN_BYTES,
+  // UC-60 — subagent-pill seams (QA unit tests): id extraction + the head-sniff label
+  // (floors to `agent <shortid>`), shared with the --list-subagents / --subagent modes.
+  subagentId,
+  subagentSource,
+  subagentLabelFromHead,
   // UC-49 — pending-question predicate seam (QA unit tests against pane fixtures).
   looksLikePendingAskUserQuestion,
   PENDING_QUESTION_CHROME,

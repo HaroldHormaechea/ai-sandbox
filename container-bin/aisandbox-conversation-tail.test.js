@@ -2365,3 +2365,184 @@ test('UC-59 AC2 — a working lead short-circuits the OR before the delegate sca
     true,
   );
 });
+
+// ════════════════════════════════════════════════════════════════════════════
+// UC-60 — subagents as pills: the helper seams behind --list-subagents and
+// --subagent. The enumeration glue (resolveTranscriptOnce/listSubagentFiles) is
+// /proc+tmux-bound and proven by the server IT + the emulator e2e; here we
+// unit-prove the PURE/FS seams the two modes are built from, with REAL temp
+// transcript fixtures (no mocks):
+//   • subagentId / subagentSource — id extraction + the `subagent:<id>` tag that
+//     keeps a tapped subagent stream isolated to ITS file (AC3, the challenger's
+//     key isolation check);
+//   • subagentLabelFromHead — the head-sniff pill label + the `agent <shortid>`
+//     floor (a pill is never blank);
+//   • deriveWorking(readBoundedTailLines(subFile)) — the EXACT working/idle the
+//     --list-subagents `working` field carries (AC2 parity with team pills);
+//   • the SUBAGENT_STALE_MS mtime gate that separates LIVE from finished/crashed
+//     subagents (AC4 — live add/remove);
+//   • the two CLI modes' never-throw / no-misroute contracts via real subprocess
+//     runs against an EMPTY --projects-dir (no resolvable main).
+// ════════════════════════════════════════════════════════════════════════════
+
+const HELPER_BIN = path.join(__dirname, 'aisandbox-conversation-tail');
+
+// ──────────────────────── subagentId / subagentSource (AC3 isolation) ────────────────────────
+
+test('UC-60 subagentId — extracts the BARE id from a subagents/agent-<id>.jsonl path', () => {
+  assert.strictEqual(helper.subagentId('/p/main/subagents/agent-abc123.jsonl'), 'abc123');
+  // A UUID-ish id with hyphens survives whole (only the leading `agent-` is stripped).
+  assert.strictEqual(
+    helper.subagentId('/p/main/subagents/agent-7f3c-9a21-bb.jsonl'),
+    '7f3c-9a21-bb',
+  );
+});
+
+test('UC-60 subagentId — a basename without the agent- prefix degrades to the bare stem', () => {
+  assert.strictEqual(helper.subagentId('/p/main/subagents/weird.jsonl'), 'weird');
+});
+
+test('UC-60 subagentSource — the per-file source tag is exactly subagent:<bareId>', () => {
+  // This tag is what streamSubagentLoop stamps on every line it emits; tapping a
+  // pill must view ONLY this id's transcript (no main / no sibling subagent).
+  assert.strictEqual(helper.subagentSource('/p/main/subagents/agent-9.jsonl'), 'subagent:9');
+  // The tag round-trips the id the server passes back as `--subagent <id>`.
+  const p = '/p/main/subagents/agent-deadbeef.jsonl';
+  assert.strictEqual(helper.subagentSource(p), 'subagent:' + helper.subagentId(p));
+});
+
+// ──────────────────────── subagentLabelFromHead (pill label + floor) ────────────────────────
+
+test('UC-60 subagentLabelFromHead — sniffs each accepted type key from the head', () => {
+  for (const key of ['subagentType', 'subagent_type', 'agentType', 'agent_type']) {
+    const head = JSON.stringify({ [key]: 'code-reviewer', sessionId: 's' }) + '\n';
+    assert.strictEqual(
+      helper.subagentLabelFromHead(head, 'abc12345xyz'),
+      'code-reviewer',
+      'key ' + key + ' must yield the type label',
+    );
+  }
+});
+
+test('UC-60 subagentLabelFromHead — floors to `agent <first8>` when no type is present', () => {
+  const head = JSON.stringify({ type: 'user', message: { role: 'user', content: 'hi' } }) + '\n';
+  assert.strictEqual(helper.subagentLabelFromHead(head, 'abcdef0123456789'), 'agent abcdef01');
+});
+
+test('UC-60 subagentLabelFromHead — empty/non-string head ⇒ floor (a pill is never blank)', () => {
+  assert.strictEqual(helper.subagentLabelFromHead('', 'qrstuvwx99'), 'agent qrstuvwx');
+  assert.strictEqual(helper.subagentLabelFromHead(null, 'qrstuvwx99'), 'agent qrstuvwx');
+  assert.strictEqual(helper.subagentLabelFromHead(undefined, 'short'), 'agent short');
+});
+
+test('UC-60 subagentLabelFromHead — a malformed JSON line is skipped, a later valid type wins', () => {
+  const head = '{not json\n' + JSON.stringify({ agentType: 'verifier' }) + '\n';
+  assert.strictEqual(helper.subagentLabelFromHead(head, 'id000000'), 'verifier');
+});
+
+test('UC-60 subagentLabelFromHead — a blank/whitespace type falls through to the floor', () => {
+  const head = JSON.stringify({ subagentType: '   ' }) + '\n';
+  assert.strictEqual(helper.subagentLabelFromHead(head, 'zzzzzzzz11'), 'agent zzzzzzzz');
+});
+
+test('UC-60 subagentLabelFromHead — the type label is whitespace-sanitized to one line', () => {
+  const head = JSON.stringify({ subagentType: 'general   purpose\tworker' }) + '\n';
+  assert.strictEqual(helper.subagentLabelFromHead(head, 'id'), 'general purpose worker');
+});
+
+// ──────────────────────── working/idle parity (AC2) ────────────────────────
+
+test('UC-60 working parity — a subagent whose tail is mid-turn is working; one ending in turn-end is idle', () => {
+  const dir = mkTmp('uc60-working-');
+  try {
+    // Mid-turn (last meaningful line is NOT a turn-end) ⇒ working — same predicate
+    // a team-agent pill uses, so the badge matches (AC2).
+    const busy = path.join(dir, 'agent-busy.jsonl');
+    fs.writeFileSync(busy, body([userLine('go'), assistantTextLine('thinking…')]));
+    assert.strictEqual(
+      helper.deriveWorking(helper.readBoundedTailLines(busy, helper.TAIL_SCAN_BYTES)),
+      true,
+    );
+    // Completed a turn (trailing turn_duration) ⇒ idle.
+    const done = path.join(dir, 'agent-done.jsonl');
+    fs.writeFileSync(done, body([userLine('go'), assistantTextLine('done'), turnEndLine()]));
+    assert.strictEqual(
+      helper.deriveWorking(helper.readBoundedTailLines(done, helper.TAIL_SCAN_BYTES)),
+      false,
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ──────────────────────── SUBAGENT_STALE_MS mtime gate (AC4 live add/remove) ────────────────────────
+
+test('UC-60 stale gate — SUBAGENT_STALE_MS is the 300s window; live subagents are kept, aged-out ones dropped', () => {
+  // Mirrors listSubagents()'s exact filter: `nowMs - st.mtimeMs > SUBAGENT_STALE_MS`
+  // ⇒ aged out (finished/crashed). Built over REAL files with utimes-set mtimes and
+  // an injected nowMs (deterministic, no sleeps).
+  assert.strictEqual(helper.SUBAGENT_STALE_MS, 300000);
+  const scene = mkDelegateScene('uc60-stale-');
+  try {
+    const STALE = helper.SUBAGENT_STALE_MS;
+    const fresh = scene.putSub('live', [userLine('x'), assistantTextLine('y')], T - 1000); // 1s old → live
+    const edge = scene.putSub('edge', [userLine('x'), assistantTextLine('y')], T - STALE); // exactly at the window → live
+    const aged = scene.putSub('gone', [userLine('x'), assistantTextLine('y')], T - STALE - 1); // just past → dropped
+
+    const isLive = (p) => {
+      const st = fs.statSync(p);
+      return T - st.mtimeMs <= STALE;
+    };
+    assert.strictEqual(isLive(fresh), true, 'a 1s-old subagent is live');
+    assert.strictEqual(isLive(edge), true, 'mtime exactly at the window boundary is still live (not >)');
+    assert.strictEqual(isLive(aged), false, 'one tick past the window is aged out → its pill is removed');
+  } finally {
+    scene.cleanup();
+  }
+});
+
+// ──────────────────────── CLI mode contracts (real subprocess) ────────────────────────
+
+test('UC-60 --list-subagents — no resolvable main ⇒ prints nothing and exits 0 (degrade contract)', () => {
+  const cp = require('node:child_process');
+  const empty = mkTmp('uc60-empty-proj-');
+  try {
+    const r = cp.spawnSync(
+      process.execPath,
+      [HELPER_BIN, '--list-subagents', '--projects-dir', empty],
+      { encoding: 'utf8', timeout: 15000 },
+    );
+    assert.strictEqual(r.status, 0, 'one-shot exits 0 even with no transcript');
+    assert.strictEqual((r.stdout || '').trim(), '', 'no main ⇒ no subagent pills emitted');
+  } finally {
+    fs.rmSync(empty, { recursive: true, force: true });
+  }
+});
+
+test('UC-60 --subagent <id> — no resolvable main ⇒ never emits another pane content (AC3 isolation)', () => {
+  // The streaming subagent tail must NEVER fall back to the lead's pane. With no
+  // resolvable main (empty --projects-dir) it produces NO transcript content at all
+  // within the grace window — only (eventually) the no-transcript control. We kill
+  // it before the grace elapses and assert it emitted zero non-control lines, proving
+  // it never misroutes to main while a subagent file is unresolved.
+  const cp = require('node:child_process');
+  const empty = mkTmp('uc60-empty-proj-');
+  try {
+    const child = cp.spawnSync(
+      process.execPath,
+      [HELPER_BIN, '--subagent', 'nope-12345', '--projects-dir', empty, '--backfill', '5'],
+      { encoding: 'utf8', timeout: 1500, killSignal: 'SIGKILL' },
+    );
+    const lines = (child.stdout || '').split('\n').filter((l) => l.length > 0);
+    // Anything emitted may only be a reserved __ctrl__ line — never a `main\t…` or a
+    // `subagent:…\t…` transcript line for an unresolved/foreign file.
+    for (const l of lines) {
+      assert.ok(
+        l.startsWith('__ctrl__\t'),
+        'subagent tail must not emit pane/transcript content with no resolvable file, got: ' + l,
+      );
+    }
+  } finally {
+    fs.rmSync(empty, { recursive: true, force: true });
+  }
+});

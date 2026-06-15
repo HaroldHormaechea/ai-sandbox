@@ -49,6 +49,29 @@ public class ConversationFacade implements McpLoginInitiator {
      */
     private static final int MAX_PENDING_SCANS = 6;
 
+    /**
+     * UC-60 — id prefix marking a target as a background SUBAGENT pill (rather than a
+     * tmux-pane team agent). The full id is {@code subagent:<bareAgentId>}; the id space
+     * is disjoint from {@code main} and the {@code swarm:…} team-pane ids (AC6 — no
+     * duplication/mislabeling). The server is the AUTHORITATIVE guard: a subagent runs
+     * in-process under the lead with NO pane of its own, so every INPUT path
+     * (composer/answer/interrupt/model) must short-circuit for a {@code subagent:} id —
+     * otherwise {@link #resolveBridgeTarget} would fall back to {@link BridgeTarget#main()}
+     * and silently inject into the LEAD's pane (the Major misroute UC-60 fixes). The
+     * Android read-only composer is a UX echo of this contract, not the enforcement.
+     */
+    public static final String SUBAGENT_ID_PREFIX = "subagent:";
+
+    /** Whether {@code targetId} addresses a background subagent pill (UC-60). */
+    private static boolean isSubagentTarget(String targetId) {
+        return targetId != null && targetId.startsWith(SUBAGENT_ID_PREFIX);
+    }
+
+    /** The bare agent id of a {@code subagent:<id>} target (UC-60). */
+    private static String subagentIdOf(String targetId) {
+        return targetId.substring(SUBAGENT_ID_PREFIX.length());
+    }
+
     private final StreamFacade streamFacade;
     private final SwarmEnumerationService swarm;
     private final TranscriptTailService tail;
@@ -122,6 +145,19 @@ public class ConversationFacade implements McpLoginInitiator {
                         case IDLE -> t;
                     });
         }
+        // UC-60 — append a pill per LIVE background subagent. A subagent is a sub-session
+        // (in-process under the lead, UC-59), NOT a tmux pane, so the pane-based swarm
+        // enumeration above can never see it; the helper's --list-subagents resolves them
+        // from <mainStem>/subagents/agent-*.jsonl instead. The id space (subagent:<id>) is
+        // disjoint from main/swarm ids (AC6). working maps to pendingActivity so the pill
+        // carries the same working/idle badge a team-agent pill does (AC2); a subagent is
+        // never "pendingQuestion" (it does not raise AskUserQuestion to the user).
+        for (TranscriptTailService.SubagentInfo s : tail.listSubagents(n)) {
+            String id = SUBAGENT_ID_PREFIX + s.id();
+            String label = (s.label() == null || s.label().isBlank()) ? id : s.label();
+            TargetInfo pill = new TargetInfo(id, "subagent", label, null, null, null, null, null, "main", null, null);
+            out.add(pill.withPending(s.working(), false));
+        }
         return out;
     }
 
@@ -131,6 +167,14 @@ public class ConversationFacade implements McpLoginInitiator {
      * lifecycle.
      */
     public TranscriptTailService.Tail startTail(int n, String targetId) throws IOException {
+        // UC-60 — a subagent pill streams its OWN agent-<id>.jsonl. Intercept BEFORE
+        // resolveBridgeTarget: a subagent has no tmux pane, so resolveBridgeTarget would
+        // fall back to main and tail the LEAD's transcript (wrong content). Build the
+        // subagent tail target directly instead (AC3 — view the subagent's transcript).
+        if (isSubagentTarget(targetId)) {
+            audit.logEvent(AuditAction.CONVERSATION_OPEN, "ok", "n", n, "targetId", targetId);
+            return tail.start(n, TailTarget.subagent(subagentIdOf(targetId)), backfillLines());
+        }
         TailTarget target = toTailTarget(resolveBridgeTarget(n, targetId));
         audit.logEvent(AuditAction.CONVERSATION_OPEN, "ok", "n", n, "targetId", targetId == null ? "main" : targetId);
         return tail.start(n, target, backfillLines());
@@ -168,6 +212,11 @@ public class ConversationFacade implements McpLoginInitiator {
 
     /** AC8/AC9 — inject a composer submission into {@code targetId}'s session. */
     public void injectComposer(int n, String targetId, String text, ClientIdentity identity) throws IOException {
+        // UC-60 (the Major fix) — a subagent pill is READ-ONLY: it has no pane, so an
+        // inject would misroute to the lead. Short-circuit (no-op) + audit, never inject.
+        if (guardSubagentInput(AuditAction.CONVERSATION_INPUT, n, targetId, identity)) {
+            return;
+        }
         injection.injectComposer(n, toInjectTarget(resolveBridgeTarget(n, targetId)), text);
         audit.logEvent(
                 AuditAction.CONVERSATION_INPUT,
@@ -211,6 +260,10 @@ public class ConversationFacade implements McpLoginInitiator {
             String freeText,
             ClientIdentity identity)
             throws IOException {
+        // UC-60 — read-only subagent pill: no-op + audit, never inject (see injectComposer).
+        if (guardSubagentInput(AuditAction.CONVERSATION_ANSWER, n, targetId, identity)) {
+            return;
+        }
         InjectTarget target = toInjectTarget(resolveBridgeTarget(n, targetId));
         // UC-55 — serialize with any in-flight wizard-option recovery on the same pane.
         synchronized (paneLock(n)) {
@@ -236,6 +289,10 @@ public class ConversationFacade implements McpLoginInitiator {
     public void injectAnswerBatch(
             int n, String targetId, List<InputInjectionService.BatchAnswerSpec> answers, ClientIdentity identity)
             throws IOException {
+        // UC-60 — read-only subagent pill: no-op + audit, never inject (see injectComposer).
+        if (guardSubagentInput(AuditAction.CONVERSATION_ANSWER, n, targetId, identity)) {
+            return;
+        }
         InjectTarget target = toInjectTarget(resolveBridgeTarget(n, targetId));
         // UC-55 — serialize with any in-flight wizard-option recovery on the same pane.
         synchronized (paneLock(n)) {
@@ -324,9 +381,39 @@ public class ConversationFacade implements McpLoginInitiator {
 
     /** Interrupt (ESC) the active turn on {@code targetId}'s session. */
     public void interrupt(int n, String targetId, ClientIdentity identity) throws IOException {
+        // UC-60 — read-only subagent pill: no-op + audit, never inject (see injectComposer).
+        if (guardSubagentInput(AuditAction.CONVERSATION_INTERRUPT, n, targetId, identity)) {
+            return;
+        }
         injection.interrupt(n, toInjectTarget(resolveBridgeTarget(n, targetId)));
         audit.logEvent(
                 AuditAction.CONVERSATION_INTERRUPT, "ok", "n", n, "targetId", targetId == null ? "main" : targetId);
+    }
+
+    /**
+     * UC-60 — the single inject-guard for a {@code subagent:} target. Returns {@code true}
+     * (and the caller MUST {@code return} without injecting) when {@code targetId} is a
+     * subagent pill, logging the blocked attempt with result {@code "blocked-subagent"}
+     * under {@code action}; returns {@code false} for any normal pane/main target so the
+     * inject proceeds. Centralised so all four input paths
+     * (composer/answer/answer-batch/interrupt) share one authoritative contract, which is
+     * what the challenger reviews for the no-op behavior.
+     */
+    private boolean guardSubagentInput(AuditAction action, int n, String targetId, ClientIdentity identity) {
+        if (!isSubagentTarget(targetId)) {
+            return false;
+        }
+        audit.logEvent(
+                action,
+                "blocked-subagent",
+                "n",
+                n,
+                "targetId",
+                targetId,
+                "fingerprint",
+                identity == null ? "" : identity.fingerprintHex());
+        LOG.info("UC-60 blocked {} into read-only subagent target {} (n={})", action.wire(), targetId, n);
+        return true;
     }
 
     /** Audit a conversation channel close. */

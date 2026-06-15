@@ -319,6 +319,16 @@ class TerminalStreamController(
         /** The always-present main-session target id (AC#10). */
         const val MAIN_TARGET_ID = "main"
 
+        /**
+         * UC-60 — id prefix marking a target as a background SUBAGENT pill (`subagent:<id>`),
+         * disjoint from [MAIN_TARGET_ID] and the `swarm:…` team-pane ids. A subagent runs
+         * in-process under the lead with no pane of its own, so a subagent target is
+         * READ-ONLY in the conversation UI (composer/answer/interrupt disabled); the server
+         * is the authoritative guard. Kept in lock-step with the server's
+         * `ConversationFacade.SUBAGENT_ID_PREFIX`.
+         */
+        const val SUBAGENT_ID_PREFIX = "subagent:"
+
         const val DEFAULT_COLS = 80
         const val DEFAULT_ROWS = 24
 
