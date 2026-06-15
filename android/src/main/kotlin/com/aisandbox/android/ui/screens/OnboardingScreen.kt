@@ -32,6 +32,7 @@ import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.FlashOff
 import androidx.compose.material.icons.outlined.FlashOn
+import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
@@ -107,6 +108,11 @@ fun OnboardingScreen(
         ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) ==
             PackageManager.PERMISSION_GRANTED
     }
+    // Criterion 6 — track whether the CAMERA runtime permission is actually
+    // held, so the camera mount block below can require it. A UC-83 file
+    // enrollment that lands on Enrolling/etc. while permission is NOT held
+    // must never reach `bindToLifecycle`.
+    var cameraPermissionGranted by remember { mutableStateOf(cameraGrantedAtFirstCompose) }
     LaunchedEffect(cameraGrantedAtFirstCompose) {
         if (cameraGrantedAtFirstCompose && state is OnboardingState.NeedsCameraPermission) {
             viewModel.onCameraPermissionGranted()
@@ -116,7 +122,34 @@ fun OnboardingScreen(
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.RequestPermission(),
     ) { granted ->
-        if (granted) viewModel.onCameraPermissionGranted() else viewModel.onCameraPermissionDenied()
+        if (granted) {
+            cameraPermissionGranted = true
+            viewModel.onCameraPermissionGranted()
+        } else {
+            viewModel.onCameraPermissionDenied()
+        }
+    }
+
+    // UC-83 — "Read QR from file". A scoped SAF read (OpenDocument, image/*):
+    // no READ_MEDIA_IMAGES / storage permission, no camera permission. We do
+    // NOT take a persistable Uri grant — the read happens within this call.
+    var importing by remember { mutableStateOf(false) }
+    val imagePicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri != null) {
+            viewModel.onQrImageSelected(uri)
+        } else {
+            // Operator cancelled the picker — re-enable the affordance.
+            importing = false
+        }
+    }
+    // Any state transition (decode landed on a failure / confirm / enroll)
+    // releases the in-flight guard so the button is tappable again.
+    LaunchedEffect(state) { importing = false }
+    val launchImagePicker: () -> Unit = {
+        importing = true
+        imagePicker.launch(arrayOf("image/*"))
     }
 
     // Camera-flash toggle driven by the top-right IconButton. Reset on any
@@ -133,12 +166,19 @@ fun OnboardingScreen(
         when (val s = state) {
             OnboardingState.NeedsCameraPermission -> CameraPermissionPanel(
                 onGrant = { permissionLauncher.launch(Manifest.permission.CAMERA) },
+                onReadFromFile = launchImagePicker,
+                readEnabled = !importing,
             )
 
-            OnboardingState.Scanning -> ScanningPanel()
+            OnboardingState.Scanning -> ScanningPanel(
+                onReadFromFile = launchImagePicker,
+                readEnabled = !importing,
+            )
 
             is OnboardingState.ConfirmReplace -> {
-                ScanningPanel() // keep the camera underneath the dialog
+                // Keep the camera underneath the dialog. Disable the file
+                // affordance here (a decision is already pending).
+                ScanningPanel(onReadFromFile = launchImagePicker, readEnabled = false)
                 ReplaceConfirmDialog(
                     onCancel = viewModel::onCancelReplace,
                     onConfirm = viewModel::onConfirmReplace,
@@ -164,9 +204,15 @@ fun OnboardingScreen(
         // camera surface every state change. We keep the preview mounted
         // through Enrolling too so the reticle's success transition reads
         // as a single continuous animation rather than a panel swap.
-        if (state is OnboardingState.Scanning ||
-            state is OnboardingState.ConfirmReplace ||
-            state is OnboardingState.Enrolling
+        // Criterion 6 — additionally require the CAMERA permission. A file
+        // enrollment performed without camera permission can drive the state
+        // into Enrolling/etc.; gating on `cameraPermissionGranted` keeps the
+        // CameraX `bindToLifecycle` from ever running in that case, while the
+        // `when (state)` panel above still renders the right content.
+        if (cameraPermissionGranted &&
+            (state is OnboardingState.Scanning ||
+                state is OnboardingState.ConfirmReplace ||
+                state is OnboardingState.Enrolling)
         ) {
             QrScanner(
                 modifier = Modifier.fillMaxSize(),
@@ -257,7 +303,11 @@ private fun GlassIconButton(onClick: () -> Unit, content: @Composable () -> Unit
 // ── Sub-panels ───────────────────────────────────────────────────────────
 
 @Composable
-private fun CameraPermissionPanel(onGrant: () -> Unit) {
+private fun CameraPermissionPanel(
+    onGrant: () -> Unit,
+    onReadFromFile: () -> Unit,
+    readEnabled: Boolean,
+) {
     Column(
         modifier = Modifier.fillMaxSize().padding(24.dp),
         verticalArrangement = Arrangement.Center,
@@ -273,11 +323,17 @@ private fun CameraPermissionPanel(onGrant: () -> Unit) {
         Button(onClick = onGrant) {
             Text(stringResource(R.string.onboarding_camera_permission_grant))
         }
+        Spacer(Modifier.height(12.dp))
+        // UC-83 — file enrollment works WITHOUT granting the camera (Criterion 6).
+        ReadQrFromFileButton(onClick = onReadFromFile, enabled = readEnabled)
     }
 }
 
 @Composable
-private fun ScanningPanel() {
+private fun ScanningPanel(
+    onReadFromFile: () -> Unit,
+    readEnabled: Boolean,
+) {
     Column(
         modifier = Modifier.fillMaxSize().padding(24.dp),
         verticalArrangement = Arrangement.SpaceBetween,
@@ -290,13 +346,35 @@ private fun ScanningPanel() {
             color = OnSurface,
             textAlign = TextAlign.Center,
         )
-        Spacer(Modifier.height(32.dp))
-        Text(
-            text = stringResource(R.string.onboarding_subtitle),
-            style = MaterialTheme.typography.bodyMedium,
-            color = OnSurfaceMuted,
-            textAlign = TextAlign.Center,
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Text(
+                text = stringResource(R.string.onboarding_subtitle),
+                style = MaterialTheme.typography.bodyMedium,
+                color = OnSurfaceMuted,
+                textAlign = TextAlign.Center,
+            )
+            Spacer(Modifier.height(16.dp))
+            // UC-83 — alternative to the live scan, alongside it (Criterion 1).
+            ReadQrFromFileButton(onClick = onReadFromFile, enabled = readEnabled)
+        }
+    }
+}
+
+/**
+ * UC-83 affordance shown in both the permission and scanning panels:
+ * opens the system document picker to read the invite QR from an image
+ * file instead of the live camera.
+ */
+@Composable
+private fun ReadQrFromFileButton(onClick: () -> Unit, enabled: Boolean) {
+    OutlinedButton(onClick = onClick, enabled = enabled) {
+        Icon(
+            imageVector = Icons.Outlined.Image,
+            contentDescription = stringResource(R.string.onboarding_read_qr_from_file_cd),
+            modifier = Modifier.size(18.dp),
         )
+        Spacer(Modifier.size(8.dp))
+        Text(stringResource(R.string.onboarding_read_qr_from_file))
     }
 }
 

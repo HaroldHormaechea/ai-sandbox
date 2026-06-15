@@ -21,17 +21,10 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import java.util.concurrent.atomic.AtomicReference
-import com.google.zxing.BinaryBitmap
-import com.google.zxing.DecodeHintType
-import com.google.zxing.MultiFormatReader
 import com.google.zxing.PlanarYUVLuminanceSource
-import com.google.zxing.common.HybridBinarizer
-import com.google.zxing.BarcodeFormat
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
-import com.google.zxing.NotFoundException
-import java.util.EnumMap
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 
@@ -157,7 +150,9 @@ private fun decodeQr(proxy: ImageProxy): String? {
     // PlanarYUVLuminanceSource takes the Y plane only — chroma is
     // irrelevant for QR decode and the rowStride may not equal width on
     // some hardware, but for monochrome decode we tolerate the
-    // padding.
+    // padding. The actual decode (binarizer + MultiFormatReader + hints)
+    // is shared with the UC-83 file path via [decode] in QrImageDecoder,
+    // so the camera and still-image paths decode identically.
     val source = PlanarYUVLuminanceSource(
         yBytes,
         yPlane.rowStride,
@@ -168,24 +163,7 @@ private fun decodeQr(proxy: ImageProxy): String? {
         height,
         false,
     )
-    val binary = BinaryBitmap(HybridBinarizer(source))
-
-    val reader = MultiFormatReader().apply {
-        val hints = EnumMap<DecodeHintType, Any>(DecodeHintType::class.java)
-        hints[DecodeHintType.POSSIBLE_FORMATS] = listOf(BarcodeFormat.QR_CODE)
-        hints[DecodeHintType.TRY_HARDER] = true
-        setHints(hints)
-    }
-    return try {
-        reader.decode(binary).text
-    } catch (_: NotFoundException) {
-        null
-    } catch (t: Throwable) {
-        Log.v(TAG, "ZXing decode skipped: ${t.javaClass.simpleName}")
-        null
-    } finally {
-        reader.reset()
-    }
+    return decode(source)
 }
 
 /**
