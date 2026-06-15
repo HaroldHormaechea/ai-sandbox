@@ -1139,6 +1139,59 @@ test('UC-47 isNonPromptUserLine treats a null/absent object defensively as non-p
   assert.strictEqual(helper.isNonPromptUserLine(undefined), true);
 });
 
+// ── UC-58 — teammate-message envelope is never the lead's own prompt ──
+// In a team-lead session the harness delivers inbound teammate/subagent messages to the
+// lead as `user`-role lines whose string content is a <teammate-message …>…</teammate-message>
+// envelope. The tail helper's mirror classifier must treat that as a non-prompt line so a
+// team-lead conversation is never NAMED after a teammate message and turn-state derivation
+// ignores it — while a genuine prompt that merely MENTIONS the tag stays a real prompt (AC3/AC5).
+test('UC-58 isNonPromptUserLine skips a teammate-message envelope (double-quoted attrs)', () => {
+  const o = {
+    type: 'user',
+    message: { content: '<teammate-message teammate_id="analyst" color="blue">hi lead</teammate-message>' },
+  };
+  assert.strictEqual(helper.isNonPromptUserLine(o), true);
+});
+
+test('UC-58 isNonPromptUserLine skips a real no-color team-lead envelope (captured wire shape)', () => {
+  // A REAL captured shape: teammate_id="team-lead", no color attribute.
+  const o = {
+    type: 'user',
+    message: { content: '<teammate-message teammate_id="team-lead">you\'re clear, proceed</teammate-message>' },
+  };
+  assert.strictEqual(helper.isNonPromptUserLine(o), true);
+});
+
+test('UC-58 isNonPromptUserLine skips a bare and a self-closing teammate envelope', () => {
+  assert.strictEqual(
+    helper.isNonPromptUserLine({ message: { content: '<teammate-message>body</teammate-message>' } }),
+    true,
+  );
+  assert.strictEqual(helper.isNonPromptUserLine({ message: { content: '<teammate-message/>' } }), true);
+});
+
+test('UC-58 isNonPromptUserLine does NOT skip a genuine prompt that merely mentions the tag', () => {
+  const o = { type: 'user', message: { content: 'please explain the <teammate-message> envelope format' } };
+  assert.strictEqual(helper.isNonPromptUserLine(o), false);
+});
+
+test('UC-58 isNonPromptUserLine does NOT skip a lookalike tag (<teammate-messageX>)', () => {
+  const o = { message: { content: '<teammate-messageX>not the envelope</teammate-messageX>' } };
+  assert.strictEqual(helper.isNonPromptUserLine(o), false);
+});
+
+test('UC-58 deriveConversationName skips a leading teammate envelope and names from the real prompt', () => {
+  const lines = [
+    assistantLine('assistant noise'),
+    userStringLine('<teammate-message teammate_id="analyst">analysis handoff, ignore for naming</teammate-message>'),
+    userStringLine('Refactor the SessionRow to show the conversation name'),
+  ];
+  assert.strictEqual(
+    helper.deriveConversationName(lines),
+    'Refactor the SessionRow to show the conversation name',
+  );
+});
+
 // ── extractUserText (the anti-regression core) ──
 test('UC-47 extractUserText reads STRING content DIRECTLY (the 253/263 common case)', () => {
   // This is the exact case the old array-only guard would have dropped.
