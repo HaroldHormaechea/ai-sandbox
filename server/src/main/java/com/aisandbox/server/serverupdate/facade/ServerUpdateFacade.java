@@ -52,7 +52,14 @@ public class ServerUpdateFacade {
             // Dev / test runtime: no manifest version to compare, so there is
             // nothing to offer. Never throw (risk note).
             audit.logEvent(
-                    AuditAction.SERVER_UPDATE_CHECK, "ok", "current", current, "latest", "n/a", "updateAvailable", false);
+                    AuditAction.SERVER_UPDATE_CHECK,
+                    "ok",
+                    "current",
+                    current,
+                    "latest",
+                    "n/a",
+                    "updateAvailable",
+                    false);
             return new UpdateStatus(current, null, false, null, null);
         }
         try {
@@ -85,11 +92,15 @@ public class ServerUpdateFacade {
                     latest.version(),
                     "updateAvailable",
                     updateAvailable);
-            return new UpdateStatus(
-                    current, latest.version(), updateAvailable, latest.htmlUrl(), latest.debAssetUrl());
+            return new UpdateStatus(current, latest.version(), updateAvailable, latest.htmlUrl(), latest.debAssetUrl());
         } catch (ServerUpdateException e) {
-            audit.logEvent(AuditAction.SERVER_UPDATE_CHECK, "fail", "current", current, "error", e.getClass()
-                    .getSimpleName());
+            audit.logEvent(
+                    AuditAction.SERVER_UPDATE_CHECK,
+                    "fail",
+                    "current",
+                    current,
+                    "error",
+                    e.getClass().getSimpleName());
             throw e;
         }
     }

@@ -66,7 +66,8 @@ public class GitHubReleaseService {
     private final String apiBaseUrl;
 
     @org.springframework.beans.factory.annotation.Autowired
-    public GitHubReleaseService(@Value("${ai-sandbox.update.github-api-base:https://api.github.com}") String apiBaseUrl) {
+    public GitHubReleaseService(
+            @Value("${ai-sandbox.update.github-api-base:https://api.github.com}") String apiBaseUrl) {
         this(
                 HttpClient.newBuilder()
                         .connectTimeout(CONNECT_TIMEOUT)

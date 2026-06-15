@@ -23,6 +23,9 @@ on:
       - 'SandboxDockerfile'
       - 'entrypoint.sh'
       - '.gitattributes'
+      # UC-84 — the root-owned self-updater script is bundled into the .deb/zip
+      # and smoke-tested below, so a PR touching only it must still run CI.
+      - 'ai-sandbox-updater.sh'
   push:
     branches:
       - main
@@ -43,6 +46,7 @@ on:
       - 'SandboxDockerfile'
       - 'entrypoint.sh'
       - '.gitattributes'
+      - 'ai-sandbox-updater.sh'
 
 permissions:
   contents: read
@@ -62,6 +66,27 @@ jobs:
         run: ./gradlew :server:spotlessCheck :server:test :server:generateOpenApiDocs --no-daemon
       - name: Fail on drifted committed OAS
         run: git diff --exit-code -- server/openapi.yaml
+      # UC-84 — the self-update trigger path is the server's entire privileged
+      # surface, so its literal MUST be byte-identical in all three places that
+      # reference it: the Java constant the server writes, the postinst that
+      # pre-creates the dir, and the .path unit that watches it. If any two
+      # drift, a marker written by the server would never fire the updater (or
+      # would fire on a dir nobody pre-created with the right ownership). Pin the
+      # one expected string and assert each file carries it exactly.
+      - name: UC-84 — trigger-path literal cross-check (Java / postinst / .path)
+        run: |
+          set -euo pipefail
+          EXPECTED="/var/lib/ai-sandbox-server/update-trigger"
+          JAVA=server/src/main/java/com/aisandbox/server/serverupdate/service/UpdateTriggerService.java
+          POSTINST=server/debian/postinst
+          PATHUNIT=server/systemd/ai-sandbox-updater.path
+          grep -qF "TRIGGER_DIR = \"$EXPECTED\"" "$JAVA" \
+            || { echo "FAIL: $JAVA missing TRIGGER_DIR = \"$EXPECTED\"" >&2; exit 1; }
+          grep -qE "install -d .* $EXPECTED\$" "$POSTINST" \
+            || { echo "FAIL: $POSTINST has no 'install -d ... $EXPECTED'" >&2; exit 1; }
+          grep -qF "DirectoryNotEmpty=$EXPECTED" "$PATHUNIT" \
+            || { echo "FAIL: $PATHUNIT missing DirectoryNotEmpty=$EXPECTED" >&2; exit 1; }
+          echo "OK: trigger path '$EXPECTED' is identical across Java constant, postinst, and .path unit."
       # UC-55 — the in-container conversation-tail helper carries pure parsing seams
       # (pending-prompt + per-tab --parse-pane recovery) with Node's built-in test
       # runner. These never run under Gradle, so CI must exercise them explicitly.
@@ -284,6 +309,12 @@ jobs:
                   test -f /opt/ai-sandbox-server/sample-config.yaml
                   test -f /opt/ai-sandbox-server/STREAM_PROTOCOL.md
                   test -f /opt/ai-sandbox-server/systemd/ai-sandbox-server.service
+                  # UC-84 — the self-update units + the root-owned updater script
+                  # ship in the operator zip (units under systemd/, script under
+                  # updater/ and executable).
+                  test -f /opt/ai-sandbox-server/systemd/ai-sandbox-updater.service
+                  test -f /opt/ai-sandbox-server/systemd/ai-sandbox-updater.path
+                  test -x /opt/ai-sandbox-server/updater/ai-sandbox-updater.sh
 
                   # AC20 — unversioned jar filenames at the install path.
                   test -f /opt/ai-sandbox-server/lib/aisandbox-server.jar
@@ -753,6 +784,11 @@ jobs:
                   test -f /opt/ai-sandbox-server/lib/aisandboxctl.jar
                   # systemd unit at the Debian-canonical path.
                   test -f /lib/systemd/system/ai-sandbox-server.service
+                  # UC-84 — self-update units at the canonical path + the
+                  # root-owned updater script installed executable.
+                  test -f /lib/systemd/system/ai-sandbox-updater.service
+                  test -f /lib/systemd/system/ai-sandbox-updater.path
+                  test -x /opt/ai-sandbox-server/updater/ai-sandbox-updater.sh
 
                   # postinst — operator dirs at 0750 owned by ai-sandbox-server.
                   assert_owner_mode() {
@@ -766,6 +802,11 @@ jobs:
                   assert_owner_mode /etc/ai-sandbox-server     ai-sandbox-server ai-sandbox-server 750
                   assert_owner_mode /var/lib/ai-sandbox-server ai-sandbox-server ai-sandbox-server 750
                   assert_owner_mode /var/log/ai-sandbox-server ai-sandbox-server ai-sandbox-server 750
+                  # UC-84 — postinst pre-creates the server-writable trigger dir
+                  # (0750, owned by the service user) so the non-root server can
+                  # drop its marker. (systemctl enable of the .path is a no-op in
+                  # this no-systemd container — asserted on the host-runner leg.)
+                  assert_owner_mode /var/lib/ai-sandbox-server/update-trigger ai-sandbox-server ai-sandbox-server 750
 
                   # System user exists with the documented shell + groups.
                   id ai-sandbox-server >/dev/null
@@ -1121,6 +1162,26 @@ jobs:
           test -f /opt/ai-sandbox-server/lib/aisandbox-server.jar
           test -f /lib/systemd/system/ai-sandbox-server.service
           test -x /usr/bin/aisandboxctl
+
+          # UC-84 — on a real-systemd host the postinst enables the self-update
+          # trigger watch (`systemctl enable --now ai-sandbox-updater.path`).
+          # Assert it is enabled + the units/script are installed. The docker
+          # .deb leg above can't check this (no systemd in the container), so
+          # this host leg is the one that proves the enable actually took.
+          test -f /lib/systemd/system/ai-sandbox-updater.service
+          test -f /lib/systemd/system/ai-sandbox-updater.path
+          test -x /opt/ai-sandbox-server/updater/ai-sandbox-updater.sh
+          sudo systemctl daemon-reload
+          if [ "$(sudo systemctl is-enabled ai-sandbox-updater.path 2>/dev/null)" != "enabled" ]; then
+              echo "FAIL: ai-sandbox-updater.path is not enabled after install" >&2
+              sudo systemctl status ai-sandbox-updater.path --no-pager || true
+              exit 1
+          fi
+          echo "UC-84: ai-sandbox-updater.path is enabled (path-activated self-update watch armed)."
+          # Clean up the .path watch so it cannot fire during the rest of this
+          # leg (a real self-update would download + reinstall + restart). The
+          # adversarial parameter-injection proof is QA's hermetic test, not CI.
+          sudo systemctl disable --now ai-sandbox-updater.path >/dev/null 2>&1 || true
 
           # Regression guard for the UC11 fix itself — the packaged
           # unit MUST list /etc/ai-sandbox-server/clients on the

@@ -3,6 +3,8 @@ package com.aisandbox.android.ui.screens
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.Intent
+import android.net.Uri
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -15,6 +17,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -22,6 +25,9 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ArrowBack
 import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -43,9 +49,11 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
 import com.aisandbox.android.BuildConfig
 import com.aisandbox.android.R
 import com.aisandbox.android.net.NetworkEvent
@@ -110,6 +118,10 @@ fun SettingsScreen(onBack: () -> Unit) {
             GroupHeader(stringResource(R.string.settings_group_appearance))
             AppearanceSection(container = container)
             KeyboardSection(container = container)
+
+            // UC-84 — server self-update controls (own group).
+            GroupHeader(stringResource(R.string.settings_group_maintenance))
+            ServerUpdateSection()
 
             // UC-53 (AC1) — the previously top-level read-only sections + footer are
             // now demoted under an Info group.
@@ -323,6 +335,161 @@ private fun KeyboardSection(container: com.aisandbox.android.AppContainer) {
                 },
             )
         }
+    }
+}
+
+/**
+ * UC-84 — the "Server updates" section. An explicit "Look for server updates"
+ * button (AC3 — never auto-runs on screen open) drives a [ServerUpdateViewModel]
+ * check; the section then renders per [ServerUpdateUiState]: up-to-date, an
+ * "Update to version X" button + external-browser "Changelog" link (AC6), an
+ * in-app confirm dialog before apply (AC7), an "updating…" state that tolerates
+ * the restart disconnect and reports the now-running version (AC9), or a clean
+ * error that leaves everything running (AC14).
+ */
+@Composable
+private fun ServerUpdateSection(viewModel: ServerUpdateViewModel = viewModel()) {
+    val context = LocalContext.current
+    val state by viewModel.state.collectAsState()
+
+    Section(title = stringResource(R.string.settings_section_server_updates)) {
+        when (val s = state) {
+            is ServerUpdateUiState.Checking -> {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                    Spacer(Modifier.width(12.dp))
+                    Text(
+                        stringResource(R.string.settings_update_checking),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = OnSurfaceMuted,
+                    )
+                }
+            }
+
+            is ServerUpdateUiState.UpToDate -> {
+                Text(
+                    stringResource(R.string.settings_update_up_to_date, s.current),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = OnSurface,
+                )
+                Spacer(Modifier.height(12.dp))
+                CheckButton(viewModel, labelRes = R.string.settings_update_recheck)
+            }
+
+            is ServerUpdateUiState.UpdateAvailable -> {
+                Text(
+                    stringResource(R.string.settings_update_current, s.current),
+                    style = AiSandboxMonoTypography.metadata,
+                    color = OnSurfaceMuted,
+                )
+                Spacer(Modifier.height(12.dp))
+                Button(
+                    onClick = { viewModel.requestConfirm() },
+                    modifier = Modifier.fillMaxWidth().testTag("settings_update_apply"),
+                ) {
+                    Text(stringResource(R.string.settings_update_available, s.latest))
+                }
+                if (!s.releaseHtmlUrl.isNullOrBlank()) {
+                    TextButton(
+                        onClick = { openChangelog(context, s.releaseHtmlUrl) },
+                        modifier = Modifier.testTag("settings_update_changelog"),
+                    ) {
+                        Text(stringResource(R.string.settings_update_changelog))
+                    }
+                }
+            }
+
+            is ServerUpdateUiState.Confirming -> {
+                // Keep the available state visible behind the dialog.
+                Text(
+                    stringResource(R.string.settings_update_available, s.latest),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = OnSurface,
+                )
+                AlertDialog(
+                    onDismissRequest = { viewModel.cancelConfirm() },
+                    title = { Text(stringResource(R.string.settings_update_confirm_title)) },
+                    text = { Text(stringResource(R.string.settings_update_confirm_body, s.latest)) },
+                    confirmButton = {
+                        TextButton(
+                            onClick = { viewModel.confirmApply() },
+                            modifier = Modifier.testTag("settings_update_confirm"),
+                        ) {
+                            Text(stringResource(R.string.settings_update_confirm_yes))
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(onClick = { viewModel.cancelConfirm() }) {
+                            Text(stringResource(R.string.settings_update_confirm_cancel))
+                        }
+                    },
+                )
+            }
+
+            is ServerUpdateUiState.Updating -> {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    CircularProgressIndicator(modifier = Modifier.size(18.dp), strokeWidth = 2.dp)
+                    Spacer(Modifier.width(12.dp))
+                    Text(
+                        stringResource(R.string.settings_update_updating),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = OnSurfaceMuted,
+                    )
+                }
+            }
+
+            is ServerUpdateUiState.Done -> {
+                Text(
+                    stringResource(R.string.settings_update_done, s.newVersion),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = OnSurface,
+                )
+                Spacer(Modifier.height(12.dp))
+                CheckButton(viewModel, labelRes = R.string.settings_update_recheck)
+            }
+
+            is ServerUpdateUiState.Error -> {
+                Text(
+                    stringResource(R.string.settings_update_error, "${s.code}: ${s.detail}"),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = ErrorTone,
+                )
+                Spacer(Modifier.height(12.dp))
+                CheckButton(viewModel, labelRes = R.string.settings_update_recheck)
+            }
+
+            ServerUpdateUiState.Idle -> {
+                Text(
+                    stringResource(R.string.settings_update_subtitle),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = OnSurfaceMuted,
+                )
+                Spacer(Modifier.height(12.dp))
+                CheckButton(viewModel, labelRes = R.string.settings_update_check)
+            }
+        }
+    }
+}
+
+@Composable
+private fun CheckButton(viewModel: ServerUpdateViewModel, labelRes: Int) {
+    Button(
+        onClick = { viewModel.check() },
+        modifier = Modifier.fillMaxWidth().testTag("settings_update_check"),
+    ) {
+        Text(stringResource(labelRes))
+    }
+}
+
+/** AC6 — open the release's GitHub page in an external browser. */
+private fun openChangelog(context: Context, url: String) {
+    val intent = Intent(Intent.ACTION_VIEW, Uri.parse(url)).apply {
+        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+    try {
+        context.startActivity(intent)
+    } catch (_: android.content.ActivityNotFoundException) {
+        // No browser available — silently ignore (the version info is still shown).
     }
 }
 

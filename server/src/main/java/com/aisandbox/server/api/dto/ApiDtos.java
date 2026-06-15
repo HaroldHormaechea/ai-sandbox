@@ -251,8 +251,7 @@ public final class ApiDtos {
      */
     @Schema(description = "Response of POST /v1/server/update/apply (UC-84).")
     public record UpdateApplyResponse(
-            @Schema(description = "Always true on success (failures return a problem+json instead).")
-                    boolean accepted,
+            @Schema(description = "Always true on success (failures return a problem+json instead).") boolean accepted,
             @Schema(description = "Best-effort latest server-v* version the update targets, or omitted if unresolved.")
                     String targetVersion) {}
 }

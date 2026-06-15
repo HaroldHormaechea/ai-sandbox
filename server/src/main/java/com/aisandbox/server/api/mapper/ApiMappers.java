@@ -105,7 +105,8 @@ public final class ApiMappers {
     }
 
     /** UC-84 — internal apply result → API response DTO (rule 5). */
-    public static ApiDtos.UpdateApplyResponse toUpdateApplyResponse(com.aisandbox.server.serverupdate.dto.ApplyResult r) {
+    public static ApiDtos.UpdateApplyResponse toUpdateApplyResponse(
+            com.aisandbox.server.serverupdate.dto.ApplyResult r) {
         return new ApiDtos.UpdateApplyResponse(r.accepted(), r.targetVersion());
     }
 
