@@ -58,11 +58,11 @@ public class McpInventoryService {
         String project = "ai-sandbox-" + n;
         String stdout;
         try {
-            // UC-82 — route through the single ClaudeMcpCommand chokepoint so every
+            // UC-82 — route through the single McpCliCommand chokepoint so every
             // `claude mcp …` argv (list/add/remove) is built one way: no shell, and the
             // subcommand comes only from the allowlisted Sub enum, never user input.
             ProcessExecutor.Result r =
-                    exec.run(ClaudeMcpCommand.build(n, ClaudeMcpCommand.Sub.LIST, List.of()), null, TIMEOUT);
+                    exec.run(McpCliCommand.build(n, McpCliCommand.Sub.LIST, List.of()), null, TIMEOUT);
             if (r.exitCode() != 0) {
                 // Common, non-exceptional cases: no container running, or a
                 // SERVER_SSH/non-sandbox session that has no `claude` at all.

@@ -35,9 +35,9 @@ import java.util.Set;
  *       service's configured (non-root) user, preserving the v2 confinement model.</li>
  * </ul>
  */
-final class ClaudeMcpCommand {
+final class McpCliCommand {
 
-    private ClaudeMcpCommand() {}
+    private McpCliCommand() {}
 
     /**
      * AC5 — the closed, compile-time set of {@code claude mcp} subcommands this server

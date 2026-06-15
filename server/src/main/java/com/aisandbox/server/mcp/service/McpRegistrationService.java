@@ -20,14 +20,14 @@ import org.springframework.stereotype.Service;
  * Java, argv-only {@link ProcessExecutor} calls, no shell, no string interpolation.
  *
  * <p><b>AC4 — injection-safe exec.</b> The argv is assembled here and emitted through
- * the single {@link ClaudeMcpCommand} chokepoint; every user-supplied value (name,
+ * the single {@link McpCliCommand} chokepoint; every user-supplied value (name,
  * command, args, URL, env entries, headers) lands as a discrete argv token, so a
  * crafted value can never break out into an extra command. Positional stdio args are
  * additionally guarded by a {@code --} separator so a flag-looking value is treated
  * as a positional argument, not a new option.
  *
  * <p><b>AC5 — config-only, least-privilege.</b> The {@code claude} verb is fixed to
- * {@code mcp add} / {@code mcp remove} by {@link ClaudeMcpCommand.Sub}; no path can
+ * {@code mcp add} / {@code mcp remove} by {@link McpCliCommand.Sub}; no path can
  * emit a conversation / {@code -p} / arbitrary-{@code claude} invocation, and no
  * {@code -u}/{@code --user}/{@code --privileged} flag is ever added.
  *
@@ -61,7 +61,7 @@ public class McpRegistrationService {
      * non-zero exit or I/O failure.
      */
     public void add(int n, McpAddSpec spec) {
-        run(ClaudeMcpCommand.build(n, ClaudeMcpCommand.Sub.ADD, addTail(spec)), "add", spec.name());
+        run(McpCliCommand.build(n, McpCliCommand.Sub.ADD, addTail(spec)), "add", spec.name());
     }
 
     /**
@@ -71,7 +71,7 @@ public class McpRegistrationService {
      * McpRegistrationException} on a non-zero exit or I/O failure.
      */
     public void remove(int n, String name) {
-        run(ClaudeMcpCommand.build(n, ClaudeMcpCommand.Sub.REMOVE, List.of("--scope", "user", name)), "remove", name);
+        run(McpCliCommand.build(n, McpCliCommand.Sub.REMOVE, List.of("--scope", "user", name)), "remove", name);
     }
 
     private void run(List<String> argv, String op, String serverName) {
