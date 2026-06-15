@@ -60,6 +60,15 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
     private val _backfilling = MutableStateFlow(false)
     val backfilling: StateFlow<Boolean> = _backfilling.asStateFlow()
 
+    // UC-79 (AC3) — mirrors the controller's older-page loading state so the screen can show a
+    // top loading affordance and gate the scroll-up trigger (single-in-flight).
+    private val _loadingOlder = MutableStateFlow(false)
+    val loadingOlder: StateFlow<Boolean> = _loadingOlder.asStateFlow()
+
+    // UC-79 (AC4) — true once the transcript start is reached; the screen stops triggering loads.
+    private val _atTranscriptStart = MutableStateFlow(false)
+    val atTranscriptStart: StateFlow<Boolean> = _atTranscriptStart.asStateFlow()
+
     private val _toolDetail = MutableStateFlow<ToolDetailState?>(null)
     val toolDetail: StateFlow<ToolDetailState?> = _toolDetail.asStateFlow()
 
@@ -124,6 +133,8 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
         viewModelScope.launch { c.pendingSheet.collect { _pendingSheet.value = it } }
         viewModelScope.launch { c.turnPhase.collect { _turnPhase.value = it } }
         viewModelScope.launch { c.backfilling.collect { _backfilling.value = it } }
+        viewModelScope.launch { c.loadingOlder.collect { _loadingOlder.value = it } }
+        viewModelScope.launch { c.atTranscriptStart.collect { _atTranscriptStart.value = it } }
         viewModelScope.launch { c.toolDetail.collect { _toolDetail.value = it } }
         viewModelScope.launch { c.selectedModelId.collect { _selectedModelId.value = it } }
     }
@@ -149,6 +160,9 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
 
     /** UC-41 — dismiss the detail dialog. */
     fun closeDetail() = controller?.closeDetail() ?: Unit
+
+    /** UC-79 (AC2) — request the next older page of transcript (scroll-up infinite scroll). */
+    fun loadOlder() = controller?.loadOlder() ?: Unit
 
     /**
      * UC-66 — fetch the server's model catalogue for the dialog. Publishes

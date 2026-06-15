@@ -577,11 +577,18 @@ public class SessionConversationHandler implements WebSocketHandler {
             }
             ConversationFacade.OlderPage page =
                     facade.fetchOlderPage(ctx.n, ctx.selectedTarget.get(), before, facade.conversationPageLines());
-            emit(ctx, session, new ConversationServerMessage.PageStart());
-            for (ConversationServerMessage frame : page.frames()) {
-                emit(ctx, session, frame);
+            // Emit the whole page burst ATOMICALLY w.r.t. the live tail pump: the fetch above
+            // ran lock-free, but the page-start → frames → page-end sequence must not be
+            // interleaved by a concurrently-pumped live frame, or that live frame would be
+            // mis-prepended into the older page on the client (AC6). emit()'s own lock is the
+            // same monitor and is reentrant, so holding it here makes the burst contiguous.
+            synchronized (ctx.outboundLock) {
+                emit(ctx, session, new ConversationServerMessage.PageStart());
+                for (ConversationServerMessage frame : page.frames()) {
+                    emit(ctx, session, frame);
+                }
+                emit(ctx, session, new ConversationServerMessage.PageEnd(page.atStart()));
             }
-            emit(ctx, session, new ConversationServerMessage.PageEnd(page.atStart()));
             ctx.oldestLineCursor.set(page.newOldestLine());
         } catch (RuntimeException e) {
             LOG.warn("conversation load-older for n={} failed: {}", ctx.n, e.toString());
