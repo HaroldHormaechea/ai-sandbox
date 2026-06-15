@@ -821,6 +821,180 @@ class ConversationEventMapperTest {
         assertThat(q.questions().get(0).options().get(0).label()).isEqualTo("A");
     }
 
+    // ════════════════ UC-58 — teammate-message envelope reclassification (AC1–AC7) ═══
+    //
+    // In a team-lead session the harness delivers an inbound teammate/subagent message to
+    // the lead as a `user`-role line whose string content is a
+    // `<teammate-message teammate_id="…" color="…">…</teammate-message>` envelope (no
+    // isMeta, no sourceToolUseID). mapUser's rule 5 reclassifies a WELL-FORMED envelope
+    // (opening tag at the START of content, a `teammate_id`, and a closing tag) to a
+    // dedicated TeammateMessage frame so it renders as a distinct, sender-attributed,
+    // NON-user bubble — instead of falling through to the rule-6 TurnStart (right-aligned
+    // user bubble). A malformed/half envelope, or a genuine prompt that merely mentions the
+    // literal text, stays a TurnStart.
+    //
+    // The fixture lines mirror REAL captured wire shapes: a no-color double-quoted
+    // `teammate_id="team-lead"` line, a quoted-`>` summary attribute, and nested-JSON inner
+    // bodies (idle_notification / task_assignment) — not synthetic-only forms.
+
+    @Test
+    void uc58_teammate_envelope_maps_to_TeammateMessage_with_sender_and_cleaned_text() {
+        // AC1/AC2 — a well-formed envelope (faithful wire form: double-quoted attrs) →
+        // TeammateMessage carrying the teammate_id + color and the stripped inner text.
+        String line = "{\"type\":\"user\",\"uuid\":\"utm\",\"message\":{\"content\":"
+                + "\"<teammate-message teammate_id=\\\"analyst\\\" color=\\\"blue\\\">"
+                + "Proposal looks good.</teammate-message>\"}}";
+        assertThat(mapper.map("main", line))
+                .singleElement()
+                .isInstanceOfSatisfying(ConversationServerMessage.TeammateMessage.class, tm -> {
+                    assertThat(tm.teammateId()).isEqualTo("analyst");
+                    assertThat(tm.color()).isEqualTo("blue");
+                    assertThat(tm.text()).isEqualTo("Proposal looks good.");
+                    assertThat(tm.uuid()).isEqualTo("utm");
+                });
+    }
+
+    @Test
+    void uc58_real_wire_no_color_team_lead_envelope_maps_to_TeammateMessage() {
+        // AC1/AC2 — a REAL captured shape: a `teammate_id="team-lead"` line with NO color
+        // attribute and double-quoted attrs, exactly as the harness delivers it to the lead.
+        String line = "{\"type\":\"user\",\"uuid\":\"utl0\",\"isSidechain\":false,\"message\":{\"content\":"
+                + "\"<teammate-message teammate_id=\\\"team-lead\\\">"
+                + "you're clear, proceed</teammate-message>\"}}";
+        assertThat(mapper.map("main", line))
+                .singleElement()
+                .isInstanceOfSatisfying(ConversationServerMessage.TeammateMessage.class, tm -> {
+                    assertThat(tm.teammateId()).isEqualTo("team-lead");
+                    assertThat(tm.color()).isEmpty();
+                    assertThat(tm.text()).isEqualTo("you're clear, proceed");
+                });
+    }
+
+    @Test
+    void uc58_teammate_envelope_with_nested_json_inner_is_collapsed_no_markup_leak() {
+        // AC6 — an idle-notification (or any nested-JSON) inner body is collapsed to a short
+        // "[type] summary" label; raw JSON braces / field names never leak into the bubble.
+        String line = "{\"type\":\"user\",\"uuid\":\"utj\",\"message\":{\"content\":"
+                + "\"<teammate-message teammate_id='notifier'>"
+                + "{\\\"type\\\":\\\"idle_notification\\\",\\\"summary\\\":\\\"agent went idle\\\"}"
+                + "</teammate-message>\"}}";
+        ConversationServerMessage.TeammateMessage tm = (ConversationServerMessage.TeammateMessage)
+                mapper.map("main", line).get(0);
+        assertThat(tm.text()).isEqualTo("[idle_notification] agent went idle");
+        assertThat(tm.text()).doesNotContain("{").doesNotContain("\"type\"").doesNotContain("summary");
+    }
+
+    @Test
+    void uc58_teammate_envelope_with_task_assignment_json_is_collapsed_no_markup_leak() {
+        // AC6 — a second REAL nested-JSON shape (a task_assignment peer-DM envelope) is
+        // likewise collapsed to "[type] summary"; no JSON markup reaches the rendered bubble.
+        String line = "{\"type\":\"user\",\"uuid\":\"uta\",\"message\":{\"content\":"
+                + "\"<teammate-message teammate_id=\\\"developer\\\" color=\\\"green\\\">"
+                + "{\\\"type\\\":\\\"task_assignment\\\",\\\"summary\\\":\\\"implement the parser\\\","
+                + "\\\"taskId\\\":\\\"42\\\"}</teammate-message>\"}}";
+        ConversationServerMessage.TeammateMessage tm = (ConversationServerMessage.TeammateMessage)
+                mapper.map("main", line).get(0);
+        assertThat(tm.teammateId()).isEqualTo("developer");
+        assertThat(tm.text()).isEqualTo("[task_assignment] implement the parser");
+        assertThat(tm.text()).doesNotContain("{").doesNotContain("taskId");
+    }
+
+    @Test
+    void uc58_teammate_envelope_preserves_multiline_inner_content() {
+        // AC6 — multi-line plain inner content is preserved as-is (renderer handles wrapping).
+        String line = "{\"type\":\"user\",\"uuid\":\"utl\",\"message\":{\"content\":"
+                + "\"<teammate-message teammate_id='dev'>line one\\nline two</teammate-message>\"}}";
+        ConversationServerMessage.TeammateMessage tm = (ConversationServerMessage.TeammateMessage)
+                mapper.map("main", line).get(0);
+        assertThat(tm.text()).contains("line one").contains("line two");
+    }
+
+    @Test
+    void uc58_teammate_envelope_without_color_yields_empty_color_but_keeps_sender() {
+        // AC2 — color is optional; attribution still works off teammate_id alone.
+        String line = "{\"type\":\"user\",\"uuid\":\"utc\",\"message\":{\"content\":"
+                + "\"<teammate-message teammate_id='challenger'>no colour here</teammate-message>\"}}";
+        ConversationServerMessage.TeammateMessage tm = (ConversationServerMessage.TeammateMessage)
+                mapper.map("main", line).get(0);
+        assertThat(tm.teammateId()).isEqualTo("challenger");
+        assertThat(tm.color()).isEmpty();
+        assertThat(tm.text()).isEqualTo("no colour here");
+    }
+
+    @Test
+    void uc58_attribute_value_containing_a_gt_does_not_truncate_the_inner_body() {
+        // Challenger Minor #1 / AC6 — a quoted attribute value that itself contains '>'
+        // must NOT be mistaken for the opening tag's end, or the markup would leak. The
+        // inner body is sliced from the REAL tag end; the attribute text never appears.
+        String line = "{\"type\":\"user\",\"uuid\":\"utg\",\"message\":{\"content\":"
+                + "\"<teammate-message teammate_id='qa' summary='done > next'>"
+                + "the actual body</teammate-message>\"}}";
+        ConversationServerMessage.TeammateMessage tm = (ConversationServerMessage.TeammateMessage)
+                mapper.map("main", line).get(0);
+        assertThat(tm.text()).isEqualTo("the actual body");
+        assertThat(tm.text()).doesNotContain("summary").doesNotContain("next");
+    }
+
+    @Test
+    void uc58_genuine_prompt_merely_mentioning_the_tag_mid_text_stays_a_TurnStart() {
+        // AC3/AC4 pitfall — the marker is STRUCTURAL (content must START with the opening
+        // tag). A real prompt that merely mentions the literal text is the user's own
+        // message and must stay a (right-aligned) TurnStart, never a TeammateMessage.
+        String line = "{\"type\":\"user\",\"uuid\":\"utp\",\"message\":{\"content\":"
+                + "\"please render a <teammate-message …> envelope in the docs\"}}";
+        assertThat(mapper.map("main", line)).singleElement().isInstanceOf(ConversationServerMessage.TurnStart.class);
+    }
+
+    @Test
+    void uc58_envelope_without_a_teammate_id_degrades_to_TurnStart() {
+        // Well-formedness — a teammate envelope must NAME its sender. Without a teammate_id
+        // it is not reclassified; it degrades to a TurnStart rather than being dropped.
+        String line = "{\"type\":\"user\",\"uuid\":\"utn\",\"message\":{\"content\":"
+                + "\"<teammate-message color='blue'>orphan envelope</teammate-message>\"}}";
+        assertThat(mapper.map("main", line)).singleElement().isInstanceOf(ConversationServerMessage.TurnStart.class);
+    }
+
+    @Test
+    void uc58_malformed_or_half_envelope_degrades_to_TurnStart_and_never_throws() {
+        // AC20 parity / AC3 (degrade-not-drop) — a half envelope (no closing tag) and an
+        // unterminated opening tag (no '>') both degrade to TurnStart; neither drops the line
+        // nor throws.
+        String noClose = "{\"type\":\"user\",\"uuid\":\"uth1\",\"message\":{\"content\":"
+                + "\"<teammate-message teammate_id='x'>body with no closing tag\"}}";
+        assertThat(mapper.map("main", noClose)).singleElement().isInstanceOf(ConversationServerMessage.TurnStart.class);
+        String noTagEnd = "{\"type\":\"user\",\"uuid\":\"uth2\",\"message\":{\"content\":"
+                + "\"<teammate-message teammate_id='x' dangling attribute with no gt\"}}";
+        assertThat(mapper.map("main", noTagEnd))
+                .singleElement()
+                .isInstanceOf(ConversationServerMessage.TurnStart.class);
+        // A lookalike tag name ("<teammate-messageX>") is not the envelope → TurnStart (AC3).
+        String lookalike = "{\"type\":\"user\",\"uuid\":\"uth3\",\"message\":{\"content\":"
+                + "\"<teammate-messageX>not the envelope</teammate-messageX>\"}}";
+        assertThat(mapper.map("main", lookalike))
+                .singleElement()
+                .isInstanceOf(ConversationServerMessage.TurnStart.class);
+    }
+
+    @Test
+    void uc58_teammate_frame_stamps_source_and_sidechain() {
+        // AC17 parity — the reclassified frame carries the per-line source + isSidechain.
+        String line = "{\"type\":\"user\",\"uuid\":\"uts\",\"isSidechain\":true,\"message\":{\"content\":"
+                + "\"<teammate-message teammate_id='worker'>delegated result</teammate-message>\"}}";
+        ConversationServerMessage.TeammateMessage tm = (ConversationServerMessage.TeammateMessage)
+                mapper.map("subagent:agent-9", line).get(0);
+        assertThat(tm.source()).isEqualTo("subagent:agent-9");
+        assertThat(tm.isSidechain()).isTrue();
+    }
+
+    @Test
+    void uc58_tool_result_user_line_still_maps_to_ToolResult_unaffected() {
+        // AC7 regression — the teammate rule runs AFTER the tool_result short-circuit, so a
+        // tool_result-carrying user line is unaffected by UC-58.
+        String line = "{\"type\":\"user\",\"uuid\":\"utr\",\"message\":{\"content\":["
+                + "{\"type\":\"tool_result\",\"tool_use_id\":\"tu9\",\"is_error\":false,\"content\":\"ok\"}]}}";
+        assertThat(mapper.map("main", line)).singleElement().isInstanceOf(ConversationServerMessage.ToolResult.class);
+    }
+
     // ──────────────────────── helper ─────────────────────────────────────────
 
     private static String extractUuid(ConversationServerMessage m) {

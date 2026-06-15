@@ -887,6 +887,125 @@ class ConversationControllerTest {
         }
     }
 
+    // ──────────────────── Part D2 — UC-58 teammate-message frames ─────────────
+    // A `teammate-message` frame (the server's reclassification of a `<teammate-message …>`
+    // envelope delivered to a team-lead session as a user line) renders as a distinct,
+    // NON-user TeammateMessage item. It is RENDER-ONLY: it must NOT advance the turn phase
+    // or touch the pending sheet — it is an inbound teammate line, not the lead's own activity.
+    // It is also a content-producing frame, so a teammate line arriving under the UC-65
+    // post-`/clear` suppression guard must be DROPPED (no item added), just like assistant-text.
+
+    private fun teammateItems(c: ConversationController): List<ConversationItem.TeammateMessage> =
+        c.items.value.filterIsInstance<ConversationItem.TeammateMessage>()
+
+    @Test
+    fun `a teammate-message frame becomes a non-user TeammateMessage and does not advance the turn phase`() {
+        // AC1/AC2 — the frame's teammateId/color/text land on a distinct non-user item, and
+        // the render-only frame leaves the spinner idle (it is not the lead's own work).
+        enqueuePush(
+            listOf(
+                """{"type":"teammate-message","uuid":"u1","source":"main","isSidechain":false,""" +
+                    """"teammateId":"analyst","color":"blue","text":"Proposal looks good."}""",
+            ),
+        )
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { teammateItems(c).isNotEmpty() }).isTrue
+            val tm = teammateItems(c).single()
+            assertThat(tm.teammateId).isEqualTo("analyst")
+            assertThat(tm.color).isEqualTo("blue")
+            assertThat(tm.text).isEqualTo("Proposal looks good.")
+            // NON-user: never a right-aligned user bubble (AC1/AC3).
+            assertThat(c.items.value.none { it is ConversationItem.UserMessage }).isTrue
+            // Render-only: the spinner stays idle (does NOT drive turn phase).
+            assertThat(c.turnPhase.value).isEqualTo(TurnPhase.IDLE)
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
+    fun `a teammate-message with no color carries a null color and still attributes the sender`() {
+        // AC2 — color is optional on the wire; the item carries a null color and the client
+        // falls back to its default label tint, attribution still keyed off teammateId.
+        enqueuePush(
+            listOf(
+                """{"type":"teammate-message","uuid":"u2","source":"main","isSidechain":false,""" +
+                    """"teammateId":"qa","text":"running the tests"}""",
+            ),
+        )
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { teammateItems(c).isNotEmpty() }).isTrue
+            val tm = teammateItems(c).single()
+            assertThat(tm.teammateId).isEqualTo("qa")
+            assertThat(tm.color).isNull()
+            assertThat(tm.text).isEqualTo("running the tests")
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
+    fun `a teammate-message does not clear or disturb a pending question sheet`() {
+        // AC1 (render-only contract) — a teammate line that arrives while a question sheet
+        // is pending must add its bubble WITHOUT dismissing the sheet (it does not resolve
+        // the lead's ask). Two-phase delivery so the sheet is observed up first.
+        val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        enqueueCapture(wsRef)
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { wsRef.get() != null }).isTrue
+            wsRef.get()!!.send(
+                """{"type":"question","uuid":"uq","source":"main","isSidechain":false,"toolUseId":"tuQ",""" +
+                    """"questions":[{"question":"Pick","header":"H","multiSelect":false,""" +
+                    """"options":[{"label":"A","description":""},{"label":"B","description":""}]}]}""",
+            )
+            assertThat(
+                awaitUntil { (c.pendingSheet.value as? PendingSheet.Questions)?.questionUuid == "tuQ" },
+            ).isTrue
+            // A teammate line lands while the ask is still open.
+            wsRef.get()!!.send(
+                """{"type":"teammate-message","uuid":"u3","source":"main","isSidechain":false,""" +
+                    """"teammateId":"developer","color":"green","text":"heads up while you decide"}""",
+            )
+            assertThat(awaitUntil { teammateItems(c).isNotEmpty() }).isTrue
+            // … and the sheet is STILL up: a render-only teammate line must not dismiss it.
+            assertThat(c.pendingSheet.value).isInstanceOf(PendingSheet.Questions::class.java)
+            assertThat((c.pendingSheet.value as PendingSheet.Questions).questionUuid).isEqualTo("tuQ")
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
+    fun `a teammate-message arriving under the post-clear suppression guard is dropped`() {
+        // UC-65 regression (AC3 of UC-65) — `teammate-message` is a content-producing frame,
+        // so while the post-`/clear` suppression guard is armed a late pre-clear teammate line
+        // must be DROPPED: no TeammateMessage item is added, the wiped transcript stays empty.
+        // (The drop-list explicitly includes "teammate-message" alongside assistant-text.)
+        val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        enqueueCapture(wsRef)
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { c.state.value == TerminalState.Open && wsRef.get() != null }).isTrue
+            c.clear() // arms the guard (CLEAR_SUPPRESS_MS)
+            wsRef.get()!!.send(
+                """{"type":"teammate-message","uuid":"tmg","source":"main","isSidechain":false,""" +
+                    """"teammateId":"analyst","color":"blue","text":"stale teammate line"}""",
+            )
+            Thread.sleep(400) // well within CLEAR_SUPPRESS_MS — guard is still active
+            assertThat(teammateItems(c)).isEmpty() // dropped: nothing resurrected (AC3)
+            assertThat(c.items.value).isEmpty()
+        } finally {
+            c.close()
+        }
+    }
+
     // ──────────────── Part E — UC-45 optimistic local echo ───────────────────
 
     /**

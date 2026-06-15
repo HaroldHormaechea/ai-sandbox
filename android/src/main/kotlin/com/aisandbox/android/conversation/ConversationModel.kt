@@ -62,6 +62,28 @@ sealed interface ConversationItem {
     }
 
     /**
+     * UC-58 — an inbound teammate/subagent message in a team-lead session. The
+     * harness delivers these to the lead as `user`-role transcript lines wrapped in a
+     * `<teammate-message …>…</teammate-message>` envelope; the server reclassifies them
+     * to a `teammate-message` frame so they render as a distinct, **non-user**,
+     * sender-attributed bubble (left-aligned, labelled by [teammateId]/[color]) rather
+     * than the right-aligned [UserMessage] (AC1/AC2). [teammateId] is the `teammate_id`
+     * (the sender's name, shown as the bubble label); [color] is the teammate's colour
+     * name (may be null/empty → default muted label colour). [text] is the cleaned inner
+     * content (raw nested-JSON envelopes are collapsed server-side, AC6).
+     */
+    data class TeammateMessage(
+        override val uuid: String,
+        override val source: String,
+        override val isSidechain: Boolean,
+        val teammateId: String,
+        val color: String?,
+        val text: String,
+    ) : ConversationItem {
+        override val key: String get() = "$uuid|teammate|${teammateId.hashCode()}|${text.hashCode()}"
+    }
+
+    /**
      * UC-41 (AC4) — ONE collapsed, type-aware row per tool call, merging the
      * `tool_use` with its paired `tool_result` (matched on [toolUseId]). The
      * controller upserts this item on both the `tool-use` and `tool-result` frames,

@@ -67,6 +67,7 @@ import com.aisandbox.android.net.ModelInfo
 import com.aisandbox.android.ui.components.AgentSwitcherBar
 import com.aisandbox.android.ui.components.Composer
 import com.aisandbox.android.ui.components.QuestionSheet
+import com.aisandbox.android.ui.components.agentColor
 import com.aisandbox.android.ui.components.bubbleTintForSource
 import com.aisandbox.android.ui.components.subtleBubbleTint
 import com.aisandbox.android.ui.theme.AiSandboxMonoTypography
@@ -348,6 +349,19 @@ private fun ConversationItemRow(
         )
         is ConversationItem.PlanApproval -> MetaLine(prefix = "📋 plan", body = item.plan, fontScale = fontScale)
         is ConversationItem.SystemNote -> SystemNoteRow(item, fontScale = fontScale)
+        // UC-58 (AC1/AC2) — an inbound teammate/subagent message: a distinct, NON-user,
+        // LEFT-aligned bubble labelled with the teammate's id and tinted by its colour
+        // (reusing the shared UC-53 [agentColor] palette), so it is never confused with the
+        // user's own right-aligned messages.
+        is ConversationItem.TeammateMessage -> Bubble(
+            label = item.teammateId.ifBlank { "teammate" },
+            body = item.text,
+            isUser = false,
+            isSidechain = item.isSidechain,
+            fontScale = fontScale,
+            tint = null,
+            labelColor = agentColor(item.color),
+        )
     }
 }
 
@@ -629,6 +643,7 @@ private fun Bubble(
     isSidechain: Boolean,
     fontScale: Float = 1f,
     tint: Color? = null,
+    labelColor: Color = OnSurfaceMuted,
 ) {
     BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
         val maxBubbleWidth = maxWidth * 0.8f
@@ -640,7 +655,7 @@ private fun Bubble(
                 Text(
                     text = if (isSidechain) "$label · subagent" else label,
                     style = AiSandboxMonoTypography.metadata.scaledBy(fontScale),
-                    color = OnSurfaceMuted,
+                    color = labelColor,
                 )
                 Spacer(Modifier.size(2.dp))
             }
