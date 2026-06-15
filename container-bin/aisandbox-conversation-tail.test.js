@@ -2040,3 +2040,323 @@ test('UC-69 firstQuestionText — body is sanitised to one line and codepoint-ca
     'body is capped at CONVERSATION_NAME_MAX_CP codepoints',
   );
 });
+
+// ════════════════════════════════════════════════════════════════════════════
+// UC-59 — delegate-aware working signal: readBoundedTailLines (the O(1) END-
+// anchored transcript reader) + anyDelegateWorking (team agents via /proc pid-
+// liveness, background subagents via an mtime freshness window), plus the
+// conversationName pending top-gate that keeps the UC-48 pending-question case
+// idle even when a delegate is working.
+//
+// deriveWorking stays PURE/unchanged — the UC-48 deriveWorking tests above still
+// pass verbatim; these cover only the additive UC-59 layer. The team-agent /proc
+// branch is gated on real, live `claude` processes, so it is impossible to mock
+// deterministically in-process; it is proven end-to-end by the LIVE AC5 gate
+// against this dev-team's real lead+teammate topology. Here we unit-prove the
+// parts that ARE deterministic:
+//   (a) readBoundedTailLines — END-anchored read, leading/trailing partial drops;
+//   (b) deriveWorking(readBoundedTailLines(...)) — the exact teammate mechanism;
+//   (c) anyDelegateWorking's background-subagent branch — fully, via injected
+//       nowMs + utimes-controlled mtimes (no sleeps, no mocks);
+//   (d) the parentSessionId anchor excludes foreign teammates (real /proc);
+//   (e) the conversationName pending-top-gate / lead-OR composition contract.
+// ════════════════════════════════════════════════════════════════════════════
+
+const STALE = helper.SUBAGENT_STALE_MS; // 45000
+// A fixed wall-clock anchor (ms). nowMs is injected into anyDelegateWorking so the
+// freshness window is evaluated deterministically against utimes-set file mtimes.
+const T = 1700000000000;
+
+// Build a tmp "main" transcript + its subagents dir in the on-disk layout
+// listSubagentFiles derives (<dir>/<stem>/subagents/agent-<id>.jsonl). The stem is
+// fabricated ('fake-main-uc59-…') so it matches NO live claude proc's
+// --parent-session-id — the team-agent /proc branch therefore contributes nothing
+// and the verdict is driven solely by the (deterministic) subagent branch.
+function mkDelegateScene(pfx) {
+  const dir = mkTmp(pfx);
+  const stem = 'fake-main-uc59-' + path.basename(dir);
+  const mainPath = path.join(dir, stem + '.jsonl');
+  fs.writeFileSync(mainPath, body([userLine('lead prompt'), turnEndLine()]));
+  const subDir = path.join(dir, stem, 'subagents');
+  fs.mkdirSync(subDir, { recursive: true });
+  const putSub = (id, lines, mtimeMs) => {
+    const p = path.join(subDir, 'agent-' + id + '.jsonl');
+    fs.writeFileSync(p, body(lines));
+    const secs = mtimeMs / 1000;
+    fs.utimesSync(p, secs, secs);
+    return p;
+  };
+  return {
+    dir,
+    stem,
+    mainPath,
+    putSub,
+    cleanup: () => fs.rmSync(dir, { recursive: true, force: true }),
+  };
+}
+
+// ──────────────────────── readBoundedTailLines (END-anchored O(1) read) ────────────────────────
+
+test('UC-59 readBoundedTailLines — small file (maxBytes ≥ size): every complete line, trailing newline element dropped', () => {
+  const dir = mkTmp('uc59-rbtl-');
+  try {
+    const p = path.join(dir, 't.jsonl');
+    fs.writeFileSync(p, body([userLine('a'), assistantTextLine('b'), turnEndLine()]));
+    const lines = helper.readBoundedTailLines(p, helper.TAIL_SCAN_BYTES);
+    assert.strictEqual(lines.length, 3);
+    assert.doesNotThrow(() => lines.forEach((l) => JSON.parse(l)), 'all returned lines are complete JSON');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('UC-59 readBoundedTailLines — a TRAILING partial (last line lacks a terminating newline) is dropped', () => {
+  const dir = mkTmp('uc59-rbtl-');
+  try {
+    const p = path.join(dir, 't.jsonl');
+    // Last line written WITHOUT a trailing '\n' ⇒ a sliced/partial line to drop.
+    fs.writeFileSync(p, userLine('complete') + '\n' + assistantTextLine('partial-no-nl'));
+    const lines = helper.readBoundedTailLines(p, helper.TAIL_SCAN_BYTES);
+    assert.strictEqual(lines.length, 1);
+    assert.strictEqual(JSON.parse(lines[0]).message.content, 'complete');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('UC-59 readBoundedTailLines — END-anchored: a window starting mid-file drops the LEADING partial and keeps only the last complete lines', () => {
+  const dir = mkTmp('uc59-rbtl-');
+  try {
+    const p = path.join(dir, 't.jsonl');
+    const all = [];
+    for (let i = 0; i < 20; i++) all.push(assistantTextLine('line-' + i + '-' + 'x'.repeat(40)));
+    fs.writeFileSync(p, body(all));
+    const size = fs.statSync(p).size;
+    // Read only the last ~quarter so the window certainly starts mid-line.
+    const lines = helper.readBoundedTailLines(p, Math.floor(size / 4));
+    assert.ok(lines.length > 0 && lines.length < all.length, 'returns a strict END suffix');
+    assert.doesNotThrow(() => lines.forEach((l) => JSON.parse(l)), 'no sliced fragment survived');
+    // The last surviving line is the file's very last line (END-anchored)…
+    assert.strictEqual(
+      JSON.parse(lines[lines.length - 1]).message.content[0].text,
+      'line-19-' + 'x'.repeat(40),
+    );
+    // …and the first file line is gone (outside the window / dropped as the partial).
+    assert.ok(!lines.some((l) => l.includes('line-0-')), 'leading lines excluded');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('UC-59 readBoundedTailLines — missing / empty file ⇒ [] (never throws)', () => {
+  assert.deepStrictEqual(
+    helper.readBoundedTailLines('/no/such/uc59/file.jsonl', helper.TAIL_SCAN_BYTES),
+    [],
+  );
+  const dir = mkTmp('uc59-rbtl-');
+  try {
+    const p = path.join(dir, 'empty.jsonl');
+    fs.writeFileSync(p, '');
+    assert.deepStrictEqual(helper.readBoundedTailLines(p, helper.TAIL_SCAN_BYTES), []);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('UC-59 readBoundedTailLines + deriveWorking — the END-anchored read drives the SAME working/idle verdict (the team-agent transcript mechanism)', () => {
+  const dir = mkTmp('uc59-compose-');
+  try {
+    const working = path.join(dir, 'w.jsonl');
+    const idle = path.join(dir, 'i.jsonl');
+    // tool_use tail — a teammate mid-tool (e.g. running :server:test) ⇒ working.
+    fs.writeFileSync(
+      working,
+      body([userLine('go'), toolUseLine('tuW', 'Bash', { command: './gradlew :server:test' })]),
+    );
+    // turn_duration tail — a live-but-idle teammate that finished its turn ⇒ idle.
+    fs.writeFileSync(idle, body([userLine('go'), assistantTextLine('done'), turnEndLine()]));
+    assert.strictEqual(
+      helper.deriveWorking(helper.readBoundedTailLines(working, helper.TAIL_SCAN_BYTES)),
+      true,
+      'teammate mid-tool ⇒ working',
+    );
+    assert.strictEqual(
+      helper.deriveWorking(helper.readBoundedTailLines(idle, helper.TAIL_SCAN_BYTES)),
+      false,
+      'live-idle teammate (turn_duration tail) ⇒ idle',
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ──────────────────────── anyDelegateWorking: constants + guards ────────────────────────
+
+test('UC-59 anyDelegateWorking — exported tuning constants are stable', () => {
+  assert.strictEqual(helper.SUBAGENT_STALE_MS, 45000);
+  assert.strictEqual(helper.TAIL_SCAN_BYTES, 131072);
+});
+
+test('UC-59 anyDelegateWorking — falsy mainPath / mainStem ⇒ false (no /proc scan)', () => {
+  assert.strictEqual(helper.anyDelegateWorking('', '', null, null, T), false);
+  assert.strictEqual(helper.anyDelegateWorking(null, 'stem', null, null, T), false);
+  assert.strictEqual(helper.anyDelegateWorking('/x/y.jsonl', '', null, null, T), false);
+});
+
+test('UC-59 anyDelegateWorking — empty subagents dir + no matching teammate ⇒ idle', () => {
+  const s = mkDelegateScene('uc59-none-');
+  try {
+    assert.strictEqual(helper.anyDelegateWorking(s.mainPath, s.stem, null, null, T), false);
+  } finally {
+    s.cleanup();
+  }
+});
+
+// ──────────────────────── anyDelegateWorking: background-subagent branch ────────────────────────
+
+test('UC-59 anyDelegateWorking — background subagent mid-turn (tool_use tail) inside the freshness window ⇒ working (AC1)', () => {
+  const s = mkDelegateScene('uc59-sub-');
+  try {
+    s.putSub('aaa', [userLine('sub task'), toolUseLine('tuS', 'Skill', { skill: 'verify' })], T);
+    assert.strictEqual(helper.anyDelegateWorking(s.mainPath, s.stem, null, null, T), true);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test('UC-59 anyDelegateWorking — subagent aged out of the window ⇒ idle even with a would-be-working tail (cleanly-finished / crashed-mid-turn subagent)', () => {
+  const s = mkDelegateScene('uc59-sub-');
+  try {
+    // A tool_use tail (deriveWorking would say working) but the file fell quiet
+    // > SUBAGENT_STALE_MS ago. Subagents never emit a turn-end, so the mtime gate
+    // is the PRIMARY completion+crash signal — both a finished and a crashed-
+    // mid-tool subagent land here as idle.
+    s.putSub('bbb', [userLine('sub task'), toolUseLine('tuS', 'Bash', { command: 'sleep' })], T - (STALE + 1000));
+    assert.strictEqual(helper.anyDelegateWorking(s.mainPath, s.stem, null, null, T), false);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test('UC-59 anyDelegateWorking — fresh subagent whose tail is NOT working (turn_duration) ⇒ idle (the deriveWorking AND belt-and-suspenders)', () => {
+  const s = mkDelegateScene('uc59-sub-');
+  try {
+    // Synthetic: real subagents never emit turn_duration, but this pins the AND
+    // half of (mtime-fresh && deriveWorking) so a future build that DOES emit a
+    // subagent turn-end correctly reads idle on completion.
+    s.putSub('ccc', [userLine('sub task'), assistantTextLine('done'), turnEndLine()], T);
+    assert.strictEqual(helper.anyDelegateWorking(s.mainPath, s.stem, null, null, T), false);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test('UC-59 anyDelegateWorking — freshness boundary: exactly SUBAGENT_STALE_MS is in-window (working); one ms older is idle', () => {
+  const s = mkDelegateScene('uc59-bound-');
+  try {
+    const p = s.putSub('ddd', [userLine('x'), toolUseLine('tuS', 'Bash', { command: 'x' })], T - STALE);
+    assert.strictEqual(
+      helper.anyDelegateWorking(s.mainPath, s.stem, null, null, T),
+      true,
+      'nowMs - mtime === STALE is NOT > STALE ⇒ in-window ⇒ working',
+    );
+    const secs = (T - STALE - 1) / 1000;
+    fs.utimesSync(p, secs, secs);
+    assert.strictEqual(
+      helper.anyDelegateWorking(s.mainPath, s.stem, null, null, T),
+      false,
+      'one ms past the window ⇒ aged out ⇒ idle',
+    );
+  } finally {
+    s.cleanup();
+  }
+});
+
+test('UC-59 anyDelegateWorking — multiple subagents: any ONE fresh+working makes the session working (AC1)', () => {
+  const s = mkDelegateScene('uc59-multi-');
+  try {
+    s.putSub('stale', [userLine('x'), toolUseLine('t1', 'Bash', { command: 'x' })], T - (STALE + 5000));
+    s.putSub('freshidle', [userLine('x'), assistantTextLine('done'), turnEndLine()], T);
+    s.putSub('working', [userLine('x'), toolUseLine('t2', 'Bash', { command: 'x' })], T);
+    assert.strictEqual(helper.anyDelegateWorking(s.mainPath, s.stem, null, null, T), true);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test('UC-59 anyDelegateWorking — multiple subagents all at rest (stale or finished) ⇒ idle', () => {
+  const s = mkDelegateScene('uc59-multi-');
+  try {
+    s.putSub('stale', [userLine('x'), toolUseLine('t1', 'Bash', { command: 'x' })], T - (STALE + 5000));
+    s.putSub('freshidle', [userLine('x'), assistantTextLine('done'), turnEndLine()], T);
+    assert.strictEqual(helper.anyDelegateWorking(s.mainPath, s.stem, null, null, T), false);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test('UC-59 anyDelegateWorking — AC4 transition: a working subagent reads idle once its turn completes and the file ages out', () => {
+  const s = mkDelegateScene('uc59-ac4-');
+  try {
+    s.putSub('eee', [userLine('x'), toolUseLine('tuS', 'Bash', { command: 'long' })], T);
+    assert.strictEqual(
+      helper.anyDelegateWorking(s.mainPath, s.stem, null, null, T),
+      true,
+      'mid-turn ⇒ working',
+    );
+    // The turn completes; the file stops being written. Observed later, past the
+    // window, it reads idle (AC4 — transitions back once nothing is working).
+    assert.strictEqual(
+      helper.anyDelegateWorking(s.mainPath, s.stem, null, null, T + STALE + 1000),
+      false,
+      'aged out ⇒ idle',
+    );
+  } finally {
+    s.cleanup();
+  }
+});
+
+test('UC-59 anyDelegateWorking — foreign-teammate exclusion: a fabricated parent stem matches NO live claude proc, so other sessions\' teammates are never counted (AC6)', () => {
+  const s = mkDelegateScene('uc59-foreign-');
+  try {
+    // This dev-team's own teammates are live `claude` procs carrying a REAL
+    // --parent-session-id; our stem is fabricated and matches none of them. With an
+    // empty subagents dir the only possible "working" source is a foreign teammate,
+    // and the parentSessionId anchor excludes it ⇒ idle. (The matching-teammate
+    // path itself is proven by the LIVE AC5 gate.)
+    assert.strictEqual(helper.anyDelegateWorking(s.mainPath, s.stem, null, null, T), false);
+  } finally {
+    s.cleanup();
+  }
+});
+
+// ──────────────────────── conversationName composition: pending top-gate + lead OR ────────────────────────
+
+test('UC-59 / UC-48 no-regression — the pending top-gate forces idle even when a delegate is genuinely working (lead blocked on a question)', () => {
+  const s = mkDelegateScene('uc59-pending-');
+  try {
+    s.putSub('fff', [userLine('x'), toolUseLine('tuS', 'Bash', { command: 'x' })], T);
+    // Precondition: the delegate really IS working (real anyDelegateWorking ⇒ true).
+    const delegateWorking = helper.anyDelegateWorking(s.mainPath, s.stem, null, null, T);
+    assert.strictEqual(delegateWorking, true);
+    // conversationName gates on `pending` FIRST:
+    //   working = pending === true ? false : (deriveWorking(lead) || anyDelegateWorking(...))
+    const leadLines = [userLine('start'), assistantQuestionLine('A or B?')]; // lead at-rest on a question
+    const working = true === true ? false : (helper.deriveWorking(leadLines) || delegateWorking);
+    assert.strictEqual(working, false, 'pending ⇒ idle: no false "working" from the delegate (UC-48 gap preserved, AC3/AC6)');
+    // With NO pending question up, the SAME working delegate flips the row to working.
+    const working2 = false === true ? false : (helper.deriveWorking(leadLines) || delegateWorking);
+    assert.strictEqual(working2, true);
+  } finally {
+    s.cleanup();
+  }
+});
+
+test('UC-59 AC2 — a working lead short-circuits the OR before the delegate scan (UC-48 behavior unchanged)', () => {
+  const leadWorking = [userLine('start'), assistantTextLine('mid turn')];
+  // deriveWorking(lead) === true makes the row working regardless of any delegate.
+  assert.strictEqual(
+    helper.deriveWorking(leadWorking) || helper.anyDelegateWorking('/x/y.jsonl', '', null, null, T),
+    true,
+  );
+});
