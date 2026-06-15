@@ -50,7 +50,9 @@ scope. A change touching both scopes releases both tracks.
 
 Stand up the full live stack and functionally drive the Android client. Use the
 **`android-testing`** skill (Phases 1–4: boot the KVM AVD → build/start the
-management server → enroll the device over mTLS → instrumented tests). Then,
+management server → enroll the device over mTLS via the **UC-83 QR-from-file
+route** — render the invite as a QR PNG and enroll through the production
+`QrImageDecoder` → `onQrPayload` path, no camera — → instrumented tests). Then,
 beyond the instrumented suite, **functionally exercise the question/answer paths
 against the live server**:
 
