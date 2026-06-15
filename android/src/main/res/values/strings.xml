@@ -207,6 +207,11 @@
     <string name="server_identity_changed_quit">Quit</string>
     <string name="server_identity_changed_rescan">Scan new QR</string>
 
+    <!-- UC-81 — copy chat messages (both sides) and the tool/skill detail popup. -->
+    <string name="conversation_copied">Copied to clipboard</string>
+    <string name="conversation_copy_message_label">Copy</string>
+    <string name="conversation_tool_copy">Copy</string>
+
     <!-- Status pills -->
     <string name="status_running">running</string>
     <string name="status_starting">starting</string>
