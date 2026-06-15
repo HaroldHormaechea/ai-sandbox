@@ -1,0 +1,9 @@
+__ctrl__	backfill-start	0
+main	{"type":"user","uuid":"u1","isSidechain":false,"message":{"content":"Summarize the team progress so far."}}
+main	{"type":"assistant","uuid":"a1","isSidechain":false,"message":{"content":[{"type":"text","text":"Starting the summary now."}]}}
+main	{"type":"user","uuid":"tm1","isSidechain":false,"message":{"content":"<teammate-message teammate_id=\"qa\" color=\"#22cc88\">I finished reviewing the diff; all tests pass.</teammate-message>"}}
+main	{"type":"user","uuid":"tm2","isSidechain":false,"message":{"content":"<teammate-message teammate_id=\"researcher\">Collected 12 sources for the comparison.</teammate-message>"}}
+main	{"type":"assistant","uuid":"a2","isSidechain":false,"message":{"content":[{"type":"text","text":"This is a deliberately long assistant message used to verify that long messages are not cropped in the conversation view (UC-80). It spans several sentences so the rendered bubble must wrap across many lines without truncation, ellipsis, or a fixed-height clip. The deterministic gate asserts the full text is present in the rendered node, not just a prefix. Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua."}]}}
+main	{"type":"assistant","uuid":"a3","isSidechain":false,"message":{"content":[{"type":"text","text":"Anything else you want me to dig into?"}]}}
+main	{"type":"system","subtype":"turn_duration","uuid":"te1","durationMs":2100,"messageCount":6}
+__ctrl__	backfill-end

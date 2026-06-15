@@ -64,6 +64,7 @@ subagent/teammate lines), and `source` (`main` | `subagent:<agentId>`).
 | `target-selected` | `targetId`                                                          | 17 |
 | `backfill-start`  | `source` — begins the bounded backfill window                      | 6, 22 |
 | `backfill-end`    | `source` — ends it; live append follows                           | 6, 22 |
+| `answer-echo`     | `questionUuid`, `questionIndex`, `selections[]`, `freeText` — **replay-profile only** (UC-85); echoes the answer just received | 85 |
 | `error`           | `code`, `title`, `detail` (RFC 9457-ish), usually followed by close| —  |
 
 `AskUserQuestion` → `question`; `ExitPlanMode` → `plan-approval`; every other
@@ -453,6 +454,42 @@ relies on long-press→tmux (AC24).
 | Batch free-text Qᵢ — single-select | `Down`×k to "Type something"; type inline (`-l`); `Enter` (advances) |
 | Batch free-text Qᵢ — multiSelect (UC-44) | walk toggling `Space`; at "Type something" type (`-l`); `Enter` (commit); `Space` (select); `Tab`+`Enter` (focus + activate in-pane Next/Submit → advance) |
 | Batch submit       | after the last question advances → "Submit"/"Review" tab; final `Enter` submits all |
+
+### Deterministic functional gate — the `replay` profile (UC-85)
+
+The mandatory pre-release functional gate runs the **real** server under a new Spring
+profile, `replay`, whose ONLY behavioural changes are:
+
+- **Transcript source.** Instead of spawning the in-container
+  `aisandbox-conversation-tail` helper, the tail is fed by a committed fixture file — a
+  recorded `<source>\t<raw-json>` / `__ctrl__\t<kind>…` envelope stream under
+  `fixtures/replay/` (the same bytes the helper would have emitted). The pump →
+  `ConversationEventMapper` → WS-emit path is unchanged. A fixture may carry one
+  replay-only directive, `__replay__\tawait-answer`, which is consumed by the replay
+  reader (never forwarded to the pump): the tail parks there until the device's answer is
+  recorded, then replays the recorded post-answer frames — so question→answer→resume
+  ordering is faithful and deterministic.
+- **Synthetic sessions.** A scenario per fixture is exposed as a `running` session in
+  `GET /v1/sessions` (no Docker), so the device has a card to open and `authorizeOpen`
+  passes. Defined by `fixtures/replay/manifest.json` (`schemaVersion` checked at boot
+  against `ReplayFixtureValidator.SCHEMA_VERSION` for drift; per-scenario
+  `{n, target, title, fixture}`).
+- **Answer echo (`answer-echo`).** With no live tmux session to inject into, an inbound
+  `answer` / `answer-batch` is **recorded** (releasing the await-answer gate) and skipped
+  for injection — mirroring the UC-60 read-only no-op-inject branch — and the server emits
+  an `answer-echo` frame carrying exactly what it received (`questionUuid`,
+  `questionIndex`, `selections[]`, `freeText`; one per batch item, in tab order). The
+  on-device gate asserts this frame to prove the **selected** option is the one
+  transmitted (UC-57) and that each question of a multi-question sheet maps to its own
+  answer (UC-43).
+
+Everything else — mTLS, UC-83 enrollment, the WebSocket, the mapper, the whole answer /
+conversation protocol — stays the production path. The `answer-echo` frame is emitted
+**only** under `replay`; outside it the `ReplayAnswerSink` bean is absent
+(`enabled()=false`), no echo is produced, and a boot-time guard aborts startup if the
+profile is ever active next to a production marker (AC-11). See
+`.claude/skills/android-testing/SKILL.md` for the gate runbook and the fixture
+re-capture procedure.
 
 ### Fragile edges (documented per the proposal RISKs)
 

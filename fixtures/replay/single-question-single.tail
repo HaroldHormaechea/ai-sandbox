@@ -1,0 +1,9 @@
+__ctrl__	backfill-start	0
+main	{"type":"user","uuid":"u1","isSidechain":false,"message":{"content":"Please pick a deployment target."}}
+main	{"type":"assistant","uuid":"a1","isSidechain":false,"message":{"content":[{"type":"text","text":"I need your input before continuing."}]}}
+main	{"type":"assistant","uuid":"q1","isSidechain":false,"message":{"content":[{"type":"tool_use","id":"tu-single","name":"AskUserQuestion","input":{"questions":[{"question":"Which deployment target?","header":"Target","multiSelect":false,"options":[{"label":"Staging","description":"Pre-production"},{"label":"Production","description":"Live users"},{"label":"Local","description":"Developer box"}]}]}}]}}
+__ctrl__	backfill-end
+__replay__	await-answer
+main	{"type":"user","uuid":"u2","isSidechain":false,"message":{"content":[{"type":"tool_result","tool_use_id":"tu-single","is_error":false,"content":"Selection received."}]}}
+main	{"type":"assistant","uuid":"a2","isSidechain":false,"message":{"content":[{"type":"text","text":"Thanks — proceeding with your selected target."}]}}
+main	{"type":"system","subtype":"turn_duration","uuid":"te1","durationMs":1500,"messageCount":4}
