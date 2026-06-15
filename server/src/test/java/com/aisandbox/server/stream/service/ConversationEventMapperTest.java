@@ -995,6 +995,155 @@ class ConversationEventMapperTest {
         assertThat(mapper.map("main", line)).singleElement().isInstanceOf(ConversationServerMessage.ToolResult.class);
     }
 
+    // ════════════════ UC-80 — long message bodies render in full (no 600-char crop) ═══
+    //
+    // The unintended cropping UC-80 removes lived in extractUserText (the user-prompt →
+    // TurnStart path), which formerly bound the prompt to MAX_SUMMARY_LEN (600 chars). It
+    // now byte-bounds to CONVERSATION_DETAIL_MAX_BYTES (48 KB, UTF-8-boundary-safe) exactly
+    // like renderContentFull / renderInputFull — so an ordinary long prompt survives in
+    // FULL, while a pathological multi-MB line is still byte-bounded so it can never OOM the
+    // device or flood the socket. The INTENTIONAL caps elsewhere — the tool-input/-result
+    // streaming summaries (600 chars) and the collapsed nested-JSON teammate-STATUS label
+    // (600 chars) — are explicitly PRESERVED (AC5). Assistant text and plain teammate text
+    // were never capped and stay full.
+    //
+    // AC→test: AC1 string/array prompt full → uc80_long_user_prompt_string_renders_in_full_no_ellipsis,
+    // uc80_long_user_prompt_text_blocks_render_in_full; AC2 assistant full →
+    // uc80_assistant_text_renders_in_full_already; AC3 teammate full →
+    // uc80_long_plain_teammate_text_renders_in_full; AC6 byte-bound + UTF-8-safe →
+    // uc80_pathological_user_prompt_is_byte_bounded_with_marker,
+    // uc80_pathological_user_prompt_is_utf8_boundary_safe; AC5 intentional caps preserved →
+    // uc80_tool_result_summary_is_still_600_capped, uc80_tool_use_input_summary_is_still_600_capped,
+    // uc80_teammate_json_status_summary_is_still_600_capped.
+
+    @Test
+    void uc80_long_user_prompt_string_renders_in_full_no_ellipsis() {
+        // AC1 — a realistic ~5 KB string prompt (well under the 48 KB cap) survives verbatim:
+        // full text, NO trailing ellipsis, NOT cropped to the old 600-char summary.
+        String longPrompt = "Implement the feature: " + "x".repeat(5000);
+        String line = "{\"type\":\"user\",\"uuid\":\"u80a\",\"message\":{\"content\":\"" + longPrompt + "\"}}";
+        ConversationServerMessage.TurnStart ts =
+                (ConversationServerMessage.TurnStart) mapper.map("main", line).get(0);
+        assertThat(ts.text()).isEqualTo(longPrompt);
+        assertThat(ts.text()).doesNotEndWith("…");
+        assertThat(ts.text().length()).isGreaterThan(600);
+    }
+
+    @Test
+    void uc80_long_user_prompt_text_blocks_render_in_full() {
+        // AC1 — the array (text-block) prompt path is likewise full, not 600-capped.
+        String longBlock = "y".repeat(5000);
+        String line = "{\"type\":\"user\",\"uuid\":\"u80b\",\"message\":{\"content\":["
+                + "{\"type\":\"text\",\"text\":\"" + longBlock + "\"}]}}";
+        ConversationServerMessage.TurnStart ts =
+                (ConversationServerMessage.TurnStart) mapper.map("main", line).get(0);
+        assertThat(ts.text()).isEqualTo(longBlock);
+        assertThat(ts.text()).doesNotEndWith("…");
+    }
+
+    @Test
+    void uc80_pathological_user_prompt_is_byte_bounded_with_marker() {
+        // AC6 — a >48 KB prompt is byte-bounded and marked truncated ("…"), so a pathological
+        // line can never OOM the device / flood the socket.
+        String huge = "z".repeat(ConversationEventMapper.CONVERSATION_DETAIL_MAX_BYTES + 20000);
+        String line = "{\"type\":\"user\",\"uuid\":\"u80c\",\"message\":{\"content\":\"" + huge + "\"}}";
+        ConversationServerMessage.TurnStart ts =
+                (ConversationServerMessage.TurnStart) mapper.map("main", line).get(0);
+        assertThat(ts.text()).endsWith("…");
+        assertThat(ts.text().getBytes(java.nio.charset.StandardCharsets.UTF_8).length)
+                .isLessThanOrEqualTo(ConversationEventMapper.CONVERSATION_DETAIL_MAX_BYTES + 4);
+    }
+
+    @Test
+    void uc80_pathological_user_prompt_is_utf8_boundary_safe() {
+        // AC6 — a multibyte char straddling the cap must be cut on a CHAR boundary, never split
+        // into an invalid UTF-8 sequence. A long run of 3-byte CJK chars past the cap must cut
+        // cleanly: re-decoding/re-encoding the bytes round-trips and introduces no U+FFFD.
+        int chars = (ConversationEventMapper.CONVERSATION_DETAIL_MAX_BYTES / 3) + 5000;
+        String huge = "世".repeat(chars);
+        String line = "{\"type\":\"user\",\"uuid\":\"u80d\",\"message\":{\"content\":\"" + huge + "\"}}";
+        ConversationServerMessage.TurnStart ts =
+                (ConversationServerMessage.TurnStart) mapper.map("main", line).get(0);
+        assertThat(ts.text()).endsWith("…");
+        byte[] bytes = ts.text().getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        assertThat(bytes.length).isLessThanOrEqualTo(ConversationEventMapper.CONVERSATION_DETAIL_MAX_BYTES + 4);
+        String roundTrip = new String(bytes, java.nio.charset.StandardCharsets.UTF_8);
+        assertThat(roundTrip.getBytes(java.nio.charset.StandardCharsets.UTF_8)).isEqualTo(bytes);
+        assertThat(ts.text()).doesNotContain("�");
+    }
+
+    // ── AC5 regression guards — the INTENTIONAL caps elsewhere are untouched ──
+
+    @Test
+    void uc80_tool_result_summary_is_still_600_capped() {
+        // AC5 — summarizeContent (the tool_result streaming summary) keeps its 600-char cap;
+        // UC-80 un-cropped only the user-prompt body, not tool-result noise.
+        String big = "r".repeat(2000);
+        String line = "{\"type\":\"user\",\"uuid\":\"u80e\",\"message\":{\"content\":["
+                + "{\"type\":\"tool_result\",\"tool_use_id\":\"tu80\",\"is_error\":false,\"content\":\"" + big
+                + "\"}]}}";
+        ConversationServerMessage.ToolResult r =
+                (ConversationServerMessage.ToolResult) mapper.map("main", line).get(0);
+        assertThat(r.summary()).endsWith("…");
+        assertThat(r.summary().length()).isLessThanOrEqualTo(601);
+    }
+
+    @Test
+    void uc80_tool_use_input_summary_is_still_600_capped() {
+        // AC5 — summarizeInput keeps its 600-char streaming cap (collapsed tool-row label).
+        String big = "i".repeat(2000);
+        String line = "{\"type\":\"assistant\",\"uuid\":\"u80f\",\"message\":{\"content\":["
+                + "{\"type\":\"tool_use\",\"id\":\"tu80b\",\"name\":\"Bash\",\"input\":{\"command\":\"" + big
+                + "\"}}]}}";
+        ConversationServerMessage.ToolUse t =
+                (ConversationServerMessage.ToolUse) mapper.map("main", line).get(0);
+        assertThat(t.inputSummary()).endsWith("…");
+        assertThat(t.inputSummary().length()).isLessThanOrEqualTo(601);
+    }
+
+    @Test
+    void uc80_assistant_text_renders_in_full_already() {
+        // AC2 — assistant text was never 600-capped (mapAssistant emits the raw text block);
+        // a long assistant body renders in full. This guards against a cap creeping back in.
+        String big = "a".repeat(5000);
+        String line = "{\"type\":\"assistant\",\"uuid\":\"u80g\",\"message\":{\"content\":["
+                + "{\"type\":\"text\",\"text\":\"" + big + "\"}]}}";
+        ConversationServerMessage.AssistantText a = (ConversationServerMessage.AssistantText)
+                mapper.map("main", line).get(0);
+        assertThat(a.text()).isEqualTo(big);
+        assertThat(a.text()).doesNotEndWith("…");
+    }
+
+    @Test
+    void uc80_long_plain_teammate_text_renders_in_full() {
+        // AC3 — a plain (non-JSON) teammate message body renders in full (cleanTeammateContent
+        // returns the stripped inner text verbatim), consistent with the user/assistant un-crop.
+        String big = "t".repeat(5000);
+        String line = "{\"type\":\"user\",\"uuid\":\"u80h\",\"message\":{\"content\":"
+                + "\"<teammate-message teammate_id=\\\"analyst\\\">" + big + "</teammate-message>\"}}";
+        ConversationServerMessage.TeammateMessage tm = (ConversationServerMessage.TeammateMessage)
+                mapper.map("main", line).get(0);
+        assertThat(tm.text()).isEqualTo(big);
+        assertThat(tm.text()).doesNotEndWith("…");
+    }
+
+    @Test
+    void uc80_teammate_json_status_summary_is_still_600_capped() {
+        // AC5 — the INTENTIONAL collapse of a nested-JSON teammate STATUS envelope keeps its
+        // 600-char label cap (a status object is tool-noise-like, not a human message body), so
+        // a long summary field is still bounded — in deliberate contrast to the plain-text case.
+        String big = "s".repeat(2000);
+        String line = "{\"type\":\"user\",\"uuid\":\"u80i\",\"message\":{\"content\":"
+                + "\"<teammate-message teammate_id=\\\"notifier\\\">"
+                + "{\\\"type\\\":\\\"idle_notification\\\",\\\"summary\\\":\\\"" + big + "\\\"}"
+                + "</teammate-message>\"}}";
+        ConversationServerMessage.TeammateMessage tm = (ConversationServerMessage.TeammateMessage)
+                mapper.map("main", line).get(0);
+        assertThat(tm.text()).startsWith("[idle_notification] ");
+        assertThat(tm.text()).endsWith("…");
+        assertThat(tm.text().length()).isLessThanOrEqualTo("[idle_notification] ".length() + 601);
+    }
+
     // ──────────────────────── helper ─────────────────────────────────────────
 
     private static String extractUuid(ConversationServerMessage m) {
