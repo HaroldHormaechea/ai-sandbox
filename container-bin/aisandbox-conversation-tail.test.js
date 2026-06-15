@@ -2062,7 +2062,7 @@ test('UC-69 firstQuestionText — body is sanitised to one line and codepoint-ca
 //   (e) the conversationName pending-top-gate / lead-OR composition contract.
 // ════════════════════════════════════════════════════════════════════════════
 
-const STALE = helper.SUBAGENT_STALE_MS; // 45000
+const STALE = helper.SUBAGENT_STALE_MS; // 300000 (300s — bumped from 45s per the UC-59 gap analysis)
 // A fixed wall-clock anchor (ms). nowMs is injected into anyDelegateWorking so the
 // freshness window is evaluated deterministically against utimes-set file mtimes.
 const T = 1700000000000;
@@ -2193,7 +2193,12 @@ test('UC-59 readBoundedTailLines + deriveWorking — the END-anchored read drive
 // ──────────────────────── anyDelegateWorking: constants + guards ────────────────────────
 
 test('UC-59 anyDelegateWorking — exported tuning constants are stable', () => {
-  assert.strictEqual(helper.SUBAGENT_STALE_MS, 45000);
+  // Bumped 45000→300000 after the gap analysis: real background-subagent
+  // transcripts go silent for >45s during a single long tool call (tool_use →
+  // tool_result), which would false-negative a busy subagent to idle. 300s covers
+  // typical long tool calls; the rare multi-minute (>300s) silent tail is an
+  // accepted, documented limitation in the helper.
+  assert.strictEqual(helper.SUBAGENT_STALE_MS, 300000);
   assert.strictEqual(helper.TAIL_SCAN_BYTES, 131072);
 });
 
