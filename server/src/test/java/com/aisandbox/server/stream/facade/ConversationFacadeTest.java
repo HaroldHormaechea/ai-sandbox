@@ -27,6 +27,7 @@ import com.aisandbox.server.stream.service.SwarmEnumerationService;
 import com.aisandbox.server.stream.service.TmuxBridgeService.BridgeTarget;
 import com.aisandbox.server.stream.service.TranscriptTailService;
 import com.aisandbox.server.stream.service.TranscriptTailService.PendingState;
+import com.aisandbox.server.stream.service.TranscriptTailService.SubagentInfo;
 import com.aisandbox.server.stream.service.TranscriptTailService.Tail;
 import com.aisandbox.server.stream.service.TranscriptTailService.TailTarget;
 import java.io.IOException;
@@ -35,6 +36,7 @@ import java.nio.file.Path;
 import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 /**
  * UC-37 — {@link ConversationFacade} is the conversation domain's use-case
@@ -147,6 +149,189 @@ class ConversationFacadeTest {
         assertThat(got).isSameAs(handle);
         verify(tail).start(eq(7), any(), eq(facade.backfillLines()));
         verify(audit).logEvent(eq(AuditAction.CONVERSATION_OPEN), eq("ok"), eq("n"), eq(7), eq("targetId"), eq("main"));
+    }
+
+    // ──────────────────────── UC-60 — subagent pills (enumerate/start/guards) ─
+
+    @Test
+    void enumerate_appends_one_pill_per_live_subagent_disjoint_from_main_and_swarm() {
+        // AC1/AC2/AC6 — each LIVE subagent the helper reports becomes an additive pill with
+        // a disjoint subagent:<id> id, kind "subagent", its label as the title, and the
+        // working flag carried as pendingActivity (the same badge a team pill uses). The
+        // existing main/swarm targets and their ids are untouched (no duplication/mislabel).
+        TargetInfo main = new TargetInfo("main", "main", "main", null, null, null, null, null, "main", null, null);
+        TargetInfo pane = target("swarm:main:0.1");
+        when(swarm.enumerate(7)).thenReturn(List.of(main, pane));
+        when(tail.scanPending(eq(7), any())).thenReturn(PendingState.IDLE);
+        when(tail.listSubagents(7))
+                .thenReturn(List.of(
+                        new SubagentInfo("a1", "code-reviewer", true), new SubagentInfo("b2", "verifier", false)));
+
+        List<TargetInfo> out = facade.enumerateConversationTargets(7, "main");
+
+        // main + swarm pane + two subagent pills, in that order (subagents appended last).
+        assertThat(out).hasSize(4);
+        assertThat(out).extracting(TargetInfo::id).containsExactly("main", "swarm:main:0.1", "subagent:a1", "subagent:b2");
+        // No id collides across the spaces (AC6 — no duplication).
+        assertThat(out).extracting(TargetInfo::id).doesNotHaveDuplicates();
+
+        TargetInfo p1 = out.get(2);
+        assertThat(p1.kind()).isEqualTo("subagent");
+        assertThat(p1.title()).isEqualTo("code-reviewer");
+        // working → pendingActivity; a subagent never raises a question → pendingQuestion stays false.
+        assertThat(p1.pendingActivity()).isTrue();
+        assertThat(p1.pendingQuestion()).isFalse();
+
+        TargetInfo p2 = out.get(3);
+        assertThat(p2.pendingActivity()).isFalse();
+        assertThat(p2.pendingQuestion()).isFalse();
+    }
+
+    @Test
+    void enumerate_subagent_pill_with_a_blank_label_falls_back_to_its_id_for_the_title() {
+        when(swarm.enumerate(7))
+                .thenReturn(List.of(
+                        new TargetInfo("main", "main", "main", null, null, null, null, null, "main", null, null)));
+        when(tail.scanPending(eq(7), any())).thenReturn(PendingState.IDLE);
+        when(tail.listSubagents(7)).thenReturn(List.of(new SubagentInfo("c3", "  ", false)));
+
+        TargetInfo pill = facade.enumerateConversationTargets(7, "main").get(1);
+        assertThat(pill.id()).isEqualTo("subagent:c3");
+        // A blank label never renders an empty pill — it falls back to the full id.
+        assertThat(pill.title()).isEqualTo("subagent:c3");
+    }
+
+    @Test
+    void enumerate_with_no_live_subagents_adds_no_extra_pills() {
+        // AC7 — a session with no subagents shows no extra pills (regression guard).
+        TargetInfo main = new TargetInfo("main", "main", "main", null, null, null, null, null, "main", null, null);
+        when(swarm.enumerate(7)).thenReturn(List.of(main));
+        when(tail.listSubagents(7)).thenReturn(List.of());
+
+        assertThat(facade.enumerateConversationTargets(7, "main")).containsExactly(main);
+    }
+
+    @Test
+    void startTail_for_a_subagent_target_builds_a_subagent_tail_without_resolving_a_pane() throws Exception {
+        // AC3 — a subagent pill streams its OWN agent-<id>.jsonl. The facade must intercept
+        // the subagent: id BEFORE resolveBridgeTarget (a subagent has no pane; resolving would
+        // misroute to main), build a subagent TailTarget, and audit OPEN with the full id.
+        Tail handle = mock(Tail.class);
+        when(tail.start(eq(7), any(), anyInt())).thenReturn(handle);
+
+        Tail got = facade.startTail(7, "subagent:abc123");
+
+        assertThat(got).isSameAs(handle);
+        // Never resolves a pane for a subagent target.
+        verify(swarm, never()).resolveTarget(eq(7), any());
+        ArgumentCaptor<TailTarget> captor = ArgumentCaptor.forClass(TailTarget.class);
+        verify(tail).start(eq(7), captor.capture(), eq(facade.backfillLines()));
+        TailTarget used = captor.getValue();
+        assertThat(used.isSubagent()).isTrue();
+        assertThat(used.subagentId()).isEqualTo("abc123");
+        assertThat(used.hasPane()).isFalse();
+        verify(audit)
+                .logEvent(
+                        eq(AuditAction.CONVERSATION_OPEN), eq("ok"), eq("n"), eq(7), eq("targetId"), eq("subagent:abc123"));
+    }
+
+    // ── The Major fix — every INPUT path is a no-op + audit for a subagent: id ──
+    // A subagent runs in-process under the lead with NO pane, so an inject would
+    // misroute to the LEAD's pane. The server is the authoritative guard (the Android
+    // read-only composer is only a UX echo): composer/answer/answer-batch/interrupt
+    // must short-circuit BEFORE resolveBridgeTarget — never resolve, never inject —
+    // and audit the blocked attempt with result "blocked-subagent".
+
+    @Test
+    void injectComposer_into_a_subagent_target_is_a_noop_and_audits_blocked() throws Exception {
+        facade.injectComposer(7, "subagent:a1", "hello lead?", identity());
+
+        verify(injection, never()).injectComposer(anyInt(), any(), any());
+        verify(swarm, never()).resolveTarget(anyInt(), any());
+        verify(audit)
+                .logEvent(
+                        eq(AuditAction.CONVERSATION_INPUT),
+                        eq("blocked-subagent"),
+                        eq("n"),
+                        eq(7),
+                        eq("targetId"),
+                        eq("subagent:a1"),
+                        eq("fingerprint"),
+                        eq("a".repeat(64)));
+    }
+
+    @Test
+    void injectAnswer_into_a_subagent_target_is_a_noop_and_audits_blocked() throws Exception {
+        facade.injectAnswer(7, "subagent:a1", 2, false, List.of(0), -1, null, identity());
+
+        verify(injection, never()).injectAnswer(anyInt(), any(), anyInt(), anyBoolean(), any(), anyInt(), any());
+        verify(swarm, never()).resolveTarget(anyInt(), any());
+        verify(audit)
+                .logEvent(
+                        eq(AuditAction.CONVERSATION_ANSWER),
+                        eq("blocked-subagent"),
+                        eq("n"),
+                        eq(7),
+                        eq("targetId"),
+                        eq("subagent:a1"),
+                        eq("fingerprint"),
+                        eq("a".repeat(64)));
+    }
+
+    @Test
+    void injectAnswerBatch_into_a_subagent_target_is_a_noop_and_audits_blocked() throws Exception {
+        facade.injectAnswerBatch(7, "subagent:a1", List.of(), identity());
+
+        verify(injection, never()).injectAnswerBatch(anyInt(), any(), any());
+        verify(swarm, never()).resolveTarget(anyInt(), any());
+        verify(audit)
+                .logEvent(
+                        eq(AuditAction.CONVERSATION_ANSWER),
+                        eq("blocked-subagent"),
+                        eq("n"),
+                        eq(7),
+                        eq("targetId"),
+                        eq("subagent:a1"),
+                        eq("fingerprint"),
+                        eq("a".repeat(64)));
+    }
+
+    @Test
+    void interrupt_of_a_subagent_target_is_a_noop_and_audits_blocked() throws Exception {
+        facade.interrupt(7, "subagent:a1", identity());
+
+        verify(injection, never()).interrupt(anyInt(), any());
+        verify(swarm, never()).resolveTarget(anyInt(), any());
+        verify(audit)
+                .logEvent(
+                        eq(AuditAction.CONVERSATION_INTERRUPT),
+                        eq("blocked-subagent"),
+                        eq("n"),
+                        eq(7),
+                        eq("targetId"),
+                        eq("subagent:a1"),
+                        eq("fingerprint"),
+                        eq("a".repeat(64)));
+    }
+
+    @Test
+    void a_normal_target_is_NOT_treated_as_a_subagent_by_the_guard() throws Exception {
+        // The guard must be precise: a swarm/main id still injects normally (no false-block).
+        when(swarm.resolveTarget(7, "swarm:main:0.1")).thenReturn(new BridgeTarget(null, "main", "0", "1"));
+
+        facade.injectComposer(7, "swarm:main:0.1", "real input", identity());
+
+        verify(injection).injectComposer(eq(7), any(InjectTarget.class), eq("real input"));
+        verify(audit)
+                .logEvent(
+                        eq(AuditAction.CONVERSATION_INPUT),
+                        eq("ok"),
+                        eq("n"),
+                        eq(7),
+                        eq("targetId"),
+                        eq("swarm:main:0.1"),
+                        eq("fingerprint"),
+                        eq("a".repeat(64)));
     }
 
     // ──────────────────────── UC-41 AC5/AC9 — fetchToolDetail ────────────────
