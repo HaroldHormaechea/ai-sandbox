@@ -3,13 +3,17 @@ package com.aisandbox.android.ui.screens
 import androidx.activity.ComponentActivity
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.filter
 import androidx.compose.ui.test.isEnabled
 import androidx.compose.ui.test.isNotEnabled
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTextInput
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -19,6 +23,8 @@ import com.aisandbox.android.net.QrPayload
 import com.aisandbox.android.net.ServerProfile
 import com.aisandbox.android.ui.theme.AiSandboxTheme
 import kotlinx.coroutines.runBlocking
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Assume.assumeTrue
 import org.junit.Before
 import org.junit.Rule
@@ -164,6 +170,83 @@ class McpScreenLiveInstrumentationTest {
 
         // AC7 — the no-MCP-servers session shows the clear empty message, never the error state.
         composeTestRule.onNodeWithText("No MCP servers for this session").assertIsDisplayed()
+    }
+
+    /**
+     * UC-82 AC1/AC6 — the Add dialog renders transport-aware fields and gates the Add
+     * button on the minimal required fields. DETERMINISTIC: the Add action lives in the
+     * top bar (rendered regardless of inventory state), and the dialog's field-swap +
+     * client-side enablement need no live server — so this runs on any emulator, even
+     * when the live env is absent.
+     */
+    @Test
+    fun addDialog_swapsTransportAwareFields_andGatesTheAddButton() {
+        composeTestRule.setContent { AiSandboxTheme { McpScreen(sessionN = 7, onBack = {}) } }
+        composeTestRule.waitForIdle()
+
+        // Open the Add dialog from the top-bar action (present in every screen state).
+        composeTestRule.onNodeWithContentDescription("Add MCP server").performClick()
+        composeTestRule.waitForIdle()
+
+        // Default transport is stdio → the Command field is shown, URL is not.
+        composeTestRule.onNodeWithText("Command").assertIsDisplayed()
+        assertFalse(anyText("URL (http:// or https://)"))
+        // Required fields blank → Add is disabled (AC6 client-side gate).
+        composeTestRule.onNodeWithText("Add").assertIsNotEnabled()
+
+        // Fill the stdio minimum (name + command) → Add becomes enabled.
+        composeTestRule.onNodeWithText("Name").performTextInput("call-graph")
+        composeTestRule.onNodeWithText("Command").performTextInput("npx")
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithText("Add").assertIsEnabled()
+
+        // Switch transport to HTTP → the stdio Command field disappears, URL appears.
+        composeTestRule.onNodeWithText("HTTP").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithText("URL (http:// or https://)").assertIsDisplayed()
+        assertFalse(anyText("Command"))
+    }
+
+    /**
+     * UC-82 AC1/AC2/AC3 — LIVE round-trip from the device UI: add a stdio MCP server
+     * through the Add dialog, see it appear in the list (live refresh, AC3), then remove
+     * it via the per-row Delete → confirm dialog and see it disappear (AC2/AC3). Mutates
+     * the live session, so it is env-gated: when the live server/session is absent (CI),
+     * it skips via Assume rather than failing.
+     */
+    @Test
+    fun liveRoundTrip_addThenRemove_throughTheUi_reflectsLive() {
+        val probe = "uc82-probe"
+        composeTestRule.setContent { AiSandboxTheme { McpScreen(sessionN = 7, onBack = {}) } }
+        settle("atlassian", "broken-tool", "No MCP servers for this session", probe)
+
+        assumeTrue(
+            "AC8 live env absent (session 7 / server unreachable) — skipping live add/remove round-trip",
+            anyText("atlassian") || anyText("broken-tool") || anyText("No MCP servers for this session"),
+        )
+
+        // ── Add the probe server through the dialog (AC1).
+        composeTestRule.onNodeWithContentDescription("Add MCP server").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithText("Name").performTextInput(probe)
+        composeTestRule.onNodeWithText("Command").performTextInput("/bin/true")
+        composeTestRule.onNodeWithText("Add").performClick()
+
+        // AC3 — it appears in the list without reopening the screen (live refresh).
+        composeTestRule.waitUntil(timeoutMillis = 60_000) { anyText(probe) }
+        composeTestRule.onNodeWithText(probe).assertIsDisplayed()
+
+        // ── Remove it via the per-row Delete → confirm dialog (AC2).
+        composeTestRule.onNodeWithContentDescription("Remove $probe").performClick()
+        composeTestRule.waitForIdle()
+        composeTestRule.onNodeWithText("Remove \"$probe\"?").assertIsDisplayed()
+        // The confirm body is honest about NOT force-killing a running child (AC2).
+        assertTrue(anyText("isn't force-killed"))
+        composeTestRule.onNodeWithText("Remove").performClick()
+
+        // AC3 — the row disappears live after deregistration.
+        composeTestRule.waitUntil(timeoutMillis = 60_000) { !anyText(probe) }
+        assertFalse(anyText(probe))
     }
 
     private companion object {

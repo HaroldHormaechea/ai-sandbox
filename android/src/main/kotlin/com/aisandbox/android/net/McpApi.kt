@@ -6,6 +6,7 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 
@@ -66,6 +67,46 @@ class McpApi(private val http: AiSandboxHttpClient) {
             }
         }
 
+    /**
+     * UC-82 — register a new MCP server for session [n] (AC1). The request body is the
+     * transport-tagged [McpAddRequest]; the server validates per-transport and returns
+     * an [McpActionResult] carrying the new server's post-add state on 201, or a
+     * problem+json (400 malformed / 409 duplicate / 500 add-failed) mapped to
+     * [ApiResult.HttpFailure].
+     */
+    suspend fun add(n: Int, body: McpAddRequest): ApiResult<McpActionResult> = withContext(Dispatchers.IO) {
+        val url = "$base/v1/sessions/$n/mcp".toHttpUrl()
+        val json = JSON.encodeToString(McpAddRequest.serializer(), body)
+        val req = Request.Builder()
+            .url(url)
+            .post(json.toRequestBody("application/json".toMediaType()))
+            .build()
+        client.newCall(req).execute().use { resp ->
+            mapResponse(resp) { responseBody ->
+                JSON.decodeFromString(McpActionResult.serializer(), responseBody)
+            }
+        }
+    }
+
+    /**
+     * UC-82 — deregister MCP server [name] from session [n] (AC2). The name is carried
+     * as an encoded path segment so a name with reserved chars cannot break out of the
+     * path. Returns the server's [McpActionResult] (with the honest deregister +
+     * reconcile-on-next-reload message) on 200, or a problem+json (404 / 500) mapped to
+     * [ApiResult.HttpFailure].
+     */
+    suspend fun remove(n: Int, name: String): ApiResult<McpActionResult> = withContext(Dispatchers.IO) {
+        val url = "$base/v1/sessions/$n/mcp".toHttpUrl().newBuilder()
+            .addPathSegment(name)
+            .build()
+        val req = Request.Builder().url(url).delete().build()
+        client.newCall(req).execute().use { resp ->
+            mapResponse(resp) { responseBody ->
+                JSON.decodeFromString(McpActionResult.serializer(), responseBody)
+            }
+        }
+    }
+
     private inline fun <T> mapResponse(
         resp: okhttp3.Response,
         deserialize: (String) -> T,
@@ -97,7 +138,14 @@ class McpApi(private val http: AiSandboxHttpClient) {
     }
 
     companion object {
-        private val JSON = Json { ignoreUnknownKeys = true; isLenient = true }
+        // explicitNulls = false: omit null optional fields when encoding McpAddRequest, so a
+        // stdio request carries no `url`/`headers` keys and an http/sse one carries no
+        // `command`/`args`/`env` keys (decoding is unaffected — it only governs serialization).
+        private val JSON = Json {
+            ignoreUnknownKeys = true
+            isLenient = true
+            explicitNulls = false
+        }
     }
 }
 
@@ -130,4 +178,23 @@ data class McpActionResult(
     val name: String,
     val state: String = "unknown",
     val message: String = "",
+)
+
+/**
+ * UC-82 — mirrors {@code ApiDtos.McpAddRequest}: the body of `POST /v1/sessions/{n}/mcp`.
+ * Transport-dependent: a `stdio` server carries [command] (+ optional [args] / [env]); an
+ * `http` / `sse` server carries [url] (+ optional [headers]). Null/empty optional fields are
+ * omitted from the JSON (the encoder is configured with `explicitNulls = false`), so the
+ * server sees exactly the transport-relevant fields. Field set MUST stay in sync with the
+ * server record (the OpenAPI spec is the contract).
+ */
+@Serializable
+data class McpAddRequest(
+    val name: String,
+    val transport: String,
+    val command: String? = null,
+    val args: List<String>? = null,
+    val url: String? = null,
+    val env: Map<String, String>? = null,
+    val headers: List<String>? = null,
 )

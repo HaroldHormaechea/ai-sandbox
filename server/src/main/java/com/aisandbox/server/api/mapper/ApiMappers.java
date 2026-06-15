@@ -82,6 +82,21 @@ public final class ApiMappers {
         return new ApiDtos.McpActionResult(o.name(), o.state().name().toLowerCase(java.util.Locale.ROOT), o.message());
     }
 
+    /**
+     * UC-82 — API request DTO → internal add spec (rule 5: the API DTO never crosses
+     * into the service layer). Null-safe on a missing body (the facade then rejects it
+     * with a 400). Transport is normalised to lower-case here so the service compares
+     * against a canonical value.
+     */
+    public static com.aisandbox.server.mcp.dto.McpAddSpec toMcpAddSpec(ApiDtos.McpAddRequest req) {
+        if (req == null) {
+            return null;
+        }
+        String transport = req.transport() == null ? null : req.transport().toLowerCase(java.util.Locale.ROOT);
+        return new com.aisandbox.server.mcp.dto.McpAddSpec(
+                req.name(), transport, req.command(), req.args(), req.url(), req.env(), req.headers());
+    }
+
     public static ApiDtos.ClientSummary toClientSummary(AllowedClient c) {
         return new ApiDtos.ClientSummary(
                 c.name(),

@@ -44,7 +44,18 @@ public enum ErrorCode {
     // UC-77 — a spawn arrived while the ai-context:latest sandbox image is
     // still being prepared (warm build in progress, or just (re)kicked).
     // Mapped to 503; the request never runs the heavy build itself.
-    SANDBOX_IMAGE_WARMING;
+    SANDBOX_IMAGE_WARMING,
+    // UC-82 — POST /v1/sessions/{n}/mcp targeted a server name that is already
+    // configured for the session. Mapped to 409 Conflict (no silent overwrite).
+    MCP_SERVER_EXISTS,
+    // UC-82 — DELETE /v1/sessions/{n}/mcp/{name} targeted a server the session
+    // does not have. Mapped to 404 Not Found.
+    MCP_SERVER_NOT_FOUND,
+    // UC-82 — the underlying `claude mcp add` invocation failed (non-zero exit
+    // or I/O error). Mapped to 500.
+    MCP_ADD_FAILED,
+    // UC-82 — the underlying `claude mcp remove` invocation failed. Mapped to 500.
+    MCP_REMOVE_FAILED;
 
     public String wire() {
         return name().toLowerCase();

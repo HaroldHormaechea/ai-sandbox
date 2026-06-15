@@ -83,6 +83,71 @@ paths:
           description: lifecycle.sh exited non-zero.
           content:
             application/problem+json: {}
+  /v1/sessions/{n}/mcp:
+    get:
+      tags:
+      - mcp-controller
+      summary: List the MCP servers configured for a session.
+      description: "Returns the session's MCP servers and their current state, as\
+        \ known to the embedded Claude Code (claude mcp list). Degrades to an empty\
+        \ list for a non-running session or an unrecognised MCP surface — never a\
+        \ 4xx for those cases."
+      operationId: list_1
+      parameters:
+      - name: "n"
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int32
+      responses:
+        "200":
+          description: The session's MCP servers (possibly empty).
+          content:
+            '*/*':
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/McpServerSummary"
+    post:
+      tags:
+      - mcp-controller
+      summary: Register a new MCP server for a session.
+      description: Adds an MCP server (stdio command or http/sse URL) to the session's
+        embedded Claude Code via an argv-only `claude mcp add`. 201 with the server's
+        post-add state; 400 malformed; 409 duplicate name; 500 on add failure.
+      operationId: add
+      parameters:
+      - name: "n"
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int32
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/McpAddRequest"
+      responses:
+        "201":
+          description: The server was registered; carries its post-add state.
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/McpActionResult"
+        "400":
+          description: Malformed or missing required fields.
+          content:
+            application/problem+json: {}
+        "409":
+          description: A server with that name is already configured.
+          content:
+            application/problem+json: {}
+        "500":
+          description: The underlying claude mcp add call failed.
+          content:
+            application/problem+json: {}
   /v1/sessions/{n}/mcp/{name}/{action}:
     post:
       tags:
@@ -181,7 +246,7 @@ paths:
     get:
       tags:
       - client-controller
-      operationId: list_1
+      operationId: list_2
       responses:
         "200":
           description: OK
@@ -194,7 +259,7 @@ paths:
     post:
       tags:
       - client-controller
-      operationId: add
+      operationId: add_1
       requestBody:
         content:
           application/json:
@@ -270,32 +335,6 @@ paths:
           description: clean.sh exited non-zero.
           content:
             application/problem+json: {}
-  /v1/sessions/{n}/mcp:
-    get:
-      tags:
-      - mcp-controller
-      summary: List the MCP servers configured for a session.
-      description: "Returns the session's MCP servers and their current state, as\
-        \ known to the embedded Claude Code (claude mcp list). Degrades to an empty\
-        \ list for a non-running session or an unrecognised MCP surface — never a\
-        \ 4xx for those cases."
-      operationId: list_2
-      parameters:
-      - name: "n"
-        in: path
-        required: true
-        schema:
-          type: integer
-          format: int32
-      responses:
-        "200":
-          description: The session's MCP servers (possibly empty).
-          content:
-            '*/*':
-              schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/McpServerSummary"
   /v1/models:
     get:
       tags:
@@ -322,6 +361,42 @@ paths:
             '*/*':
               schema:
                 type: object
+  /v1/sessions/{n}/mcp/{name}:
+    delete:
+      tags:
+      - mcp-controller
+      summary: Deregister an MCP server from a session.
+      description: Removes the named MCP server via an argv-only `claude mcp remove`.
+        200 with an honest note (deregister + reconcile on next reload; a running
+        child is not force-killed); 404 unknown server; 500 on remove failure.
+      operationId: remove
+      parameters:
+      - name: "n"
+        in: path
+        required: true
+        schema:
+          type: integer
+          format: int32
+      - name: name
+        in: path
+        required: true
+        schema:
+          type: string
+      responses:
+        "200":
+          description: The server was deregistered.
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/McpActionResult"
+        "404":
+          description: No MCP server with that name in the session.
+          content:
+            application/problem+json: {}
+        "500":
+          description: The underlying claude mcp remove call failed.
+          content:
+            application/problem+json: {}
   /v1/clients/{cnOrFingerprint}:
     delete:
       tags:
@@ -358,6 +433,54 @@ components:
           type: string
           default: shared
           description: shared | isolated
+    McpAddRequest:
+      type: object
+      description: "Body of POST /v1/sessions/{n}/mcp (UC-82) — register a new MCP\
+        \ server."
+      properties:
+        name:
+          type: string
+          description: "MCP server identifier. [A-Za-z0-9._-], 1-128 chars, no spaces,\
+            \ no leading '-'."
+          example: atlassian
+          minLength: 1
+          pattern: "[A-Za-z0-9._-]{1,128}"
+        transport:
+          type: string
+          description: Transport/type of the MCP server.
+          enum:
+          - stdio
+          - http
+          - sse
+          example: stdio
+        command:
+          type: string
+          description: stdio transport — the executable to run (required for stdio).
+          example: npx
+        args:
+          type: array
+          description: stdio transport — arguments passed to the command.
+          items:
+            type: string
+        url:
+          type: string
+          description: http / sse transport — the server URL (required for those;
+            http(s) only).
+          example: https://mcp.atlassian.com/v1/sse
+        env:
+          type: object
+          additionalProperties:
+            type: string
+          description: stdio transport — environment variables for the command (K=V).
+            Values are secret.
+        headers:
+          type: array
+          description: "http / sse transport — \"Header: value\" strings. Values are\
+            \ secret."
+          items:
+            type: string
+      required:
+      - name
     McpActionResult:
       type: object
       description: UC-67 — outcome of an MCP control action (login/reconnect/refresh).

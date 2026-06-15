@@ -5,6 +5,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.aisandbox.android.AiSandboxApplication
 import com.aisandbox.android.net.ApiResult
+import com.aisandbox.android.net.McpAddRequest
 import com.aisandbox.android.net.McpServerInfo
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -41,6 +42,15 @@ class McpViewModel(application: Application) : AndroidViewModel(application) {
      */
     private val _actionMessage = MutableStateFlow<String?>(null)
     val actionMessage: StateFlow<String?> = _actionMessage.asStateFlow()
+
+    /**
+     * UC-82 — one-shot signal that an [add] succeeded, so the screen can close the Add
+     * dialog. On a failed add it stays false, so the dialog stays open with the user's
+     * input intact (notably a 409 duplicate-name). The screen consumes it via
+     * [consumeAddSucceeded].
+     */
+    private val _addSucceeded = MutableStateFlow(false)
+    val addSucceeded: StateFlow<Boolean> = _addSucceeded.asStateFlow()
 
     /** Bind to session [n] and run the initial fetch. Idempotent across recompositions. */
     fun attach(n: Int) {
@@ -108,9 +118,82 @@ class McpViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /**
+     * UC-82 — register a new MCP server (AC1), then re-fetch so it appears live (AC3).
+     * Reuses [busyServer] (keyed by the new name) for the in-flight gate; the outcome
+     * (the server's honest message, or the validation / duplicate / failure detail)
+     * surfaces via [actionMessage]. On success only, [addSucceeded] is raised so the
+     * screen closes the dialog.
+     */
+    fun add(body: McpAddRequest) {
+        if (sessionN < 0 || _busyServer.value != null) return
+        _busyServer.value = body.name
+        viewModelScope.launch {
+            val profile = container.profileStore.current()
+            if (profile == null) {
+                _busyServer.value = null
+                _actionMessage.value = "Not enrolled"
+                return@launch
+            }
+            val result = try {
+                container.mcpApi(container.httpClient(profile)).add(sessionN, body)
+            } catch (t: Throwable) {
+                _busyServer.value = null
+                _actionMessage.value = t.message ?: t.javaClass.simpleName
+                return@launch
+            }
+            _busyServer.value = null
+            when (result) {
+                is ApiResult.Success -> {
+                    _actionMessage.value = result.value.message.ifBlank { "Added." }
+                    _addSucceeded.value = true
+                    refresh() // AC3 — the new server appears without reopening the screen.
+                }
+                is ApiResult.HttpFailure -> _actionMessage.value = result.detail.ifBlank { result.code }
+            }
+        }
+    }
+
+    /**
+     * UC-82 — deregister an MCP server (AC2), then re-fetch so it disappears live (AC3).
+     * The server's response message is honest that this only deregisters (an
+     * already-running child keeps running until the next MCP reload); it is shown via
+     * [actionMessage]. Reuses [busyServer] for the in-flight gate.
+     */
+    fun remove(name: String) {
+        if (sessionN < 0 || _busyServer.value != null) return
+        _busyServer.value = name
+        viewModelScope.launch {
+            val profile = container.profileStore.current()
+            if (profile == null) {
+                _busyServer.value = null
+                _actionMessage.value = "Not enrolled"
+                return@launch
+            }
+            val result = try {
+                container.mcpApi(container.httpClient(profile)).remove(sessionN, name)
+            } catch (t: Throwable) {
+                _busyServer.value = null
+                _actionMessage.value = t.message ?: t.javaClass.simpleName
+                return@launch
+            }
+            _busyServer.value = null
+            _actionMessage.value = when (result) {
+                is ApiResult.Success -> result.value.message.ifBlank { "Removed." }
+                is ApiResult.HttpFailure -> result.detail.ifBlank { result.code }
+            }
+            if (result is ApiResult.Success) refresh() // AC3 — the row disappears live.
+        }
+    }
+
     /** Clear the transient action message after the snackbar has shown it. */
     fun consumeActionMessage() {
         _actionMessage.value = null
+    }
+
+    /** Clear the one-shot [addSucceeded] signal after the screen has closed the dialog. */
+    fun consumeAddSucceeded() {
+        _addSucceeded.value = false
     }
 }
 
@@ -127,4 +210,59 @@ sealed interface McpUiState {
     data class Loaded(val servers: List<McpServerInfo>) : McpUiState
     data object Empty : McpUiState
     data class Error(val message: String) : McpUiState
+}
+
+/**
+ * UC-82 — pure builder that turns the Add-dialog's raw text fields into a transport-
+ * correct [McpAddRequest]. Kept top-level (not inside the composable) so it is
+ * unit-testable without instrumentation. It trims every field and folds blank optionals
+ * to null (so they are omitted from the wire body), then:
+ *
+ * - **stdio** → keeps [command] + whitespace-separated [argsText] as `args` + `K=V` lines
+ *   from [envText] as `env`; ignores url/headers.
+ * - **http / sse** → keeps [url] + `Header: value` lines from [headersText] as `headers`;
+ *   ignores command/args/env.
+ *
+ * No shell escaping or quoting happens here: every value travels to the server as plain
+ * data and lands as a discrete argv element server-side, so a value like `; rm -rf` or
+ * `$(touch x)` is inert (AC4). The server enforces the authoritative validation (AC6).
+ */
+internal fun buildMcpAddRequest(
+    name: String,
+    transport: String,
+    command: String,
+    argsText: String,
+    url: String,
+    envText: String,
+    headersText: String,
+): McpAddRequest {
+    val t = transport.trim().lowercase()
+    return if (t == "stdio") {
+        McpAddRequest(
+            name = name.trim(),
+            transport = "stdio",
+            command = command.trim().ifBlank { null },
+            args = argsText.split(Regex("\\s+")).map { it.trim() }.filter { it.isNotEmpty() }.ifEmpty { null },
+            env = parseEnvLines(envText),
+        )
+    } else {
+        McpAddRequest(
+            name = name.trim(),
+            transport = t,
+            url = url.trim().ifBlank { null },
+            headers = headersText.lines().map { it.trim() }.filter { it.isNotEmpty() }.ifEmpty { null },
+        )
+    }
+}
+
+/** Parse `K=V` lines (one per line) into an env map; blank / `=`-less lines are dropped. */
+private fun parseEnvLines(envText: String): Map<String, String>? {
+    val map = envText.lines()
+        .map { it.trim() }
+        .filter { it.isNotEmpty() && it.contains('=') }
+        .associate { line ->
+            val idx = line.indexOf('=')
+            line.substring(0, idx).trim() to line.substring(idx + 1).trim()
+        }
+    return map.ifEmpty { null }
 }
