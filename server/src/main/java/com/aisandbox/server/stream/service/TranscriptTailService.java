@@ -98,6 +98,17 @@ public class TranscriptTailService {
     public static final String CTRL_DETAIL_NOT_FOUND = "detail-not-found";
 
     /**
+     * UC-79 — leading control line of a {@code --fetch-page} (load-older) emission.
+     * Carries TWO extra tab-delimited fields after the kind: the start line index of
+     * the slice actually delivered (the new oldest-line cursor) and {@code atStart}
+     * (1 when that start is the very beginning of the transcript):
+     * {@code __ctrl__\tpage-meta\t<startIdx>\t<atStart(0|1)>}. The {@code backfill-start}
+     * control ALSO now carries a single extra field — the primary window's start line
+     * index — used to SEED the cursor (the handler parses it at the control switch).
+     */
+    public static final String CTRL_PAGE_META = "page-meta";
+
+    /**
      * UC-50 — pane-signal pending-prompt control lines (lock-step with the helper's
      * {@code CTRL_PENDING_QUESTION}/{@code CTRL_PENDING_CLEAR}). Unlike the other
      * control lines these carry a THIRD tab-delimited field after the kind:
@@ -265,6 +276,78 @@ public class TranscriptTailService {
             return List.of();
         }
     }
+
+    /**
+     * UC-79 (AC2/AC6) — one-shot, bounded re-read of {@code target}'s PRIMARY transcript
+     * for the OLDER page ending just below {@code beforeLine}. Runs the helper in
+     * {@code --fetch-page --before-line <i> --count <n>} mode (resolve once, read the
+     * complete-line slice, print a leading {@code page-meta} control then the older
+     * {@code <source>\t<raw>} lines), then exits — so {@link ProcessExecutor#run} fits,
+     * exactly like {@link #fetchDetailLines}. Returns a {@link PageLines} carrying the
+     * envelope lines plus the parsed new oldest-line cursor and {@code atStart} flag.
+     * A {@code beforeLine <= 0}, an unresolvable transcript, a missing page-meta, a
+     * non-zero exit, a timeout, or any I/O error degrades to an EMPTY page pinned at the
+     * given {@code beforeLine} with {@code atStart=true} — so the cursor never silently
+     * advances and the client stops paging (AC4). Never throws.
+     */
+    public PageLines fetchPageLines(int n, TailTarget target, int beforeLine, int pageSize) {
+        if (beforeLine <= 0) {
+            return new PageLines(List.of(), Math.max(0, beforeLine), true);
+        }
+        try {
+            List<String> argv = new ArrayList<>(buildArgv(n, target, 1));
+            argv.add("--fetch-page");
+            argv.add("--before-line");
+            argv.add(Integer.toString(beforeLine));
+            argv.add("--count");
+            argv.add(Integer.toString(Math.max(1, pageSize)));
+            ProcessExecutor.Result r = exec.run(argv, null, DETAIL_TIMEOUT);
+            if (r.exitCode() != 0 || r.stdout() == null) {
+                return new PageLines(List.of(), beforeLine, true);
+            }
+            List<String> lines = new ArrayList<>();
+            int newOldest = beforeLine;
+            boolean atStart = true;
+            boolean sawMeta = false;
+            for (String line : r.stdout().split("\n", -1)) {
+                if (line.isBlank()) {
+                    continue;
+                }
+                if (line.startsWith(CTRL_SOURCE)) {
+                    // Leading control: __ctrl__\tpage-meta\t<start>\t<atStart(0|1)>.
+                    String[] parts = line.split("\t", -1);
+                    if (parts.length >= 4 && CTRL_PAGE_META.equals(parts[1].trim())) {
+                        sawMeta = true;
+                        try {
+                            newOldest = Integer.parseInt(parts[2].trim());
+                        } catch (NumberFormatException nfe) {
+                            newOldest = beforeLine;
+                        }
+                        atStart = "1".equals(parts[3].trim());
+                    }
+                    continue; // never hand a control line to the mapper
+                }
+                lines.add(line);
+            }
+            if (!sawMeta) {
+                // No page-meta → treat as nothing loaded so the cursor never silently advances.
+                return new PageLines(List.of(), beforeLine, true);
+            }
+            return new PageLines(lines, newOldest, atStart);
+        } catch (IOException io) {
+            LOG.debug("fetchPageLines failed for n={} target={} before={}: {}", n, target, beforeLine, io.toString());
+            return new PageLines(List.of(), beforeLine, true);
+        }
+    }
+
+    /**
+     * UC-79 — result of a {@link #fetchPageLines} call: the older transcript envelope
+     * {@code lines} ({@code <source>\t<raw>}, control lines stripped), the new oldest-line
+     * {@code cursor} (the start index of the slice actually delivered — the handler stores
+     * it as the connection's cursor), and {@code atStart} (true once the transcript start
+     * is reached, so no further paging is attempted).
+     */
+    public record PageLines(List<String> lines, int cursor, boolean atStart) {}
 
     /**
      * UC-55 — one-shot, READ-ONLY capture+parse of the CURRENTLY-FOCUSED wizard tab of

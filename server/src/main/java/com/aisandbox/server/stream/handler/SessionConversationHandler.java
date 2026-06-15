@@ -21,6 +21,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import org.slf4j.Logger;
@@ -256,14 +257,22 @@ public class SessionConversationHandler implements WebSocketHandler {
             String subtype = (ptab < 0 ? payload : payload.substring(0, ptab)).trim();
             String rest = ptab < 0 ? "" : payload.substring(ptab + 1);
             switch (subtype) {
-                case TranscriptTailService.CTRL_BACKFILL_START -> emit(
-                        ctx, session, new ConversationServerMessage.BackfillStart(ctx.selectedTarget.get()));
+                case TranscriptTailService.CTRL_BACKFILL_START -> {
+                    // UC-79 — the primary backfill-start carries the window's start line
+                    // index; seed/re-seed the per-connection oldest-line cursor from it so a
+                    // later load-older knows where to page from (AC2). A re-backfill (target
+                    // switch, rebaseline) re-seeds here. A subagent backfill inside the same
+                    // window carries no index → keep the existing cursor.
+                    seedOldestCursor(ctx, rest);
+                    emit(ctx, session, new ConversationServerMessage.BackfillStart(ctx.selectedTarget.get()));
+                }
                 case TranscriptTailService.CTRL_BACKFILL_END -> emit(
                         ctx, session, new ConversationServerMessage.BackfillEnd(ctx.selectedTarget.get()));
                 case TranscriptTailService.CTRL_REBASELINE -> {
-                    // entrypoint restart loop spawned a fresh claude → new transcript.
-                    // The helper re-baselines + re-backfills; nothing to do server-side
-                    // beyond letting the new backfill markers flow through.
+                    // entrypoint restart loop spawned a fresh claude → new transcript. The
+                    // helper re-baselines + re-backfills; the following backfill-start re-seeds
+                    // the cursor. Clear any stale in-flight guard so paging works post-rotation.
+                    ctx.loadingOlder.set(false);
                     LOG.debug("conversation tail rebaselined for n={}", ctx.n);
                 }
                 case TranscriptTailService.CTRL_NO_TRANSCRIPT -> {
@@ -499,6 +508,8 @@ public class SessionConversationHandler implements WebSocketHandler {
                     });
             case ConversationClientMessage.FetchDetail fd -> Schedulers.boundedElastic()
                     .schedule(() -> fetchDetail(session, ctx, fd));
+            case ConversationClientMessage.LoadOlder lo -> Schedulers.boundedElastic()
+                    .schedule(() -> loadOlder(session, ctx));
             case ConversationClientMessage.Close c -> session.close(
                             CloseStatus.NORMAL.withReason(c.reason() == null ? "client-close" : c.reason()))
                     .subscribe();
@@ -524,6 +535,60 @@ public class SessionConversationHandler implements WebSocketHandler {
             frame = new ConversationServerMessage.ToolDetail(fd.toolUseId(), null, "", "", false, false);
         }
         emit(ctx, session, frame);
+    }
+
+    /**
+     * UC-79 (AC2/AC4) — seed/re-seed the per-connection oldest-line cursor from the start
+     * index carried on a primary {@code backfill-start} control ({@code rest}). A subagent
+     * backfill (no index field) leaves the cursor untouched, and a non-numeric/blank index
+     * is ignored — the cursor only ever moves to a parsed primary window start.
+     */
+    private void seedOldestCursor(ConvCtx ctx, String rest) {
+        if (rest == null || rest.isBlank()) {
+            return; // subagent backfill (no index) — keep the existing primary cursor
+        }
+        try {
+            ctx.oldestLineCursor.set(Math.max(0, Integer.parseInt(rest.trim())));
+            ctx.loadingOlder.set(false); // a fresh window invalidates any in-flight page
+        } catch (NumberFormatException nfe) {
+            LOG.debug("conversation backfill-start carried no parseable cursor for n={}: '{}'", ctx.n, rest);
+        }
+    }
+
+    /**
+     * UC-79 (AC2/AC3/AC4/AC6) — handle a {@code load-older}: fetch the next OLDER page of
+     * the selected target's transcript (ending just below the connection's oldest-line
+     * cursor) and emit a {@code page-start} → older frames → {@code page-end(atStart)}
+     * sequence; advance the cursor to the page's new oldest line. A single-in-flight guard
+     * ({@link ConvCtx#loadingOlder}) drops overlapping requests from a fast scroll-up fling.
+     * When the cursor is already at the transcript start (0) it emits {@code page-end(true)}
+     * with no page so the client stops paging. Any failure degrades to {@code page-end(false)}
+     * so the client clears its loading affordance rather than hanging — it never crashes the pump.
+     */
+    private void loadOlder(WebSocketSession session, ConvCtx ctx) {
+        if (!ctx.loadingOlder.compareAndSet(false, true)) {
+            return; // a page load is already in flight (rapid scroll-up) — drop this request
+        }
+        try {
+            int before = ctx.oldestLineCursor.get();
+            if (before <= 0) {
+                emit(ctx, session, new ConversationServerMessage.PageEnd(true));
+                return;
+            }
+            ConversationFacade.OlderPage page =
+                    facade.fetchOlderPage(ctx.n, ctx.selectedTarget.get(), before, facade.conversationPageLines());
+            emit(ctx, session, new ConversationServerMessage.PageStart());
+            for (ConversationServerMessage frame : page.frames()) {
+                emit(ctx, session, frame);
+            }
+            emit(ctx, session, new ConversationServerMessage.PageEnd(page.atStart()));
+            ctx.oldestLineCursor.set(page.newOldestLine());
+        } catch (RuntimeException e) {
+            LOG.warn("conversation load-older for n={} failed: {}", ctx.n, e.toString());
+            emit(ctx, session, new ConversationServerMessage.PageEnd(false));
+        } finally {
+            ctx.loadingOlder.set(false);
+        }
     }
 
     private void applyAnswer(WebSocketSession session, ConvCtx ctx, ConversationClientMessage.Answer a) {
@@ -626,6 +691,9 @@ public class SessionConversationHandler implements WebSocketHandler {
             }
             ctx.selectedTarget.set(resolved);
             ctx.pendingQuestions.clear(); // questions are per-target; the new tail re-backfills its own
+            // UC-79 — the new target's tail re-backfills and re-seeds the oldest-line cursor
+            // via its own backfill-start; clear the in-flight guard so paging works after the switch.
+            ctx.loadingOlder.set(false);
             emit(ctx, session, new ConversationServerMessage.TargetSelected(resolved));
         } catch (Exception e) {
             LOG.warn("conversation target switch to {} failed: {}", resolved, e.toString());
@@ -740,6 +808,27 @@ public class SessionConversationHandler implements WebSocketHandler {
         final AtomicReference<TranscriptTailService.Tail> tailRef = new AtomicReference<>();
         final AtomicInteger generation = new AtomicInteger(0);
         final AtomicReference<String> selectedTarget = new AtomicReference<>(TARGET_MAIN);
+
+        /**
+         * UC-79 — the oldest transcript line index currently loaded for the selected
+         * target's PRIMARY file. Seeded/re-seeded from the helper's {@code backfill-start
+         * <idx>} control (parsed on the pump thread) and advanced as older pages load
+         * (on a {@code boundedElastic} {@code load-older} thread) — hence an
+         * {@link AtomicInteger}. A {@code load-older} fetches {@code [cursor-pageSize,
+         * cursor)} and resets the cursor to the page's new oldest line; {@code 0} means
+         * the transcript start is loaded (no further paging).
+         */
+        final AtomicInteger oldestLineCursor = new AtomicInteger(0);
+
+        /**
+         * UC-79 — single-in-flight guard for {@code load-older}: a fast scroll-up fling can
+         * fire several {@code load-older} frames before the first page returns. The handler
+         * {@code compareAndSet(false,true)} before fetching and resets it when done, so only
+         * one page is ever in flight and the cursor advances exactly once per page (AC2 — no
+         * skipped/overlapping pages). Cleared on target switch / rebaseline / re-seed.
+         */
+        final AtomicBoolean loadingOlder = new AtomicBoolean(false);
+
         final ConcurrentHashMap<String, ConversationServerMessage.Question> pendingQuestions =
                 new ConcurrentHashMap<>();
 

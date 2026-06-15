@@ -29,6 +29,7 @@ import java.util.List;
     @JsonSubTypes.Type(value = ConversationClientMessage.Interrupt.class, name = "interrupt"),
     @JsonSubTypes.Type(value = ConversationClientMessage.EnumerateTargets.class, name = "enumerate-targets"),
     @JsonSubTypes.Type(value = ConversationClientMessage.FetchDetail.class, name = "fetch-detail"),
+    @JsonSubTypes.Type(value = ConversationClientMessage.LoadOlder.class, name = "load-older"),
     @JsonSubTypes.Type(value = ConversationClientMessage.Close.class, name = "close")
 })
 public sealed interface ConversationClientMessage
@@ -39,6 +40,7 @@ public sealed interface ConversationClientMessage
                 ConversationClientMessage.Interrupt,
                 ConversationClientMessage.EnumerateTargets,
                 ConversationClientMessage.FetchDetail,
+                ConversationClientMessage.LoadOlder,
                 ConversationClientMessage.Close {
 
     /**
@@ -107,6 +109,20 @@ public sealed interface ConversationClientMessage
      * session; it is a server-local read.
      */
     record FetchDetail(String toolUseId, String uuid) implements ConversationClientMessage {}
+
+    /**
+     * UC-79 (AC2) — request the next OLDER page of the selected target's transcript,
+     * sent when the user scrolls up toward the top of the loaded window. No payload:
+     * the server owns the per-connection oldest-line cursor (seeded from the
+     * {@code backfill-start} window start and advanced as pages load), so it knows
+     * exactly which slice {@code [cursor-pageSize, cursor)} to fetch next. The server
+     * replies with a {@link ConversationServerMessage.PageStart}, the older
+     * transcript-derived frames, then a {@link ConversationServerMessage.PageEnd}
+     * (with {@code atStart=true} once the beginning of the transcript is reached, so
+     * the client stops paging — AC4). Like {@code fetch-detail} it is a server-local
+     * read; it is NOT injected into the tmux session.
+     */
+    record LoadOlder() implements ConversationClientMessage {}
 
     /** Client-initiated clean close. */
     record Close(String reason) implements ConversationClientMessage {}

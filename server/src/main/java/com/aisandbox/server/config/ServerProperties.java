@@ -220,6 +220,20 @@ public record ServerProperties(
         public int conversationDetailMaxBytes() {
             return CONVERSATION_DETAIL_MAX_BYTES_DEFAULT;
         }
+
+        /**
+         * UC-79 — page size (transcript lines) for an infinite-scroll {@code load-older}
+         * request (AC2/AC7): how many older lines the server fetches per page as the user
+         * scrolls up. Smaller than {@link #conversationBackfillLines()} (the initial
+         * window) so each page is a quick, bounded fetch. Like the other conversation
+         * bounds this is a defaulted accessor rather than a new YAML-bound,
+         * {@code @Min}-validated component, so existing {@code config.yaml} /
+         * {@code sample-config.yaml} / QA fixtures bind unchanged. Promote to a bound
+         * field if per-deployment tuning is ever needed.
+         */
+        public int conversationPageLines() {
+            return CONVERSATION_PAGE_LINES_DEFAULT;
+        }
     }
 
     /** UC-37 default backfill window — see {@link Streams#conversationBackfillLines()}. */
@@ -227,6 +241,9 @@ public record ServerProperties(
 
     /** UC-41 default tool-detail byte cap (48&nbsp;KB) — see {@link Streams#conversationDetailMaxBytes()}. */
     public static final int CONVERSATION_DETAIL_MAX_BYTES_DEFAULT = 49152;
+
+    /** UC-79 default older-page size — see {@link Streams#conversationPageLines()}. */
+    public static final int CONVERSATION_PAGE_LINES_DEFAULT = 100;
 
     /**
      * UC04 enrollment-endpoint configuration. Tokens issued by

@@ -55,6 +55,8 @@ import java.util.List;
     @JsonSubTypes.Type(value = ConversationServerMessage.TargetSelected.class, name = "target-selected"),
     @JsonSubTypes.Type(value = ConversationServerMessage.BackfillStart.class, name = "backfill-start"),
     @JsonSubTypes.Type(value = ConversationServerMessage.BackfillEnd.class, name = "backfill-end"),
+    @JsonSubTypes.Type(value = ConversationServerMessage.PageStart.class, name = "page-start"),
+    @JsonSubTypes.Type(value = ConversationServerMessage.PageEnd.class, name = "page-end"),
     @JsonSubTypes.Type(value = ConversationServerMessage.ServerError.class, name = "error")
 })
 public sealed interface ConversationServerMessage
@@ -75,6 +77,8 @@ public sealed interface ConversationServerMessage
                 ConversationServerMessage.TargetSelected,
                 ConversationServerMessage.BackfillStart,
                 ConversationServerMessage.BackfillEnd,
+                ConversationServerMessage.PageStart,
+                ConversationServerMessage.PageEnd,
                 ConversationServerMessage.ServerError {
 
     /**
@@ -281,6 +285,27 @@ public sealed interface ConversationServerMessage
 
     /** Marks the end of the backfill window for {@code source}; live append follows. */
     record BackfillEnd(String source) implements ConversationServerMessage {}
+
+    /**
+     * UC-79 (AC2/AC3) — marks the beginning of an OLDER page emitted in response to a
+     * client {@link ConversationClientMessage.LoadOlder}. The transcript-derived frames
+     * that follow (between this and {@link PageEnd}) are STRICTLY older than the
+     * currently-loaded window and are <b>prepended</b> at the front of the list (not
+     * appended), preserving the user's scroll anchor. Like the backfill window the
+     * client uses {@code uuid} dedupe so an overlapping line never double-renders. The
+     * client raises its top loading affordance on this frame.
+     */
+    record PageStart() implements ConversationServerMessage {}
+
+    /**
+     * UC-79 (AC3/AC4) — marks the end of an older page. {@code atStart} is {@code true}
+     * once the page reached the very beginning of the transcript, so the client stops
+     * attempting further load-older requests (and may show a "start of conversation"
+     * boundary). The client clears its top loading affordance on this frame. A
+     * page-end with no preceding {@link PageStart}/frames (e.g. the cursor was already
+     * at 0, or the fetch failed) simply clears the affordance and applies {@code atStart}.
+     */
+    record PageEnd(boolean atStart) implements ConversationServerMessage {}
 
     /** Server-emitted error frame (RFC 9457-ish shape), typically followed by a close. */
     record ServerError(String code, String title, String detail) implements ConversationServerMessage {}
