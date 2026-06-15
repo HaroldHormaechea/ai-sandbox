@@ -29,6 +29,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -764,6 +765,299 @@ class SessionConversationHandlerTest {
         verify(facade).injectAnswer(eq(7), any(), eq(2), eq(false), eq(List.of(1)), eq(2), eq(""), any());
         verify(facade, never()).injectAnswerBatch(anyInt(), any(), any(), any());
         assertThat(session.closedWith).isNull();
+    }
+
+    // ──────────────── UC-79 AC2/AC4/AC6 — load-older paging ────────────────
+
+    private static final String LOAD_OLDER = "{\"type\":\"load-older\"}";
+
+    /**
+     * Drive an Allowed-path handler that first emits {@code preLoadTailLines} on the tail
+     * (e.g. a {@code backfill-start <idx>} that SEEDS the per-connection oldest-line cursor,
+     * then a {@code backfill-end}), then — once the {@code backfill-end} frame has been
+     * emitted (so the cursor seed is committed) — delivers ONE inbound {@code load-older}
+     * frame. The tail holds the channel open until a {@code page-end} frame lands, then EOFs.
+     * {@code block()} returns deterministically with the whole page burst already recorded.
+     */
+    private static FakeSession driveLoadOlder(ConversationFacade facade, String... preLoadTailLines) throws Exception {
+        CountDownLatch readyForLoad = new CountDownLatch(1); // backfill-end emitted → cursor seeded
+        CountDownLatch replyDone = new CountDownLatch(1); // page-end emitted → safe to EOF
+
+        TranscriptTailService.Tail tail = mock(TranscriptTailService.Tail.class);
+        var stub = when(tail.readLine());
+        for (String l : preLoadTailLines) {
+            stub = stub.thenReturn(l);
+        }
+        stub.thenAnswer(inv -> {
+            replyDone.await(5, TimeUnit.SECONDS);
+            return null;
+        });
+
+        when(facade.authorizeOpen(eq(7), any())).thenReturn(new StreamFacade.Allowed());
+        when(facade.startTail(eq(7), any())).thenReturn(tail);
+
+        Map<String, Object> attrs = new HashMap<>();
+        attrs.put(SessionConversationHandler.IDENTITY_ATTR, identity());
+        FakeSession session = new FakeSession(URI.create("/v1/sessions/7/conversation"), subprotocolHeaders(), attrs);
+        session.onSent = payload -> {
+            if (payload.contains("\"type\":\"backfill-end\"")) {
+                readyForLoad.countDown();
+            }
+            if (payload.contains("\"type\":\"page-end\"")) {
+                replyDone.countDown();
+            }
+        };
+        session.incoming = Mono.fromCallable(() -> {
+                    readyForLoad.await(5, TimeUnit.SECONDS);
+                    return session.textMessage(LOAD_OLDER);
+                })
+                .flux()
+                .subscribeOn(reactor.core.scheduler.Schedulers.boundedElastic());
+
+        newHandler(facade).handle(session).block();
+        return session;
+    }
+
+    private static ConversationServerMessage older(String uuid, String text) {
+        return new ConversationServerMessage.AssistantText(uuid, false, "main", text);
+    }
+
+    @Test
+    void load_older_seeds_cursor_from_backfill_start_then_emits_page_start_frames_page_end() throws Exception {
+        ConversationFacade facade = mock(ConversationFacade.class);
+        when(facade.conversationPageLines()).thenReturn(100);
+        // Cursor seeded to 150 by the backfill-start; the page fetched below 150 returns two
+        // older frames and advances the cursor to 50 (not yet the transcript start).
+        when(facade.fetchOlderPage(eq(7), any(), eq(150), eq(100)))
+                .thenReturn(new ConversationFacade.OlderPage(
+                        List.of(older("o1", "older-1"), older("o2", "older-2")), 50, false));
+
+        FakeSession session = driveLoadOlder(facade, "__ctrl__\tbackfill-start\t150", "__ctrl__\tbackfill-end");
+
+        verify(facade).fetchOlderPage(eq(7), any(), eq(150), eq(100));
+        // The burst is page-start → frames → page-end, contiguous (the outboundLock keeps a live
+        // frame from interleaving mid-page — here we pin the order/contiguity it guarantees).
+        int ps = indexOfContaining(session.sent, "\"type\":\"page-start\"");
+        int o1 = indexOfContaining(session.sent, "older-1");
+        int o2 = indexOfContaining(session.sent, "older-2");
+        int pe = indexOfContaining(session.sent, "\"type\":\"page-end\"");
+        assertThat(ps).isGreaterThanOrEqualTo(0);
+        assertThat(o1).isEqualTo(ps + 1);
+        assertThat(o2).isEqualTo(ps + 2);
+        assertThat(pe).isEqualTo(ps + 3);
+        assertThat(session.sent.get(pe)).contains("\"atStart\":false");
+        assertThat(session.closedWith).isNull();
+    }
+
+    @Test
+    void load_older_at_transcript_start_emits_page_end_atStart_without_fetching() throws Exception {
+        ConversationFacade facade = mock(ConversationFacade.class);
+        when(facade.conversationPageLines()).thenReturn(100);
+
+        // Cursor seeded to 0 — already at the beginning of the transcript.
+        FakeSession session = driveLoadOlder(facade, "__ctrl__\tbackfill-start\t0", "__ctrl__\tbackfill-end");
+
+        // No fetch is attempted; the client just gets page-end(atStart=true) so it stops paging.
+        verify(facade, never()).fetchOlderPage(anyInt(), any(), anyInt(), anyInt());
+        assertThat(session.sent)
+                .anySatisfy(f -> assertThat(f).contains("\"type\":\"page-end\"").contains("\"atStart\":true"));
+        assertThat(session.sent).noneSatisfy(f -> assertThat(f).contains("\"type\":\"page-start\""));
+        assertThat(session.closedWith).isNull();
+    }
+
+    @Test
+    void load_older_reseeds_the_cursor_after_a_rebaseline() throws Exception {
+        ConversationFacade facade = mock(ConversationFacade.class);
+        when(facade.conversationPageLines()).thenReturn(100);
+        when(facade.fetchOlderPage(eq(7), any(), eq(40), eq(100)))
+                .thenReturn(new ConversationFacade.OlderPage(List.of(older("r", "re")), 0, true));
+
+        // A rebaseline (fresh transcript) clears any in-flight guard; the FOLLOWING backfill-start
+        // RE-seeds the cursor (40 here, not the stale 150) so paging pages from the new window.
+        FakeSession session = driveLoadOlder(
+                facade,
+                "__ctrl__\tbackfill-start\t150",
+                "__ctrl__\trebaseline",
+                "__ctrl__\tbackfill-start\t40",
+                "__ctrl__\tbackfill-end");
+
+        verify(facade).fetchOlderPage(eq(7), any(), eq(40), eq(100));
+        verify(facade, never()).fetchOlderPage(eq(7), any(), eq(150), eq(100));
+        assertThat(session.closedWith).isNull();
+    }
+
+    @Test
+    void load_older_keeps_the_primary_cursor_when_a_subagent_backfill_start_carries_no_index() throws Exception {
+        ConversationFacade facade = mock(ConversationFacade.class);
+        when(facade.conversationPageLines()).thenReturn(100);
+        when(facade.fetchOlderPage(eq(7), any(), eq(150), eq(100)))
+                .thenReturn(new ConversationFacade.OlderPage(List.of(older("s", "s")), 50, false));
+
+        // The primary backfill-start seeds 150; a following index-less (subagent) backfill-start
+        // must NOT move the primary cursor — the page still fetches below 150.
+        FakeSession session = driveLoadOlder(
+                facade, "__ctrl__\tbackfill-start\t150", "__ctrl__\tbackfill-start", "__ctrl__\tbackfill-end");
+
+        verify(facade).fetchOlderPage(eq(7), any(), eq(150), eq(100));
+        assertThat(session.closedWith).isNull();
+    }
+
+    @Test
+    void load_older_degrades_to_page_end_when_the_facade_throws() throws Exception {
+        ConversationFacade facade = mock(ConversationFacade.class);
+        when(facade.conversationPageLines()).thenReturn(100);
+        when(facade.fetchOlderPage(eq(7), any(), eq(150), eq(100))).thenThrow(new RuntimeException("boom"));
+
+        FakeSession session = driveLoadOlder(facade, "__ctrl__\tbackfill-start\t150", "__ctrl__\tbackfill-end");
+
+        // A failed fetch must clear the client's loading affordance (page-end) and NOT crash the pump.
+        assertThat(session.sent).anySatisfy(f -> assertThat(f).contains("\"type\":\"page-end\""));
+        assertThat(session.closedWith).isNull();
+    }
+
+    @Test
+    void load_older_single_in_flight_guard_drops_an_overlapping_request() throws Exception {
+        // AC2 — a fast scroll-up fling can fire several load-older frames before the first page
+        // returns. The handler's single-in-flight guard must drop the overlap, so fetchOlderPage
+        // runs EXACTLY once even though two load-older frames are delivered while one is in flight.
+        ConversationFacade facade = mock(ConversationFacade.class);
+        when(facade.conversationPageLines()).thenReturn(100);
+
+        CountDownLatch readyForLoad = new CountDownLatch(1); // backfill-end → cursor seeded
+        CountDownLatch fetchStarted = new CountDownLatch(1); // first fetch acquired the guard
+        CountDownLatch releaseFetch = new CountDownLatch(1); // let the first fetch finish
+        CountDownLatch replyDone = new CountDownLatch(1);
+
+        when(facade.fetchOlderPage(eq(7), any(), eq(200), eq(100))).thenAnswer(inv -> {
+            fetchStarted.countDown();
+            releaseFetch.await(5, TimeUnit.SECONDS);
+            return new ConversationFacade.OlderPage(List.of(older("g", "g")), 100, false);
+        });
+
+        TranscriptTailService.Tail tail = mock(TranscriptTailService.Tail.class);
+        when(tail.readLine())
+                .thenReturn("__ctrl__\tbackfill-start\t200")
+                .thenReturn("__ctrl__\tbackfill-end")
+                .thenAnswer(inv -> {
+                    replyDone.await(5, TimeUnit.SECONDS);
+                    return null;
+                });
+        when(facade.authorizeOpen(eq(7), any())).thenReturn(new StreamFacade.Allowed());
+        when(facade.startTail(eq(7), any())).thenReturn(tail);
+
+        Map<String, Object> attrs = new HashMap<>();
+        attrs.put(SessionConversationHandler.IDENTITY_ATTR, identity());
+        FakeSession session = new FakeSession(URI.create("/v1/sessions/7/conversation"), subprotocolHeaders(), attrs);
+        session.onSent = payload -> {
+            if (payload.contains("\"type\":\"backfill-end\"")) {
+                readyForLoad.countDown();
+            }
+            if (payload.contains("\"type\":\"page-end\"")) {
+                replyDone.countDown();
+            }
+        };
+        // First load-older once the cursor is seeded; SECOND once the first fetch is in flight.
+        session.incoming = Flux.concat(
+                        Mono.fromCallable(() -> {
+                            readyForLoad.await(5, TimeUnit.SECONDS);
+                            return session.textMessage(LOAD_OLDER);
+                        }),
+                        Mono.fromCallable(() -> {
+                            fetchStarted.await(5, TimeUnit.SECONDS);
+                            return session.textMessage(LOAD_OLDER);
+                        }))
+                .subscribeOn(reactor.core.scheduler.Schedulers.boundedElastic());
+        // Release the held first fetch shortly after the overlapping (second) frame has had time
+        // to be processed-and-dropped by the guard.
+        Thread releaser = new Thread(() -> {
+            try {
+                fetchStarted.await(5, TimeUnit.SECONDS);
+                Thread.sleep(300);
+                releaseFetch.countDown();
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+            }
+        });
+        releaser.setDaemon(true);
+        releaser.start();
+
+        newHandler(facade).handle(session).block();
+        releaser.join(2000);
+
+        // The overlapping request was dropped — exactly one fetch ran (no skipped/duplicated page).
+        verify(facade, times(1)).fetchOlderPage(eq(7), any(), eq(200), eq(100));
+        assertThat(session.closedWith).isNull();
+    }
+
+    @Test
+    void load_older_advances_the_cursor_so_the_next_page_fetches_below_it() throws Exception {
+        // AC2/AC6 — after a page advances the cursor (150 → 50), the NEXT load-older must fetch
+        // below the NEW cursor (50), not re-fetch the same window — contiguous, non-overlapping paging.
+        ConversationFacade facade = mock(ConversationFacade.class);
+        when(facade.conversationPageLines()).thenReturn(100);
+        when(facade.fetchOlderPage(eq(7), any(), eq(150), eq(100)))
+                .thenReturn(new ConversationFacade.OlderPage(List.of(older("p1", "page1")), 50, false));
+        when(facade.fetchOlderPage(eq(7), any(), eq(50), eq(100)))
+                .thenReturn(new ConversationFacade.OlderPage(List.of(older("p2", "page2")), 0, true));
+
+        CountDownLatch readyForLoad = new CountDownLatch(1);
+        CountDownLatch firstPageDone = new CountDownLatch(1);
+        CountDownLatch replyDone = new CountDownLatch(1);
+        AtomicInteger pageEnds = new AtomicInteger(0);
+
+        TranscriptTailService.Tail tail = mock(TranscriptTailService.Tail.class);
+        when(tail.readLine())
+                .thenReturn("__ctrl__\tbackfill-start\t150")
+                .thenReturn("__ctrl__\tbackfill-end")
+                .thenAnswer(inv -> {
+                    replyDone.await(5, TimeUnit.SECONDS);
+                    return null;
+                });
+        when(facade.authorizeOpen(eq(7), any())).thenReturn(new StreamFacade.Allowed());
+        when(facade.startTail(eq(7), any())).thenReturn(tail);
+
+        Map<String, Object> attrs = new HashMap<>();
+        attrs.put(SessionConversationHandler.IDENTITY_ATTR, identity());
+        FakeSession session = new FakeSession(URI.create("/v1/sessions/7/conversation"), subprotocolHeaders(), attrs);
+        session.onSent = payload -> {
+            if (payload.contains("\"type\":\"backfill-end\"")) {
+                readyForLoad.countDown();
+            }
+            if (payload.contains("\"type\":\"page-end\"")) {
+                int n = pageEnds.incrementAndGet();
+                if (n == 1) {
+                    firstPageDone.countDown(); // first page complete → trigger the second load-older
+                } else {
+                    replyDone.countDown(); // second page complete → safe to EOF
+                }
+            }
+        };
+        session.incoming = Flux.concat(
+                        Mono.fromCallable(() -> {
+                            readyForLoad.await(5, TimeUnit.SECONDS);
+                            return session.textMessage(LOAD_OLDER);
+                        }),
+                        Mono.fromCallable(() -> {
+                            firstPageDone.await(5, TimeUnit.SECONDS);
+                            return session.textMessage(LOAD_OLDER);
+                        }))
+                .subscribeOn(reactor.core.scheduler.Schedulers.boundedElastic());
+
+        newHandler(facade).handle(session).block();
+
+        // First page fetched below the seeded cursor (150); second fetched below the advanced cursor (50).
+        verify(facade).fetchOlderPage(eq(7), any(), eq(150), eq(100));
+        verify(facade).fetchOlderPage(eq(7), any(), eq(50), eq(100));
+        assertThat(session.closedWith).isNull();
+    }
+
+    private static int indexOfContaining(List<String> frames, String needle) {
+        for (int i = 0; i < frames.size(); i++) {
+            if (frames.get(i).contains(needle)) {
+                return i;
+            }
+        }
+        return -1;
     }
 
     private static HttpHeaders subprotocolHeaders() {

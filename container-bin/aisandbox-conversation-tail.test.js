@@ -2546,3 +2546,179 @@ test('UC-60 --subagent <id> — no resolvable main ⇒ never emits another pane 
     fs.rmSync(empty, { recursive: true, force: true });
   }
 });
+
+// ════════════════════════ UC-79 — infinite-scroll load-older page slice ════════════════════════
+//
+// The helper's `--fetch-page` one-shot is the data source for AC2/AC6/AC7: given the
+// server's current oldest-line cursor (`--before-line`) it returns the contiguous older
+// slice `[max(0, before-count), before)` of the PRIMARY transcript, each line in the normal
+// `main\t<raw>` envelope, preceded by `__ctrl__\tpage-meta\t<start>\t<atStart>`. The pure
+// slice math lives in the exported `computePageSlice`; the cursor-seeding `backfill-start`
+// now carries its window's start index. These tests pin both seams (real temp transcripts +
+// the pure function) plus the end-to-end graceful-miss path of the `--fetch-page` dispatch.
+
+// Build N synthetic transcript lines; each is a small JSON object so a `main\t<raw>` envelope
+// is a realistic shape. Returned as the readAllLines index space (complete, non-empty lines).
+function pageLinesFixture(n) {
+  const lines = [];
+  for (let i = 0; i < n; i++) lines.push(JSON.stringify({ i, type: 'assistant', text: 'line-' + i }));
+  return lines;
+}
+
+// A roomy byte cap so the count bound (not the byte budget) is what limits a normal page.
+const BIG_CAP = 1 << 20;
+
+test('UC-79 — CTRL_PAGE_META constant matches the server/helper contract', () => {
+  assert.strictEqual(helper.CTRL_PAGE_META, 'page-meta');
+});
+
+test('UC-79 AC2 — computePageSlice returns the contiguous slice [before-count, before) in oldest→newest order', () => {
+  const all = pageLinesFixture(500);
+  const r = helper.computePageSlice(all, 300, 100, BIG_CAP);
+  assert.strictEqual(r.start, 200, 'start = max(0, before-count) = 300-100');
+  assert.strictEqual(r.atStart, false, 'start is not the transcript beginning');
+  assert.strictEqual(r.lines.length, 100, 'exactly `count` lines fit under the roomy cap');
+  // Emitted oldest→newest so a client prepend keeps transcript order (AC6).
+  assert.strictEqual(r.lines[0], 'main\t' + all[200], 'first emitted line is the oldest (index=start)');
+  assert.strictEqual(r.lines[99], 'main\t' + all[299], 'last emitted line is just below `before`');
+  // Every line carries the normal `main\t<raw>` envelope (so the server maps it like live tail).
+  for (const l of r.lines) assert.ok(l.startsWith('main\t'), 'every page line is a main\\t envelope');
+});
+
+test('UC-79 AC4 — computePageSlice clamps at the transcript start and sets atStart=true', () => {
+  const all = pageLinesFixture(60);
+  // before(40) - count(100) would be negative → lowerBound clamps to 0; slice is [0,40).
+  const r = helper.computePageSlice(all, 40, 100, BIG_CAP);
+  assert.strictEqual(r.start, 0, 'lower bound clamps to 0');
+  assert.strictEqual(r.atStart, true, 'reaching index 0 flags the transcript start');
+  assert.strictEqual(r.lines.length, 40, 'all lines below `before` are delivered');
+  assert.strictEqual(r.lines[0], 'main\t' + all[0]);
+  assert.strictEqual(r.lines[39], 'main\t' + all[39]);
+});
+
+test('UC-79 AC4 — computePageSlice at before<=0 yields an empty page pinned at start', () => {
+  const all = pageLinesFixture(10);
+  const r0 = helper.computePageSlice(all, 0, 100, BIG_CAP);
+  assert.strictEqual(r0.start, 0);
+  assert.strictEqual(r0.atStart, true);
+  assert.strictEqual(r0.lines.length, 0, 'no lines below index 0');
+});
+
+test('UC-79 AC6/AC7 — cap truncation drops the OLDEST lines (stays contiguous below `before`, no gap)', () => {
+  const all = pageLinesFixture(500);
+  // Size the cap so only a handful of the newest lines fit. The first line is always kept
+  // whole (progress guarantee); subsequent lines are added newest→oldest until the budget
+  // is exhausted, so a truncated page ends exactly at before-1 and drops its OLDEST edge.
+  const oneLineBytes = Buffer.byteLength('main\t' + all[0], 'utf8');
+  const cap = oneLineBytes * 5 + 3; // room for ~5 lines, not the full 100
+  const r = helper.computePageSlice(all, 300, 100, cap);
+  assert.ok(r.lines.length >= 1 && r.lines.length < 100, 'cap truncated the page below the count');
+  // Contiguity: the slice must end at before-1 (newest kept) and begin at `start` with no gap.
+  assert.strictEqual(r.lines[r.lines.length - 1], 'main\t' + all[299], 'newest kept line abuts `before` (no gap)');
+  assert.strictEqual(r.lines[0], 'main\t' + all[r.start], 'oldest kept line is at the reported start');
+  assert.strictEqual(r.start, 300 - r.lines.length, 'start advances upward as the OLDEST lines are dropped');
+  assert.strictEqual(r.atStart, false, 'a cap-truncated mid-transcript page is not at the start');
+});
+
+test('UC-79 — computePageSlice always makes progress: the first (newest) line is kept even if it alone exceeds the cap', () => {
+  const all = pageLinesFixture(20);
+  const r = helper.computePageSlice(all, 10, 100, 1 /* impossibly small cap */);
+  assert.strictEqual(r.lines.length, 1, 'exactly one line — the cursor must advance, never stall');
+  assert.strictEqual(r.lines[0], 'main\t' + all[9], 'the single kept line is the newest (abuts before)');
+  assert.strictEqual(r.start, 9);
+});
+
+test('UC-79 AC2 — computePageSlice over a REAL temp transcript (readAllLines index space) pages contiguously', () => {
+  const dir = mkTmp('uc79-page-');
+  try {
+    const all = pageLinesFixture(250);
+    const file = path.join(dir, 'main.jsonl');
+    fs.writeFileSync(file, all.join('\n') + '\n');
+    // Mirror the helper's readAllLines index space: complete (newline-terminated) lines only.
+    const read = fs.readFileSync(file, 'utf8').split('\n').filter((l) => l.length > 0);
+    assert.strictEqual(read.length, 250, 'every complete line is recovered from the real transcript');
+    // First older page below a window that backfilled the newest 100 lines (start cursor=150).
+    const p1 = helper.computePageSlice(read, 150, 100, BIG_CAP);
+    assert.strictEqual(p1.start, 50);
+    assert.strictEqual(p1.atStart, false);
+    assert.strictEqual(p1.lines[0], 'main\t' + read[50]);
+    assert.strictEqual(p1.lines[99], 'main\t' + read[149], 'page abuts the previous cursor — no gap, no overlap');
+    // Next page from the advanced cursor reaches the start.
+    const p2 = helper.computePageSlice(read, p1.start, 100, BIG_CAP);
+    assert.strictEqual(p2.start, 0);
+    assert.strictEqual(p2.atStart, true);
+    assert.strictEqual(p2.lines.length, 50);
+    assert.strictEqual(p2.lines[49], 'main\t' + read[49], 'second page abuts the first — fully contiguous coverage');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('UC-79 AC2 — primary backfill carries its window start index on backfill-start (seeds the server cursor)', () => {
+  const dir = mkTmp('uc79-bfstart-');
+  try {
+    const all = pageLinesFixture(250);
+    const file = path.join(dir, 'main.jsonl');
+    fs.writeFileSync(file, all.join('\n') + '\n');
+    const reader = helper.makeReader(file, 'main');
+    const t0 = 2_000_000;
+    // Primary reader (emitStartCtrl=true), backfilling the newest 100 of 250 lines.
+    const emitted = captureOut(() => helper.backfill(reader, 100, t0, true));
+    const ctrl = emitted.find((l) => l.startsWith('__ctrl__\tbackfill-start'));
+    assert.ok(ctrl, 'a primary backfill emits a backfill-start control');
+    assert.strictEqual(ctrl, '__ctrl__\tbackfill-start\t150', 'start index = lines.length - n = 250-100');
+    // The seeded cursor (150) is exactly where the first --fetch-page must read below.
+    const slice = helper.computePageSlice(all, 150, 100, BIG_CAP);
+    assert.strictEqual(slice.lines[99], 'main\t' + all[149], 'fetch-page below the seeded cursor abuts the window');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('UC-79 — a subagent backfill (emitStartCtrl falsey) carries NO cursor seed', () => {
+  const dir = mkTmp('uc79-subbf-');
+  try {
+    const all = pageLinesFixture(20);
+    const file = path.join(dir, 'sub.jsonl');
+    fs.writeFileSync(file, all.join('\n') + '\n');
+    const reader = helper.makeReader(file, 'subagent:abc');
+    const emitted = captureOut(() => helper.backfill(reader, 100, 3_000_000));
+    assert.ok(
+      !emitted.some((l) => l.startsWith('__ctrl__\tbackfill-start')),
+      'a subagent backfill must NOT emit a cursor-seeding backfill-start',
+    );
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('UC-79 AC4 — primary backfill of a MISSING file still seeds the cursor at 0 (so paging never hangs)', () => {
+  const reader = helper.makeReader('/nonexistent/uc79/main.jsonl', 'main');
+  const emitted = captureOut(() => helper.backfill(reader, 100, 4_000_000, true));
+  assert.deepStrictEqual(
+    emitted.filter((l) => l.startsWith('__ctrl__')),
+    ['__ctrl__\tbackfill-start\t0'],
+    'a missing primary file seeds start=0 (server cursor seeded, load-older just stops)',
+  );
+});
+
+test('UC-79 AC4 — `--fetch-page` against an unresolvable transcript degrades to an empty page pinned at before, atStart=1', () => {
+  const cp = require('node:child_process');
+  const empty = mkTmp('uc79-fetchpage-empty-');
+  try {
+    const child = cp.spawnSync(
+      process.execPath,
+      [HELPER_BIN, '--fetch-page', '--before-line', '50', '--count', '100', '--projects-dir', empty],
+      { encoding: 'utf8', timeout: 3000, killSignal: 'SIGKILL' },
+    );
+    assert.strictEqual(child.status, 0, 'fetch-page exits cleanly even with nothing to read');
+    const lines = (child.stdout || '').split('\n').filter((l) => l.length > 0);
+    assert.deepStrictEqual(
+      lines,
+      ['__ctrl__\tpage-meta\t50\t1'],
+      'graceful miss: exactly one page-meta pinned at `before` with atStart=1, no main lines',
+    );
+  } finally {
+    fs.rmSync(empty, { recursive: true, force: true });
+  }
+});

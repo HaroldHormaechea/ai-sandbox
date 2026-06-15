@@ -204,4 +204,85 @@ class TranscriptTailServiceTest {
         when(exec.run(any(), any(), any(Duration.class))).thenThrow(new IOException("helper crashed"));
         assertThat(svc.listSubagents(7)).isEmpty();
     }
+
+    // ──────────────────────── UC-79 — fetchPageLines (load-older) ────────────
+
+    @Test
+    void fetchPageLines_parses_page_meta_then_the_older_envelope_lines() throws Exception {
+        // The helper leads with `__ctrl__\tpage-meta\t<start>\t<atStart>`, then the older
+        // `<source>\t<raw>` envelope lines (oldest→newest). The service strips the control,
+        // captures the new cursor (start) and atStart, and returns the bare envelope lines.
+        String out = "__ctrl__\tpage-meta\t50\t0\n" + "main\t{\"i\":50}\n" + "main\t{\"i\":51}\n";
+        when(exec.run(any(), any(), any(Duration.class))).thenReturn(new ProcessExecutor.Result(0, out, ""));
+
+        TranscriptTailService.PageLines page = svc.fetchPageLines(7, TailTarget.main(), 150, 100);
+
+        assertThat(page.cursor()).isEqualTo(50);
+        assertThat(page.atStart()).isFalse();
+        assertThat(page.lines()).containsExactly("main\t{\"i\":50}", "main\t{\"i\":51}");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void fetchPageLines_sends_the_fetch_page_before_line_and_count_flags() throws Exception {
+        when(exec.run(any(), any(), any(Duration.class)))
+                .thenReturn(new ProcessExecutor.Result(0, "__ctrl__\tpage-meta\t40\t0\n", ""));
+        svc.fetchPageLines(3, TailTarget.main(), 140, 100);
+        // Observable via the buildArgv contract: fetchPageLines uses buildArgv(n, target, 1)
+        // and appends the one-shot page flags.
+        org.mockito.ArgumentCaptor<List<String>> argv = org.mockito.ArgumentCaptor.forClass(List.class);
+        org.mockito.Mockito.verify(exec).run(argv.capture(), any(), any(Duration.class));
+        assertThat(argv.getValue()).contains("--fetch-page");
+        assertThat(argv.getValue()).containsSequence("--before-line", "140");
+        assertThat(argv.getValue()).containsSequence("--count", "100");
+    }
+
+    @Test
+    void fetchPageLines_marks_atStart_when_the_meta_flag_is_1() throws Exception {
+        String out = "__ctrl__\tpage-meta\t0\t1\n" + "main\t{\"i\":0}\n";
+        when(exec.run(any(), any(), any(Duration.class))).thenReturn(new ProcessExecutor.Result(0, out, ""));
+        TranscriptTailService.PageLines page = svc.fetchPageLines(7, TailTarget.main(), 30, 100);
+        assertThat(page.cursor()).isZero();
+        assertThat(page.atStart()).isTrue();
+        assertThat(page.lines()).containsExactly("main\t{\"i\":0}");
+    }
+
+    @Test
+    void fetchPageLines_short_circuits_at_or_below_zero_without_invoking_the_helper() throws Exception {
+        TranscriptTailService.PageLines page = svc.fetchPageLines(7, TailTarget.main(), 0, 100);
+        assertThat(page.lines()).isEmpty();
+        assertThat(page.cursor()).isZero();
+        assertThat(page.atStart()).isTrue();
+        // The cursor is already at the start — no helper process is spawned.
+        org.mockito.Mockito.verifyNoInteractions(exec);
+    }
+
+    @Test
+    void fetchPageLines_missing_page_meta_degrades_to_an_empty_page_pinned_at_before() throws Exception {
+        // No page-meta control → treat as nothing loaded so the cursor never silently advances.
+        when(exec.run(any(), any(), any(Duration.class)))
+                .thenReturn(new ProcessExecutor.Result(0, "main\t{\"i\":9}\n", ""));
+        TranscriptTailService.PageLines page = svc.fetchPageLines(7, TailTarget.main(), 120, 100);
+        assertThat(page.lines()).isEmpty();
+        assertThat(page.cursor()).isEqualTo(120);
+        assertThat(page.atStart()).isTrue();
+    }
+
+    @Test
+    void fetchPageLines_non_zero_exit_degrades_to_an_empty_page_pinned_at_before() throws Exception {
+        when(exec.run(any(), any(), any(Duration.class))).thenReturn(new ProcessExecutor.Result(2, "anything", "boom"));
+        TranscriptTailService.PageLines page = svc.fetchPageLines(7, TailTarget.main(), 120, 100);
+        assertThat(page.lines()).isEmpty();
+        assertThat(page.cursor()).isEqualTo(120);
+        assertThat(page.atStart()).isTrue();
+    }
+
+    @Test
+    void fetchPageLines_swallows_an_io_failure_and_pins_at_before() throws Exception {
+        when(exec.run(any(), any(), any(Duration.class))).thenThrow(new IOException("helper crashed"));
+        TranscriptTailService.PageLines page = svc.fetchPageLines(7, TailTarget.main(), 120, 100);
+        assertThat(page.lines()).isEmpty();
+        assertThat(page.cursor()).isEqualTo(120);
+        assertThat(page.atStart()).isTrue();
+    }
 }

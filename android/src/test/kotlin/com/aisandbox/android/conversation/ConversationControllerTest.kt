@@ -1708,4 +1708,186 @@ class ConversationControllerTest {
             c.close()
         }
     }
+
+    // ──────────────────────── UC-79 — infinite-scroll older pages ─────────────
+
+    private fun assistantTexts(c: ConversationController): List<String> =
+        c.items.value.filterIsInstance<ConversationItem.AssistantMessage>().map { it.text }
+
+    @Test
+    fun `an older page prepends history in transcript order and dedupes the boundary`() {
+        // AC2/AC6 — the loaded window holds [win-a, win-b]; an older page brings [old-1, old-2]
+        // plus an OVERLAP line (same key as win-a). At page-end the page's items are prepended in
+        // arrival (oldest→newest) order ABOVE the window, and the overlap is deduped (one render).
+        enqueuePush(
+            listOf(
+                """{"type":"backfill-start","source":"main"}""",
+                """{"type":"assistant-text","uuid":"wa","source":"main","isSidechain":false,"text":"win-a"}""",
+                """{"type":"assistant-text","uuid":"wb","source":"main","isSidechain":false,"text":"win-b"}""",
+                """{"type":"backfill-end","source":"main"}""",
+                """{"type":"page-start"}""",
+                """{"type":"assistant-text","uuid":"o1","source":"main","isSidechain":false,"text":"old-1"}""",
+                """{"type":"assistant-text","uuid":"o2","source":"main","isSidechain":false,"text":"old-2"}""",
+                // Overlap with the window's win-a (same uuid+text → same key) — must dedupe (AC6).
+                """{"type":"assistant-text","uuid":"wa","source":"main","isSidechain":false,"text":"win-a"}""",
+                """{"type":"page-end","atStart":false}""",
+            ),
+        )
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { assistantTexts(c) == listOf("old-1", "old-2", "win-a", "win-b") })
+                .withFailMessage("expected prepended+deduped order, got ${assistantTexts(c)}")
+                .isTrue
+            // The half-built page is never published mid-assembly, and paging is not at the start.
+            assertThat(awaitUntil { !c.loadingOlder.value }).isTrue
+            assertThat(c.atTranscriptStart.value).isFalse
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
+    fun `a tool pair merges across the page boundary into a single row at its older position`() {
+        // AC6 — the window already holds the tool_result for X (a result-first placeholder row);
+        // an older page brings the matching tool_use for X. They must merge into ONE ToolActivity
+        // (keyed on toolUseId), and that merged row moves to its correct OLDER position in the page.
+        enqueuePush(
+            listOf(
+                """{"type":"backfill-start","source":"main"}""",
+                """{"type":"tool-result","uuid":"tr","source":"main","isSidechain":false,"toolUseId":"X","isError":false,"summary":"RESULT"}""",
+                """{"type":"assistant-text","uuid":"wb","source":"main","isSidechain":false,"text":"win-b"}""",
+                """{"type":"backfill-end","source":"main"}""",
+                """{"type":"page-start"}""",
+                """{"type":"assistant-text","uuid":"o1","source":"main","isSidechain":false,"text":"old-1"}""",
+                """{"type":"tool-use","uuid":"tu","source":"main","isSidechain":false,"toolName":"Bash","toolUseId":"X","inputSummary":"ls -la","primaryText":""}""",
+                """{"type":"page-end","atStart":false}""",
+            ),
+        )
+        val c = networkedController()
+        c.attach(7)
+        try {
+            // 3 rows total: old-1, the single merged tool row, win-b (no duplicate tool row).
+            assertThat(awaitUntil { c.items.value.size == 3 })
+                .withFailMessage("expected 3 rows, got ${c.items.value.map { it.key }}")
+                .isTrue
+            val tools = c.items.value.filterIsInstance<ConversationItem.ToolActivity>()
+            assertThat(tools).hasSize(1)
+            // Merged in place: BOTH halves present (tool_use input + the result that arrived first).
+            assertThat(tools.single().toolUseId).isEqualTo("X")
+            assertThat(tools.single().inputSummary).isEqualTo("ls -la")
+            assertThat(tools.single().result?.summary).isEqualTo("RESULT")
+            // Positioned at its older (page) slot — after old-1, before the window's win-b.
+            val keys = c.items.value.map { it.key }
+            assertThat(keys.indexOf("toolactivity|X")).isEqualTo(1)
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
+    fun `a page-end with atStart true stops further paging`() {
+        // AC4 — once the transcript start is reached the controller flags atTranscriptStart and a
+        // subsequent loadOlder() is a no-op (the client stops requesting older pages).
+        val received = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        enqueueRecorder(received, wsRef)
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { c.state.value == TerminalState.Open && wsRef.get() != null }).isTrue
+            wsRef.get()!!.send("""{"type":"page-start"}""")
+            wsRef.get()!!.send("""{"type":"page-end","atStart":true}""")
+            assertThat(awaitUntil { c.atTranscriptStart.value }).isTrue
+            assertThat(awaitUntil { !c.loadingOlder.value }).isTrue
+            // loadOlder() must NOT send a load-older frame once at the start.
+            c.loadOlder()
+            Thread.sleep(150)
+            assertThat(received.none { it.contains(""""type":"load-older"""") }).isTrue
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
+    fun `a zero-yield page still clears loading and can reach the transcript start`() {
+        // AC4 — a page that prepends NOTHING (cursor already at 0 server-side) is delivered as a
+        // page-start immediately followed by page-end(atStart=true) with no frames. The loading
+        // affordance still clears and the controller reaches atTranscriptStart (no hang).
+        enqueuePush(
+            listOf(
+                """{"type":"backfill-start","source":"main"}""",
+                """{"type":"assistant-text","uuid":"wa","source":"main","isSidechain":false,"text":"only"}""",
+                """{"type":"backfill-end","source":"main"}""",
+                """{"type":"page-start"}""",
+                """{"type":"page-end","atStart":true}""",
+            ),
+        )
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { c.atTranscriptStart.value }).isTrue
+            assertThat(awaitUntil { !c.loadingOlder.value }).isTrue
+            // The existing window is untouched by an empty page.
+            assertThat(assistantTexts(c)).containsExactly("only")
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
+    fun `loadOlder is single-in-flight and re-enabled by page-end`() {
+        // AC2/AC3 — loadOlder() optimistically raises loadingOlder and sends ONE load-older frame;
+        // a second call while in flight is dropped (a fast scroll-up fling fires no overlap). The
+        // server's page-end clears the flag so a later scroll can page again.
+        val received = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        enqueueRecorder(received, wsRef)
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { c.state.value == TerminalState.Open && wsRef.get() != null }).isTrue
+            // Two rapid calls → exactly one frame on the wire (single-in-flight).
+            c.loadOlder()
+            c.loadOlder()
+            assertThat(awaitUntil { received.count { it.contains(""""type":"load-older"""") } == 1 })
+                .withFailMessage("expected exactly 1 load-older, got ${received.count { it.contains("load-older") }}")
+                .isTrue
+            assertThat(c.loadingOlder.value).isTrue
+            Thread.sleep(150)
+            assertThat(received.count { it.contains(""""type":"load-older"""") }).isEqualTo(1)
+            // page-end clears the in-flight guard …
+            wsRef.get()!!.send("""{"type":"page-end","atStart":false}""")
+            assertThat(awaitUntil { !c.loadingOlder.value }).isTrue
+            // … so a fresh loadOlder() pages again (second frame).
+            c.loadOlder()
+            assertThat(awaitUntil { received.count { it.contains(""""type":"load-older"""") } == 2 }).isTrue
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
+    fun `a fresh backfill window re-enables paging after the transcript start was reached`() {
+        // AC4 fresh-window — after reaching the start, a re-baselined / re-seeded window (a new
+        // backfill-start, e.g. on reconnect or target switch) re-enables paging: atTranscriptStart
+        // and loadingOlder reset so older history can be paged again.
+        val received = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        enqueueRecorder(received, wsRef)
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { c.state.value == TerminalState.Open && wsRef.get() != null }).isTrue
+            wsRef.get()!!.send("""{"type":"page-start"}""")
+            wsRef.get()!!.send("""{"type":"page-end","atStart":true}""")
+            assertThat(awaitUntil { c.atTranscriptStart.value }).isTrue
+            // A fresh backfill window resets the paging flags (AC4 fresh-window).
+            wsRef.get()!!.send("""{"type":"backfill-start","source":"main"}""")
+            assertThat(awaitUntil { !c.atTranscriptStart.value }).isTrue
+            assertThat(c.loadingOlder.value).isFalse
+        } finally {
+            c.close()
+        }
+    }
 }
