@@ -1,6 +1,8 @@
 package com.aisandbox.server.stream.service;
 
 import com.aisandbox.server.sessions.service.ProcessExecutor;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
@@ -110,10 +112,72 @@ public class TranscriptTailService {
 
     public static final String CTRL_PENDING_CLEAR = "pending-clear";
 
+    /**
+     * UC-60 — one-shot {@code --list-subagents} timeout. The helper resolves the main
+     * transcript and stats its {@code subagents/agent-*.jsonl}, so it is fast; a slow /
+     * failed call degrades to no subagent pills (the switcher simply shows none).
+     */
+    private static final Duration LIST_SUBAGENTS_TIMEOUT = Duration.ofSeconds(8);
+
+    /** Lenient parser for the helper's {@code --list-subagents} NDJSON output. */
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
     private final ProcessExecutor exec;
 
     public TranscriptTailService(ProcessExecutor exec) {
         this.exec = exec;
+    }
+
+    /**
+     * UC-60 — one LIVE background subagent of a session's lead, as enumerated by the
+     * helper's {@code --list-subagents} mode. {@code id} is the BARE agent id (the
+     * {@code <id>} of {@code agent-<id>.jsonl}); the conversation facade forms the
+     * {@code subagent:<id>} pill/target id from it. {@code working} carries the same
+     * working/idle semantics team-agent pills use (UC-59 {@code deriveWorking} over the
+     * subagent transcript tail).
+     */
+    public record SubagentInfo(String id, String label, boolean working) {}
+
+    /**
+     * UC-60 — enumerate the lead's LIVE background subagents for session {@code n} via
+     * the helper's one-shot {@code --list-subagents} mode (resolve the main transcript,
+     * stat each {@code subagents/agent-*.jsonl}, emit one JSON {@code {id,label,working}}
+     * per live one). Never throws: any failure (no transcript, race, helper error,
+     * timeout) degrades to an empty list, so the switcher simply shows no subagent pills.
+     */
+    public List<SubagentInfo> listSubagents(int n) {
+        try {
+            List<String> argv = new ArrayList<>(buildArgv(n, TailTarget.main(), 1));
+            argv.add("--list-subagents");
+            ProcessExecutor.Result r = exec.run(argv, null, LIST_SUBAGENTS_TIMEOUT);
+            if (r.exitCode() != 0 || r.stdout() == null || r.stdout().isBlank()) {
+                return List.of();
+            }
+            List<SubagentInfo> out = new ArrayList<>();
+            for (String line : r.stdout().split("\n", -1)) {
+                String s = line.trim();
+                if (s.isEmpty()) {
+                    continue;
+                }
+                try {
+                    JsonNode o = MAPPER.readTree(s);
+                    String id = o.path("id").asText(null);
+                    if (id == null || id.isBlank()) {
+                        continue;
+                    }
+                    String label = o.path("label").asText("");
+                    boolean working = o.path("working").asBoolean(false);
+                    out.add(new SubagentInfo(id, label, working));
+                } catch (com.fasterxml.jackson.core.JsonProcessingException jpe) {
+                    // Skip a malformed line — never let one bad record drop the rest.
+                    LOG.debug("listSubagents skipped malformed line for n={}: {}", n, jpe.toString());
+                }
+            }
+            return out;
+        } catch (IOException io) {
+            LOG.debug("listSubagents failed for n={}: {}", n, io.toString());
+            return List.of();
+        }
     }
 
     /** UC-37 AC18 — the pending state of a (non-selected) target's transcript, for switcher badging. */
@@ -235,13 +299,33 @@ public class TranscriptTailService {
      * {@code socket} is null for the container default socket (the current
      * layout) or an absolute path for a legacy {@code claude-swarm-*} socket.
      */
-    public record TailTarget(String socket, String session, String window, String pane) {
+    public record TailTarget(String socket, String session, String window, String pane, String subagentId) {
+
+        /** Back-compat 4-arg form (pane/main targets) — no subagent id. */
+        public TailTarget(String socket, String session, String window, String pane) {
+            this(socket, session, window, pane, null);
+        }
+
         public static TailTarget main() {
-            return new TailTarget(null, "main", null, null);
+            return new TailTarget(null, "main", null, null, null);
+        }
+
+        /**
+         * UC-60 — a subagent tail target: stream ONLY the lead's
+         * {@code subagents/agent-<id>.jsonl} (the helper's {@code --subagent <id>}
+         * mode). Anchored to the {@code main} session (the subagent dir is derived
+         * from the main transcript), with no pane coordinates.
+         */
+        public static TailTarget subagent(String id) {
+            return new TailTarget(null, "main", null, null, id);
         }
 
         public boolean hasPane() {
             return window != null && !window.isBlank() && pane != null && !pane.isBlank();
+        }
+
+        public boolean isSubagent() {
+            return subagentId != null && !subagentId.isBlank();
         }
     }
 
@@ -271,7 +355,13 @@ public class TranscriptTailService {
                 new ArrayList<>(List.of("docker", "compose", "-p", project, "exec", "-T", "claude-sandbox", HELPER));
         argv.add("--session");
         argv.add(t.session() == null ? "main" : t.session());
-        if (t.hasPane()) {
+        if (t.isSubagent()) {
+            // UC-60 — a subagent stream tails ONLY the lead's agent-<id>.jsonl; it is
+            // anchored to the main session and carries NO pane flags (the subagent dir
+            // is derived from the main transcript, not a tmux pane).
+            argv.add("--subagent");
+            argv.add(t.subagentId());
+        } else if (t.hasPane()) {
             argv.add("--window");
             argv.add(t.window());
             argv.add("--pane");
