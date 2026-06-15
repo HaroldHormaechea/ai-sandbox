@@ -455,7 +455,7 @@ class ConversationController(
         // Control frames (targets/selection/turn boundaries/errors) fall through untouched.
         if (clearSuppressActive) {
             when (type) {
-                "turn-start", "thinking", "assistant-text", "tool-use", "tool-result",
+                "turn-start", "thinking", "assistant-text", "teammate-message", "tool-use", "tool-result",
                 "system-note", "question", "plan-approval", "pending-question",
                 -> return
                 // Defensive: a fresh transcript stream beginning under the guard means the
@@ -493,6 +493,19 @@ class ConversationController(
                 addItem(ConversationItem.AssistantMessage(uuid(obj), source(obj), sidechain(obj), str(obj, "text") ?: ""))
                 if (!backfilling && _turnPhase.value != TurnPhase.IDLE) _turnPhase.value = TurnPhase.WORKING
             }
+            // UC-58 — an inbound teammate/subagent message (a user-role line the server
+            // reclassified from a <teammate-message …> envelope). Render-only, like
+            // system-note: a distinct non-user bubble that does NOT advance the turn phase
+            // or touch the pending sheet (it is not the lead's own activity). Deliberately
+            // NOT in ANSWER_PROGRESS_FRAMES, so it never disarms the UC-75 answer watchdog.
+            "teammate-message" -> addItem(
+                ConversationItem.TeammateMessage(
+                    uuid(obj), source(obj), sidechain(obj),
+                    teammateId = str(obj, "teammateId") ?: "",
+                    color = str(obj, "color"),
+                    text = str(obj, "text") ?: "",
+                ),
+            )
             "tool-use" -> upsertToolUse(
                 uuid(obj), source(obj), sidechain(obj),
                 toolName = str(obj, "toolName") ?: "tool",
