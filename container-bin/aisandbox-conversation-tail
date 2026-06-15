@@ -169,6 +169,27 @@ const DETAIL_OUTPUT_CAP_BYTES = 65536;
 // file (observed at line index ~4), so a small head read is sufficient and cheap.
 const ID_SCAN_BYTES = 131072;
 
+// How many bytes we read from the END of a delegate transcript to derive its
+// working/idle signal (UC-59). deriveWorking only inspects the last 60 lines, so a
+// 128 KiB tail covers it comfortably while keeping the read O(1) regardless of how
+// large a long-running delegate's transcript has grown.
+const TAIL_SCAN_BYTES = 131072;
+
+// UC-59 — bounded staleness window for a BACKGROUND SUBAGENT's transcript. Unlike a
+// team agent (a separate `claude` OS process we can gate on pid-liveness), a
+// background subagent runs IN-PROCESS under the lead, so there is no pid to anchor
+// liveness on. Worse, a subagent transcript NEVER emits a {system,turn_duration}
+// turn-end (verified live: its last line is always an `assistant` entry), so
+// deriveWorking alone would report a finished subagent as "working" forever. The
+// mtime window is therefore the PRIMARY completion + crash signal for subagents: an
+// actively-working subagent appends to its transcript continuously, so once it
+// finishes (or crashes) the file falls quiet and ages out of the window. Sized
+// generously so an ordinary tool call between transcript writes is not mistaken for
+// completion; the only cost of an over-long window is a cosmetically lingering
+// spinner (benign — the lead's own turn-state covers the common resume-to-process
+// case), whereas too short a window would flicker a busy subagent to idle.
+const SUBAGENT_STALE_MS = 45000;
+
 // Bounded grace before we FAIL LOUD with `no-transcript`. Covers the entrypoint
 // restart `sleep 1` window and a teammate spawn settling; resolution normally
 // succeeds within a tick or two when a transcript exists.
@@ -607,11 +628,23 @@ function resolveTranscriptForClaude(claudePid) {
   return selectMainTranscript(enriched, { parentSessionIds: parentIds });
 }
 
-/** One-shot resolve for the current target pane (used by --scan-pending). */
-function resolveTranscriptOnce() {
+/**
+ * One-shot resolve for the current target pane, returning the FULL context the
+ * UC-59 delegate scan needs: the main transcript path plus the lead's claudePid and
+ * cwd-slug. (impure.) `mainPath`/`claudePid`/`slug` may each be null on a miss.
+ */
+function resolveMainContextOnce() {
   const panePid = resolvePanePid();
   const claudePid = findClaudePid(panePid, 3);
-  return resolveTranscriptForClaude(claudePid);
+  const mainPath = resolveTranscriptForClaude(claudePid);
+  const cwd = claudePid != null ? readProcLink('/proc/' + claudePid + '/cwd') : null;
+  const slug = slugFromCwd(cwd);
+  return { mainPath, claudePid, slug };
+}
+
+/** One-shot resolve for the current target pane (used by --scan-pending). */
+function resolveTranscriptOnce() {
+  return resolveMainContextOnce().mainPath;
 }
 
 /**
@@ -689,6 +722,113 @@ function subagentSource(filePath) {
   const bn = path.basename(filePath, '.jsonl'); // agent-<id>
   const id = bn.startsWith('agent-') ? bn.substring('agent-'.length) : bn;
   return 'subagent:' + id;
+}
+
+/**
+ * UC-59 — read the LAST `maxBytes` of a transcript and return its COMPLETE lines
+ * (impure FS read, O(1) regardless of file size). Exported for QA. Mirrors
+ * {@link readTranscriptIdentity}'s bounded read but anchored at the END: seek to
+ * max(0, size - maxBytes), read to EOF, then drop the partial lines our window may
+ * have sliced through — the LEADING partial (when we started mid-file, the first
+ * element is an incomplete JSON fragment) and the TRAILING partial (no terminating
+ * newline). The surviving complete lines feed the PURE deriveWorking unchanged.
+ * `stat`-cheap callers should short-circuit before calling this. Returns string[].
+ */
+function readBoundedTailLines(filePath, maxBytes) {
+  let fd;
+  try {
+    fd = fs.openSync(filePath, 'r');
+  } catch (e) {
+    return [];
+  }
+  let text = '';
+  let startedMidFile = false;
+  try {
+    const st = fs.fstatSync(fd);
+    const size = st.size;
+    const len = Math.min(maxBytes, size);
+    const start = size - len;
+    startedMidFile = start > 0;
+    if (len > 0) {
+      const buf = Buffer.allocUnsafe(len);
+      const read = fs.readSync(fd, buf, 0, len, start);
+      text = buf.toString('utf8', 0, read);
+    }
+  } catch (e) {
+    /* best-effort */
+  } finally {
+    try { fs.closeSync(fd); } catch (e) { /* ignore */ }
+  }
+  if (!text) return [];
+  const lines = text.split('\n');
+  // Drop the trailing element: it is either '' (file ended with a newline) or a
+  // partial last line — mirror readAllLines, which always pops it.
+  if (lines.length > 0) lines.pop();
+  // Drop a leading partial line only when our window started mid-file (its first
+  // element is an incomplete JSON fragment we cannot parse).
+  if (startedMidFile && lines.length > 0) lines.shift();
+  return lines.filter((l) => l.length > 0);
+}
+
+/**
+ * UC-59 — is ANY delegate (team agent OR background subagent) of the main pane
+ * currently working? (impure — /proc scan + bounded transcript reads.) deriveWorking
+ * stays PURE/unchanged; this is the additive delegate-aware layer wired into
+ * {@link conversationName}, so the sessions-list "working" spinner reflects real
+ * activity even when the lead has delegated and ended its own turn (gone idle).
+ * TYPE-SPLIT by delegate kind, because the two have different liveness signals:
+ *
+ *  • Team agents — SEPARATE `claude` OS processes whose cmdline carries
+ *    --agent-name and --parent-session-id === our `mainStem`. pid-liveness is the
+ *    PRIMARY gate (mirrors collectParentSessionIds, inverted): a dead/zombie
+ *    teammate has no proc and is simply excluded, so the analyst-zombie case never
+ *    false-positives to "working". For each LIVE teammate we resolve its active
+ *    transcript and ask deriveWorking — a teammate mid-tool has a tool_use tail →
+ *    "working" with NO dependence on recent writes, so NO mtime gate is applied (a
+ *    long :server:test must never false-negative to idle). Teammate transcripts DO
+ *    emit turn_duration, so a live-but-idle teammate correctly reads idle.
+ *  • Background subagents — IN-PROCESS under the lead (no pid). Gated on
+ *    deriveWorking AND an mtime freshness window (SUBAGENT_STALE_MS), because a
+ *    subagent transcript never emits a turn-end (see SUBAGENT_STALE_MS). The mtime
+ *    gate is the real completion/crash signal here; deriveWorking is kept in the AND
+ *    as belt-and-suspenders for any future build that does emit a subagent turn-end.
+ *
+ * `slug` is accepted for API symmetry with the resolver context but is intentionally
+ * unused: a teammate runs in its OWN team-definition cwd (a different slug than the
+ * lead), so parentSessionId === mainStem is the exact, sufficient anchor. `nowMs` is
+ * injectable for deterministic tests. Returns true if any delegate is working.
+ */
+function anyDelegateWorking(mainPath, mainStem, slug, claudePid, nowMs) {
+  if (!mainPath || !mainStem) return false;
+  if (nowMs === undefined) nowMs = Date.now();
+  // ── Team agents: /proc scan for live claude procs parented to our session ──
+  let pids;
+  try {
+    pids = fs.readdirSync('/proc');
+  } catch (e) {
+    pids = [];
+  }
+  for (const ent of pids) {
+    if (!/^\d+$/.test(ent)) continue;
+    const pid = parseInt(ent, 10);
+    if (claudePid != null && pid === claudePid) continue; // never count the lead itself
+    const cmd = readProc('/proc/' + pid + '/cmdline');
+    if (!cmd || cmd.indexOf('--parent-session-id') < 0) continue;
+    if (!isClaude(pid)) continue;
+    const idn = parseClaudeIdentity(cmd);
+    if (idn.parentSessionId !== mainStem) continue; // only OUR delegates
+    const tPath = resolveTranscriptForClaude(pid); // a LIVE pid → resolvable transcript
+    if (!tPath) continue;
+    if (deriveWorking(readBoundedTailLines(tPath, TAIL_SCAN_BYTES))) return true;
+  }
+  // ── Background subagents: <mainStem>/subagents/agent-*.jsonl ──
+  for (const sf of listSubagentFiles(mainPath)) {
+    const st = statSafe(sf);
+    if (!st) continue;
+    if (nowMs - st.mtimeMs > SUBAGENT_STALE_MS) continue; // aged out → finished/crashed
+    if (deriveWorking(readBoundedTailLines(sf, TAIL_SCAN_BYTES))) return true;
+  }
+  return false;
 }
 
 // ──────────────────────── line splitting with residual buffer ────────────────────────
@@ -1510,7 +1650,8 @@ function firstQuestionText(parsed) {
  * back to tmuxTitle (AC3) and shows no spinner. Never blocks.
  */
 function conversationName() {
-  const mainPath = resolveTranscriptOnce();
+  const ctx = resolveMainContextOnce();
+  const mainPath = ctx.mainPath;
   if (!mainPath) { out(''); out('idle'); return; }
   const lines = readAllLines(mainPath);
   const name = deriveConversationName(lines);
@@ -1522,9 +1663,18 @@ function conversationName() {
   const pending = paneText == null ? null : looksLikePendingAskUserQuestion(paneText);
   out(name || '');
   // Revised working (AC5, source-level mutual exclusion): a pending question is
-  // at-rest "waiting", never "working" — pending ⇒ idle; else the existing
-  // transcript-derived working logic. The server enforces the same precedence too.
-  const working = pending === true ? false : deriveWorking(lines);
+  // at-rest "waiting", never "working" — pending ⇒ idle (absolute top precedence,
+  // preserving the UC-48 pending-question gap and UC-49 "?" even when a delegate is
+  // mid-turn — AC3/AC6). Otherwise the lead's own transcript-derived working signal
+  // OR, when the lead has delegated and gone idle, any team-agent / background
+  // subagent that is still working (UC-59, AC1/AC2/AC4). deriveWorking(lines) is
+  // evaluated first so the common lead-is-working case short-circuits before the
+  // (heavier) /proc + delegate-transcript scan. The server enforces the same
+  // pending-precedence too.
+  const mainStem = path.basename(mainPath, '.jsonl');
+  const working = pending === true
+    ? false
+    : (deriveWorking(lines) || anyDelegateWorking(mainPath, mainStem, ctx.slug, ctx.claudePid));
   out(working ? 'working' : 'idle');
   if (pending !== null) {
     out(pending ? 'pending-question' : 'none');
@@ -1817,6 +1967,13 @@ module.exports = {
   deriveConversationName,
   // UC-48 — working/idle derivation seam (QA unit tests).
   deriveWorking,
+  // UC-59 — delegate-aware working seams (QA unit tests). anyDelegateWorking is the
+  // additive layer (team agents via /proc pid-liveness, background subagents via
+  // mtime); readBoundedTailLines is its O(1) end-anchored transcript reader.
+  anyDelegateWorking,
+  readBoundedTailLines,
+  SUBAGENT_STALE_MS,
+  TAIL_SCAN_BYTES,
   // UC-49 — pending-question predicate seam (QA unit tests against pane fixtures).
   looksLikePendingAskUserQuestion,
   PENDING_QUESTION_CHROME,
