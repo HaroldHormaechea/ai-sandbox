@@ -5,10 +5,14 @@ import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onRoot
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
 import com.aisandbox.android.conversation.ConversationItem
 import com.aisandbox.android.ui.theme.AiSandboxTheme
 import kotlinx.coroutines.runBlocking
@@ -17,6 +21,9 @@ import org.junit.Assert.assertFalse
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.io.File
+import java.io.FileOutputStream
+import android.graphics.Bitmap
 
 /**
  * UC-78 — device-realistic (emulator-tier) coverage of the chat anchor-to-bottom
@@ -235,6 +242,41 @@ class ConversationAnchorInstrumentationTest {
             before,
             firstVisible(state),
         )
+    }
+
+    @Test
+    fun captureScreenshot_backfillOpensAtBottom() {
+        // AC1/AC6 visual gate — render the backfill-open state (24 tall items, backfilling=true),
+        // assert it's anchored at the bottom, and dump a screenshot to the app's external files dir
+        // so QA can pull it and confirm by eye that the chat opens already at the latest message
+        // (no top-of-list content), not mid-scroll.
+        val items = mutableStateOf(emptyList<ConversationItem>())
+        val backfilling = mutableStateOf(true)
+        lateinit var state: LazyListState
+        composeTestRule.setContent {
+            AiSandboxTheme {
+                val s = rememberLazyListState()
+                state = s
+                ConversationContent(
+                    items = items.value,
+                    modifier = Modifier.fillMaxSize(),
+                    listState = s,
+                    backfilling = backfilling.value,
+                )
+            }
+        }
+        // Cold replay lands the full transcript at once.
+        ui { items.value = msgs("V", 24) }
+        composeTestRule.waitForIdle()
+        assertEquals("backfill must open anchored at the bottom", 23, lastVisible(state))
+        // The newest message is on screen; the very first message is NOT.
+        composeTestRule.onNodeWithText("[V] Message #23", substring = true).assertIsDisplayed()
+
+        val bmp: Bitmap = composeTestRule.onRoot().captureToImage().asAndroidBitmap()
+        val dir: File = InstrumentationRegistry.getInstrumentation().targetContext
+            .getExternalFilesDir(null) ?: error("no external files dir")
+        val out = File(dir, "uc78_backfill_open_at_bottom.png")
+        FileOutputStream(out).use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
     }
 
     @Test
