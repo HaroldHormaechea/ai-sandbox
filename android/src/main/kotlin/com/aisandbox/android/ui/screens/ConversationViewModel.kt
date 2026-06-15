@@ -55,6 +55,11 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
     private val _turnPhase = MutableStateFlow(TurnPhase.IDLE)
     val turnPhase: StateFlow<TurnPhase> = _turnPhase.asStateFlow()
 
+    // UC-78 — mirrors the controller's replay/backfill phase so the screen can anchor
+    // the conversation to the bottom instantly (no animation) while history replays.
+    private val _backfilling = MutableStateFlow(false)
+    val backfilling: StateFlow<Boolean> = _backfilling.asStateFlow()
+
     private val _toolDetail = MutableStateFlow<ToolDetailState?>(null)
     val toolDetail: StateFlow<ToolDetailState?> = _toolDetail.asStateFlow()
 
@@ -118,6 +123,7 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
         viewModelScope.launch { c.selectedTargetId.collect { _selectedTargetId.value = it } }
         viewModelScope.launch { c.pendingSheet.collect { _pendingSheet.value = it } }
         viewModelScope.launch { c.turnPhase.collect { _turnPhase.value = it } }
+        viewModelScope.launch { c.backfilling.collect { _backfilling.value = it } }
         viewModelScope.launch { c.toolDetail.collect { _toolDetail.value = it } }
         viewModelScope.launch { c.selectedModelId.collect { _selectedModelId.value = it } }
     }
