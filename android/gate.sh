@@ -28,6 +28,9 @@
 #   GATE_PORT            server TLS port (default 18443)
 #   GATE_AVD             AVD name (default ai_sandbox_gate)
 #   GATE_KEEP            set to 1 to skip teardown (leave emulator + server running for debugging)
+#   GATE_SKIP_EMULATOR   set to 1 to reuse an ALREADY-RUNNING emulator (CI: the
+#                        reactivecircus action owns the AVD lifecycle) — gate.sh then
+#                        neither creates/launches nor kills the emulator.
 set -euo pipefail
 
 # ── resolve repo + required env ────────────────────────────────────────────────
@@ -61,7 +64,8 @@ cleanup() {
     return
   fi
   log "teardown"
-  "$ADB" -s "$DEV" emu kill >/dev/null 2>&1 || true
+  # In CI the reactivecircus action owns the emulator — never kill it here.
+  [ "${GATE_SKIP_EMULATOR:-0}" = "1" ] || "$ADB" -s "$DEV" emu kill >/dev/null 2>&1 || true
   [ -n "$SERVER_PID" ] && kill "$SERVER_PID" >/dev/null 2>&1 || true
   exit "$rc"
 }
@@ -124,15 +128,19 @@ grep -q "Netty started on port $PORT" "$GATE_DIR/log/server.log" || { echo "::er
 log "server up (synthetic replay sessions exposed)"
 
 # ── 3. boot the emulator (ANR mitigation, AC-10) ─────────────────────────────────
-log "booting AVD $AVD"
-"$AVDM" list avd 2>/dev/null | grep -q "$AVD" || {
-  yes | "$SDKM" "$SYS_IMG" >/dev/null 2>&1 || true
-  echo no | "$AVDM" create avd -n "$AVD" -k "$SYS_IMG" -d pixel_6
-}
-pgrep -f "avd $AVD" >/dev/null || \
-  nohup "$EMU" -avd "$AVD" -no-window -no-audio -no-boot-anim -no-snapshot \
-    -gpu swiftshader_indirect -no-metrics -camera-back none -camera-front none \
-    -accel auto -port 5554 > "$GATE_DIR/log/emulator.log" 2>&1 &
+if [ "${GATE_SKIP_EMULATOR:-0}" = "1" ]; then
+  log "GATE_SKIP_EMULATOR=1 — reusing the already-running emulator"
+else
+  log "booting AVD $AVD"
+  "$AVDM" list avd 2>/dev/null | grep -q "$AVD" || {
+    yes | "$SDKM" "$SYS_IMG" >/dev/null 2>&1 || true
+    echo no | "$AVDM" create avd -n "$AVD" -k "$SYS_IMG" -d pixel_6
+  }
+  pgrep -f "avd $AVD" >/dev/null || \
+    nohup "$EMU" -avd "$AVD" -no-window -no-audio -no-boot-anim -no-snapshot \
+      -gpu swiftshader_indirect -no-metrics -camera-back none -camera-front none \
+      -accel auto -port 5554 > "$GATE_DIR/log/emulator.log" 2>&1 &
+fi
 "$ADB" wait-for-device
 until [ "$("$ADB" -s "$DEV" shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = 1 ]; do sleep 2; done
 # AC-10 — kill animations + the ANR dialog so launcher/SystemUI ANRs are out of path.

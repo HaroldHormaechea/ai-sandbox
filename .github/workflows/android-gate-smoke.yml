@@ -87,16 +87,13 @@ jobs:
           # the real gate uses so launcher/SystemUI ANRs are out of the boot path.
           emulator-options: -no-window -no-snapshot -no-boot-anim -gpu swiftshader_indirect -noaudio -no-metrics -camera-back none -camera-front none
           disable-animations: true
+          # NOTE: android-emulator-runner executes EACH LINE of `script:` as a separate
+          # `sh -c`, so every line MUST be a self-contained command — no multi-line if/fi
+          # or here-docs (a split `if … then` would run alone and fail with "unexpected end
+          # of file"). The boot assertion is therefore a single `test … || { …; exit 1; }`.
           script: |
-            set -eu
             echo "boot_completed=$(adb shell getprop sys.boot_completed | tr -d '\r')"
-            booted="$(adb shell getprop sys.boot_completed | tr -d '\r')"
-            if [ "$booted" != "1" ]; then
-              echo "::error::emulator did not report sys.boot_completed=1"
-              exit 1
-            fi
-            # AC-10 — confirm we can also disable animation scales at runtime (the
-            # same calls the full gate makes), so the gate's ANR mitigation is proven here.
+            test "$(adb shell getprop sys.boot_completed | tr -d '\r')" = 1 || { echo '::error::emulator did not report sys.boot_completed=1'; exit 1; }
             adb shell settings put global window_animation_scale 0 || true
             adb shell settings put global transition_animation_scale 0 || true
             adb shell settings put global animator_duration_scale 0 || true
