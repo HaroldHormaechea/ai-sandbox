@@ -63,6 +63,9 @@ commands:
   # against a real Claude Code TUI: bring up rootless DinD, build + spawn a session,
   # and drive/observe its tmux pane via `docker compose -p ai-sandbox-<n> exec`.
   - aisandbox-dind
+  # UC-82 — QA runs the MCP add-dialog instrumented test on the KVM emulator
+  # (`:android:connectedDebugAndroidTest`); the helper boots/queries the AVD.
+  - aisandbox-emulator
   - ./setup.sh
   - ./spawn.sh
   - ./attach.sh

@@ -256,7 +256,193 @@ class McpApiTest {
         }
     }
 
+    // ──────────────────────── add (UC-82 AC1/AC6) ────────────────────────────
+
+    @Test
+    fun add_stdio_postsJsonBodyOmittingNullFields_andDecodesResult() = runTest {
+        val (server, profile) = startPinnedServer()
+        try {
+            server.enqueue(
+                MockResponse().setResponseCode(201).setBody(
+                    """{"name":"call-graph","state":"connected","message":"Added \"call-graph\"."}""",
+                ),
+            )
+
+            val body = McpAddRequest(
+                name = "call-graph",
+                transport = "stdio",
+                command = "npx",
+                args = listOf("-y", "pkg"),
+                env = mapOf("TOKEN" to "s3cr3t"),
+                // url / headers left null → must be omitted from the wire (explicitNulls=false).
+            )
+            val result = apiFor(profile).add(7, body)
+
+            assertThat(result).isInstanceOf(ApiResult.Success::class.java)
+            assertThat((result as ApiResult.Success).value.name).isEqualTo("call-graph")
+
+            val rr = server.takeRequest()
+            assertThat(rr.method).isEqualTo("POST")
+            assertThat(rr.path).isEqualTo("/v1/sessions/7/mcp")
+            val sent = rr.body.readUtf8()
+            val obj = JSON_FOR_ASSERT.parseToJsonElement(sent) as kotlinx.serialization.json.JsonObject
+            // stdio fields present …
+            assertThat(obj.keys).contains("name", "transport", "command", "args", "env")
+            // … and the null http/sse fields are OMITTED, not sent as null.
+            assertThat(obj.keys).doesNotContain("url", "headers")
+            assertThat(obj["transport"].toString().trim('"')).isEqualTo("stdio")
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun add_http_postsUrlAndHeaders_omittingStdioFields() = runTest {
+        val (server, profile) = startPinnedServer()
+        try {
+            server.enqueue(
+                MockResponse().setResponseCode(201).setBody(
+                    """{"name":"atlassian","state":"needs_auth","message":"Added."}""",
+                ),
+            )
+
+            val body = McpAddRequest(
+                name = "atlassian",
+                transport = "sse",
+                url = "https://mcp.atlassian.com/v1/sse",
+                headers = listOf("Authorization: Bearer t"),
+            )
+            val result = apiFor(profile).add(7, body)
+
+            assertThat(result).isInstanceOf(ApiResult.Success::class.java)
+            val rr = server.takeRequest()
+            val obj = JSON_FOR_ASSERT.parseToJsonElement(rr.body.readUtf8()) as kotlinx.serialization.json.JsonObject
+            assertThat(obj.keys).contains("name", "transport", "url", "headers")
+            assertThat(obj.keys).doesNotContain("command", "args", "env")
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun add_duplicateName_mapsTo409HttpFailure() = runTest {
+        val (server, profile) = startPinnedServer()
+        try {
+            server.enqueue(
+                MockResponse()
+                    .setResponseCode(409)
+                    .setBody("""{"code":"mcp_server_exists","detail":"MCP server already exists: dupe"}"""),
+            )
+
+            val result = apiFor(profile).add(
+                7,
+                McpAddRequest(name = "dupe", transport = "stdio", command = "npx"),
+            )
+
+            assertThat(result).isInstanceOf(ApiResult.HttpFailure::class.java)
+            val failure = result as ApiResult.HttpFailure
+            assertThat(failure.status).isEqualTo(409)
+            assertThat(failure.code).isEqualTo("mcp_server_exists")
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun add_validationError_mapsTo400HttpFailure() = runTest {
+        val (server, profile) = startPinnedServer()
+        try {
+            server.enqueue(
+                MockResponse()
+                    .setResponseCode(400)
+                    .setBody("""{"code":"bad_request","detail":"transport must be one of [stdio, http, sse]"}"""),
+            )
+
+            val result = apiFor(profile).add(
+                7,
+                McpAddRequest(name = "x", transport = "websocket"),
+            )
+
+            assertThat(result).isInstanceOf(ApiResult.HttpFailure::class.java)
+            assertThat((result as ApiResult.HttpFailure).status).isEqualTo(400)
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    // ──────────────────────── remove (UC-82 AC2) ─────────────────────────────
+
+    @Test
+    fun remove_deletesTheNamePath_andDecodesTheHonestResult() = runTest {
+        val (server, profile) = startPinnedServer()
+        try {
+            server.enqueue(
+                MockResponse().setResponseCode(200).setBody(
+                    """{"name":"atlassian","state":"unknown","message":"Deregistered \"atlassian\" — it isn't force-killed."}""",
+                ),
+            )
+
+            val result = apiFor(profile).remove(7, "atlassian")
+
+            assertThat(result).isInstanceOf(ApiResult.Success::class.java)
+            val action = (result as ApiResult.Success).value
+            assertThat(action.name).isEqualTo("atlassian")
+            assertThat(action.message).containsIgnoringCase("isn't force-killed")
+
+            val rr = server.takeRequest()
+            assertThat(rr.method).isEqualTo("DELETE")
+            assertThat(rr.path).isEqualTo("/v1/sessions/7/mcp/atlassian")
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun remove_urlEncodesAServerNameWithReservedChars() = runTest {
+        val (server, profile) = startPinnedServer()
+        try {
+            server.enqueue(
+                MockResponse().setResponseCode(200).setBody(
+                    """{"name":"weird/name","state":"unknown","message":"Deregistered."}""",
+                ),
+            )
+
+            apiFor(profile).remove(7, "weird/name")
+
+            val rr = server.takeRequest()
+            // The '/' is a single percent-encoded path segment — it cannot break out of the path.
+            assertThat(rr.path).isEqualTo("/v1/sessions/7/mcp/weird%2Fname")
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun remove_notFound_mapsTo404HttpFailure() = runTest {
+        val (server, profile) = startPinnedServer()
+        try {
+            server.enqueue(
+                MockResponse()
+                    .setResponseCode(404)
+                    .setBody("""{"code":"mcp_server_not_found","detail":"MCP server not found: ghost"}"""),
+            )
+
+            val result = apiFor(profile).remove(7, "ghost")
+
+            assertThat(result).isInstanceOf(ApiResult.HttpFailure::class.java)
+            val failure = result as ApiResult.HttpFailure
+            assertThat(failure.status).isEqualTo(404)
+            assertThat(failure.code).isEqualTo("mcp_server_not_found")
+        } finally {
+            server.shutdown()
+        }
+    }
+
     private fun spkiHex(spkiBytes: ByteArray): String =
         MessageDigest.getInstance("SHA-256").digest(spkiBytes)
             .joinToString("") { "%02x".format(it.toInt() and 0xff) }
+
+    private companion object {
+        private val JSON_FOR_ASSERT = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
+    }
 }

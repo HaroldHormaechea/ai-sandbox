@@ -234,4 +234,60 @@ class ApiMappersTest {
         assertThat(r.state()).isEqualTo("connected");
         assertThat(r.message()).isEqualTo("Re-checked the server's connection.");
     }
+
+    // ── UC-82 — API add request → internal McpAddSpec (rule 5 boundary) ───────
+
+    @Test
+    void toMcpAddSpec_carries_all_fields_and_lowercases_the_transport() {
+        ApiDtos.McpAddRequest req = new ApiDtos.McpAddRequest(
+                "atlassian",
+                "SSE", // mixed-case transport from the wire …
+                null,
+                null,
+                "https://mcp.atlassian.com/v1/sse",
+                null,
+                java.util.List.of("Authorization: Bearer t"));
+
+        com.aisandbox.server.mcp.dto.McpAddSpec spec = ApiMappers.toMcpAddSpec(req);
+
+        assertThat(spec.name()).isEqualTo("atlassian");
+        assertThat(spec.transport()).isEqualTo("sse"); // … normalised to lower-case here.
+        assertThat(spec.url()).isEqualTo("https://mcp.atlassian.com/v1/sse");
+        assertThat(spec.headers()).containsExactly("Authorization: Bearer t");
+    }
+
+    @Test
+    void toMcpAddSpec_carries_stdio_command_args_and_env() {
+        ApiDtos.McpAddRequest req = new ApiDtos.McpAddRequest(
+                "local",
+                "stdio",
+                "npx",
+                java.util.List.of("-y", "pkg"),
+                null,
+                java.util.Map.of("TOKEN", "secret"),
+                null);
+
+        com.aisandbox.server.mcp.dto.McpAddSpec spec = ApiMappers.toMcpAddSpec(req);
+
+        assertThat(spec.transport()).isEqualTo("stdio");
+        assertThat(spec.command()).isEqualTo("npx");
+        assertThat(spec.args()).containsExactly("-y", "pkg");
+        assertThat(spec.env()).containsEntry("TOKEN", "secret");
+    }
+
+    @Test
+    void toMcpAddSpec_is_null_safe_on_a_missing_body() {
+        // A missing POST body maps to null; the facade then rejects it with a 400.
+        assertThat(ApiMappers.toMcpAddSpec(null)).isNull();
+    }
+
+    @Test
+    void toMcpAddSpec_tolerates_a_null_transport() {
+        ApiDtos.McpAddRequest req = new ApiDtos.McpAddRequest("x", null, "npx", null, null, null, null);
+
+        com.aisandbox.server.mcp.dto.McpAddSpec spec = ApiMappers.toMcpAddSpec(req);
+
+        assertThat(spec.transport()).isNull();
+        assertThat(spec.name()).isEqualTo("x");
+    }
 }

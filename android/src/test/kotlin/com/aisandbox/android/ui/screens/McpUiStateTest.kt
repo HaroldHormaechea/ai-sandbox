@@ -54,4 +54,105 @@ class McpUiStateTest {
         assertThat(state).isEqualTo(McpUiState.Error("Not enrolled"))
         assertThat(state).isNotEqualTo(McpUiState.Error("boom"))
     }
+
+    // ── UC-82 — buildMcpAddRequest pure builder (the Add-dialog → wire seam) ───
+
+    @Test
+    fun build_stdio_keepsCommandArgsEnv_andOmitsUrlHeaders() {
+        val req = buildMcpAddRequest(
+            name = "call-graph",
+            transport = "stdio",
+            command = "npx",
+            argsText = "-y  some-package   extra",
+            url = "ignored.example",
+            envText = "TOKEN=abc\nKEY = v2 \n\nMALFORMED_NO_EQ",
+            headersText = "ignored: header",
+        )
+
+        assertThat(req.transport).isEqualTo("stdio")
+        assertThat(req.command).isEqualTo("npx")
+        // Args split on runs of whitespace, blanks dropped.
+        assertThat(req.args).containsExactly("-y", "some-package", "extra")
+        // Env: K=V lines parsed, key/value trimmed, blank / '='-less lines dropped.
+        assertThat(req.env).containsEntry("TOKEN", "abc").containsEntry("KEY", "v2")
+        assertThat(req.env).doesNotContainKey("MALFORMED_NO_EQ")
+        // stdio omits the http/sse fields entirely.
+        assertThat(req.url).isNull()
+        assertThat(req.headers).isNull()
+    }
+
+    @Test
+    fun build_stdio_foldsBlankOptionalsToNull() {
+        val req = buildMcpAddRequest(
+            name = " local ",
+            transport = "stdio",
+            command = " mcp-bin ",
+            argsText = "   ",
+            url = "",
+            envText = "\n  \n",
+            headersText = "",
+        )
+
+        assertThat(req.name).isEqualTo("local") // trimmed
+        assertThat(req.command).isEqualTo("mcp-bin") // trimmed
+        assertThat(req.args).isNull() // all-blank → null (omitted on the wire)
+        assertThat(req.env).isNull()
+    }
+
+    @Test
+    fun build_http_keepsUrlAndHeaders_andOmitsStdioFields() {
+        val req = buildMcpAddRequest(
+            name = "atlassian",
+            transport = "SSE", // mixed case …
+            command = "ignored",
+            argsText = "ignored args",
+            url = " https://mcp.atlassian.com/v1/sse ",
+            envText = "IGNORED=1",
+            headersText = "Authorization: Bearer t\n\nX-Trace: 1\n   ",
+        )
+
+        assertThat(req.transport).isEqualTo("sse") // … normalised to lower-case
+        assertThat(req.url).isEqualTo("https://mcp.atlassian.com/v1/sse") // trimmed
+        assertThat(req.headers).containsExactly("Authorization: Bearer t", "X-Trace: 1")
+        // http/sse omits the stdio fields entirely.
+        assertThat(req.command).isNull()
+        assertThat(req.args).isNull()
+        assertThat(req.env).isNull()
+    }
+
+    @Test
+    fun build_doesNotShellEscapeOrAlterHostileValues_soTheyTravelAsInertData() {
+        // AC4 (client side): the builder must NOT try to quote/escape — the value travels
+        // verbatim and lands as a discrete argv element server-side, where it is inert.
+        val hostile = "x; touch /tmp/uc82_pwned && \$(ls /)"
+        val req = buildMcpAddRequest(
+            name = "evil",
+            transport = "stdio",
+            command = hostile,
+            argsText = "`whoami`",
+            url = "",
+            envText = "E=v;rm -rf /",
+            headersText = "",
+        )
+
+        assertThat(req.command).isEqualTo(hostile) // verbatim, not escaped/quoted
+        assertThat(req.args).containsExactly("`whoami`")
+        assertThat(req.env).containsEntry("E", "v;rm -rf /")
+    }
+
+    @Test
+    fun build_envValueMayContainEqualsSigns() {
+        // Only the FIRST '=' splits key from value, so a base64/padded value survives.
+        val req = buildMcpAddRequest(
+            name = "n",
+            transport = "stdio",
+            command = "c",
+            argsText = "",
+            url = "",
+            envText = "B64=YWJjZA==",
+            headersText = "",
+        )
+
+        assertThat(req.env).containsEntry("B64", "YWJjZA==")
+    }
 }
