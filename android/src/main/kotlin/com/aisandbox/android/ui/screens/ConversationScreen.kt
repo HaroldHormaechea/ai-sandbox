@@ -1,7 +1,11 @@
 package com.aisandbox.android.ui.screens
 
+import android.os.Build
+import android.widget.Toast
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -55,6 +59,13 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.ui.semantics.customActions
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.TextUnit
@@ -62,6 +73,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.aisandbox.android.R
 import com.aisandbox.android.conversation.ConversationItem
 import com.aisandbox.android.conversation.ToolDetailState
 import com.aisandbox.android.conversation.TurnPhase
@@ -120,6 +132,21 @@ fun ConversationScreen(
 
     var menuOpen by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
+
+    // UC-81 — one hoisted copy action shared by every bubble (both sides + teammate) and
+    // the UC-41 tool-detail popup. Places the FULL text on the system clipboard via the
+    // same AnnotatedString pattern as ServerIdentityChangedScreen. Confirmation follows
+    // platform convention: a Toast only on API < 33; on Android 13+ the system surfaces its
+    // own clipboard UI, so a redundant toast is suppressed (same SDK gate as SessionsScreen).
+    val clipboard = LocalClipboardManager.current
+    val context = LocalContext.current
+    val copiedConfirmation = stringResource(R.string.conversation_copied)
+    val onCopy: (String) -> Unit = { text ->
+        clipboard.setText(AnnotatedString(text))
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            Toast.makeText(context, copiedConfirmation, Toast.LENGTH_SHORT).show()
+        }
+    }
 
     // UC-78 — the anchor-to-bottom effect now lives in [ConversationContent], keyed on
     // items.size only and gated on `backfilling`, so the initial replay snaps to the bottom
@@ -214,6 +241,7 @@ fun ConversationScreen(
                     onLoadOlder = viewModel::loadOlder,
                     fontScale = fontScale,
                     useAgentColor = useAgentColor,
+                    onCopy = onCopy,
                     onToolTap = { toolUseId ->
                         // AC5 — resolve the originating tool_use line's uuid (server scoping) and fetch.
                         val uuid = items.firstOrNull {
@@ -226,7 +254,7 @@ fun ConversationScreen(
             SpinnerRow(turnPhase)
         }
         toolDetail?.let { detail ->
-            ToolDetailDialog(state = detail, onDismiss = viewModel::closeDetail)
+            ToolDetailDialog(state = detail, onDismiss = viewModel::closeDetail, onCopy = onCopy)
         }
         // UC-66 — the model-selection dialog. Shown whenever the catalogue fetch is in any
         // non-Idle state; dismissing resets it to Idle and changes nothing (AC6).
@@ -356,6 +384,9 @@ internal fun ConversationContent(
     onLoadOlder: () -> Unit = {},
     fontScale: Float = 1f,
     useAgentColor: Boolean = false,
+    // UC-81 — copy a bubble's full text to the clipboard (defaulted so existing call
+    // sites / instrumented tests that don't wire copy still compile).
+    onCopy: (String) -> Unit = {},
     onToolTap: (String) -> Unit = {},
 ) {
     // UC-78/UC-79 (AC8) — bottom-anchor keyed on the LAST item's KEY, not items.size. A
@@ -454,7 +485,7 @@ internal fun ConversationContent(
             item(key = LOADING_OLDER_ROW_KEY) { LoadingOlderRow() }
         }
         items(items = items, key = { it.key }) { item ->
-            ConversationItemRow(item, onToolTap, fontScale, useAgentColor)
+            ConversationItemRow(item, onToolTap, fontScale, useAgentColor, onCopy)
         }
     }
 }
@@ -479,15 +510,16 @@ private fun ConversationItemRow(
     onToolTap: (String) -> Unit,
     fontScale: Float,
     useAgentColor: Boolean,
+    onCopy: (String) -> Unit = {},
 ) {
     when (item) {
         is ConversationItem.UserMessage ->
-            Bubble(label = null, body = item.text, isUser = true, isSidechain = item.isSidechain, fontScale = fontScale, tint = null)
+            Bubble(label = null, body = item.text, isUser = true, isSidechain = item.isSidechain, fontScale = fontScale, tint = null, onCopy = onCopy)
         is ConversationItem.AssistantMessage -> {
             // UC-53 (AC3/AC4) — toggle ON + a non-null chromatic tint for this
             // source → subtle background; else today's neutral SurfaceLow.
             val tint = if (useAgentColor) bubbleTintForSource(item.source)?.let { subtleBubbleTint(it) } else null
-            Bubble(label = labelFor(item.source), body = item.text, isUser = false, isSidechain = item.isSidechain, fontScale = fontScale, tint = tint)
+            Bubble(label = labelFor(item.source), body = item.text, isUser = false, isSidechain = item.isSidechain, fontScale = fontScale, tint = tint, onCopy = onCopy)
         }
         is ConversationItem.Thinking -> MetaLine(prefix = "thinking", body = item.text, fontScale = fontScale)
         is ConversationItem.ToolActivity -> ToolBubble(item = item, onTap = { onToolTap(item.toolUseId) }, fontScale = fontScale)
@@ -510,6 +542,7 @@ private fun ConversationItemRow(
             fontScale = fontScale,
             tint = null,
             labelColor = agentColor(item.color),
+            onCopy = onCopy,
         )
     }
 }
@@ -614,7 +647,13 @@ private fun toolSnippet(s: String): String =
  * "Detail unavailable" message when [ToolDetailState.Unavailable] (AC9).
  */
 @Composable
-internal fun ToolDetailDialog(state: ToolDetailState, onDismiss: () -> Unit) {
+internal fun ToolDetailDialog(
+    state: ToolDetailState,
+    onDismiss: () -> Unit,
+    // UC-81 (AC3) — copy the FULL tool-popup info (untruncated input + output). Defaulted
+    // so existing same-package instrumented tests constructing this dialog still compile.
+    onCopy: (String) -> Unit = {},
+) {
     Dialog(onDismissRequest = onDismiss) {
         Surface(shape = RoundedCornerShape(12.dp), color = SurfaceLow) {
             Column(
@@ -663,13 +702,34 @@ internal fun ToolDetailDialog(state: ToolDetailState, onDismiss: () -> Unit) {
                     }
                 }
                 Spacer(Modifier.height(12.dp))
-                TextButton(onClick = onDismiss, modifier = Modifier.align(Alignment.End)) {
-                    Text("Close")
+                Row(
+                    modifier = Modifier.align(Alignment.End),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    // UC-81 (AC3/AC4) — Copy is offered only once the detail has loaded; for
+                    // Loading / Unavailable there is nothing meaningful to copy, so it's hidden.
+                    if (state is ToolDetailState.Loaded) {
+                        TextButton(onClick = { onCopy(toolDetailCopyText(state)) }) {
+                            Text(stringResource(R.string.conversation_tool_copy))
+                        }
+                        Spacer(Modifier.width(8.dp))
+                    }
+                    TextButton(onClick = onDismiss) {
+                        Text("Close")
+                    }
                 }
             }
         }
     }
 }
+
+/**
+ * UC-81 (AC3/AC4) — the exact text the tool-popup **Copy** button places on the clipboard:
+ * the FULL, untruncated input and output, blank fields rendered as `(empty)` to match the
+ * dialog's on-screen presentation. Pure + `internal` so QA can unit-test it directly.
+ */
+internal fun toolDetailCopyText(state: ToolDetailState.Loaded): String =
+    "Input:\n${state.input.ifBlank { "(empty)" }}\n\nOutput:\n${state.result.ifBlank { "(empty)" }}"
 
 /**
  * UC-66 (AC2/AC5/AC6) — the model-selection dialog. Reuses [ToolDetailDialog]'s
@@ -784,6 +844,7 @@ private fun ModelRow(model: ModelInfo, selected: Boolean, onClick: () -> Unit) {
  * text wraps. Default soft-wrap (no TextOverflow/softWrap override on the body)
  * keeps long unbroken tokens (URLs/code) inside the cap rather than overflowing.
  */
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun Bubble(
     label: String?,
@@ -793,7 +854,13 @@ private fun Bubble(
     fontScale: Float = 1f,
     tint: Color? = null,
     labelColor: Color = OnSurfaceMuted,
+    // UC-81 — long-press a bubble to copy its FULL body to the clipboard (AC1/AC2/AC4).
+    // Defaulted to a no-op so non-copy call sites / previews compile unchanged.
+    onCopy: (String) -> Unit = {},
 ) {
+    // UC-81 (AC6) — TalkBack-discoverable, named "Copy" action so the long-press copy
+    // affordance is reachable without the gesture. Resolved here (composable context).
+    val copyActionLabel = stringResource(R.string.conversation_copy_message_label)
     BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
         val maxBubbleWidth = maxWidth * 0.8f
         Column(
@@ -820,6 +887,20 @@ private fun Bubble(
                     .widthIn(max = maxBubbleWidth)
                     .clip(RoundedCornerShape(12.dp))
                     .background(background)
+                    // UC-81 (AC6) — long-press copies; the tap is intentionally a no-op so
+                    // the gesture layer adds copy WITHOUT introducing a click that could
+                    // collide with existing bubble interactions. No `role = Role.Button`.
+                    .combinedClickable(onClick = {}, onLongClick = { onCopy(body) })
+                    // UC-81 (AC6) — also expose copy as a named TalkBack action for users who
+                    // can't perform a long-press gesture.
+                    .semantics {
+                        customActions = listOf(
+                            CustomAccessibilityAction(copyActionLabel) {
+                                onCopy(body)
+                                true
+                            },
+                        )
+                    }
                     .padding(12.dp),
             ) {
                 Text(
