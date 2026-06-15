@@ -167,7 +167,7 @@ class ConversationController(
      *
      * [transcriptEpoch] is a monotonic counter bumped on every transcript-window reset that can
      * orphan an in-flight page: [selectTarget], [clear], and every `backfill-start` frame.
-     * [loadOlderEpoch] captures the epoch in effect when a `load-older` request is SENT; when the
+     * [pageRequestEpoch] captures the epoch in effect when a `load-older` request is SENT; when the
      * matching `page-start` arrives with a different current epoch, that page was requested for a
      * prior window and is STALE. [pageDiscarding] is the explicit drain state entered for a stale
      * page: every frame of the burst is dropped until its `page-end`, so a late page for A can
@@ -179,7 +179,7 @@ class ConversationController(
     private var transcriptEpoch = 0L
 
     @Volatile
-    private var loadOlderEpoch = 0L
+    private var pageRequestEpoch = 0L
 
     @Volatile
     private var pageDiscarding = false
@@ -496,7 +496,7 @@ class ConversationController(
         // Agent-switcher fix — capture the epoch at request time. If the transcript window resets
         // (target switch / `/clear` / `backfill-start`) before this page's `page-start` arrives,
         // the captured epoch will no longer match and the page is drained as stale.
-        loadOlderEpoch = transcriptEpoch
+        pageRequestEpoch = transcriptEpoch
         if (client?.sendLoadOlder() != true) {
             _loadingOlder.value = false
         }
@@ -556,7 +556,7 @@ class ConversationController(
                 // epoch, this page was requested for a prior target/window. Drain & DROP the whole
                 // burst (DISCARD) so it can't leak into the current transcript; otherwise assemble
                 // it normally.
-                if (loadOlderEpoch != transcriptEpoch) {
+                if (pageRequestEpoch != transcriptEpoch) {
                     beginPageDiscard()
                 } else {
                     beginPage()
@@ -572,9 +572,13 @@ class ConversationController(
                 return
             }
         }
-        // Agent-switcher fix — while draining a stale page, drop EVERY frame of the burst until
-        // its `page-end` (handled above). backfill-start is exempt: it was handled before this gate.
-        if (pageDiscarding) {
+        // Agent-switcher fix — while draining a stale page, drop only its CONTENT frames (which
+        // would otherwise leak the prior window's history). Window/control frames must still be
+        // processed so the drain can't freeze the switcher: `targets`/`target-selected` keep the
+        // agent list + selection live (the 3 s enumerate poll keeps firing during a drain), and
+        // `backfill-end` belongs to the CURRENT window's replay, not the stale page. `backfill-start`
+        // is exempt too — it was already handled (epoch bump + reset) before this gate.
+        if (pageDiscarding && type !in PAGE_DRAIN_PASSTHROUGH) {
             return
         }
         if (pageMode) {
@@ -1260,5 +1264,14 @@ class ConversationController(
         private val ANSWER_PROGRESS_FRAMES = setOf(
             "turn-start", "thinking", "assistant-text", "tool-use", "tool-result", "turn-end", "backfill-start",
         )
+
+        /**
+         * Agent-switcher fix — window/control frame types allowed THROUGH the stale-page discard
+         * drain (everything else in the burst is dropped). These carry no transcript content, so
+         * they cannot leak the prior window's history; suppressing them would instead freeze the
+         * switcher's target list / selection while a stale page drains. (`backfill-start` is not
+         * listed: it is handled — epoch bump + full page-state reset — before the discard gate.)
+         */
+        private val PAGE_DRAIN_PASSTHROUGH = setOf("targets", "target-selected", "backfill-end")
     }
 }
