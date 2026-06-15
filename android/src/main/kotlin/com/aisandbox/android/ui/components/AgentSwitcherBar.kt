@@ -23,6 +23,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.aisandbox.android.terminal.StreamTarget
 import com.aisandbox.android.terminal.TerminalStreamController.Companion.MAIN_TARGET_ID
+import com.aisandbox.android.terminal.TerminalStreamController.Companion.SUBAGENT_ID_PREFIX
 import com.aisandbox.android.ui.theme.Accent
 import com.aisandbox.android.ui.theme.AccentContainer
 import com.aisandbox.android.ui.theme.AiSandboxMonoTypography
@@ -44,6 +45,14 @@ import com.aisandbox.android.ui.theme.SurfaceLow
  *   <li>AC#12 — the row is hidden when only the main target is present (no team
  *       running).</li>
  * </ul>
+ *
+ * <p>UC-60 — background subagents arrive as additional targets (id {@code
+ * subagent:<id>}, kind {@code subagent}) and render as pills here with the same
+ * layout/placement as team-agent pills. Their dot has no upstream agent-color, so it
+ * hashes the full id through [chromaticColorForKey] (the same palette/hash the
+ * conversation bubble tint uses), and their working/idle badge rides the same
+ * [StreamTarget.pendingActivity] flag team pills use. A subagent target is read-only —
+ * tapping it views the subagent's transcript; input handling is gated by the screen.
  */
 @Composable
 fun AgentSwitcherBar(
@@ -107,12 +116,21 @@ private fun AgentTile(
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         // AC#9 — per-agent color dot (the main session has no agent color).
+        // UC-60 — a subagent pill carries no upstream agent-color (it is a sub-session,
+        // not a tmux pane), so its dot hashes the full `subagent:<id>` id through the
+        // SAME palette/hash the conversation bubble tint uses — so the dot reads as the
+        // same colour as that subagent's message bubbles.
         if (target.id != MAIN_TARGET_ID) {
+            val dotColor = if (target.id.startsWith(SUBAGENT_ID_PREFIX)) {
+                chromaticColorForKey(target.id)
+            } else {
+                agentColor(target.agentColor)
+            }
             Box(
                 modifier = Modifier
                     .size(8.dp)
                     .clip(CircleShape)
-                    .background(agentColor(target.agentColor)),
+                    .background(dotColor),
             )
         }
         Text(

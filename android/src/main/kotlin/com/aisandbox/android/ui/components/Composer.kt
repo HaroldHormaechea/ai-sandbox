@@ -38,16 +38,26 @@ import com.aisandbox.android.ui.theme.SurfaceLow
  * <p>[enabled] is wired to "no pending question" — while a [QuestionSheet] is up
  * the composer is locked (AC12) so a competing/double submit can't race the
  * answer.
+ *
+ * <p>UC-60 — [readOnly] is set when a background-subagent pill is the selected
+ * target. A subagent is a read-only view (it has no pane to inject into; the
+ * server hard-blocks any input to a `subagent:` id), so the composer is disabled
+ * with an explanatory placeholder rather than the "answer the question" one.
  */
 @Composable
 fun Composer(
     enabled: Boolean,
     onSubmit: (String) -> Unit,
     modifier: Modifier = Modifier,
+    readOnly: Boolean = false,
 ) {
     var text by rememberSaveable { mutableStateOf("") }
-    val placeholder = remember(enabled) {
-        if (enabled) "Message" else "Answer the question above to continue"
+    val placeholder = remember(enabled, readOnly) {
+        when {
+            readOnly -> "Viewing a subagent — read-only"
+            enabled -> "Message"
+            else -> "Answer the question above to continue"
+        }
     }
 
     Surface(modifier = modifier.fillMaxWidth(), color = SurfaceLow) {

@@ -64,6 +64,7 @@ import com.aisandbox.android.conversation.ConversationItem
 import com.aisandbox.android.conversation.ToolDetailState
 import com.aisandbox.android.conversation.TurnPhase
 import com.aisandbox.android.net.ModelInfo
+import com.aisandbox.android.terminal.TerminalStreamController.Companion.SUBAGENT_ID_PREFIX
 import com.aisandbox.android.ui.components.AgentSwitcherBar
 import com.aisandbox.android.ui.components.Composer
 import com.aisandbox.android.ui.components.QuestionSheet
@@ -166,17 +167,25 @@ fun ConversationScreen(
             )
         },
         bottomBar = {
+            // UC-60 — a selected background-subagent pill is a READ-ONLY view: it has no
+            // pane to inject into and the server hard-blocks input to a `subagent:` id, so
+            // suppress the answer sheet and disable the composer (with an explanatory
+            // placeholder) rather than offering inputs that would be no-ops.
+            val readOnly = selectedTargetId.startsWith(SUBAGENT_ID_PREFIX)
             Column(modifier = Modifier.imePadding().navigationBarsPadding()) {
-                pendingSheet?.let { sheet ->
-                    QuestionSheet(
-                        sheet = sheet,
-                        onSubmit = viewModel::submitAnswer,
-                        onSubmitBatch = viewModel::submitAnswerBatch,
-                    )
+                if (!readOnly) {
+                    pendingSheet?.let { sheet ->
+                        QuestionSheet(
+                            sheet = sheet,
+                            onSubmit = viewModel::submitAnswer,
+                            onSubmitBatch = viewModel::submitAnswerBatch,
+                        )
+                    }
                 }
                 Composer(
-                    enabled = pendingSheet == null,
+                    enabled = !readOnly && pendingSheet == null,
                     onSubmit = viewModel::submitComposer,
+                    readOnly = readOnly,
                 )
             }
         },
