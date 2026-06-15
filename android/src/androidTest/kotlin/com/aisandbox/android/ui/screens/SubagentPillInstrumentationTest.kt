@@ -8,11 +8,18 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
+import android.graphics.Bitmap
+import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import androidx.test.platform.app.InstrumentationRegistry
+import java.io.File
+import java.io.FileOutputStream
 import com.aisandbox.android.terminal.StreamTarget
 import com.aisandbox.android.terminal.TerminalStreamController
 import com.aisandbox.android.ui.components.AgentSwitcherBar
@@ -55,6 +62,23 @@ class SubagentPillInstrumentationTest {
         pendingActivity = working,
     )
 
+    /**
+     * QA visual gate — dump the current Compose tree to a PNG under the app's external
+     * files dir so it can be pulled off the device and inspected by eye (the use case is
+     * fundamentally a "does it LOOK right" feature: pill at top, correct colour, read-only
+     * composer). Best-effort: a capture failure never fails the behavioural assertions.
+     */
+    private fun screenshot(name: String) {
+        try {
+            val bmp: Bitmap = composeTestRule.onRoot().captureToImage().asAndroidBitmap()
+            val ctx = InstrumentationRegistry.getInstrumentation().targetContext
+            val dir = ctx.getExternalFilesDir("uc60-screens") ?: File(ctx.filesDir, "uc60-screens").apply { mkdirs() }
+            FileOutputStream(File(dir, "$name.png")).use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+        } catch (t: Throwable) {
+            // ignore — screenshots are an inspection aid, not an assertion
+        }
+    }
+
     @Test
     fun subagent_pill_appears_at_top_with_label_alongside_team_and_main() {
         // AC1/AC2/AC5/AC6 — the subagent pill renders at the top with its label, together
@@ -71,6 +95,7 @@ class SubagentPillInstrumentationTest {
         composeTestRule.onNodeWithText("main").assertIsDisplayed()
         composeTestRule.onNodeWithText("ping").assertIsDisplayed()
         composeTestRule.onNodeWithText("code-reviewer").assertIsDisplayed()
+        screenshot("01-pill-bar-main-team-subagent")
     }
 
     @Test
@@ -98,6 +123,7 @@ class SubagentPillInstrumentationTest {
 
         // Before tapping: the composer is the normal "Message" box.
         composeTestRule.onNodeWithText("Message").assertIsDisplayed()
+        screenshot("02-composer-interactive-before-tap")
 
         composeTestRule.onNodeWithText("code-reviewer").assertHasClickAction().performClick()
         assertEquals(listOf("subagent:a1"), selections)
@@ -105,6 +131,7 @@ class SubagentPillInstrumentationTest {
         // After tapping the subagent pill: read-only view.
         composeTestRule.onNodeWithText("Viewing a subagent — read-only").assertIsDisplayed()
         composeTestRule.onNodeWithContentDescription("Send").assertIsNotEnabled()
+        screenshot("03-subagent-selected-readonly-composer")
     }
 
     @Test

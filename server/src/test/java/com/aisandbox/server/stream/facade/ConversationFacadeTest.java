@@ -171,7 +171,9 @@ class ConversationFacadeTest {
 
         // main + swarm pane + two subagent pills, in that order (subagents appended last).
         assertThat(out).hasSize(4);
-        assertThat(out).extracting(TargetInfo::id).containsExactly("main", "swarm:main:0.1", "subagent:a1", "subagent:b2");
+        assertThat(out)
+                .extracting(TargetInfo::id)
+                .containsExactly("main", "swarm:main:0.1", "subagent:a1", "subagent:b2");
         // No id collides across the spaces (AC6 — no duplication).
         assertThat(out).extracting(TargetInfo::id).doesNotHaveDuplicates();
 
@@ -232,7 +234,12 @@ class ConversationFacadeTest {
         assertThat(used.hasPane()).isFalse();
         verify(audit)
                 .logEvent(
-                        eq(AuditAction.CONVERSATION_OPEN), eq("ok"), eq("n"), eq(7), eq("targetId"), eq("subagent:abc123"));
+                        eq(AuditAction.CONVERSATION_OPEN),
+                        eq("ok"),
+                        eq("n"),
+                        eq(7),
+                        eq("targetId"),
+                        eq("subagent:abc123"));
     }
 
     // ── The Major fix — every INPUT path is a no-op + audit for a subagent: id ──

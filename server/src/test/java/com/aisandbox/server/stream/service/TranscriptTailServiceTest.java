@@ -149,8 +149,9 @@ class TranscriptTailServiceTest {
 
         List<SubagentInfo> out = svc.listSubagents(7);
 
-        assertThat(out).containsExactly(
-                new SubagentInfo("a1", "code-reviewer", true), new SubagentInfo("b2", "agent b2abcd", false));
+        assertThat(out)
+                .containsExactly(
+                        new SubagentInfo("a1", "code-reviewer", true), new SubagentInfo("b2", "agent b2abcd", false));
         // Disjoint id space — the bare ids carry no `subagent:`/`swarm:`/`main` prefix here
         // (the facade adds the subagent: prefix); they must be distinct (no duplication, AC6).
         assertThat(out).extracting(SubagentInfo::id).doesNotHaveDuplicates().containsExactly("a1", "b2");
