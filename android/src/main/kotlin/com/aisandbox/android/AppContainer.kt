@@ -6,6 +6,7 @@ import com.aisandbox.android.identity.KeyStoreIdentityManager
 import com.aisandbox.android.net.AiSandboxHttpClient
 import com.aisandbox.android.net.ConversationClient
 import com.aisandbox.android.net.DeepLinkEvents
+import com.aisandbox.android.net.GitHubReleaseClient
 import com.aisandbox.android.net.McpApi
 import com.aisandbox.android.net.ModelsApi
 import com.aisandbox.android.net.ServerProfile
@@ -117,6 +118,13 @@ class AppContainer(applicationContext: Context) {
 
     /** UC-84 — build a per-profile client for the server self-update endpoints (+ healthz probe). */
     fun serverUpdateApi(client: AiSandboxHttpClient): ServerUpdateApi = ServerUpdateApi(client)
+
+    /**
+     * UC-87 — plain, fully unauthenticated GitHub Releases client for the
+     * Android app self-update flow. Deliberately NOT the mTLS [AiSandboxHttpClient]:
+     * it carries no client cert and no token (AC7), hitting only the public repo.
+     */
+    fun gitHubReleaseClient(): GitHubReleaseClient = GitHubReleaseClient()
 
     fun streamClient(client: AiSandboxHttpClient, sessionN: Int): StreamClient =
         StreamClient(http = client, sessionN = sessionN)

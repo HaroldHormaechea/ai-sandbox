@@ -180,6 +180,22 @@
     <string name="settings_update_updating">Updating… the server is restarting and will reconnect.</string>
     <string name="settings_update_done">Now running v%1$s</string>
     <string name="settings_update_error">Update failed: %1$s</string>
+
+    <!-- UC-87 — Android app self-update -->
+    <string name="sessions_menu_app_update">Look for app updates</string>
+    <string name="app_update_title">App updates</string>
+    <string name="app_update_back">Back</string>
+    <string name="app_update_checking">Checking for the latest app version…</string>
+    <string name="app_update_up_to_date">You are on the latest version (v%1$s).</string>
+    <string name="app_update_transition">v%1$s → v%2$s</string>
+    <string name="app_update_action">Update</string>
+    <string name="app_update_changelog">Changelog</string>
+    <string name="app_update_downloading">Downloading… %1$d%%</string>
+    <string name="app_update_installing">Starting the installer…</string>
+    <string name="app_update_error">Update failed: %1$s</string>
+    <string name="app_update_retry">Retry</string>
+    <string name="app_update_debug_notice">In-app update is available only for release-signed builds. This is a debug build (v%1$s), so it can\'t be updated in place.</string>
+
     <string name="settings_section_appearance">Conversation view</string>
     <string name="settings_appearance_font_size">Font size</string>
     <string name="settings_appearance_font_size_subtitle">Rescales text in the conversation/agent view only. Other screens are unaffected.</string>

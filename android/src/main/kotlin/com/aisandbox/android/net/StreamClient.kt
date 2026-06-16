@@ -69,6 +69,16 @@ class StreamClient(
     private var ws: WebSocket? = null
     private val openedSignal = CompletableDeferred<Unit>()
 
+    /**
+     * UC-88 — set by [close] BEFORE it cancels the socket, so the [onFailure]
+     * okhttp fires for a forced [WebSocket.cancel] is recognised as an expected,
+     * intentional teardown and stays quiescent (no state flip → no spurious
+     * reconnect / wrong UC-72 dial phase). @Volatile because [close] runs on the
+     * caller thread while the [Listener] callbacks run on okhttp's.
+     */
+    @Volatile
+    private var intentionalClose = false
+
     /** Unique-per-stream id used in NetworkEvent.* surfacing. */
     val streamId: String = "stream-$sessionN-${System.currentTimeMillis()}"
 
@@ -112,12 +122,22 @@ class StreamClient(
         sendControl("""{"type":"select-target","targetId":"${jsonEscape(targetId)}"}""")
 
     /**
-     * Close the WebSocket cleanly with code 1000. Idempotent — once
-     * closed the WS reference is nulled and re-connects must build a
-     * fresh [StreamClient].
+     * Close the WebSocket cleanly with code 1000, then force-drop it.
+     * Idempotent — once closed the WS reference is nulled and re-connects
+     * must build a fresh [StreamClient].
+     *
+     * <p>UC-88 — a graceful [WebSocket.close] alone lets a half-open /
+     * in-flight socket linger 30–60 s (ping-timeout + read-timeout +
+     * okhttp's `cancelAfterCloseMillis`); under repeated reconnect/relaunch
+     * those orphaned sockets pile up. So after the graceful close we call
+     * [WebSocket.cancel] to tear the socket down in ~0 ms. [intentionalClose]
+     * is flagged FIRST so the resulting [onFailure] stays quiescent.
+     * cancel() is safe before the upgrade completes (cancel-before-open).
      */
     fun close(reason: String = "client-close") {
+        intentionalClose = true
         ws?.close(NORMAL_CLOSE_CODE, reason)
+        ws?.cancel()
         ws = null
         _state.value = State.Disconnected(reason = reason)
     }
@@ -173,6 +193,14 @@ class StreamClient(
         }
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+            if (intentionalClose) {
+                // UC-88 — forced cancel from [close]; okhttp reports it as onFailure.
+                // Stay QUIESCENT (see SessionEventsClient.onFailure): [close] already
+                // set Disconnected, so don't re-touch _state or the loop may treat
+                // this as a spontaneous drop and reconnect / mis-drive the dial.
+                if (!openedSignal.isCompleted) openedSignal.complete(Unit)
+                return
+            }
             Log.w(TAG, "WS failure: ${t.javaClass.simpleName}: ${t.message}", t)
             _state.value = State.Disconnected(reason = t.message ?: t.javaClass.simpleName)
             ws = null
@@ -215,5 +243,11 @@ class StreamClient(
 
         /** RFC 6455 normal closure. */
         const val NORMAL_CLOSE_CODE = 1000
+
+        /** UC-88 — server `CloseStatus.SERVICE_OVERLOAD` (1013): per-client cap refusal. */
+        const val SERVICE_OVERLOAD_CLOSE_CODE = 1013
+
+        /** UC-88 — server `CloseStatus.POLICY_VIOLATION` (1008): auth/identity refusal. */
+        const val POLICY_VIOLATION_CLOSE_CODE = 1008
     }
 }

@@ -40,6 +40,16 @@ class ConversationClient(
     private var ws: WebSocket? = null
     private val openedSignal = CompletableDeferred<Unit>()
 
+    /**
+     * UC-88 — set by [close] BEFORE it cancels the socket, so the [onFailure]
+     * okhttp fires for a forced [WebSocket.cancel] is recognised as an expected,
+     * intentional teardown and stays quiescent (no state flip → no spurious
+     * reconnect / wrong UC-72 dial phase). @Volatile because [close] runs on the
+     * caller thread while the [Listener] callbacks run on okhttp's.
+     */
+    @Volatile
+    private var intentionalClose = false
+
     val streamId: String = "conv-$sessionN-${System.currentTimeMillis()}"
 
     /** Open the WebSocket; suspends until the upgrade completes or fails. */
@@ -104,9 +114,33 @@ class ConversationClient(
         )
     }
 
+    /**
+     * Close the conversation channel: enqueue the app-level `{"type":"close"}`
+     * frame, then the WS close frame (code 1000), then force-drop the socket.
+     *
+     * <p>UC-88 — the order is `{"type":"close"}` → [WebSocket.close] → [WebSocket.cancel].
+     * The cancel tears a half-open / in-flight socket down in ~0 ms instead of
+     * letting it linger 30–60 s (ping/read timeouts + okhttp's
+     * `cancelAfterCloseMillis`) and pile up across repeated relaunches.
+     * [intentionalClose] is flagged FIRST so the resulting [onFailure] stays
+     * quiescent. cancel() is safe before the upgrade completes.
+     *
+     * <p><b>The `{"type":"close"}` app frame is BEST-EFFORT, not load-bearing.</b>
+     * On a half-open socket the immediate cancel() may discard the still-unwritten
+     * frame, so the server then learns of the close via TCP RST rather than the
+     * app goodbye — and that is FINE: the conversation handler's resource teardown
+     * (transcript-tail close, [ActiveStreamRegistry] detach, audit) runs in its
+     * `doFinally`, which fires on ANY socket termination (clean close, error, or
+     * RST) just as promptly. Nothing on the server depends on receiving this app
+     * frame (it merely asks the server to close with a NORMAL status). The
+     * cap/wedge channel of UC-88 is the events feed, which sends no app-close frame
+     * at all — so keeping this one best-effort is consistent and correct.
+     */
     fun close(reason: String = "client-close") {
+        intentionalClose = true
         ws?.send("""{"type":"close","reason":"${jsonEscape(reason)}"}""")
         ws?.close(NORMAL_CLOSE_CODE, reason)
+        ws?.cancel()
         ws = null
         _state.value = State.Disconnected(reason = reason)
     }
@@ -154,6 +188,14 @@ class ConversationClient(
         }
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+            if (intentionalClose) {
+                // UC-88 — forced cancel from [close]; okhttp reports it as onFailure.
+                // Stay QUIESCENT (see SessionEventsClient.onFailure): [close] already
+                // set Disconnected, so don't re-touch _state or the loop may treat
+                // this as a spontaneous drop and reconnect / mis-drive the dial.
+                if (!openedSignal.isCompleted) openedSignal.complete(Unit)
+                return
+            }
             Log.w(TAG, "conv WS failure: ${t.javaClass.simpleName}: ${t.message}")
             _state.value = State.Disconnected(reason = t.message ?: t.javaClass.simpleName)
             ws = null

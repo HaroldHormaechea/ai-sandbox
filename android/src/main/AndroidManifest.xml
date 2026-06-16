@@ -20,6 +20,9 @@
     <uses-permission
         android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"
         tools:ignore="BatteryLife" />
+    <!-- UC-87 — in-app self-update: launch the system package-installer for the
+         downloaded release APK (gated per-app via canRequestPackageInstalls). -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <uses-feature android:name="android.hardware.camera" android:required="false" />
     <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
@@ -66,6 +69,20 @@
             android:exported="false"
             android:foregroundServiceType="dataSync"
             android:stopWithTask="false" />
+
+        <!-- UC-87 — FileProvider exposing the downloaded release APK to the
+             system package-installer via a content:// URI (REQUEST_INSTALL_PACKAGES
+             flow). Authority is per-variant (${applicationId}.fileprovider) so the
+             release + debug builds don't collide. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
 
     </application>
 </manifest>

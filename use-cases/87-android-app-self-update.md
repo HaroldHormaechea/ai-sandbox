@@ -1,0 +1,34 @@
+# Use Case 87: Android app self-update (download & install the latest release APK)
+
+## Summary
+Add an in-app **client** self-update flow to the ai-sandbox Android app, the analogue of UC-84's *server* `.deb` self-update but for the app itself. From the sessions-list hamburger menu introduced in UC-84 (#103), a new entry (e.g. "Look for app updates") opens a dedicated update screen that shows a loader while it checks the latest stable `android-v*` GitHub release. If the device is already on the newest version it shows "You are on the latest" with the current version; if a newer version exists it shows the `oldVersion → newVersion` transition and offers an Update action. Accepting downloads the release's `android-release.apk` asset (the android-release.yml workflow already publishes a signed APK as a release asset) and launches the Android package-installer (`PackageInstaller` / `ACTION_VIEW` through a `FileProvider`, gated by the `REQUEST_INSTALL_PACKAGES` permission). The version check and APK download MUST use only public, unauthenticated GitHub endpoints — the app never asks for or depends on a GitHub account, token, or `gh` auth. Version comparison is by semver of the release tag (`android-vX.Y.Z` → `X.Y.Z`) against `BuildConfig.VERSION_NAME`, because `versionCode` is a non-semantic CI run number and cannot be used to order versions. In-app self-update is only meaningful for release-signed installs (a `.debug` build has applicationId `com.aisandbox.android.debug` and a different signing key, so it cannot be updated in place by the release APK); on debug builds the update screen states that in-app update is available only for release builds and does not attempt an install.
+
+## Acceptance Criteria
+1. A new entry (e.g. "Look for app updates") appears in the sessions-list hamburger menu alongside UC-84's "Look for server updates", and opens a dedicated app-update screen.
+2. On open, the screen shows a loader while it queries the **latest stable `android-v*` release** via a public, unauthenticated GitHub endpoint (pre-release / `-rc` tags are ignored).
+3. When the installed `VERSION_NAME` is greater than or equal to the latest release version, the screen shows "You are on the latest" together with the current version, and offers no update action.
+4. When a strictly newer stable version exists, the screen shows the `oldVersion → newVersion` transition and an Update action.
+5. Accepting Update downloads the release's `android-release.apk` asset over a public URL with **no** auth header/token, shows visible download progress, and surfaces a clear, retryable error on download failure (never a crash).
+6. After a successful download the app launches the system package-installer to install the APK in place (a `FileProvider` content URI + `REQUEST_INSTALL_PACKAGES`); if "install unknown apps" is not yet granted for the app, the flow guides the user to grant it rather than failing silently.
+7. No GitHub account, login, token, or `gh` invocation is ever required or prompted on any path of the version check, download, or install.
+8. The version check fails gracefully with a clear, retryable message (never a crash) when the device is offline or GitHub is unreachable / rate-limited.
+9. On a **debug** build, the update screen clearly states that in-app update is available only for release-signed installs and does not attempt a download/install (it does not crash or mislead).
+10. Version ordering is computed from the release tag semver, not from `versionCode`.
+11. CI gates pass: `:android:test` and `:android:lint`; and `:server:test` + `:server:spotlessCheck` if any server code is touched (expected: none).
+
+## Potential Pitfalls & Open Questions
+- **Edge case** — GitHub's anonymous REST API is rate-limited (~60 req/hr/IP); prefer the `releases/latest` redirect or the stable asset URL pattern over heavy unauthenticated API polling, and handle HTTP 403/rate-limit responses as a graceful "couldn't check right now" state.
+- **Risk** — `REQUEST_INSTALL_PACKAGES` triggers a per-app "install unknown apps" system grant (Android 8+); the flow must route the user to the settings toggle and resume cleanly, not dead-end.
+- **Edge case** — `releases/latest` on GitHub points at the latest published, non-pre-release release across **all** tag tracks; since this repo has both `server-v*` and `android-v*`, the check must filter to the `android-v*` track specifically rather than trusting a global "latest".
+- **Assumption** — The currently-installed app exposes its version via `BuildConfig.VERSION_NAME` (set from the tag by android-release.yml); the comparison relies on that being the released semver string.
+- **Edge case** — A downloaded APK that is not signed with the same key as the installed app (e.g. sideloaded debug over release) will be rejected by the installer with a signature-mismatch; AC-9's debug guard avoids the common case, but a user-facing installer rejection should still read as a clear error.
+
+## Original Description
+The mobile app was supposed to have an auto updater (distinct from UC-84's in-app *server* self-update — this is the **client/app** analogue). Entry point: the **settings hamburger** menu (the one added in UC-84, #103). On click: open a **new screen** that shows a **loader** while it checks for a newer app version. If no newer version is detected → display "you are in the latest". If a newer version exists → display the transition `oldversion -> newversion`, AND **offer to update** (an action/button that triggers the app update). On accepting the update → **download the new release APK and install it** (in-app APK download + Android package-installer flow; will need the install-packages permission / `ACTION_VIEW`/`PackageInstaller` and a FileProvider for the downloaded APK). **Hard constraint: require NO GitHub account, login, or credentials on the device.** Version check + APK download must use public/unauthenticated endpoints only (no token, no `gh` auth) — e.g. the public GitHub Releases API/asset URLs for the android-v* track, or another anonymous distribution endpoint. The app must never prompt for or depend on GitHub credentials.
+
+## Clarifications
+- Q: Which releases should the updater offer to install?
+  A: Stable releases only — ignore pre-release / `-rc` `android-v*` tags.
+- Q: Behaviour when the installed build is a debug build (cannot self-update from the release APK)?
+  A: Show a clear "in-app update is available only for release builds" message; do not attempt the install.
+- Note: Feasibility was confirmed against the repo before saving — `android-release.yml` publishes a signed `android-release.apk` (~67 MB) as a public release asset, signed with the stable CI keystore (`RELEASE_ANDROID_SIGNATURE_KEYSTORE_*`); `versionName` is derived from the `android-vX.Y.Z` tag and `versionCode` is a monotonic CI run number.

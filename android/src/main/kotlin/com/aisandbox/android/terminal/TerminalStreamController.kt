@@ -226,6 +226,12 @@ class TerminalStreamController(
 
     private fun startConnectLoop() {
         connectJob?.cancel()
+        // UC-88 — cancelling the coroutine does NOT cancel the OkHttp socket it
+        // owns, so force-drop any in-flight/half-open client BEFORE relaunching
+        // (e.g. userTriggeredReconnect). Otherwise a relaunch orphans a draining
+        // socket; close() cancels the socket in ~0 ms.
+        streamClient?.close("reconnect")
+        streamClient = null
         connectJob = scope.launch {
             val profile = profileStore.current()
             if (profile == null) {
@@ -296,6 +302,11 @@ class TerminalStreamController(
                 }
 
                 if (!isActive) break
+                // UC-88 — surface a server refusal (SERVICE_OVERLOAD / POLICY_VIOLATION)
+                // distinctly rather than letting it read as a routine drop. Back-off
+                // behaviour is unchanged (the unlimited-retry contract stands).
+                (client.state.value as? StreamClient.State.Disconnected)
+                    ?.let { logServerRefusalIfAny(it.reason) }
                 // UC-71 — this give-up branch only fires under an injected finite
                 // retry budget; with the unlimited default ctor it is unreachable.
                 if (reconnect.shouldGiveUp()) {
@@ -310,6 +321,21 @@ class TerminalStreamController(
                 _state.value = TerminalState.Reconnecting(reconnect.attemptCount, delayMs)
                 delay(delayMs)
             }
+        }
+    }
+
+    /**
+     * UC-88 — log a server-initiated *refusal* close distinctly (per-client cap
+     * SERVICE_OVERLOAD / POLICY_VIOLATION). The client encodes server closes as
+     * `"$code:$reason"`. Logging only — the unlimited-retry back-off contract is
+     * unchanged.
+     */
+    private fun logServerRefusalIfAny(reason: String) {
+        when {
+            reason.startsWith("${StreamClient.SERVICE_OVERLOAD_CLOSE_CODE}:") ->
+                Log.w(TAG, "stream refused by server — SERVICE_OVERLOAD: $reason; backing off, not hammering")
+            reason.startsWith("${StreamClient.POLICY_VIOLATION_CLOSE_CODE}:") ->
+                Log.w(TAG, "stream refused by server — POLICY_VIOLATION: $reason")
         }
     }
 
