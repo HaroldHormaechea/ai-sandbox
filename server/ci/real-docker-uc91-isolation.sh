@@ -141,6 +141,25 @@ B_OUT="$(run_in "$PROJ_B" "$PROJECTS_B" '
       console.log(\"STEMS=\"+stems);
       console.log(\"RESOLVED=\"+(r.indexOf(\"sess-A\")>=0?\"A-FOREIGN\":(r.indexOf(\"sess-B\")>=0?\"B-OWN\":\"none\")));
     "
+    # (d) UC-65 /clear-follow (rotation-follow restored post-revert) + a RED control
+    # that proves the resolver WOULD bleed if a foreign file were co-resident — i.e.
+    # the per-session mount isolation is what makes (a)/(c) GREEN.
+    RG=/tmp/uc91-rg;  rm -rf "$RG";  mkdir -p "$RG"
+    printf "%s\n" "{\"type\":\"summary\",\"sessionId\":\"sess-B\"}" > "$RG/sess-B.jsonl"      # B launch (older)
+    printf "%s\n" "{\"type\":\"summary\",\"sessionId\":\"bnew\"}"   > "$RG/bnew.jsonl"        # B post-/clear (newer, B-owned)
+    touch -d "2020-01-01 00:00:00" "$RG/sess-B.jsonl"; touch -d "2020-01-01 00:05:00" "$RG/bnew.jsonl"
+    RED=/tmp/uc91-red; rm -rf "$RED"; mkdir -p "$RED"
+    printf "%s\n" "{\"type\":\"summary\",\"sessionId\":\"sess-B\"}" > "$RED/sess-B.jsonl"     # B (older)
+    printf "%s\n" "{\"type\":\"summary\",\"sessionId\":\"sess-A\"}" > "$RED/sess-A.jsonl"     # A foreign (newer) — pre-fix co-residence
+    touch -d "2020-01-01 00:00:00" "$RED/sess-B.jsonl"; touch -d "2020-01-01 00:05:00" "$RED/sess-A.jsonl"
+    node -e "
+      const h=require(\"/usr/local/bin/aisandbox-conversation-tail\");
+      const C=d=>h.listTopLevelTranscripts(d).map(x=>{const id=h.readTranscriptIdentity(x.path,65536);return{path:x.path,stem:x.stem,mtimeMs:x.mtimeMs,agentNamePresent:id.agentNamePresent};});
+      const rg=h.selectMainCurrent(C(\"/tmp/uc91-rg\"),\"sess-B\")||\"\";
+      console.log(\"CLEARFOLLOW=\"+(rg.indexOf(\"bnew\")>=0?\"POST-CLEAR\":(rg.indexOf(\"sess-B\")>=0?\"STALE-LAUNCH\":\"none\")));
+      const red=h.selectMainCurrent(C(\"/tmp/uc91-red\"),\"sess-B\")||\"\";
+      console.log(\"REDCONTROL=\"+(red.indexOf(\"sess-A\")>=0?\"BLEEDS-A\":(red.indexOf(\"sess-B\")>=0?\"B\":\"none\")));
+    "
 ')" || fail "container B assertion run failed"
 
 echo "$B_OUT" | sed 's/^/[B] /'
@@ -151,5 +170,11 @@ echo "$B_OUT" | grep -q 'CORESIDE=OK'   || fail "(b) CO-RESIDENCE: main+teammate
 echo "$B_OUT" | grep -q 'STEMS=sess-B'  || fail "(a) ISOLATION: B's resolver candidate set is not B-only (foreign stems present)"
 echo "$B_OUT" | grep -q 'RESOLVED=B-OWN' || fail "(c) RESOLVER: B did not resolve its OWN transcript"
 echo "$B_OUT" | grep -q 'RESOLVED=A-FOREIGN' && fail "(c) RESOLVER: B resolved A's FOREIGN transcript — bleed!"
+# (d) UC-65 rotation-follow must be RESTORED post-revert (interim fail-closed must be gone).
+echo "$B_OUT" | grep -q 'CLEARFOLLOW=POST-CLEAR' || fail "(d) UC-65 /clear-follow broken: helper did not adopt B's newer post-/clear transcript (stuck on stale launch file)"
+# RED control: the resolver MUST bleed when a foreign file is co-resident — this is
+# exactly the pre-fix condition the per-session mount eliminates. If it does NOT
+# bleed here, the resolver semantics changed and our isolation argument is moot.
+echo "$B_OUT" | grep -q 'REDCONTROL=BLEEDS-A' || fail "RED control invalid: resolver did not bleed on co-resident foreign file — re-derive the isolation argument"
 
-log "PASS — cross-session transcript isolation holds (a), agent co-residence intact (b), shared auth + B-own resolution (c)."
+log "PASS — (a) cross-session isolation, (b) agent co-residence (UC-60 pills), (c) shared auth + B-own resolution, (d) UC-65 /clear-follow restored. RED control confirms the mount isolation is load-bearing (resolver bleeds when foreign files are co-resident)."
