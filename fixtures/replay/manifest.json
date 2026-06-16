@@ -6,6 +6,7 @@
     { "n": 2, "target": "single-question-multi", "title": "Multi-select question", "fixture": "single-question-multi.tail" },
     { "n": 3, "target": "single-question-other", "title": "Other free-text question", "fixture": "single-question-other.tail" },
     { "n": 4, "target": "multi-question", "title": "Multi-question sheet", "fixture": "multi-question.tail" },
-    { "n": 5, "target": "conversation-transcript", "title": "Conversation transcript", "fixture": "conversation-transcript.tail" }
+    { "n": 5, "target": "conversation-transcript", "title": "Conversation transcript", "fixture": "conversation-transcript.tail" },
+    { "n": 6, "target": "pending-question-single", "title": "Pane-signal pending question", "fixture": "pending-question-single.tail" }
   ]
 }

@@ -17,6 +17,7 @@ on:
   workflow_dispatch:
   push:
     branches:
+      - 'main'
       - 'feat/uc-85-deterministic-llm-free-functional-gate'
   pull_request:
     paths:
