@@ -220,6 +220,22 @@ class ConversationController(
     private var clearSuppressActive = false
 
     /**
+     * UC-86 — target-switch suppression guard. Armed by [selectTarget] as its FIRST action
+     * (BEFORE its [clearItems], to close the UI-thread/collector-thread race) so the OLD target's
+     * still-buffered live CONTENT frames — arriving at [onFrame] between the wipe and the NEW
+     * target's `backfill-start` — are dropped instead of landing on the freshly-cleared store
+     * (the view-bleed defect). Unlike [clearSuppressActive], this guard's drop path does NOT wipe
+     * the store, so the UC-45 optimistic echo survives a switch. Lifted by the new target's
+     * `backfill-start` (immediately, via [liftAllSuppressGuards] in the main handler or the
+     * [clearSuppressActive] guard-block arm) OR by a [CLEAR_SUPPRESS_MS] timed fallback — and
+     * NEVER by a user submit (a submit must not re-admit the old target's buffered frames; that
+     * lift-on-submit semantics belongs to [clearSuppressActive]). @Volatile because it is written
+     * from the UI thread ([selectTarget]) and read from the [onFrame] collector.
+     */
+    @Volatile
+    private var switchSuppressActive = false
+
+    /**
      * UC-45 — optimistic local-echo state, all guarded by [itemLock] (same lock as
      * [itemMap], so the optimistic insert and the reconcile mutate the store atomically).
      *
@@ -342,8 +358,29 @@ class ConversationController(
         answerWatchdogJob = null
     }
 
+    /**
+     * UC-86 — lift BOTH suppression guards together (two boolean assignments; never wipes the
+     * store). Called from the `backfill-start` handlers so an overlapping `/clear` + target-switch
+     * (both guards armed) can't strand one guard set forever — which would silently drop all later
+     * live frames. The clear path still performs its own [clearItems]; this only flips the flags.
+     */
+    private fun liftAllSuppressGuards() {
+        clearSuppressActive = false
+        switchSuppressActive = false
+    }
+
     /** AC17 — switch the tailed/inject target; clear the view for the new target's transcript. */
     fun selectTarget(targetId: String) {
+        // UC-86 — arm the target-switch suppression guard as the FIRST action, BEFORE the
+        // clearItems() below, so the OLD target's still-buffered live content frames that race in
+        // between the wipe and the new target's backfill-start are dropped instead of landing on
+        // the freshly-cleared store (the view-bleed defect). The normal lift is the new target's
+        // backfill-start handler; this timed fallback lifts the guard if no backfill-start arrives.
+        switchSuppressActive = true
+        scope.launch {
+            delay(CLEAR_SUPPRESS_MS)
+            switchSuppressActive = false
+        }
         // Agent-switcher fix — a target switch opens a fresh transcript window: bump the epoch so
         // any in-flight `load-older` page requested for the OLD target is recognised as stale (and
         // drained) when its `page-start` lands after the switch, instead of grafting the old
@@ -596,15 +633,13 @@ class ConversationController(
         // Control frames (targets/selection/turn boundaries/errors) fall through untouched.
         if (clearSuppressActive) {
             when (type) {
-                "turn-start", "thinking", "assistant-text", "teammate-message", "tool-use", "tool-result",
-                "system-note", "question", "plan-approval", "pending-question",
-                -> return
+                in SUPPRESSED_CONTENT_FRAMES -> return
                 // Defensive: a fresh transcript stream beginning under the guard means the
-                // session is replaying its (now post-clear) history — re-wipe, lift the guard,
+                // session is replaying its (now post-clear) history — re-wipe, lift the guards,
                 // and let the backfill render the clean transcript from the start.
                 "backfill-start" -> {
                     clearItems()
-                    clearSuppressActive = false
+                    liftAllSuppressGuards() // UC-86 (Q5) — lift BOTH guards so an overlapping switch isn't stranded
                     _backfilling.value = true
                     _atTranscriptStart.value = false // UC-79 — fresh window, paging re-enabled
                     _loadingOlder.value = false
@@ -612,6 +647,21 @@ class ConversationController(
                 }
                 // targets, target-selected, backfill-end, pending-clear, turn-end, error → pass
                 else -> { /* fall through to normal handling */ }
+            }
+        }
+        // UC-86 — target-switch suppression. While a switch is pending (armed by [selectTarget]
+        // BEFORE its clearItems(); lifted by the new target's backfill-start or the
+        // CLEAR_SUPPRESS_MS timed fallback), drop the OLD target's still-buffered live CONTENT
+        // frames that arrive between the wipe and the new backfill-start — they would otherwise
+        // land on the freshly-cleared store and bleed the old target's content into the new view.
+        // Unlike the clear guard above, this does NOT clearItems(): the stale frames are already
+        // dropped so the store stays clean, AND not wiping preserves the UC-45 optimistic echo
+        // (written directly to itemMap by a submit, not via onFrame). `backfill-start` is
+        // deliberately NOT dropped — it falls through to the main handler, which lifts the guard.
+        if (switchSuppressActive) {
+            when (type) {
+                in SUPPRESSED_CONTENT_FRAMES -> return
+                else -> { /* control frames (incl. backfill-start) pass through */ }
             }
         }
         when (type) {
@@ -739,9 +789,12 @@ class ConversationController(
                 republishSelectedModel(it) // UC-66 — keep the highlighted model in sync with the target
             }
             "backfill-start" -> {
+                // UC-86 — the new target's window is starting: lift BOTH suppression guards (the
+                // immediate lift for the normal switch case). NO clearItems() here — the switch
+                // drop-block above already dropped the old target's buffered content frames, so the
+                // store is clean, and not wiping preserves the UC-45 optimistic echo.
+                liftAllSuppressGuards()
                 _backfilling.value = true
-                // UC-79 — a fresh/re-seeded window: the server re-seeds its oldest-line cursor,
-                // so reset our paging flags (older history may now exist again; nothing in flight).
                 _atTranscriptStart.value = false
                 _loadingOlder.value = false
             }
@@ -1263,6 +1316,18 @@ class ConversationController(
          */
         private val ANSWER_PROGRESS_FRAMES = setOf(
             "turn-start", "thinking", "assistant-text", "tool-use", "tool-result", "turn-end", "backfill-start",
+        )
+
+        /**
+         * UC-65 / UC-86 — the item-adding ("content") frame types that BOTH suppression guards drop
+         * while armed. Shared by the [clearSuppressActive] guard-block and the [switchSuppressActive]
+         * drop-block so the two can never drift. Control frames (targets/target-selected/turn
+         * boundaries/backfill-start/backfill-end/pending-clear/error) are deliberately absent — they
+         * must always pass through (notably `backfill-start`, which is what LIFTS the guards).
+         */
+        private val SUPPRESSED_CONTENT_FRAMES = setOf(
+            "turn-start", "thinking", "assistant-text", "teammate-message", "tool-use", "tool-result",
+            "system-note", "question", "plan-approval", "pending-question",
         )
 
         /**
