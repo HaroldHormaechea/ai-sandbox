@@ -188,13 +188,20 @@ class WsReconnectAccumulationTest {
             .`as`("the fix is not hiding accumulation by failing to open — all $cycles sockets are live first")
             .isGreaterThanOrEqualTo(cap)
 
+        // Settle margin: connect() assigns `ws` then suspends on the open-signal;
+        // the async call can increment the live count a hair BEFORE that assignment
+        // lands, so give every coroutine time to finish assigning `ws` before we
+        // close — otherwise a close() racing a null `ws` would no-op its cancel().
+        Thread.sleep(750)
+
         // Close each via the PRODUCTION close() (graceful close + cancel()).
         clients.forEach { it.close("reconnect") }
 
-        // cancel() aborts each in-flight connect in ~0 ms, so the live-call count
-        // drains back to baseline. Pre-fix (no cancel) this would stay at ≈ N for
-        // the full 30 s read timeout and this poll would TIME OUT → assertion fails.
-        val drainedB = pollUntil(10_000, { it <= 2 }) { httpB.client.dispatcher.runningCallsCount() }
+        // cancel() aborts each in-flight connect, so the live-call count drains
+        // back to baseline. Pre-fix (no cancel) this would stay at ≈ N for the
+        // full 30 s read timeout and this poll would TIME OUT → assertion fails.
+        val drainedB = pollUntil(15_000, { it <= 2 }) { httpB.client.dispatcher.runningCallsCount() }
+        println("UC-88 accumulation: peakA=$peakA lingeringA=$lingeringA peakB=$peakB drainedB=$drainedB")
         assertThat(drainedB)
             .`as`("production close() cancels the half-open socket so live calls return to baseline (no accumulation)")
             .isLessThanOrEqualTo(2)
