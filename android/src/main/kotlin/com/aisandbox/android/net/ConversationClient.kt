@@ -40,6 +40,16 @@ class ConversationClient(
     private var ws: WebSocket? = null
     private val openedSignal = CompletableDeferred<Unit>()
 
+    /**
+     * UC-88 — set by [close] BEFORE it cancels the socket, so the [onFailure]
+     * okhttp fires for a forced [WebSocket.cancel] is recognised as an expected,
+     * intentional teardown and stays quiescent (no state flip → no spurious
+     * reconnect / wrong UC-72 dial phase). @Volatile because [close] runs on the
+     * caller thread while the [Listener] callbacks run on okhttp's.
+     */
+    @Volatile
+    private var intentionalClose = false
+
     val streamId: String = "conv-$sessionN-${System.currentTimeMillis()}"
 
     /** Open the WebSocket; suspends until the upgrade completes or fails. */
@@ -104,9 +114,23 @@ class ConversationClient(
         )
     }
 
+    /**
+     * Close the conversation channel. Flushes the app-level `{"type":"close"}`
+     * frame, then the WS close frame (code 1000), then force-drops the socket.
+     *
+     * <p>UC-88 — ordering matters: the `{"type":"close"}` app frame is enqueued
+     * FIRST (so the server gets our explicit goodbye), THEN the graceful
+     * [WebSocket.close], THEN [WebSocket.cancel]. The cancel tears a half-open /
+     * in-flight socket down in ~0 ms instead of letting it linger 30–60 s
+     * (ping/read timeouts + okhttp's `cancelAfterCloseMillis`) and pile up across
+     * repeated relaunches. [intentionalClose] is flagged FIRST so the resulting
+     * [onFailure] stays quiescent. cancel() is safe before the upgrade completes.
+     */
     fun close(reason: String = "client-close") {
+        intentionalClose = true
         ws?.send("""{"type":"close","reason":"${jsonEscape(reason)}"}""")
         ws?.close(NORMAL_CLOSE_CODE, reason)
+        ws?.cancel()
         ws = null
         _state.value = State.Disconnected(reason = reason)
     }
@@ -154,6 +178,14 @@ class ConversationClient(
         }
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+            if (intentionalClose) {
+                // UC-88 — forced cancel from [close]; okhttp reports it as onFailure.
+                // Stay QUIESCENT (see SessionEventsClient.onFailure): [close] already
+                // set Disconnected, so don't re-touch _state or the loop may treat
+                // this as a spontaneous drop and reconnect / mis-drive the dial.
+                if (!openedSignal.isCompleted) openedSignal.complete(Unit)
+                return
+            }
             Log.w(TAG, "conv WS failure: ${t.javaClass.simpleName}: ${t.message}")
             _state.value = State.Disconnected(reason = t.message ?: t.javaClass.simpleName)
             ws = null

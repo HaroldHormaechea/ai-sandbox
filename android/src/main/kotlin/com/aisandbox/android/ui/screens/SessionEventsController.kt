@@ -86,6 +86,12 @@ class SessionEventsController(
 
     private fun startConnectLoop() {
         connectJob?.cancel()
+        // UC-88 — cancelling the coroutine does NOT cancel the OkHttp socket it
+        // owns, so force-drop any in-flight/half-open client BEFORE relaunching.
+        // Otherwise a rapid disconnect→connect (e.g. chat→list) orphans a draining
+        // socket that still counts against the server's per-fingerprint cap.
+        eventsClient?.close("reconnect")
+        eventsClient = null
         connectJob = scope.launch {
             val profile = profileStore.current()
             if (profile == null) {
@@ -186,6 +192,14 @@ class SessionEventsController(
                 }
 
                 if (!isActive) break
+                // UC-88 — if the server explicitly refused the feed (per-client cap
+                // SERVICE_OVERLOAD / POLICY_VIOLATION) log it distinctly, so a wedge
+                // caused by overload is visible in the logs instead of looking like an
+                // ordinary transient drop. We still honour the unlimited-retry
+                // contract (UC-70/71/72) and back off below — we just don't pretend a
+                // refusal was silent.
+                (client.state.value as? SessionEventsClient.State.Disconnected)
+                    ?.let { logServerRefusalIfAny(it.reason) }
                 // UC-71 — this give-up branch only fires under an injected finite
                 // retry budget; with the unlimited default ctor it is unreachable.
                 if (reconnect.shouldGiveUp()) {
@@ -225,6 +239,23 @@ class SessionEventsController(
                 )
                 delay(delayMs)
             }
+        }
+    }
+
+    /**
+     * UC-88 — log a server-initiated *refusal* close distinctly. The client
+     * encodes server closes as `"$code:$reason"` in [SessionEventsClient.State.Disconnected];
+     * a SERVICE_OVERLOAD (per-fingerprint cap) or POLICY_VIOLATION means the
+     * server is actively rejecting us, which is the wedge-by-overload symptom of
+     * this UC — surface it instead of letting it read as a routine drop. Does NOT
+     * change the back-off behaviour (the unlimited-retry contract stands).
+     */
+    private fun logServerRefusalIfAny(reason: String) {
+        when {
+            reason.startsWith("${SessionEventsClient.SERVICE_OVERLOAD_CLOSE_CODE}:") ->
+                Log.w(TAG, "events feed refused by server — SERVICE_OVERLOAD (per-client cap): $reason; backing off, not hammering")
+            reason.startsWith("${SessionEventsClient.POLICY_VIOLATION_CLOSE_CODE}:") ->
+                Log.w(TAG, "events feed refused by server — POLICY_VIOLATION: $reason")
         }
     }
 

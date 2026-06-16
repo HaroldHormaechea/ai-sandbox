@@ -51,6 +51,16 @@ class SessionEventsClient(
     private var ws: WebSocket? = null
     private val openedSignal = CompletableDeferred<Unit>()
 
+    /**
+     * UC-88 — set by [close] BEFORE it cancels the socket, so the [onFailure]
+     * okhttp fires for a forced [WebSocket.cancel] is recognised as an expected,
+     * intentional teardown and stays quiescent (no state flip → no spurious
+     * reconnect / wrong UC-72 dial phase). @Volatile because [close] runs on the
+     * caller thread while the [Listener] callbacks run on okhttp's.
+     */
+    @Volatile
+    private var intentionalClose = false
+
     /** Unique-per-feed id for log correlation. */
     val feedId: String = "sessions-events-${System.currentTimeMillis()}"
 
@@ -70,11 +80,24 @@ class SessionEventsClient(
     }
 
     /**
-     * Close the WebSocket cleanly with code 1000. Idempotent — once closed the
-     * reference is nulled; reconnects must build a fresh [SessionEventsClient].
+     * Close the WebSocket cleanly with code 1000, then force-drop it. Idempotent
+     * — once closed the reference is nulled; reconnects must build a fresh
+     * [SessionEventsClient].
+     *
+     * <p>UC-88 — a graceful [WebSocket.close] alone lets a half-open / in-flight
+     * socket linger 30–60 s (ping-timeout + read-timeout + okhttp's
+     * `cancelAfterCloseMillis`). Under sustained half-open network + repeated
+     * chat→list, those abandoned sockets pile up faster than they drain and
+     * blow past the server's per-fingerprint feed cap — wedging the feed. So
+     * after the graceful close we call [WebSocket.cancel] to tear the socket
+     * down in ~0 ms. [intentionalClose] is flagged FIRST so the resulting
+     * [onFailure] stays quiescent. cancel() is safe before the upgrade completes
+     * (cancel-before-open) — okhttp aborts the in-flight connect.
      */
     fun close(reason: String = "client-close") {
+        intentionalClose = true
         ws?.close(NORMAL_CLOSE_CODE, reason)
+        ws?.cancel()
         ws = null
         _state.value = State.Disconnected(reason = reason)
     }
@@ -126,6 +149,16 @@ class SessionEventsClient(
         }
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+            if (intentionalClose) {
+                // UC-88 — we cancelled this socket on purpose ([close] flagged it);
+                // okhttp reports a forced cancel as onFailure (not onClosed). Stay
+                // QUIESCENT: [close] already set Disconnected and nulled ws, so do
+                // NOT touch _state here — otherwise the controller's loop could read
+                // this as a spontaneous drop and schedule a reconnect / drive the
+                // UC-72 dial yellow→red. Just unblock a connect() still awaiting open.
+                if (!openedSignal.isCompleted) openedSignal.complete(Unit)
+                return
+            }
             Log.w(TAG, "events WS failure: ${t.javaClass.simpleName}: ${t.message}")
             _state.value = State.Disconnected(reason = t.message ?: t.javaClass.simpleName)
             ws = null
@@ -160,5 +193,17 @@ class SessionEventsClient(
 
         /** RFC 6455 normal closure. */
         const val NORMAL_CLOSE_CODE = 1000
+
+        /**
+         * UC-88 — the server closes the feed with Spring's
+         * `CloseStatus.SERVICE_OVERLOAD` (RFC 6455 1013) when this client's
+         * per-fingerprint subscription cap is exceeded (the wedge symptom of this
+         * UC). The controller surfaces this distinctly so we back off audibly
+         * rather than silently hammering a server that is refusing us.
+         */
+        const val SERVICE_OVERLOAD_CLOSE_CODE = 1013
+
+        /** UC-88 — server `CloseStatus.POLICY_VIOLATION` (1008) — auth/identity refusal. */
+        const val POLICY_VIOLATION_CLOSE_CODE = 1008
     }
 }
