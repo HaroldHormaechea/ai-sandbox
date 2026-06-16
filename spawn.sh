@@ -145,6 +145,13 @@ PROJECT="ai-sandbox-${N}"
 if [ -n "${AI_SANDBOX_HOST_STATE_ROOT:-}" ]; then
     WORKSPACE_HOST_PATH="./workspace"
     CLAUDE_CONFIG_HOST_PATH="./claude-config"
+    # UC-91 — transcripts (~/.claude/projects) are ALWAYS per-session, even when
+    # claude-config is shared (the default). Sessions sharing one claude-config
+    # otherwise co-resolve the same projects/<slug>/ dir, so one session's main
+    # transcript leaks into another's chat (conversation bleed + wrong agent pills
+    # on session→session switch). A dedicated per-session bind isolates the
+    # transcript store regardless of the claude-config sharing mode.
+    CLAUDE_PROJECTS_HOST_PATH="./claude-projects-${N}"
     if [ "$WORKSPACE_MODE" = "isolated" ]; then
         WORKSPACE_HOST_PATH="./workspace-${N}"
     fi
@@ -191,6 +198,8 @@ else
 
     WORKSPACE_HOST_PATH="$WS_ROOT/workspace"
     CLAUDE_CONFIG_HOST_PATH="$WS_ROOT/claude-config"
+    # UC-91 — per-session transcript store (see the host-state-root branch above).
+    CLAUDE_PROJECTS_HOST_PATH="$WS_ROOT/claude-projects-${N}"
     if [ "$WORKSPACE_MODE" = "isolated" ]; then
         WORKSPACE_HOST_PATH="$WS_ROOT/workspace-${N}"
     fi
@@ -207,16 +216,18 @@ fi
 # as the user who runs spawn.sh (the ai-sandbox-server service user in install
 # mode), gives them the right owner up front. `mkdir -p` is idempotent and
 # harmless in developer mode where the shared dirs usually already exist.
-mkdir -p "$WORKSPACE_HOST_PATH" "$CLAUDE_CONFIG_HOST_PATH"
+mkdir -p "$WORKSPACE_HOST_PATH" "$CLAUDE_CONFIG_HOST_PATH" "$CLAUDE_PROJECTS_HOST_PATH"
 
 # ── Launch ───────────────────────────────────────────────────────────────────
 export AI_SANDBOX_WORKSPACE_HOST_PATH="$WORKSPACE_HOST_PATH"
 export AI_SANDBOX_CLAUDE_CONFIG_HOST_PATH="$CLAUDE_CONFIG_HOST_PATH"
+export AI_SANDBOX_CLAUDE_PROJECTS_HOST_PATH="$CLAUDE_PROJECTS_HOST_PATH"
 export AI_SANDBOX_LABEL="$LABEL"
 
 info "Spawning $PROJECT" >&2
-info "  workspace     : $WORKSPACE_HOST_PATH" >&2
-info "  claude-config : $CLAUDE_CONFIG_HOST_PATH" >&2
+info "  workspace      : $WORKSPACE_HOST_PATH" >&2
+info "  claude-config  : $CLAUDE_CONFIG_HOST_PATH" >&2
+info "  claude-projects: $CLAUDE_PROJECTS_HOST_PATH" >&2
 if [ "$LABEL_SET" -eq 1 ] && [ -n "$LABEL" ]; then
     info "  label         : $LABEL" >&2
 fi

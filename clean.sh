@@ -136,6 +136,10 @@ clean_one() {
     # silent leak after relocation.
     local ws_dir="${SESSION_DIR_BASE}/workspace-${n}"
     local cc_dir="${SESSION_DIR_BASE}/claude-config-${n}"
+    # UC-91 — the always-per-session transcript store (spawn.sh creates
+    # ./claude-projects-<N> for every session). Tear it down with the rest of the
+    # session's claude state so it doesn't orphan on the host.
+    local cp_dir="${SESSION_DIR_BASE}/claude-projects-${n}"
     if [ "$KEEP_WORKSPACE" -eq 0 ] && [ -d "$ws_dir" ]; then
         info "  rm -rf $ws_dir" >&2
         rm -rf "$ws_dir"
@@ -143,6 +147,10 @@ clean_one() {
     if [ "$KEEP_CLAUDE_CONFIG" -eq 0 ] && [ -d "$cc_dir" ]; then
         info "  rm -rf $cc_dir" >&2
         rm -rf "$cc_dir"
+    fi
+    if [ "$KEEP_CLAUDE_CONFIG" -eq 0 ] && [ -d "$cp_dir" ]; then
+        info "  rm -rf $cp_dir" >&2
+        rm -rf "$cp_dir"
     fi
 
     # If `down` reported failure, re-check whether containers actually remain
