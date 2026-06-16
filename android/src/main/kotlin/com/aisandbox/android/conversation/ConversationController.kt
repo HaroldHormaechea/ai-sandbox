@@ -158,6 +158,33 @@ class ConversationController(
     private val pageKeys = LinkedHashSet<String>()
 
     /**
+     * Agent-switcher selection fix — transcript epoch + stale-page drain.
+     *
+     * The UC-79 older-page machinery is not target/epoch-aware: a `load-older` page requested
+     * for target A can land AFTER a switch to target B (or a reconnect/`backfill-start`), and the
+     * page-burst frames then either graft A's history into B's store or swallow B's own
+     * `backfill-start` — both surface as "every member shows the same conversation".
+     *
+     * [transcriptEpoch] is a monotonic counter bumped on every transcript-window reset that can
+     * orphan an in-flight page: [selectTarget], [clear], and every `backfill-start` frame.
+     * [pageRequestEpoch] captures the epoch in effect when a `load-older` request is SENT; when the
+     * matching `page-start` arrives with a different current epoch, that page was requested for a
+     * prior window and is STALE. [pageDiscarding] is the explicit drain state entered for a stale
+     * page: every frame of the burst is dropped until its `page-end`, so a late page for A can
+     * never leak into B's live transcript. All guarded on the single [onFrame] collector; the
+     * counters are [Volatile] because they are also written from the UI thread ([selectTarget]/
+     * [clear]) and only ever compared for inequality (exact monotonicity is not required).
+     */
+    @Volatile
+    private var transcriptEpoch = 0L
+
+    @Volatile
+    private var pageRequestEpoch = 0L
+
+    @Volatile
+    private var pageDiscarding = false
+
+    /**
      * UC-78 — exposed as a [StateFlow] (was a plain `@Volatile var`) so the UI can read
      * the replay/backfill phase and anchor the conversation to the bottom WITHOUT animating.
      * Internal turn-phase gating still reads/writes [_backfilling].value exactly as before.
@@ -191,6 +218,22 @@ class ConversationController(
      */
     @Volatile
     private var clearSuppressActive = false
+
+    /**
+     * UC-86 — target-switch suppression guard. Armed by [selectTarget] as its FIRST action
+     * (BEFORE its [clearItems], to close the UI-thread/collector-thread race) so the OLD target's
+     * still-buffered live CONTENT frames — arriving at [onFrame] between the wipe and the NEW
+     * target's `backfill-start` — are dropped instead of landing on the freshly-cleared store
+     * (the view-bleed defect). Unlike [clearSuppressActive], this guard's drop path does NOT wipe
+     * the store, so the UC-45 optimistic echo survives a switch. Lifted by the new target's
+     * `backfill-start` (immediately, via [liftAllSuppressGuards] in the main handler or the
+     * [clearSuppressActive] guard-block arm) OR by a [CLEAR_SUPPRESS_MS] timed fallback — and
+     * NEVER by a user submit (a submit must not re-admit the old target's buffered frames; that
+     * lift-on-submit semantics belongs to [clearSuppressActive]). @Volatile because it is written
+     * from the UI thread ([selectTarget]) and read from the [onFrame] collector.
+     */
+    @Volatile
+    private var switchSuppressActive = false
 
     /**
      * UC-45 — optimistic local-echo state, all guarded by [itemLock] (same lock as
@@ -315,8 +358,34 @@ class ConversationController(
         answerWatchdogJob = null
     }
 
+    /**
+     * UC-86 — lift BOTH suppression guards together (two boolean assignments; never wipes the
+     * store). Called from the `backfill-start` handlers so an overlapping `/clear` + target-switch
+     * (both guards armed) can't strand one guard set forever — which would silently drop all later
+     * live frames. The clear path still performs its own [clearItems]; this only flips the flags.
+     */
+    private fun liftAllSuppressGuards() {
+        clearSuppressActive = false
+        switchSuppressActive = false
+    }
+
     /** AC17 — switch the tailed/inject target; clear the view for the new target's transcript. */
     fun selectTarget(targetId: String) {
+        // UC-86 — arm the target-switch suppression guard as the FIRST action, BEFORE the
+        // clearItems() below, so the OLD target's still-buffered live content frames that race in
+        // between the wipe and the new target's backfill-start are dropped instead of landing on
+        // the freshly-cleared store (the view-bleed defect). The normal lift is the new target's
+        // backfill-start handler; this timed fallback lifts the guard if no backfill-start arrives.
+        switchSuppressActive = true
+        scope.launch {
+            delay(CLEAR_SUPPRESS_MS)
+            switchSuppressActive = false
+        }
+        // Agent-switcher fix — a target switch opens a fresh transcript window: bump the epoch so
+        // any in-flight `load-older` page requested for the OLD target is recognised as stale (and
+        // drained) when its `page-start` lands after the switch, instead of grafting the old
+        // target's history into the new target's store.
+        transcriptEpoch++
         _selectedTargetId.value = targetId
         clearItems()
         closeDetail() // the open dialog belongs to the old target's tool call
@@ -385,6 +454,10 @@ class ConversationController(
      */
     fun clear() {
         val hadSheet = _pendingSheet.value != null
+        // Agent-switcher fix — a `/clear` wipes the window, so bump the epoch: an in-flight
+        // `load-older` page must not repopulate the just-cleared transcript when its (now stale)
+        // `page-start` arrives.
+        transcriptEpoch++
         // Arm the guard BEFORE sending so a fast `/clear` echo is caught (AC3).
         clearSuppressActive = true
         scope.launch {
@@ -457,6 +530,10 @@ class ConversationController(
     fun loadOlder() {
         if (_atTranscriptStart.value || _loadingOlder.value) return
         _loadingOlder.value = true
+        // Agent-switcher fix — capture the epoch at request time. If the transcript window resets
+        // (target switch / `/clear` / `backfill-start`) before this page's `page-start` arrives,
+        // the captured epoch will no longer match and the page is drained as stale.
+        pageRequestEpoch = transcriptEpoch
         if (client?.sendLoadOlder() != true) {
             _loadingOlder.value = false
         }
@@ -497,19 +574,49 @@ class ConversationController(
     private fun onFrame(text: String) {
         val obj = runCatching { json.parseToJsonElement(text) }.getOrNull() as? JsonObject ?: return
         val type = obj["type"]?.jsonPrimitive?.contentOrNull
+        // Agent-switcher fix — a `backfill-start` opens a fresh transcript window and must be
+        // handled BEFORE the page / discard gates below, so a new target's (or a reconnect's)
+        // backfill can never be swallowed by an in-flight stale-page drain. Bump the epoch (any
+        // page requested for the prior window is now stale) and force-reset all page/discard
+        // state, then FALL THROUGH to the normal `backfill-start` handling (which resets the
+        // backfill flags and renders the fresh window).
+        if (type == "backfill-start") {
+            resetPagingForNewWindow()
+        }
         // UC-79 — older-page (infinite scroll) frames. page-start/page-end bracket a run of
         // purely HISTORICAL frames that must ONLY add (prepended) items — never disarm the
         // answer watchdog, touch the clear guard, the turn phase, the pending sheet, or the
         // live spinner. Handle them (and any frame arriving while a page is open) up front.
         when (type) {
             "page-start" -> {
-                beginPage()
+                // Agent-switcher fix — if the captured request epoch no longer matches the live
+                // epoch, this page was requested for a prior target/window. Drain & DROP the whole
+                // burst (DISCARD) so it can't leak into the current transcript; otherwise assemble
+                // it normally.
+                if (pageRequestEpoch != transcriptEpoch) {
+                    beginPageDiscard()
+                } else {
+                    beginPage()
+                }
                 return
             }
             "page-end" -> {
-                endPage(obj["atStart"]?.jsonPrimitive?.booleanOrNull ?: false)
+                if (pageDiscarding) {
+                    endPageDiscard()
+                } else {
+                    endPage(obj["atStart"]?.jsonPrimitive?.booleanOrNull ?: false)
+                }
                 return
             }
+        }
+        // Agent-switcher fix — while draining a stale page, drop only its CONTENT frames (which
+        // would otherwise leak the prior window's history). Window/control frames must still be
+        // processed so the drain can't freeze the switcher: `targets`/`target-selected` keep the
+        // agent list + selection live (the 3 s enumerate poll keeps firing during a drain), and
+        // `backfill-end` belongs to the CURRENT window's replay, not the stale page. `backfill-start`
+        // is exempt too — it was already handled (epoch bump + reset) before this gate.
+        if (pageDiscarding && type !in PAGE_DRAIN_PASSTHROUGH) {
+            return
         }
         if (pageMode) {
             handlePageFrame(type, obj)
@@ -526,15 +633,13 @@ class ConversationController(
         // Control frames (targets/selection/turn boundaries/errors) fall through untouched.
         if (clearSuppressActive) {
             when (type) {
-                "turn-start", "thinking", "assistant-text", "teammate-message", "tool-use", "tool-result",
-                "system-note", "question", "plan-approval", "pending-question",
-                -> return
+                in SUPPRESSED_CONTENT_FRAMES -> return
                 // Defensive: a fresh transcript stream beginning under the guard means the
-                // session is replaying its (now post-clear) history — re-wipe, lift the guard,
+                // session is replaying its (now post-clear) history — re-wipe, lift the guards,
                 // and let the backfill render the clean transcript from the start.
                 "backfill-start" -> {
                     clearItems()
-                    clearSuppressActive = false
+                    liftAllSuppressGuards() // UC-86 (Q5) — lift BOTH guards so an overlapping switch isn't stranded
                     _backfilling.value = true
                     _atTranscriptStart.value = false // UC-79 — fresh window, paging re-enabled
                     _loadingOlder.value = false
@@ -542,6 +647,21 @@ class ConversationController(
                 }
                 // targets, target-selected, backfill-end, pending-clear, turn-end, error → pass
                 else -> { /* fall through to normal handling */ }
+            }
+        }
+        // UC-86 — target-switch suppression. While a switch is pending (armed by [selectTarget]
+        // BEFORE its clearItems(); lifted by the new target's backfill-start or the
+        // CLEAR_SUPPRESS_MS timed fallback), drop the OLD target's still-buffered live CONTENT
+        // frames that arrive between the wipe and the new backfill-start — they would otherwise
+        // land on the freshly-cleared store and bleed the old target's content into the new view.
+        // Unlike the clear guard above, this does NOT clearItems(): the stale frames are already
+        // dropped so the store stays clean, AND not wiping preserves the UC-45 optimistic echo
+        // (written directly to itemMap by a submit, not via onFrame). `backfill-start` is
+        // deliberately NOT dropped — it falls through to the main handler, which lifts the guard.
+        if (switchSuppressActive) {
+            when (type) {
+                in SUPPRESSED_CONTENT_FRAMES -> return
+                else -> { /* control frames (incl. backfill-start) pass through */ }
             }
         }
         when (type) {
@@ -669,9 +789,12 @@ class ConversationController(
                 republishSelectedModel(it) // UC-66 — keep the highlighted model in sync with the target
             }
             "backfill-start" -> {
+                // UC-86 — the new target's window is starting: lift BOTH suppression guards (the
+                // immediate lift for the normal switch case). NO clearItems() here — the switch
+                // drop-block above already dropped the old target's buffered content frames, so the
+                // store is clean, and not wiping preserves the UC-45 optimistic echo.
+                liftAllSuppressGuards()
                 _backfilling.value = true
-                // UC-79 — a fresh/re-seeded window: the server re-seeds its oldest-line cursor,
-                // so reset our paging flags (older history may now exist again; nothing in flight).
                 _atTranscriptStart.value = false
                 _loadingOlder.value = false
             }
@@ -757,6 +880,43 @@ class ConversationController(
             pageKeys.clear()
         }
         _loadingOlder.value = true
+    }
+
+    /**
+     * Agent-switcher fix — enter the stale-page DRAIN: the `page-start` that just arrived belongs
+     * to a `load-older` requested for a prior transcript window/target. Every subsequent frame is
+     * dropped (see the [onFrame] discard gate) until the matching `page-end`. Deliberately does
+     * NOT raise [_loadingOlder] or touch any item/turn state — the affordance and store belong to
+     * the CURRENT window, which the originating switch/`backfill-start` already reset.
+     */
+    private fun beginPageDiscard() {
+        synchronized(itemLock) {
+            pageDiscarding = true
+            pageMode = false
+            pageKeys.clear()
+        }
+    }
+
+    /** Agent-switcher fix — end the stale-page drain at its `page-end`; the burst was fully dropped. */
+    private fun endPageDiscard() {
+        synchronized(itemLock) {
+            pageDiscarding = false
+        }
+    }
+
+    /**
+     * Agent-switcher fix — a `backfill-start` opened a fresh transcript window. Bump the epoch so
+     * any in-flight `load-older` page is recognised as stale, and tear down any page-assembly or
+     * stale-page drain in progress so a leftover burst from the prior window cannot leak. Items are
+     * NOT touched here — the `backfill-start` handler / replay owns the store content.
+     */
+    private fun resetPagingForNewWindow() {
+        transcriptEpoch++
+        synchronized(itemLock) {
+            pageMode = false
+            pageDiscarding = false
+            pageKeys.clear()
+        }
     }
 
     /**
@@ -1038,6 +1198,8 @@ class ConversationController(
             // UC-79 — wiping the store ends any page in progress and re-enables paging for the
             // new transcript; its backfill-start re-seeds the cursor and these flags.
             pageMode = false
+            // Agent-switcher fix — also end any stale-page drain; the wipe supersedes it.
+            pageDiscarding = false
             pageKeys.clear()
             _items.value = emptyList()
         }
@@ -1155,5 +1317,26 @@ class ConversationController(
         private val ANSWER_PROGRESS_FRAMES = setOf(
             "turn-start", "thinking", "assistant-text", "tool-use", "tool-result", "turn-end", "backfill-start",
         )
+
+        /**
+         * UC-65 / UC-86 — the item-adding ("content") frame types that BOTH suppression guards drop
+         * while armed. Shared by the [clearSuppressActive] guard-block and the [switchSuppressActive]
+         * drop-block so the two can never drift. Control frames (targets/target-selected/turn
+         * boundaries/backfill-start/backfill-end/pending-clear/error) are deliberately absent — they
+         * must always pass through (notably `backfill-start`, which is what LIFTS the guards).
+         */
+        private val SUPPRESSED_CONTENT_FRAMES = setOf(
+            "turn-start", "thinking", "assistant-text", "teammate-message", "tool-use", "tool-result",
+            "system-note", "question", "plan-approval", "pending-question",
+        )
+
+        /**
+         * Agent-switcher fix — window/control frame types allowed THROUGH the stale-page discard
+         * drain (everything else in the burst is dropped). These carry no transcript content, so
+         * they cannot leak the prior window's history; suppressing them would instead freeze the
+         * switcher's target list / selection while a stale page drains. (`backfill-start` is not
+         * listed: it is handled — epoch bump + full page-state reset — before the discard gate.)
+         */
+        private val PAGE_DRAIN_PASSTHROUGH = setOf("targets", "target-selected", "backfill-end")
     }
 }

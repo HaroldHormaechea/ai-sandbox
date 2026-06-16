@@ -1295,7 +1295,15 @@ class ConversationControllerTest {
             assertThat(awaitUntil { userMessages(c).size == 1 }).isTrue
             c.selectTarget("swarm:main:0.1") // clears items + pendingEchoes + reconciledServerKeys
             assertThat(c.items.value).isEmpty()
-            wsRef.get()!!.send(
+            // UC-86 — the switch-suppress guard is now active; lift it via backfill-start,
+            // exactly as the real server always does immediately after processing select-target.
+            // Only after the guard lifts can the new-target turn-start be processed (the guard
+            // deliberately suppresses all content frames before this, to prevent bleed).
+            val ws = wsRef.get()!!
+            ws.send("""{"type":"backfill-start","source":"main"}""")
+            ws.send("""{"type":"backfill-end","source":"main"}""")
+            assertThat(awaitUntil { !c.backfilling.value }).isTrue
+            ws.send(
                 """{"type":"turn-start","uuid":"u9","source":"main","isSidechain":false,"text":"fresh"}""",
             )
             assertThat(awaitUntil { userMessages(c).size == 1 }).isTrue
@@ -1719,23 +1727,35 @@ class ConversationControllerTest {
         // AC2/AC6 — the loaded window holds [win-a, win-b]; an older page brings [old-1, old-2]
         // plus an OVERLAP line (same key as win-a). At page-end the page's items are prepended in
         // arrival (oldest→newest) order ABOVE the window, and the overlap is deduped (one render).
-        enqueuePush(
+        // Agent-switcher fix — the page is requested via loadOlder() so it carries the live
+        // window's transcriptEpoch (the server emits page-start ONLY in response to load-older —
+        // SessionConversationHandler.loadOlder), exactly as in production. A two-phase capture
+        // delivers the backfill window first, then the requested page, so the epoch matches.
+        val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        enqueueCapture(wsRef)
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { c.state.value == TerminalState.Open && wsRef.get() != null }).isTrue
+            val ws = wsRef.get()!!
             listOf(
                 """{"type":"backfill-start","source":"main"}""",
                 """{"type":"assistant-text","uuid":"wa","source":"main","isSidechain":false,"text":"win-a"}""",
                 """{"type":"assistant-text","uuid":"wb","source":"main","isSidechain":false,"text":"win-b"}""",
                 """{"type":"backfill-end","source":"main"}""",
+            ).forEach { ws.send(it) }
+            assertThat(awaitUntil { assistantTexts(c) == listOf("win-a", "win-b") }).isTrue
+            // User scrolls up → request the older page (captures the live window's epoch).
+            c.loadOlder()
+            assertThat(awaitUntil { c.loadingOlder.value }).isTrue
+            listOf(
                 """{"type":"page-start"}""",
                 """{"type":"assistant-text","uuid":"o1","source":"main","isSidechain":false,"text":"old-1"}""",
                 """{"type":"assistant-text","uuid":"o2","source":"main","isSidechain":false,"text":"old-2"}""",
                 // Overlap with the window's win-a (same uuid+text → same key) — must dedupe (AC6).
                 """{"type":"assistant-text","uuid":"wa","source":"main","isSidechain":false,"text":"win-a"}""",
                 """{"type":"page-end","atStart":false}""",
-            ),
-        )
-        val c = networkedController()
-        c.attach(7)
-        try {
+            ).forEach { ws.send(it) }
             assertThat(awaitUntil { assistantTexts(c) == listOf("old-1", "old-2", "win-a", "win-b") })
                 .withFailMessage("expected prepended+deduped order, got ${assistantTexts(c)}")
                 .isTrue
@@ -1752,21 +1772,30 @@ class ConversationControllerTest {
         // AC6 — the window already holds the tool_result for X (a result-first placeholder row);
         // an older page brings the matching tool_use for X. They must merge into ONE ToolActivity
         // (keyed on toolUseId), and that merged row moves to its correct OLDER position in the page.
-        enqueuePush(
+        // Agent-switcher fix — the page is requested via loadOlder() so it carries the live
+        // window's epoch (server emits page-start only in response to load-older), as in production.
+        val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        enqueueCapture(wsRef)
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { c.state.value == TerminalState.Open && wsRef.get() != null }).isTrue
+            val ws = wsRef.get()!!
             listOf(
                 """{"type":"backfill-start","source":"main"}""",
                 """{"type":"tool-result","uuid":"tr","source":"main","isSidechain":false,"toolUseId":"X","isError":false,"summary":"RESULT"}""",
                 """{"type":"assistant-text","uuid":"wb","source":"main","isSidechain":false,"text":"win-b"}""",
                 """{"type":"backfill-end","source":"main"}""",
+            ).forEach { ws.send(it) }
+            assertThat(awaitUntil { c.items.value.size == 2 }).isTrue
+            c.loadOlder()
+            assertThat(awaitUntil { c.loadingOlder.value }).isTrue
+            listOf(
                 """{"type":"page-start"}""",
                 """{"type":"assistant-text","uuid":"o1","source":"main","isSidechain":false,"text":"old-1"}""",
                 """{"type":"tool-use","uuid":"tu","source":"main","isSidechain":false,"toolName":"Bash","toolUseId":"X","inputSummary":"ls -la","primaryText":""}""",
                 """{"type":"page-end","atStart":false}""",
-            ),
-        )
-        val c = networkedController()
-        c.attach(7)
-        try {
+            ).forEach { ws.send(it) }
             // 3 rows total: old-1, the single merged tool row, win-b (no duplicate tool row).
             assertThat(awaitUntil { c.items.value.size == 3 })
                 .withFailMessage("expected 3 rows, got ${c.items.value.map { it.key }}")
@@ -1814,18 +1843,27 @@ class ConversationControllerTest {
         // AC4 — a page that prepends NOTHING (cursor already at 0 server-side) is delivered as a
         // page-start immediately followed by page-end(atStart=true) with no frames. The loading
         // affordance still clears and the controller reaches atTranscriptStart (no hang).
-        enqueuePush(
+        // Agent-switcher fix — the page is requested via loadOlder() so it carries the live
+        // window's epoch (server emits page-start only in response to load-older), as in production.
+        val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        enqueueCapture(wsRef)
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { c.state.value == TerminalState.Open && wsRef.get() != null }).isTrue
+            val ws = wsRef.get()!!
             listOf(
                 """{"type":"backfill-start","source":"main"}""",
                 """{"type":"assistant-text","uuid":"wa","source":"main","isSidechain":false,"text":"only"}""",
                 """{"type":"backfill-end","source":"main"}""",
+            ).forEach { ws.send(it) }
+            assertThat(awaitUntil { assistantTexts(c) == listOf("only") }).isTrue
+            c.loadOlder()
+            assertThat(awaitUntil { c.loadingOlder.value }).isTrue
+            listOf(
                 """{"type":"page-start"}""",
                 """{"type":"page-end","atStart":true}""",
-            ),
-        )
-        val c = networkedController()
-        c.attach(7)
-        try {
+            ).forEach { ws.send(it) }
             assertThat(awaitUntil { c.atTranscriptStart.value }).isTrue
             assertThat(awaitUntil { !c.loadingOlder.value }).isTrue
             // The existing window is untouched by an empty page.
@@ -1886,6 +1924,776 @@ class ConversationControllerTest {
             wsRef.get()!!.send("""{"type":"backfill-start","source":"main"}""")
             assertThat(awaitUntil { !c.atTranscriptStart.value }).isTrue
             assertThat(c.loadingOlder.value).isFalse
+        } finally {
+            c.close()
+        }
+    }
+
+    // ──────────── Part H — agent-switcher selection fix: stale-page epoch drain ─────────────
+    //
+    // THE regression: "every member shows the same conversation". The UC-79 older-page machinery
+    // was not target/epoch-aware — a `load-older` page requested for target A could land AFTER a
+    // switch to B (or a reconnect/`backfill-start`), and the burst then either grafted A's history
+    // into B's store or swallowed B's own `backfill-start`. The fix adds a monotonic
+    // [transcriptEpoch] (bumped on selectTarget / clear / every `backfill-start`), captured at
+    // `load-older` send-time and re-checked at `page-start`: a mismatch marks the page STALE and
+    // drains its whole burst (dropping CONTENT only — `targets`/`target-selected`/`backfill-end`
+    // pass through), while `backfill-start` is handled BEFORE the drain gate so a fresh window can
+    // never be swallowed. These guards pin that behaviour; the private page-state flags
+    // (pageMode/pageDiscarding) are asserted BEHAVIOURALLY — a later live line must render — since
+    // they are not exposed.
+
+    @Test
+    fun `a stale older page for the prior target is fully discarded after switching, including its content`() {
+        // Guard 1 — a load-older page requested on target A lands AFTER the user switched to B and
+        // B's backfill rendered. The whole stale burst (page-start, the page's assistant-text +
+        // tool-use CONTENT, page-end) is drained and dropped, so A's history never leaks into B's
+        // transcript; B's window + selection stay intact and a later live B line still renders
+        // (proving the drain and page-assembly state were both cleared).
+        val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        enqueueCapture(wsRef)
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { c.state.value == TerminalState.Open && wsRef.get() != null }).isTrue
+            val ws = wsRef.get()!!
+            // On target A the user scrolls up → an older page is requested (captures the epoch).
+            c.loadOlder()
+            assertThat(awaitUntil { c.loadingOlder.value }).isTrue
+            // The user switches to B before the page arrives → fresh window (epoch bumps).
+            c.selectTarget("swarm:main:0.1")
+            // B's backfill renders its own two lines (its backfill-start bumps the epoch again).
+            listOf(
+                """{"type":"backfill-start","source":"main"}""",
+                """{"type":"assistant-text","uuid":"b1","source":"main","isSidechain":false,"text":"b1"}""",
+                """{"type":"assistant-text","uuid":"b2","source":"main","isSidechain":false,"text":"b2"}""",
+                """{"type":"backfill-end","source":"main"}""",
+            ).forEach { ws.send(it) }
+            assertThat(awaitUntil { assistantTexts(c) == listOf("b1", "b2") })
+                .withFailMessage("B backfill did not render; got ${assistantTexts(c)}")
+                .isTrue
+            // Now the STALE page for A lands (requested for the prior window): page-start, CONTENT
+            // (assistant-text + tool-use), page-end — every frame must be drained/dropped.
+            listOf(
+                """{"type":"page-start"}""",
+                """{"type":"assistant-text","uuid":"a0","source":"main","isSidechain":false,"text":"a0"}""",
+                """{"type":"tool-use","uuid":"at","source":"main","isSidechain":false,"toolName":"Bash",""" +
+                    """"toolUseId":"aT","inputSummary":"ls","primaryText":"ls"}""",
+                """{"type":"page-end","atStart":false}""",
+            ).forEach { ws.send(it) }
+            // A subsequent LIVE line for B proves the drain ended cleanly (pageDiscarding cleared)
+            // and the live path is active again (pageMode false → it publishes immediately).
+            ws.send("""{"type":"assistant-text","uuid":"b3","source":"main","isSidechain":false,"text":"b3"}""")
+            assertThat(awaitUntil { assistantTexts(c) == listOf("b1", "b2", "b3") })
+                .withFailMessage("stale A page leaked / live B frame lost; items=${c.items.value.map { it.key }}")
+                .isTrue
+            // No A content survived: the stale tool-use never created a row, and B is still selected.
+            assertThat(c.items.value.none { it is ConversationItem.ToolActivity }).isTrue
+            assertThat(c.selectedTargetId.value).isEqualTo("swarm:main:0.1")
+            assertThat(c.loadingOlder.value).isFalse
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
+    fun `B's backfill-start clears a stale-page drain even with interleaved stale content`() {
+        // Guard 2 — the page for A begins draining (stale), an interleaved stale CONTENT line is
+        // dropped, then B's backfill-start arrives BEFORE the stale page's page-end. backfill-start
+        // is handled (epoch bump + full page-state reset) BEFORE the discard gate, so it can never
+        // be swallowed by the drain: B's window renders cleanly and the drain is cleared.
+        val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        enqueueCapture(wsRef)
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { c.state.value == TerminalState.Open && wsRef.get() != null }).isTrue
+            val ws = wsRef.get()!!
+            c.loadOlder() // on A — captures the current epoch
+            assertThat(awaitUntil { c.loadingOlder.value }).isTrue
+            c.selectTarget("swarm:main:0.1") // epoch bump → the in-flight page is now stale
+            listOf(
+                // Stale page for A starts draining; the interleaved stale CONTENT line is dropped …
+                """{"type":"page-start"}""",
+                """{"type":"assistant-text","uuid":"a0","source":"main","isSidechain":false,"text":"stale-a0"}""",
+                // … then B's backfill-start lands (NO page-end for the stale page) and must NOT be swallowed.
+                """{"type":"backfill-start","source":"main"}""",
+                """{"type":"assistant-text","uuid":"b1","source":"main","isSidechain":false,"text":"b1"}""",
+                """{"type":"assistant-text","uuid":"b2","source":"main","isSidechain":false,"text":"b2"}""",
+                """{"type":"backfill-end","source":"main"}""",
+            ).forEach { ws.send(it) }
+            assertThat(awaitUntil { assistantTexts(c) == listOf("b1", "b2") })
+                .withFailMessage("B backfill swallowed or stale A content leaked; got ${assistantTexts(c)}")
+                .isTrue
+            // The drain was cleared by backfill-start: a later live line renders normally.
+            ws.send("""{"type":"assistant-text","uuid":"b3","source":"main","isSidechain":false,"text":"b3"}""")
+            assertThat(awaitUntil { assistantTexts(c) == listOf("b1", "b2", "b3") })
+                .withFailMessage("stale drain not cleared by backfill-start; got ${assistantTexts(c)}")
+                .isTrue
+            assertThat(c.selectedTargetId.value).isEqualTo("swarm:main:0.1")
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
+    fun `bare stale content frames during a page drain are dropped from the store`() {
+        // Guard 3 — while a stale page is draining (pageDiscarding), the discard gate drops every
+        // CONTENT frame (assistant-text / thinking / tool-use / tool-result) so the prior window's
+        // history can never leak into the freshly-switched transcript. A later live line is then
+        // the FIRST and only item, proving the burst added nothing.
+        val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        enqueueCapture(wsRef)
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { c.state.value == TerminalState.Open && wsRef.get() != null }).isTrue
+            val ws = wsRef.get()!!
+            c.loadOlder() // on A — captures the current epoch
+            assertThat(awaitUntil { c.loadingOlder.value }).isTrue
+            c.selectTarget("swarm:main:0.1") // epoch bump → the in-flight page is now stale
+            assertThat(c.items.value).isEmpty()
+            listOf(
+                """{"type":"page-start"}""",
+                """{"type":"assistant-text","uuid":"c1","source":"main","isSidechain":false,"text":"ghost-text"}""",
+                """{"type":"thinking","uuid":"c2","source":"main","isSidechain":false,"text":"ghost-think"}""",
+                """{"type":"tool-use","uuid":"c3","source":"main","isSidechain":false,"toolName":"Bash",""" +
+                    """"toolUseId":"gT","inputSummary":"x","primaryText":"x"}""",
+                """{"type":"tool-result","uuid":"c4","source":"main","isSidechain":false,""" +
+                    """"toolUseId":"gT","isError":false,"summary":"y"}""",
+                """{"type":"page-end","atStart":false}""",
+            ).forEach { ws.send(it) }
+            // Assert the epoch/pageDiscarding gate dropped all stale page content FIRST.
+            assertThat(awaitUntil { !c.loadingOlder.value }).isTrue // page-end processed
+            assertThat(c.items.value).isEmpty() // stale burst all dropped by the epoch/pageDiscarding gate
+            // UC-86 — switchSuppressActive is still armed at this point (endPageDiscard() does not
+            // lift it by design; only backfill-start does). Deliver backfill-start/end to lift the
+            // guard exactly as the real server does after processing the target switch.
+            listOf(
+                """{"type":"backfill-start","source":"main"}""",
+                """{"type":"backfill-end","source":"main"}""",
+            ).forEach { ws.send(it) }
+            assertThat(awaitUntil { !c.backfilling.value }).isTrue
+            // NOW the live line arrives — only then does it pass the (now-lifted) switch guard.
+            ws.send("""{"type":"assistant-text","uuid":"live","source":"main","isSidechain":false,"text":"live"}""")
+            assertThat(awaitUntil { assistantTexts(c) == listOf("live") })
+                .withFailMessage("stale content leaked; items=${c.items.value.map { it.key }}")
+                .isTrue
+            assertThat(c.items.value.none { it is ConversationItem.ToolActivity }).isTrue // gT dropped
+            assertThat(c.items.value).hasSize(1)
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
+    fun `legit same-window paging still prepends older history in order (epoch match, no regression)`() {
+        // Guard 4 (UC-79 no-regression) — a load-older page requested AND delivered within the SAME
+        // transcript window (no target switch / clear / backfill between the request and the page)
+        // matches the captured epoch, so it is ASSEMBLED (not discarded) and prepended in order.
+        // Drives a real loadOlder() so the epoch-match path is genuinely exercised.
+        val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        enqueueCapture(wsRef)
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { c.state.value == TerminalState.Open && wsRef.get() != null }).isTrue
+            val ws = wsRef.get()!!
+            // Render the live window first.
+            listOf(
+                """{"type":"backfill-start","source":"main"}""",
+                """{"type":"assistant-text","uuid":"wa","source":"main","isSidechain":false,"text":"win-a"}""",
+                """{"type":"assistant-text","uuid":"wb","source":"main","isSidechain":false,"text":"win-b"}""",
+                """{"type":"backfill-end","source":"main"}""",
+            ).forEach { ws.send(it) }
+            assertThat(awaitUntil { assistantTexts(c) == listOf("win-a", "win-b") }).isTrue
+            // User scrolls up → request an older page (captures the CURRENT epoch).
+            c.loadOlder()
+            assertThat(awaitUntil { c.loadingOlder.value }).isTrue
+            // The page arrives in the SAME window (epoch unchanged) → assembled, not discarded.
+            listOf(
+                """{"type":"page-start"}""",
+                """{"type":"assistant-text","uuid":"o1","source":"main","isSidechain":false,"text":"old-1"}""",
+                """{"type":"assistant-text","uuid":"o2","source":"main","isSidechain":false,"text":"old-2"}""",
+                """{"type":"page-end","atStart":false}""",
+            ).forEach { ws.send(it) }
+            assertThat(awaitUntil { assistantTexts(c) == listOf("old-1", "old-2", "win-a", "win-b") })
+                .withFailMessage("legit same-window paging broke; got ${assistantTexts(c)}")
+                .isTrue
+            assertThat(awaitUntil { !c.loadingOlder.value }).isTrue
+            assertThat(c.atTranscriptStart.value).isFalse
+        } finally {
+            c.close()
+        }
+    }
+
+    // ── Part H (optional edge cases, per the developer's change notes) ──────────────────────────
+    // These pin CURRENT behaviour for two orderings the approved design treats as out-of-scope
+    // because real server flows do not produce them. They are documentation guards: if the contract
+    // is ever tightened around these orderings, they will flag the change for review.
+
+    @Test
+    fun `a server target-selected frame is a selection echo, not a window reset, so a same-epoch page still assembles`() {
+        // Edge case (a) — a server-pushed `target-selected` frame only updates the selected target
+        // label; it does NOT bump transcriptEpoch (it is not a transcript-window reset, and it does
+        // not wipe the store). So an in-flight load-older page requested in the SAME epoch still
+        // matches and assembles onto the still-displayed window. In real flows a `backfill-start`
+        // ALWAYS follows the selection and IS the window reset (it bumps the epoch + re-renders).
+        val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        enqueueCapture(wsRef)
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { c.state.value == TerminalState.Open && wsRef.get() != null }).isTrue
+            val ws = wsRef.get()!!
+            // Render the current window (A).
+            listOf(
+                """{"type":"backfill-start","source":"main"}""",
+                """{"type":"assistant-text","uuid":"a1","source":"main","isSidechain":false,"text":"a1"}""",
+                """{"type":"assistant-text","uuid":"a2","source":"main","isSidechain":false,"text":"a2"}""",
+                """{"type":"backfill-end","source":"main"}""",
+            ).forEach { ws.send(it) }
+            assertThat(awaitUntil { assistantTexts(c) == listOf("a1", "a2") }).isTrue
+            c.loadOlder() // captures the live epoch
+            assertThat(awaitUntil { c.loadingOlder.value }).isTrue
+            // A server `target-selected` echo arrives (no trailing backfill) — selection updates,
+            // but the epoch is NOT bumped, so the in-flight page is NOT stale.
+            ws.send("""{"type":"target-selected","targetId":"swarm:main:0.1"}""")
+            assertThat(awaitUntil { c.selectedTargetId.value == "swarm:main:0.1" }).isTrue
+            listOf(
+                """{"type":"page-start"}""",
+                """{"type":"assistant-text","uuid":"o1","source":"main","isSidechain":false,"text":"old-1"}""",
+                """{"type":"assistant-text","uuid":"o2","source":"main","isSidechain":false,"text":"old-2"}""",
+                """{"type":"page-end","atStart":false}""",
+            ).forEach { ws.send(it) }
+            // The page assembled (epoch matched) — pinning that target-selected alone is not a reset.
+            assertThat(awaitUntil { assistantTexts(c) == listOf("old-1", "old-2", "a1", "a2") })
+                .withFailMessage("target-selected wrongly treated as a window reset; got ${assistantTexts(c)}")
+                .isTrue
+            assertThat(awaitUntil { !c.loadingOlder.value }).isTrue
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
+    fun `a mid-burst backfill-start clears the drain and B's window survives a trailing stale page-end`() {
+        // Edge case (b) — a `backfill-start` arriving BETWEEN a stale `page-start` and its `page-end`
+        // clears `pageDiscarding` (it is handled before the discard gate), so the trailing stale
+        // `page-end` then takes the normal endPage() path. The load-bearing invariant: B's freshly
+        // backfilled window is NEVER corrupted — the stale page's content does not leak and B renders
+        // cleanly. (Server bursts are contiguous, so this interleaving is not expected live; the
+        // atTranscriptStart side-effect of the trailing page-end is the documented out-of-scope quirk.)
+        val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        enqueueCapture(wsRef)
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { c.state.value == TerminalState.Open && wsRef.get() != null }).isTrue
+            val ws = wsRef.get()!!
+            c.loadOlder() // on A — captures the current epoch
+            assertThat(awaitUntil { c.loadingOlder.value }).isTrue
+            c.selectTarget("swarm:main:0.1") // epoch bump → the in-flight page is now stale
+            listOf(
+                // Stale page begins draining; an interleaved stale CONTENT line is dropped …
+                """{"type":"page-start"}""",
+                """{"type":"assistant-text","uuid":"sx","source":"main","isSidechain":false,"text":"stale-x"}""",
+                // … then B's backfill-start lands mid-burst (clears the drain) and renders B …
+                """{"type":"backfill-start","source":"main"}""",
+                """{"type":"assistant-text","uuid":"b1","source":"main","isSidechain":false,"text":"b1"}""",
+                """{"type":"assistant-text","uuid":"b2","source":"main","isSidechain":false,"text":"b2"}""",
+                """{"type":"backfill-end","source":"main"}""",
+                // … and only NOW the stale page-end arrives (drain already cleared → endPage path).
+                """{"type":"page-end","atStart":true}""",
+            ).forEach { ws.send(it) }
+            // Load-bearing invariant: B's window is intact and the stale page's content never leaked.
+            assertThat(awaitUntil { assistantTexts(c) == listOf("b1", "b2") })
+                .withFailMessage("B window corrupted by the interleaving; got ${assistantTexts(c)}")
+                .isTrue
+            assertThat(c.selectedTargetId.value).isEqualTo("swarm:main:0.1")
+            // A later live line still renders (the controller is not wedged in a drain).
+            ws.send("""{"type":"assistant-text","uuid":"b3","source":"main","isSidechain":false,"text":"b3"}""")
+            assertThat(awaitUntil { assistantTexts(c) == listOf("b1", "b2", "b3") }).isTrue
+            // Documented out-of-scope quirk: the trailing stale page-end(atStart=true) took the
+            // endPage path and flipped atTranscriptStart on B's window. Pinned so any future change
+            // to make page-end epoch-aware surfaces here for review.
+            assertThat(c.atTranscriptStart.value)
+                .withFailMessage("known quirk changed: trailing stale page-end no longer sets atTranscriptStart")
+                .isTrue
+        } finally {
+            c.close()
+        }
+    }
+
+    // ──────────── Part I — UC-86 reproduction: conversation bleed and broken pills ─────────────
+    //
+    // THE BUG (android-v0.4.15 regression, both symptoms):
+    //
+    // (1) VIEW BLEED — after the user taps a different agent pill, live content frames from
+    //     the OLD target that the server had already buffered arrive at the client AFTER
+    //     selectTarget() called clearItems(). Because clearItems() does NOT arm any
+    //     suppression guard, these "in-flight" frames are added to the now-empty store,
+    //     contaminating the new target's transcript with the old target's content.
+    //
+    // (2) PILL NAVIGATION BROKEN — this same unsuppressed arrival of stale content is
+    //     exactly what makes a pill-tap appear to "not work": the view switches from A
+    //     to B, clearItems empties the list, but A's still-buffered line(s) immediately
+    //     re-populate it.  The user sees content that belongs to A in B's window.
+    //
+    // ROOT CAUSE: selectTarget() calls clearItems() and sendSelectTarget(), but does NOT
+    // arm a "switch suppress" guard analogous to the clearSuppressActive guard that
+    // UC-65's /clear uses.  The /clear handler sets clearSuppressActive = true, which
+    // drops every content frame until backfill-start re-clears the store; selectTarget()
+    // has no equivalent, so any live frame from the prior target that arrives in the
+    // window between clearItems() and the server's backfill-start lands in the store.
+    //
+    // Fix (not yet applied — this is the Phase-0 failing repro):
+    // selectTarget() must arm a per-switch suppression flag (or reuse/generalise
+    // clearSuppressActive) so that "turn-start", "assistant-text", "thinking",
+    // "teammate-message", "tool-use", "tool-result", "system-note" frames arriving
+    // before the next backfill-start are dropped, and backfill-start re-clears the store
+    // (already done for the clearSuppressActive path at onFrame line ~606).
+
+    @Test
+    fun `UC-86 repro (1) - live frame from old target that arrives after selectTarget contaminates new target transcript`() {
+        // Scenario: agent A has a live assistant-text frame that the server buffers just
+        // before processing the client's select-target.  That frame arrives at the client
+        // AFTER selectTarget("B") called clearItems().  It must be DROPPED (not added to
+        // B's now-empty store).  Without a switch-suppress guard the test fails because
+        // the stale frame is kept, and B's backfill is then appended below it.
+        val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        enqueueCapture(wsRef)
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { c.state.value == TerminalState.Open && wsRef.get() != null }).isTrue
+            val ws = wsRef.get()!!
+
+            // Agent A's initial backfill renders.
+            listOf(
+                """{"type":"backfill-start","source":"main"}""",
+                """{"type":"assistant-text","uuid":"a1","source":"main","isSidechain":false,"text":"A-history"}""",
+                """{"type":"backfill-end","source":"main"}""",
+            ).forEach { ws.send(it) }
+            assertThat(awaitUntil { assistantTexts(c) == listOf("A-history") }).isTrue
+
+            // User taps agent B pill → clearItems() runs client-side; select-target sent to server.
+            c.selectTarget("swarm:main:0.1")
+            assertThat(c.items.value).isEmpty()
+
+            // A stale live frame from A arrives BEFORE the server's backfill-start for B
+            // (server had buffered it before processing the select-target command).
+            ws.send(
+                """{"type":"assistant-text","uuid":"a-stale","source":"main","isSidechain":false,"text":"A-stale-leak"}""",
+            )
+
+            // B's backfill arrives.
+            listOf(
+                """{"type":"backfill-start","source":"main"}""",
+                """{"type":"assistant-text","uuid":"b1","source":"main","isSidechain":false,"text":"B-content"}""",
+                """{"type":"backfill-end","source":"main"}""",
+            ).forEach { ws.send(it) }
+
+            // B's transcript must contain ONLY B's content — A's stale frame must be absent.
+            // This FAILS before the fix: stale frame lands in the empty store before backfill-start,
+            // then B's content is appended below it → items = [A-stale-leak, B-content].
+            assertThat(awaitUntil { assistantTexts(c) == listOf("B-content") })
+                .withFailMessage(
+                    "A's stale live frame contaminated B's transcript (UC-86 bleed not fixed); " +
+                        "got: ${assistantTexts(c)}",
+                )
+                .isTrue
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
+    fun `UC-86 repro (2) - multiple stale live frames from old target are all suppressed across the switch`() {
+        // Variant of repro (1): the server had MULTIPLE buffered frames from agent A
+        // (e.g. a tool-use + tool-result + assistant-text mid-turn) all arriving before
+        // B's backfill-start.  None must appear in B's transcript.
+        val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        enqueueCapture(wsRef)
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { c.state.value == TerminalState.Open && wsRef.get() != null }).isTrue
+            val ws = wsRef.get()!!
+
+            // A's backfill.
+            listOf(
+                """{"type":"backfill-start","source":"main"}""",
+                """{"type":"assistant-text","uuid":"a1","source":"main","isSidechain":false,"text":"A-init"}""",
+                """{"type":"backfill-end","source":"main"}""",
+            ).forEach { ws.send(it) }
+            assertThat(awaitUntil { assistantTexts(c) == listOf("A-init") }).isTrue
+
+            c.selectTarget("swarm:main:0.1")
+
+            // Three stale frames from A's in-progress turn arrive before B's backfill-start.
+            listOf(
+                """{"type":"thinking","uuid":"a-th","source":"main","isSidechain":false,"text":"A-thinking"}""",
+                """{"type":"tool-use","uuid":"a-tu","source":"main","isSidechain":false,""" +
+                    """"toolName":"Bash","toolUseId":"aTU","inputSummary":"ls","primaryText":"ls"}""",
+                """{"type":"assistant-text","uuid":"a-stale2","source":"main","isSidechain":false,"text":"A-stale-2"}""",
+            ).forEach { ws.send(it) }
+
+            // B's backfill.
+            listOf(
+                """{"type":"backfill-start","source":"main"}""",
+                """{"type":"assistant-text","uuid":"b1","source":"main","isSidechain":false,"text":"B-only"}""",
+                """{"type":"backfill-end","source":"main"}""",
+            ).forEach { ws.send(it) }
+
+            // Only B's item must appear; no A thinking/tool/text must survive.
+            // FAILS before the fix: all three A frames contaminate B's store.
+            assertThat(awaitUntil { assistantTexts(c) == listOf("B-only") })
+                .withFailMessage(
+                    "Stale A frames not suppressed after selectTarget; got: ${c.items.value.map { it.key }}",
+                )
+                .isTrue
+            assertThat(c.items.value.none { it is ConversationItem.ToolActivity }).isTrue
+            assertThat(c.items.value.none { it is ConversationItem.Thinking }).isTrue
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
+    fun `UC-86 guard - basic agent-pill navigation without stale pages works (smoke)`() {
+        // Non-failing guard: selectTarget with NO prior loadOlder (no stale page in flight)
+        // and no stale live frames → the clean path.  B's backfill renders exactly.
+        // This must PASS before and after the fix so a future over-correction is caught.
+        val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        enqueueCapture(wsRef)
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { c.state.value == TerminalState.Open && wsRef.get() != null }).isTrue
+            val ws = wsRef.get()!!
+
+            // A's initial backfill.
+            listOf(
+                """{"type":"backfill-start","source":"main"}""",
+                """{"type":"assistant-text","uuid":"a1","source":"main","isSidechain":false,"text":"A-content"}""",
+                """{"type":"backfill-end","source":"main"}""",
+            ).forEach { ws.send(it) }
+            assertThat(awaitUntil { assistantTexts(c) == listOf("A-content") }).isTrue
+            assertThat(c.selectedTargetId.value).isEqualTo(TerminalStreamController.MAIN_TARGET_ID)
+
+            // Tap B — clearItems fires; items go empty.
+            c.selectTarget("swarm:main:0.1")
+            assertThat(c.items.value).isEmpty()
+            assertThat(c.selectedTargetId.value).isEqualTo("swarm:main:0.1")
+
+            // B's clean backfill (no stale frames in flight).
+            listOf(
+                """{"type":"backfill-start","source":"main"}""",
+                """{"type":"assistant-text","uuid":"b1","source":"main","isSidechain":false,"text":"B-content"}""",
+                """{"type":"assistant-text","uuid":"b2","source":"main","isSidechain":false,"text":"B-content-2"}""",
+                """{"type":"backfill-end","source":"main"}""",
+            ).forEach { ws.send(it) }
+
+            assertThat(awaitUntil { assistantTexts(c) == listOf("B-content", "B-content-2") })
+                .withFailMessage("clean selectTarget + backfill failed; got: ${assistantTexts(c)}")
+                .isTrue
+            // No A content survived.
+            assertThat(c.items.value.none { (it as? ConversationItem.AssistantMessage)?.text == "A-content" }).isTrue
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
+    fun `UC-86 guard - rapid consecutive agent switches show only the final target's content`() {
+        // AC6 guard: rapidly switching A → B → C; only C's backfill must show.  Each switch
+        // clears the store and bumps the epoch; C's clean backfill fills the final view.
+        val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        enqueueCapture(wsRef)
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { c.state.value == TerminalState.Open && wsRef.get() != null }).isTrue
+            val ws = wsRef.get()!!
+
+            // Establish initial window.
+            listOf(
+                """{"type":"backfill-start","source":"main"}""",
+                """{"type":"assistant-text","uuid":"a1","source":"main","isSidechain":false,"text":"A-init"}""",
+                """{"type":"backfill-end","source":"main"}""",
+            ).forEach { ws.send(it) }
+            assertThat(awaitUntil { assistantTexts(c) == listOf("A-init") }).isTrue
+
+            // Rapid A → B → C switches (each bumps epoch again).
+            c.selectTarget("swarm:b:0.1")
+            c.selectTarget("swarm:c:0.1")
+
+            assertThat(c.items.value).isEmpty()
+            assertThat(c.selectedTargetId.value).isEqualTo("swarm:c:0.1")
+
+            // C's backfill arrives with no stale frames.
+            listOf(
+                """{"type":"backfill-start","source":"main"}""",
+                """{"type":"assistant-text","uuid":"c1","source":"main","isSidechain":false,"text":"C-content"}""",
+                """{"type":"backfill-end","source":"main"}""",
+            ).forEach { ws.send(it) }
+
+            assertThat(awaitUntil { assistantTexts(c) == listOf("C-content") })
+                .withFailMessage("after rapid A→B→C switches, got: ${assistantTexts(c)}")
+                .isTrue
+        } finally {
+            c.close()
+        }
+    }
+
+    // ──────────── Part II — UC-86 fix: guard correctness and boundary conditions ─────────────
+
+    @Test
+    fun `UC-86 Q5 — clear() while switch is pending lifts both guards and content renders after backfill-start`() {
+        // Q5 edge case: the user taps a pill (selectTarget) and then immediately issues /clear
+        // before the new target's backfill-start arrives, arming BOTH switchSuppressActive AND
+        // clearSuppressActive simultaneously.  The next backfill-start must lift BOTH via
+        // liftAllSuppressGuards() in the clearSuppressActive guard-block arm — leaving neither
+        // guard stranded.  A subsequent live assistant-text must render to prove this.
+        val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        enqueueCapture(wsRef)
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { c.state.value == TerminalState.Open && wsRef.get() != null }).isTrue
+            val ws = wsRef.get()!!
+
+            // Arm both guards simultaneously: pill-tap then /clear, no backfill between them.
+            c.selectTarget("swarm:main:0.1") // switchSuppressActive = true
+            c.clear()                         // clearSuppressActive = true (both now armed)
+
+            // Deliver backfill-start: hits the clearSuppressActive guard-block arm first
+            // (clearItems() + liftAllSuppressGuards()), so BOTH flags are cleared atomically.
+            ws.send("""{"type":"backfill-start","source":"main"}""")
+            ws.send("""{"type":"assistant-text","uuid":"b-ac","source":"main","isSidechain":false,"text":"B-after-clear"}""")
+            ws.send("""{"type":"backfill-end","source":"main"}""")
+
+            // The live content must render — proves switchSuppressActive is NOT permanently stranded
+            // (if it were, the assistant-text above would have been dropped too).
+            assertThat(awaitUntil { assistantTexts(c) == listOf("B-after-clear") })
+                .withFailMessage(
+                    "switchSuppressActive stranded after overlapping clear(); got: ${assistantTexts(c)}",
+                )
+                .isTrue
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
+    fun `UC-86 — optimistic echo submitted after selectTarget is preserved through backfill-start and reconciles`() {
+        // submit-survives-backfill: the suppress window allows the UC-45 optimistic echo through
+        // (submitComposer writes directly to itemMap, not via onFrame), while still dropping a stale
+        // A-frame.  After backfill-start (Path B — no clearItems, echo survives), the server's
+        // turn-start echo reconciles against the pending bubble in place.
+        val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        enqueueCapture(wsRef)
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { c.state.value == TerminalState.Open && wsRef.get() != null }).isTrue
+            val ws = wsRef.get()!!
+
+            // Switch to B (arms switchSuppressActive) then immediately submit (echo goes in directly).
+            c.selectTarget("swarm:main:0.1")
+            c.submitComposer("hello")
+
+            // (a) Optimistic echo appears immediately — submit bypasses onFrame.
+            assertThat(awaitUntil { userMessages(c).size == 1 }).isTrue
+            assertThat(userMessages(c).single().uuid).isEmpty() // optimistic: blank uuid
+            assertThat(userMessages(c).single().localSeq).isEqualTo(0L) // first localSeq
+
+            // (b) A stale A frame arrives — must be dropped by the switch-suppress guard.
+            ws.send(
+                """{"type":"assistant-text","uuid":"stale-a","source":"main","isSidechain":false,"text":"A-stale-during-submit"}""",
+            )
+
+            // Deliver B's backfill (Path B: no clearItems — echo stays; guard lifts).
+            listOf(
+                """{"type":"backfill-start","source":"main"}""",
+                """{"type":"backfill-end","source":"main"}""",
+            ).forEach { ws.send(it) }
+            assertThat(awaitUntil { !c.backfilling.value }).isTrue
+
+            // Stale A frame must not have appeared.
+            assertThat(c.items.value.none { it is ConversationItem.AssistantMessage }).isTrue
+
+            // (c) Server's turn-start echo reconciles against the pending echo in place.
+            ws.send(
+                """{"type":"turn-start","uuid":"srv-u1","source":"main","isSidechain":false,"text":"hello"}""",
+            )
+            // Wait specifically for the uuid to be updated (size == 1 was already true, so we must
+            // poll for the reconcile to have fired and the server uuid to have been applied).
+            assertThat(awaitUntil { userMessages(c).firstOrNull()?.uuid == "srv-u1" }).isTrue
+            val reconciled = userMessages(c).single()
+            assertThat(reconciled.uuid).isEqualTo("srv-u1") // server uuid applied
+            assertThat(reconciled.localSeq).isEqualTo(0L)   // localSeq preserved (not a fresh add)
+            assertThat(c.items.value.none { it is ConversationItem.AssistantMessage }).isTrue // A still absent
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
+    fun `UC-86 — switchSuppressActive falls back to timed lift when no backfill-start arrives`() {
+        // Timeout backstop: if the server never delivers a backfill-start (network drop, unexpected
+        // race), the CLEAR_SUPPRESS_MS timed fallback inside selectTarget() fires and lifts
+        // switchSuppressActive so live content is not blocked permanently.
+        // CLEAR_SUPPRESS_MS = 1_500L ms (companion constant); we sleep 2_000 ms to ensure it fired.
+        val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        enqueueCapture(wsRef)
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { c.state.value == TerminalState.Open && wsRef.get() != null }).isTrue
+            val ws = wsRef.get()!!
+
+            c.selectTarget("swarm:main:0.1") // arms guard + starts 1_500 ms timer
+
+            // Deliberate: no backfill-start sent. Wait past CLEAR_SUPPRESS_MS so the timed
+            // fallback fires and lifts the guard.
+            Thread.sleep(2_000L)
+
+            // A live frame arriving after the timer must render (guard is now down).
+            ws.send(
+                """{"type":"assistant-text","uuid":"post-timeout","source":"main","isSidechain":false,"text":"live-after-timeout"}""",
+            )
+            assertThat(awaitUntil { assistantTexts(c) == listOf("live-after-timeout") })
+                .withFailMessage("timed fallback did not lift switchSuppressActive; items=${c.items.value.map { it.key }}")
+                .isTrue
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
+    fun `AC1 — two controllers for different sessions carry independent transcript state`() {
+        // AC1 guard (controller layer): session 1 and session 2 use independent ConversationController
+        // instances whose stores never share state.  Receiving content for session 2 does not
+        // contaminate session 1's transcript, and vice versa.
+        // Note: ViewModel-level isolation (ConversationViewModel.attach() collector lifecycle under
+        // Android framework) is outside JVM unit-test scope — it requires instrumented tests to verify
+        // that the old controller's collector coroutines are cancelled when the session changes.
+        val wsRef1 = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        val wsRef2 = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        enqueueCapture(wsRef1)
+        enqueueCapture(wsRef2)
+
+        val store = org.mockito.Mockito.mock(ServerProfileStore::class.java)
+        kotlinx.coroutines.runBlocking { org.mockito.Mockito.doReturn(profile).`when`(store).current() }
+        val makeCtrl = { n: Int ->
+            ConversationController(
+                sessionN = n,
+                profileStore = store,
+                httpClientFactory = { AiSandboxHttpClient(profile, fakeIdentity()) },
+                clientFactory = { http, sn -> ConversationClient(http, sn) },
+                onClosed = {},
+            )
+        }
+
+        val c1 = makeCtrl(1)
+        val c2 = makeCtrl(2)
+        // Attach controllers one at a time so the MockWebServer serves them in a known order:
+        // c1 gets the first enqueued response (wsRef1), c2 gets the second (wsRef2).
+        c1.attach(1)
+        assertThat(awaitUntil { c1.state.value == TerminalState.Open && wsRef1.get() != null }).isTrue
+        c2.attach(2)
+        try {
+            assertThat(awaitUntil { c2.state.value == TerminalState.Open && wsRef2.get() != null }).isTrue
+
+            // Session 1 receives content A.
+            listOf(
+                """{"type":"backfill-start","source":"main"}""",
+                """{"type":"assistant-text","uuid":"s1-a1","source":"main","isSidechain":false,"text":"session-1-content"}""",
+                """{"type":"backfill-end","source":"main"}""",
+            ).forEach { wsRef1.get()!!.send(it) }
+            assertThat(awaitUntil { assistantTexts(c1) == listOf("session-1-content") }).isTrue
+
+            // Session 2 receives content B.
+            listOf(
+                """{"type":"backfill-start","source":"main"}""",
+                """{"type":"assistant-text","uuid":"s2-b1","source":"main","isSidechain":false,"text":"session-2-content"}""",
+                """{"type":"backfill-end","source":"main"}""",
+            ).forEach { wsRef2.get()!!.send(it) }
+            assertThat(awaitUntil { assistantTexts(c2) == listOf("session-2-content") }).isTrue
+
+            // Neither session sees the other's content (no cross-session bleed at controller layer).
+            assertThat(assistantTexts(c1)).doesNotContain("session-2-content")
+                .withFailMessage("session-2 content bled into session-1 controller: ${assistantTexts(c1)}")
+            assertThat(assistantTexts(c2)).doesNotContain("session-1-content")
+                .withFailMessage("session-1 content bled into session-2 controller: ${assistantTexts(c2)}")
+        } finally {
+            c1.close()
+            c2.close()
+        }
+    }
+
+    @Test
+    fun `SUPPRESSED_CONTENT_FRAMES sync — all item-adding frame types are suppressed in the switch window`() {
+        // Structural guard: every when(type) arm in onFrame() that adds a visible item (via
+        // addItem / upsertToolUse / upsertToolResult / reconcileOrAddUserMessage) must be present
+        // in SUPPRESSED_CONTENT_FRAMES so it is dropped while switchSuppressActive is armed.
+        // This test sends ALL known item-adding frame types while the guard is active and asserts
+        // none reached the store.  If a developer adds a new content frame type to onFrame() but
+        // forgets to add it to SUPPRESSED_CONTENT_FRAMES, a variant of this test will catch the
+        // resulting bleed.  Frame types enumerated from when(type) in ConversationController.onFrame().
+        val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        enqueueCapture(wsRef)
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { c.state.value == TerminalState.Open && wsRef.get() != null }).isTrue
+            val ws = wsRef.get()!!
+
+            c.selectTarget("swarm:main:0.1") // arms switchSuppressActive
+            assertThat(c.items.value).isEmpty()
+
+            // Send every item-adding frame type known from onFrame()'s when(type) arms.
+            listOf(
+                // turn-start → reconcileOrAddUserMessage (if text non-blank)
+                """{"type":"turn-start","uuid":"ts1","source":"main","isSidechain":false,"text":"stale-turn"}""",
+                // thinking → addItem(Thinking)
+                """{"type":"thinking","uuid":"th1","source":"main","isSidechain":false,"text":"stale-think"}""",
+                // assistant-text → addItem(AssistantMessage)
+                """{"type":"assistant-text","uuid":"at1","source":"main","isSidechain":false,"text":"stale-assistant"}""",
+                // teammate-message (UC-58) → addItem(TeammateMessage)
+                """{"type":"teammate-message","uuid":"tm1","source":"main","isSidechain":false,""" +
+                    """"teammateId":"agent-x","color":"blue","text":"stale-teammate"}""",
+                // tool-use → upsertToolUse
+                """{"type":"tool-use","uuid":"tu1","source":"main","isSidechain":false,""" +
+                    """"toolName":"Bash","toolUseId":"SYNC-TU","inputSummary":"ls","primaryText":"ls"}""",
+                // tool-result → upsertToolResult
+                """{"type":"tool-result","uuid":"tr1","source":"main","isSidechain":false,""" +
+                    """"toolUseId":"SYNC-TU","isError":false,"summary":"done"}""",
+                // system-note (UC-42) → addItem(SystemNote)
+                """{"type":"system-note","uuid":"sn1","source":"main","isSidechain":false,"label":"cmd","detail":"body"}""",
+                // question → addItem(Question)
+                """{"type":"question","uuid":"q1","source":"main","isSidechain":false,"toolUseId":"SYNC-TU",""" +
+                    """"questions":[{"question":"Q?","header":"Q","multiSelect":false,"options":[{"label":"Yes","description":""}]}]}""",
+                // plan-approval → addItem(PlanApproval)
+                """{"type":"plan-approval","uuid":"pa1","source":"main","isSidechain":false,"toolUseId":"SYNC-TU","plan":"1. do x"}""",
+            ).forEach { ws.send(it) }
+
+            // Lift the guard via backfill-start so a post-guard frame can land as sentinel.
+            listOf(
+                """{"type":"backfill-start","source":"main"}""",
+                """{"type":"backfill-end","source":"main"}""",
+            ).forEach { ws.send(it) }
+            assertThat(awaitUntil { !c.backfilling.value }).isTrue
+
+            // The store must be completely empty — every suppressed frame was dropped.
+            assertThat(c.items.value)
+                .withFailMessage(
+                    "Not all item-adding frame types are in SUPPRESSED_CONTENT_FRAMES; " +
+                        "leaked: ${c.items.value.map { it.key }}",
+                )
+                .isEmpty()
         } finally {
             c.close()
         }
