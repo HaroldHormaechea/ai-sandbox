@@ -85,11 +85,28 @@ class SessionEventsController(
     }
 
     private fun startConnectLoop() {
+        // UC-88 (challenger re-review) — NEVER relaunch over a connect that is still
+        // healthily inside its handshake window (Connecting) or already Open under an
+        // ACTIVE loop. Force-cancelling such a connect as part of a "relaunch" would
+        // let rapid chat→list bouncing thrash a slow-but-progressing connect
+        // (connect→cancel→reconnect→cancel…) and starve it from ever completing. The
+        // relaunch-cancel below is reserved for an ACTUAL new attempt / teardown,
+        // where the prior client is orphaned (its loop already ended) or has genuinely
+        // failed. (connect() already no-ops while a loop is active; this encodes that
+        // contract directly in the loop starter so it holds for every caller.)
+        if (connectJob?.isActive == true) {
+            when (eventsClient?.state?.value) {
+                is SessionEventsClient.State.Connecting,
+                is SessionEventsClient.State.Open -> return
+                else -> { /* active loop but the client failed/terminal — relaunch is fine */ }
+            }
+        }
         connectJob?.cancel()
-        // UC-88 — cancelling the coroutine does NOT cancel the OkHttp socket it
-        // owns, so force-drop any in-flight/half-open client BEFORE relaunching.
-        // Otherwise a rapid disconnect→connect (e.g. chat→list) orphans a draining
-        // socket that still counts against the server's per-fingerprint cap.
+        // Cancelling the coroutine does NOT cancel the OkHttp socket it owns, so
+        // force-drop the prior/orphaned client BEFORE relaunching — a graceful close
+        // alone lets a half-open socket linger 30–60 s and pile up past the server's
+        // per-fingerprint cap. This close is intentional (quiescent onFailure) and,
+        // per the guard above, only ever runs on a terminal/orphaned client.
         eventsClient?.close("reconnect")
         eventsClient = null
         connectJob = scope.launch {
