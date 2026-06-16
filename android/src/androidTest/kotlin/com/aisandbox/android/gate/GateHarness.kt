@@ -6,11 +6,17 @@ import com.aisandbox.android.conversation.ConversationController
 import com.aisandbox.android.conversation.PendingSheet
 import com.aisandbox.android.net.ConversationClient
 import java.util.concurrent.CopyOnWriteArrayList
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.onSubscription
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
@@ -81,15 +87,17 @@ object GateHarness {
         )
     }
 
-    /** One open synthetic replay session: the live controller plus the captured WS client. */
+    /** One open synthetic replay session: the live controller plus a flow of its CURRENT WS client. */
     class GateSession(
         val controller: ConversationController,
-        private val clientHolder: MutableStateFlow<ConversationClient?>,
+        /**
+         * The controller's current [ConversationClient], updated every time the controller
+         * (re)creates one. The controller swaps this on reconnect, so an [EchoCollector] MUST
+         * follow this flow rather than capture a single instance — otherwise a reconnect leaves it
+         * subscribed to a dead client and it silently misses the echo (the CI/local flake root cause).
+         */
+        val clientFlow: StateFlow<ConversationClient?>,
     ) {
-        /** The live conversation WS client the controller is using (captured via the factory). */
-        fun client(): ConversationClient =
-            clientHolder.value ?: error("conversation client not created yet — controller did not connect")
-
         fun close() = controller.close("gate-test-done")
     }
 
@@ -108,11 +116,11 @@ object GateHarness {
             onClosed = {},
         )
         controller.attach(n)
-        return GateSession(controller, holder)
+        return GateSession(controller, holder.asStateFlow())
     }
 
     /** Block until the replayed fixture raises an in-app-answerable question sheet for the session. */
-    fun awaitQuestionSheet(session: GateSession, timeoutMs: Long = 45_000): PendingSheet.Questions =
+    fun awaitQuestionSheet(session: GateSession, timeoutMs: Long = 60_000): PendingSheet.Questions =
         runBlocking {
             withTimeout(timeoutMs) {
                 session.controller.pendingSheet.first { it is PendingSheet.Questions } as PendingSheet.Questions
@@ -123,18 +131,41 @@ object GateHarness {
     data class AnswerEcho(val questionUuid: String, val questionIndex: Int, val selections: List<Int>, val freeText: String)
 
     /**
-     * Subscribes to the live WS frames and records every {@code answer-echo} the server emits.
-     * Start BEFORE submitting an answer; the short settle gives the subscription time to register
-     * (the production {@code incoming} flow has no replay, so a pre-subscription emit would be lost).
+     * Captures the server's {@code answer-echo} frames off the live WS into a thread-safe list the
+     * test polls via {@code composeTestRule.waitUntil} (which keeps the Compose/main loop pumping —
+     * proven reliable; a {@code runBlocking} await on the instrumentation thread does NOT pump it).
+     *
+     * <p>Robustness fixes for the CI/local flake (AC-10):
+     *
+     * <ol>
+     *   <li><b>Follows the controller's CURRENT client.</b> It collects {@code session.clientFlow}
+     *       with {@code collectLatest}, so when the controller swaps its {@link ConversationClient}
+     *       on a reconnect, the collector re-subscribes to the new one. Capturing a single client
+     *       instance was the flake root cause: a reconnect left the collector on a dead client and it
+     *       silently missed the echo (the server still recorded the answer, so it looked like a hang).</li>
+     *   <li><b>No lost echo on first subscribe.</b> Each per-client subscription uses
+     *       {@code onSubscription}; the constructor blocks (ms) until the FIRST one registers, so an
+     *       echo can't be dropped before we're listening ({@code incoming} has {@code replay = 0}).
+     *       Construct BEFORE submitting, then poll {@link #received} with a generous timeout.</li>
+     * </ol>
      */
-    class EchoCollector(client: ConversationClient) {
+    class EchoCollector(session: GateSession) {
         private val received = CopyOnWriteArrayList<AnswerEcho>()
         private val scope = CoroutineScope(Dispatchers.IO)
-        private val job: Job = scope.launch { client.incoming.collect { onText(it) } }
+        private val job: Job
 
         init {
-            // Let the SharedFlow subscription register before any answer is submitted.
-            Thread.sleep(500)
+            val subscribed = CompletableDeferred<Unit>()
+            job = scope.launch {
+                session.clientFlow.filterNotNull().collectLatest { client ->
+                    client.incoming
+                        .onSubscription { if (!subscribed.isCompleted) subscribed.complete(Unit) }
+                        .collect { onText(it) }
+                }
+            }
+            // Briefly block until the FIRST subscription registers (ms): no echo emitted after this
+            // point can be lost. This replaces the racy fixed sleep; it does NOT wait for echoes.
+            runBlocking { withTimeout(15_000) { subscribed.await() } }
         }
 
         private fun onText(text: String) {
@@ -151,6 +182,7 @@ object GateHarness {
             )
         }
 
+        /** Every {@code answer-echo} received so far (oldest first). Poll via {@code waitUntil}. */
         fun received(): List<AnswerEcho> = received.toList()
 
         fun stop() = job.cancel()

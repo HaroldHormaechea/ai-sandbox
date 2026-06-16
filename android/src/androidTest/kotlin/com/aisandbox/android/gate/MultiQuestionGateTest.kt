@@ -39,7 +39,7 @@ class MultiQuestionGateTest {
             assertTrue("multi-question fixture must carry ≥2 questions", sheet.questions.size >= 2)
             val q2Multi = sheet.questions[1].multiSelect
 
-            val collector = GateHarness.EchoCollector(session.client())
+            val collector = GateHarness.EchoCollector(session)
             composeTestRule.setContent {
                 AiSandboxTheme {
                     QuestionSheet(
@@ -63,7 +63,7 @@ class MultiQuestionGateTest {
             composeTestRule.waitForIdle()
 
             // UC-43 — one answer-echo per question, each correlated by questionIndex.
-            composeTestRule.waitUntil(25_000) { collector.received().size >= 2 }
+            composeTestRule.waitUntil(90_000) { collector.received().size >= 2 }
             val byIndex = collector.received().associateBy { it.questionIndex }
             assertEquals("Q1 maps to its own frame at index 0", listOf(0), byIndex[0]?.selections)
             val expectedQ2 = if (q2Multi) listOf(0, 1) else listOf(1)
@@ -73,7 +73,7 @@ class MultiQuestionGateTest {
             collector.stop()
 
             // The conversation resumes: the recorded post-answer turn-end clears the sheet + spinner.
-            composeTestRule.waitUntil(25_000) {
+            composeTestRule.waitUntil(60_000) {
                 session.controller.pendingSheet.value == null && session.controller.turnPhase.value == TurnPhase.IDLE
             }
             assertEquals(null, session.controller.pendingSheet.value)

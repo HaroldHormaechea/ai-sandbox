@@ -59,15 +59,15 @@ class AskUserQuestionGateTest {
             assertTrue("single-select fixture is NOT multiSelect", !sheet.questions[0].multiSelect)
             assertTrue("fixture must offer ≥3 options so 'not first' is meaningful", sheet.questions[0].options.size >= 3)
 
-            val collector = GateHarness.EchoCollector(session.client())
+            val collector = GateHarness.EchoCollector(session)
             hostSheet(session, sheet)
 
             // Tap the SECOND option (index 1) — deliberately NOT the first-visible one.
             composeTestRule.onNodeWithTag(QuestionTestTags.option(1)).performClick()
             composeTestRule.onNodeWithTag(QuestionTestTags.SUBMIT).performClick()
             composeTestRule.waitForIdle()
-            composeTestRule.waitUntil(25_000) { collector.received().isNotEmpty() }
 
+            composeTestRule.waitUntil(90_000) { collector.received().isNotEmpty() }
             val echo = collector.received().first()
             assertEquals("UC-57 — only the tapped option index is transmitted", listOf(1), echo.selections)
             assertEquals("single-select carries no free text", "", echo.freeText)
@@ -88,7 +88,7 @@ class AskUserQuestionGateTest {
             assertTrue("multi-select fixture is multiSelect", sheet.questions[0].multiSelect)
             assertTrue("fixture must offer ≥3 options", sheet.questions[0].options.size >= 3)
 
-            val collector = GateHarness.EchoCollector(session.client())
+            val collector = GateHarness.EchoCollector(session)
             hostSheet(session, sheet)
 
             // Check the first and third options (0 and 2) — skip the middle one.
@@ -96,8 +96,8 @@ class AskUserQuestionGateTest {
             composeTestRule.onNodeWithTag(QuestionTestTags.option(2)).performClick()
             composeTestRule.onNodeWithTag(QuestionTestTags.SUBMIT).performClick()
             composeTestRule.waitForIdle()
-            composeTestRule.waitUntil(25_000) { collector.received().isNotEmpty() }
 
+            composeTestRule.waitUntil(90_000) { collector.received().isNotEmpty() }
             val echo = collector.received().first()
             assertEquals("UC-57 — exactly the checked indices are transmitted", listOf(0, 2), echo.selections.sorted())
             assertEquals("", echo.freeText)
@@ -117,15 +117,15 @@ class AskUserQuestionGateTest {
             val optionCount = sheet.questions[0].options.size
             assertTrue("other fixture must offer ≥1 option", optionCount >= 1)
 
-            val collector = GateHarness.EchoCollector(session.client())
+            val collector = GateHarness.EchoCollector(session)
             hostSheet(session, sheet)
 
             val custom = "ap-southeast-2"
             composeTestRule.onNodeWithTag(QuestionTestTags.OTHER_FIELD).performTextInput(custom)
             composeTestRule.onNodeWithTag(QuestionTestTags.SUBMIT).performClick()
             composeTestRule.waitForIdle()
-            composeTestRule.waitUntil(25_000) { collector.received().isNotEmpty() }
 
+            composeTestRule.waitUntil(90_000) { collector.received().isNotEmpty() }
             val echo = collector.received().first()
             // The "Other" choice occupies the index equal to the option count (UC-75).
             assertEquals("UC-75 — Other selection index is the option count", listOf(optionCount), echo.selections)

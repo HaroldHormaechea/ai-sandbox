@@ -72,7 +72,7 @@ class ConversationViewGateTest {
             }
         }
         // The transcript fixture carries the long (UC-80) message; wait until it has streamed in.
-        composeTestRule.waitUntil(45_000) {
+        composeTestRule.waitUntil(90_000) {
             session.controller.items.value.any { it is ConversationItem.AssistantMessage && it.text.contains("magna aliqua") }
         }
         composeTestRule.waitForIdle()
@@ -187,7 +187,7 @@ class ConversationViewGateTest {
             scrollTo(items(session).size - 1)
             composeTestRule.onNodeWithText(target, substring = true).performTouchInput { longClick() }
             composeTestRule.waitForIdle()
-            composeTestRule.waitUntil(10_000) { copied != null }
+            composeTestRule.waitUntil(30_000) { copied != null }
             assertTrue("UC-81 — long-press copies the FULL bubble body", copied!!.contains(target))
         } finally {
             session.close()
