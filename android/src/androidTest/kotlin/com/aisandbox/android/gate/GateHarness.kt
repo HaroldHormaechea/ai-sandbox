@@ -69,6 +69,14 @@ object GateHarness {
     const val N_MULTI_QUESTION = 4
     const val N_TRANSCRIPT = 5
 
+    /**
+     * UC-85 — scenario 6: a single question raised purely by the production
+     * {@code __ctrl__ pending-question} pane signal (promptKey {@code "pq-single"}), NOT an
+     * in-transcript {@code AskUserQuestion} tool call. Exercises the pane-derived pending-question
+     * fidelity path the developer added (answerable, in-app, with the UC-75 spinner machinery).
+     */
+    const val N_PENDING_QUESTION = 6
+
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 
     fun app(): AiSandboxApplication =

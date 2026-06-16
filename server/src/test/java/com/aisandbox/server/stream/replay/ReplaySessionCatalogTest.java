@@ -160,9 +160,9 @@ class ReplaySessionCatalogTest {
         ReplaySessionCatalog catalog =
                 assertCatalog(() -> new ReplaySessionCatalog(propsForDir(REPO_FIXTURES), new ReplayFixtureValidator()));
 
-        assertThat(catalog.scenarios()).as("all committed scenarios load").hasSize(5);
+        assertThat(catalog.scenarios()).as("all committed scenarios load").hasSize(6);
         List<SessionRecord> records = catalog.syntheticRecords();
-        assertThat(records).as("one synthetic session per scenario").hasSize(5);
+        assertThat(records).as("one synthetic session per scenario").hasSize(6);
         assertThat(records)
                 .as("every synthetic session is reported running so its card renders + channel opens")
                 .allSatisfy(r -> {
