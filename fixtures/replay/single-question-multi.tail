@@ -1,8 +1,8 @@
 __ctrl__	backfill-start	0
 main	{"type":"user","uuid":"u1","isSidechain":false,"message":{"content":"Which environments should I deploy to?"}}
-main	{"type":"assistant","uuid":"q1","isSidechain":false,"message":{"content":[{"type":"tool_use","id":"tu-multi","name":"AskUserQuestion","input":{"questions":[{"question":"Select all environments to deploy to.","header":"Environments","multiSelect":true,"options":[{"label":"Staging","description":"Pre-production"},{"label":"Production","description":"Live users"},{"label":"Canary","description":"1% rollout"}]}]}}]}}
 __ctrl__	backfill-end
+__ctrl__	pending-question	{"key":"tu-multi","kind":"questions","plan":"","questions":[{"question":"Select all environments to deploy to.","header":"Environments","multiSelect":true,"options":[{"label":"Staging","description":"Pre-production"},{"label":"Production","description":"Live users"},{"label":"Canary","description":"1% rollout"}]}]}
 __replay__	await-answer
 main	{"type":"user","uuid":"u2","isSidechain":false,"message":{"content":[{"type":"tool_result","tool_use_id":"tu-multi","is_error":false,"content":"Selections received."}]}}
 main	{"type":"assistant","uuid":"a2","isSidechain":false,"message":{"content":[{"type":"text","text":"Deploying to the selected environments."}]}}
-main	{"type":"system","subtype":"turn_duration","uuid":"te1","durationMs":1400,"messageCount":4}
+main	{"type":"system","subtype":"turn_duration","uuid":"te1","durationMs":1400,"messageCount":3}
