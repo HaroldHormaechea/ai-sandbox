@@ -120,6 +120,7 @@ fun SessionsScreen(
     onOpen: (Int) -> Unit,
     onOpenTerminal: (Int) -> Unit,
     onOpenSettings: () -> Unit,
+    onOpenAppUpdate: () -> Unit,
     viewModel: SessionsViewModel = viewModel(),
 ) {
     val state by viewModel.state.collectAsState()
@@ -242,12 +243,13 @@ fun SessionsScreen(
                     }
                 },
                 actions = {
-                    // UC-84 (AC1) — single overflow/hamburger menu. Rendering lives
-                    // in the stateless [SessionsOverflowMenu] seam so an instrumented
-                    // test can assert the two items independently of the ViewModel.
+                    // UC-84 (AC1) / UC-87 — single overflow/hamburger menu. Rendering
+                    // lives in the stateless [SessionsOverflowMenu] seam so an
+                    // instrumented test can assert the items independently of the ViewModel.
                     SessionsOverflowMenu(
                         onStartSsh = { viewModel.openServerSsh { n -> onOpenTerminal(n) } },
                         onOpenSettings = onOpenSettings,
+                        onOpenAppUpdate = onOpenAppUpdate,
                     )
                 },
                 scrollBehavior = scrollBehavior,
@@ -765,25 +767,29 @@ private fun SessionRow(
 }
 
 /**
- * UC-84 (AC1/AC2) — the top-bar overflow/hamburger menu seam. Stateless +
- * `internal` so an instrumented test can drive it directly (mirrors the
- * `internal fun SessionsBody` pattern). Exposes exactly two items behind a
- * single [Icons.Filled.MoreVert] button:
+ * UC-84 (AC1/AC2) / UC-87 — the top-bar overflow/hamburger menu seam. Stateless
+ * + `internal` so an instrumented test can drive it directly (mirrors the
+ * `internal fun SessionsBody` pattern). Exposes three items behind a single
+ * [Icons.Filled.MoreVert] button:
  *
  * <ul>
  *   <li>"Start SSH session" — same create-or-focus host-shell behavior as the
  *       old UC-62 shell icon ([onStartSsh]).</li>
  *   <li>"Settings" — navigates to the Settings screen ([onOpenSettings]).</li>
+ *   <li>"Look for app updates" — opens the UC-87 app self-update screen
+ *       ([onOpenAppUpdate]).</li>
  * </ul>
  *
  * Stable testTags: {@code sessions_overflow_action} (button),
  * {@code sessions_server_ssh_action} (SSH item),
- * {@code sessions_menu_settings} (Settings item).
+ * {@code sessions_menu_settings} (Settings item),
+ * {@code sessions_menu_app_update} (app-update item).
  */
 @Composable
 internal fun SessionsOverflowMenu(
     onStartSsh: () -> Unit,
     onOpenSettings: () -> Unit,
+    onOpenAppUpdate: () -> Unit,
 ) {
     var menuExpanded by remember { mutableStateOf(false) }
     Box {
@@ -814,6 +820,14 @@ internal fun SessionsOverflowMenu(
                 onClick = {
                     menuExpanded = false
                     onOpenSettings()
+                },
+            )
+            DropdownMenuItem(
+                text = { Text(stringResource(R.string.sessions_menu_app_update)) },
+                modifier = Modifier.testTag("sessions_menu_app_update"),
+                onClick = {
+                    menuExpanded = false
+                    onOpenAppUpdate()
                 },
             )
         }
