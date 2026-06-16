@@ -208,19 +208,21 @@ class ServerSshRowInstrumentationTest {
     }
 
     @Test
-    fun overflow_menu_seam_shows_the_two_items_and_fires_each_callback() {
-        // UC-84 AC1/AC2 — the SessionsOverflowMenu render seam in isolation: the
-        // single overflow button opens to the two migrated items — "Start SSH
-        // session" (preserved tag sessions_server_ssh_action) and "Settings"
-        // (sessions_menu_settings) — and each item fires its OWN callback only.
-        // Complements the full-screen migration above with a focused seam render.
+    fun overflow_menu_seam_shows_the_three_items_and_fires_each_callback() {
+        // UC-84 AC1/AC2 + UC-87 AC1 — the SessionsOverflowMenu render seam in
+        // isolation: the single overflow button opens to the three items —
+        // "Start SSH session" (preserved tag sessions_server_ssh_action),
+        // "Settings" (sessions_menu_settings), and "Look for app updates"
+        // (sessions_menu_app_update) — and each item fires its OWN callback only.
         var sshFired = false
         var settingsFired = false
+        var appUpdateFired = false
         composeTestRule.setContent {
             AiSandboxTheme {
                 SessionsOverflowMenu(
                     onStartSsh = { sshFired = true },
                     onOpenSettings = { settingsFired = true },
+                    onOpenAppUpdate = { appUpdateFired = true },
                 )
             }
         }
@@ -229,20 +231,30 @@ class ServerSshRowInstrumentationTest {
         composeTestRule.onNodeWithTag("sessions_overflow_action").assertIsDisplayed().assertHasClickAction()
         composeTestRule.onNodeWithTag("sessions_server_ssh_action").assertDoesNotExist()
         composeTestRule.onNodeWithTag("sessions_menu_settings").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("sessions_menu_app_update").assertDoesNotExist()
 
-        // Open → the two items appear.
+        // Open → the three items appear, including UC-87's "Look for app updates" (AC1).
         composeTestRule.onNodeWithTag("sessions_overflow_action").performClick()
         composeTestRule.onNodeWithText(ctx.getString(R.string.server_ssh_action)).assertIsDisplayed()
         composeTestRule.onNodeWithText(ctx.getString(R.string.sessions_menu_settings)).assertIsDisplayed()
+        composeTestRule.onNodeWithText(ctx.getString(R.string.sessions_menu_app_update)).assertIsDisplayed()
 
         // "Start SSH session" fires onStartSsh only (preserved UC-62 behavior + tag).
         composeTestRule.onNodeWithTag("sessions_server_ssh_action").performClick()
         assertTrue("Start SSH session fires onStartSsh", sshFired)
         assertFalse("the SSH item must not fire Settings", settingsFired)
+        assertFalse("the SSH item must not fire app-update", appUpdateFired)
 
-        // Re-open → "Settings" fires onOpenSettings.
+        // Re-open → "Settings" fires onOpenSettings only.
         composeTestRule.onNodeWithTag("sessions_overflow_action").performClick()
         composeTestRule.onNodeWithTag("sessions_menu_settings").performClick()
         assertTrue("Settings fires onOpenSettings", settingsFired)
+        assertFalse("Settings must not fire app-update", appUpdateFired)
+
+        // UC-87 AC1 — re-open → "Look for app updates" fires onOpenAppUpdate, opening
+        // the dedicated app-update screen.
+        composeTestRule.onNodeWithTag("sessions_overflow_action").performClick()
+        composeTestRule.onNodeWithTag("sessions_menu_app_update").performClick()
+        assertTrue("Look for app updates fires onOpenAppUpdate", appUpdateFired)
     }
 }
