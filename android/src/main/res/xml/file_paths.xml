@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  UC-87 — FileProvider path mapping for the in-app self-update flow.
+  The downloaded release APK is written to getCacheDir()/updates/android-release.apk
+  (see AppUpdateViewModel.destFileSupplier); <cache-path> exposes exactly that
+  subtree so FileProvider.getUriForFile can mint a content:// URI for the
+  system package-installer. No other directory is exposed.
+-->
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+    <cache-path name="updates" path="updates/" />
+</paths>

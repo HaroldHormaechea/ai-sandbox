@@ -27,6 +27,9 @@ object Routes {
     /** UC-67 — full-screen MCP management view for a session. Path with `{n}`; use [mcpFor]. */
     const val McpPattern = "mcp/{n}"
     const val Settings = "settings"
+
+    /** UC-87 — dedicated full-screen app self-update view (reached from the sessions hamburger). */
+    const val AppUpdate = "app-update"
     const val CertRevoked = "cert-revoked"
     const val ServerIdentityChanged = "server-identity-changed"
 

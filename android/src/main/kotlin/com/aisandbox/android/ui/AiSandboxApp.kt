@@ -22,6 +22,7 @@ import com.aisandbox.android.net.NetworkEvent
 import com.aisandbox.android.net.NetworkEvents
 import com.aisandbox.android.net.TlsFailureTranslation
 import com.aisandbox.android.requireContainer
+import com.aisandbox.android.ui.screens.AppUpdateScreen
 import com.aisandbox.android.ui.screens.CertRevokedScreen
 import com.aisandbox.android.ui.screens.ConversationScreen
 import com.aisandbox.android.ui.screens.McpScreen
@@ -189,6 +190,8 @@ fun AiSandboxApp() {
                     onOpen = { n -> navController.navigate(Routes.conversationFor(n)) },
                     onOpenTerminal = { n -> navController.navigate(Routes.terminalFor(n)) },
                     onOpenSettings = { navController.navigate(Routes.Settings) },
+                    // UC-87 — third hamburger item opens the app self-update screen.
+                    onOpenAppUpdate = { navController.navigate(Routes.AppUpdate) },
                 )
             }
 
@@ -223,6 +226,11 @@ fun AiSandboxApp() {
 
             composable(Routes.Settings) {
                 SettingsScreen(onBack = { navController.popBackStack() })
+            }
+
+            composable(Routes.AppUpdate) {
+                // UC-87 — dedicated app self-update screen.
+                AppUpdateScreen(onBack = { navController.popBackStack() })
             }
 
             composable(Routes.CertRevoked) {
