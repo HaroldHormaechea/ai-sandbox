@@ -85,7 +85,30 @@ class SessionEventsController(
     }
 
     private fun startConnectLoop() {
+        // UC-88 (challenger re-review) — NEVER relaunch over a connect that is still
+        // healthily inside its handshake window (Connecting) or already Open under an
+        // ACTIVE loop. Force-cancelling such a connect as part of a "relaunch" would
+        // let rapid chat→list bouncing thrash a slow-but-progressing connect
+        // (connect→cancel→reconnect→cancel…) and starve it from ever completing. The
+        // relaunch-cancel below is reserved for an ACTUAL new attempt / teardown,
+        // where the prior client is orphaned (its loop already ended) or has genuinely
+        // failed. (connect() already no-ops while a loop is active; this encodes that
+        // contract directly in the loop starter so it holds for every caller.)
+        if (connectJob?.isActive == true) {
+            when (eventsClient?.state?.value) {
+                is SessionEventsClient.State.Connecting,
+                is SessionEventsClient.State.Open -> return
+                else -> { /* active loop but the client failed/terminal — relaunch is fine */ }
+            }
+        }
         connectJob?.cancel()
+        // Cancelling the coroutine does NOT cancel the OkHttp socket it owns, so
+        // force-drop the prior/orphaned client BEFORE relaunching — a graceful close
+        // alone lets a half-open socket linger 30–60 s and pile up past the server's
+        // per-fingerprint cap. This close is intentional (quiescent onFailure) and,
+        // per the guard above, only ever runs on a terminal/orphaned client.
+        eventsClient?.close("reconnect")
+        eventsClient = null
         connectJob = scope.launch {
             val profile = profileStore.current()
             if (profile == null) {
@@ -186,6 +209,14 @@ class SessionEventsController(
                 }
 
                 if (!isActive) break
+                // UC-88 — if the server explicitly refused the feed (per-client cap
+                // SERVICE_OVERLOAD / POLICY_VIOLATION) log it distinctly, so a wedge
+                // caused by overload is visible in the logs instead of looking like an
+                // ordinary transient drop. We still honour the unlimited-retry
+                // contract (UC-70/71/72) and back off below — we just don't pretend a
+                // refusal was silent.
+                (client.state.value as? SessionEventsClient.State.Disconnected)
+                    ?.let { logServerRefusalIfAny(it.reason) }
                 // UC-71 — this give-up branch only fires under an injected finite
                 // retry budget; with the unlimited default ctor it is unreachable.
                 if (reconnect.shouldGiveUp()) {
@@ -225,6 +256,23 @@ class SessionEventsController(
                 )
                 delay(delayMs)
             }
+        }
+    }
+
+    /**
+     * UC-88 — log a server-initiated *refusal* close distinctly. The client
+     * encodes server closes as `"$code:$reason"` in [SessionEventsClient.State.Disconnected];
+     * a SERVICE_OVERLOAD (per-fingerprint cap) or POLICY_VIOLATION means the
+     * server is actively rejecting us, which is the wedge-by-overload symptom of
+     * this UC — surface it instead of letting it read as a routine drop. Does NOT
+     * change the back-off behaviour (the unlimited-retry contract stands).
+     */
+    private fun logServerRefusalIfAny(reason: String) {
+        when {
+            reason.startsWith("${SessionEventsClient.SERVICE_OVERLOAD_CLOSE_CODE}:") ->
+                Log.w(TAG, "events feed refused by server — SERVICE_OVERLOAD (per-client cap): $reason; backing off, not hammering")
+            reason.startsWith("${SessionEventsClient.POLICY_VIOLATION_CLOSE_CODE}:") ->
+                Log.w(TAG, "events feed refused by server — POLICY_VIOLATION: $reason")
         }
     }
 
