@@ -71,7 +71,7 @@ class GitHubReleaseClientTest {
     // ── AC2 — resolve newest stable android-v* ──────────────────────────────
 
     @Test
-    fun latest_release_resolves_newest_stable_android_track() = runBlocking {
+    fun latest_release_resolves_newest_stable_android_track(): Unit = runBlocking {
         server.enqueue(MockResponse().setResponseCode(200).setBody(releasesJson()))
         val result = client().latestStableRelease()
         assertThat(result).isInstanceOf(GitHubReleaseClient.ReleaseCheckResult.Available::class.java)
@@ -85,7 +85,7 @@ class GitHubReleaseClientTest {
     // ── AC5/AC7 — credential-free on every request ──────────────────────────
 
     @Test
-    fun latest_release_sends_no_authorization_header() = runBlocking {
+    fun latest_release_sends_no_authorization_header(): Unit = runBlocking {
         server.enqueue(MockResponse().setResponseCode(200).setBody(releasesJson()))
         client().latestStableRelease()
         val recorded = server.takeRequest()
@@ -99,21 +99,21 @@ class GitHubReleaseClientTest {
     // ── AC8 — graceful failure mapping (never crashes) ──────────────────────
 
     @Test
-    fun http_403_maps_to_rate_limited() = runBlocking {
+    fun http_403_maps_to_rate_limited(): Unit = runBlocking {
         server.enqueue(MockResponse().setResponseCode(403).setBody("rate limit exceeded"))
         assertThat(client().latestStableRelease())
             .isEqualTo(GitHubReleaseClient.ReleaseCheckResult.RateLimited)
     }
 
     @Test
-    fun http_429_maps_to_rate_limited() = runBlocking {
+    fun http_429_maps_to_rate_limited(): Unit = runBlocking {
         server.enqueue(MockResponse().setResponseCode(429).setBody("too many requests"))
         assertThat(client().latestStableRelease())
             .isEqualTo(GitHubReleaseClient.ReleaseCheckResult.RateLimited)
     }
 
     @Test
-    fun transport_failure_maps_to_unreachable() = runBlocking {
+    fun transport_failure_maps_to_unreachable(): Unit = runBlocking {
         // Shut the server down so the connection is refused → offline / unreachable (AC8).
         val c = client()
         server.shutdown()
@@ -122,7 +122,7 @@ class GitHubReleaseClientTest {
     }
 
     @Test
-    fun non_2xx_maps_to_check_failed() = runBlocking {
+    fun non_2xx_maps_to_check_failed(): Unit = runBlocking {
         server.enqueue(MockResponse().setResponseCode(500).setBody("boom"))
         val result = client().latestStableRelease()
         assertThat(result).isInstanceOf(GitHubReleaseClient.ReleaseCheckResult.CheckFailed::class.java)
@@ -130,14 +130,14 @@ class GitHubReleaseClientTest {
     }
 
     @Test
-    fun malformed_body_maps_to_check_failed() = runBlocking {
+    fun malformed_body_maps_to_check_failed(): Unit = runBlocking {
         server.enqueue(MockResponse().setResponseCode(200).setBody("{not json"))
         val result = client().latestStableRelease()
         assertThat(result).isInstanceOf(GitHubReleaseClient.ReleaseCheckResult.CheckFailed::class.java)
     }
 
     @Test
-    fun only_server_track_maps_to_no_release() = runBlocking {
+    fun only_server_track_maps_to_no_release(): Unit = runBlocking {
         server.enqueue(
             MockResponse().setResponseCode(200).setBody(
                 """[{"tag_name":"server-v1.2.3","draft":false,"prerelease":false,"assets":[]}]""",
@@ -150,7 +150,7 @@ class GitHubReleaseClientTest {
     // ── AC5 — APK download (stream + progress + clean failure) ──────────────
 
     @Test
-    fun download_streams_bytes_and_reports_progress() = runBlocking {
+    fun download_streams_bytes_and_reports_progress(): Unit = runBlocking {
         val payload = ByteArray(256 * 1024) { (it % 251).toByte() } // > one 64 KiB buffer
         val body = Buffer().write(payload)
         server.enqueue(MockResponse().setResponseCode(200).setBody(body))
@@ -169,7 +169,7 @@ class GitHubReleaseClientTest {
     }
 
     @Test
-    fun download_http_failure_returns_failed_without_throwing() = runBlocking {
+    fun download_http_failure_returns_failed_without_throwing(): Unit = runBlocking {
         server.enqueue(MockResponse().setResponseCode(404).setBody("not found"))
         val dest = File(tmpDir, "android-release.apk")
         val result = client().download(server.url("/dl/missing.apk").toString(), dest) { }
@@ -179,7 +179,7 @@ class GitHubReleaseClientTest {
     }
 
     @Test
-    fun download_sends_no_authorization_header_across_a_redirect() = runBlocking {
+    fun download_sends_no_authorization_header_across_a_redirect(): Unit = runBlocking {
         // 302 to a second path on the same mock; OkHttp follows it (followRedirects).
         server.enqueue(
             MockResponse().setResponseCode(302)

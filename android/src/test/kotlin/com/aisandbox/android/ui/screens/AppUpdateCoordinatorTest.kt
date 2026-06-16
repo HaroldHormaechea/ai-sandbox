@@ -92,7 +92,7 @@ class AppUpdateCoordinatorTest {
     // ── AC9 — debug short-circuit, NO network ───────────────────────────────
 
     @Test
-    fun debug_build_short_circuits_with_no_network_call() = runBlocking {
+    fun debug_build_short_circuits_with_no_network_call(): Unit = runBlocking {
         val supplierCalled = AtomicBoolean(false)
         val state = MutableStateFlow<AppUpdateUiState>(AppUpdateUiState.Checking)
         coordinator(
@@ -110,7 +110,7 @@ class AppUpdateCoordinatorTest {
     // ── AC3 — up to date ────────────────────────────────────────────────────
 
     @Test
-    fun current_ge_latest_is_up_to_date() = runBlocking {
+    fun current_ge_latest_is_up_to_date(): Unit = runBlocking {
         val state = MutableStateFlow<AppUpdateUiState>(AppUpdateUiState.Checking)
         coordinator(
             state,
@@ -122,7 +122,7 @@ class AppUpdateCoordinatorTest {
     }
 
     @Test
-    fun no_release_is_treated_as_up_to_date() = runBlocking {
+    fun no_release_is_treated_as_up_to_date(): Unit = runBlocking {
         val state = MutableStateFlow<AppUpdateUiState>(AppUpdateUiState.Checking)
         coordinator(state, releaseSupplier = { GitHubReleaseClient.ReleaseCheckResult.NoRelease }).check()
         val s = state.await { it is AppUpdateUiState.UpToDate || it is AppUpdateUiState.Error }
@@ -132,7 +132,7 @@ class AppUpdateCoordinatorTest {
     // ── AC4 — strictly newer ⇒ offer ────────────────────────────────────────
 
     @Test
-    fun strictly_newer_release_offers_an_update() = runBlocking {
+    fun strictly_newer_release_offers_an_update(): Unit = runBlocking {
         val state = MutableStateFlow<AppUpdateUiState>(AppUpdateUiState.Checking)
         coordinator(
             state,
@@ -149,7 +149,7 @@ class AppUpdateCoordinatorTest {
     // ── AC10 — ordering by semver, not lexical/versionCode ──────────────────
 
     @Test
-    fun ordering_uses_semver_not_string_compare() = runBlocking {
+    fun ordering_uses_semver_not_string_compare(): Unit = runBlocking {
         // current 0.10.0 vs latest 0.9.0: a string compare says "0.10.0" < "0.9.0"
         // and would wrongly offer a downgrade. Semver says current is newer ⇒ up to date.
         val state = MutableStateFlow<AppUpdateUiState>(AppUpdateUiState.Checking)
@@ -165,7 +165,7 @@ class AppUpdateCoordinatorTest {
     // ── AC8 — graceful, retryable errors (never a crash) ────────────────────
 
     @Test
-    fun rate_limited_surfaces_a_retryable_error() = runBlocking {
+    fun rate_limited_surfaces_a_retryable_error(): Unit = runBlocking {
         val state = MutableStateFlow<AppUpdateUiState>(AppUpdateUiState.Checking)
         coordinator(state, releaseSupplier = { GitHubReleaseClient.ReleaseCheckResult.RateLimited }).check()
         val s = state.await { it is AppUpdateUiState.Error }
@@ -173,7 +173,7 @@ class AppUpdateCoordinatorTest {
     }
 
     @Test
-    fun unreachable_surfaces_a_retryable_error() = runBlocking {
+    fun unreachable_surfaces_a_retryable_error(): Unit = runBlocking {
         val state = MutableStateFlow<AppUpdateUiState>(AppUpdateUiState.Checking)
         coordinator(
             state,
@@ -185,7 +185,7 @@ class AppUpdateCoordinatorTest {
     }
 
     @Test
-    fun check_failed_surfaces_a_retryable_error() = runBlocking {
+    fun check_failed_surfaces_a_retryable_error(): Unit = runBlocking {
         val state = MutableStateFlow<AppUpdateUiState>(AppUpdateUiState.Checking)
         coordinator(
             state,
@@ -198,7 +198,7 @@ class AppUpdateCoordinatorTest {
     // ── AC5/AC6 — download → install ────────────────────────────────────────
 
     @Test
-    fun update_downloads_then_installs() = runBlocking {
+    fun update_downloads_then_installs(): Unit = runBlocking {
         val state = MutableStateFlow<AppUpdateUiState>(AppUpdateUiState.Checking)
         val installed = AtomicBoolean(false)
         val coord = coordinator(
@@ -226,7 +226,7 @@ class AppUpdateCoordinatorTest {
     // ── AC5 — visible download progress (deterministic, no StateFlow conflation race) ──
 
     @Test
-    fun download_progress_is_surfaced_to_the_ui() = runBlocking {
+    fun download_progress_is_surfaced_to_the_ui(): Unit = runBlocking {
         val state = MutableStateFlow<AppUpdateUiState>(AppUpdateUiState.Checking)
         // The downloader emits 42% then HOLDS until the test confirms it observed
         // the Downloading state — so the conflated StateFlow cannot skip past it.
@@ -255,7 +255,7 @@ class AppUpdateCoordinatorTest {
     // ── AC5/AC8 — download failure deletes the partial file ─────────────────
 
     @Test
-    fun download_failure_deletes_partial_file_and_errors() = runBlocking {
+    fun download_failure_deletes_partial_file_and_errors(): Unit = runBlocking {
         val state = MutableStateFlow<AppUpdateUiState>(AppUpdateUiState.Checking)
         val dest = destFile()
         dest.parentFile?.mkdirs()
@@ -282,7 +282,7 @@ class AppUpdateCoordinatorTest {
     // ── AC6 — install needs the "unknown apps" grant ────────────────────────
 
     @Test
-    fun install_needs_permission_surfaces_retryable_error() = runBlocking {
+    fun install_needs_permission_surfaces_retryable_error(): Unit = runBlocking {
         val state = MutableStateFlow<AppUpdateUiState>(AppUpdateUiState.Checking)
         val coord = coordinator(
             state,
@@ -301,7 +301,7 @@ class AppUpdateCoordinatorTest {
     }
 
     @Test
-    fun install_failure_deletes_file_and_errors() = runBlocking {
+    fun install_failure_deletes_file_and_errors(): Unit = runBlocking {
         val state = MutableStateFlow<AppUpdateUiState>(AppUpdateUiState.Checking)
         val dest = destFile()
         val coord = coordinator(
@@ -327,7 +327,7 @@ class AppUpdateCoordinatorTest {
     // ── Missing asset & pre-offer guard ─────────────────────────────────────
 
     @Test
-    fun update_with_no_apk_asset_surfaces_no_asset_error() = runBlocking {
+    fun update_with_no_apk_asset_surfaces_no_asset_error(): Unit = runBlocking {
         val state = MutableStateFlow<AppUpdateUiState>(AppUpdateUiState.Checking)
         val coord = coordinator(
             state,
@@ -342,7 +342,7 @@ class AppUpdateCoordinatorTest {
     }
 
     @Test
-    fun update_before_an_offer_is_a_no_op() = runBlocking {
+    fun update_before_an_offer_is_a_no_op(): Unit = runBlocking {
         val state = MutableStateFlow<AppUpdateUiState>(AppUpdateUiState.Checking)
         val downloaderCalled = AtomicBoolean(false)
         val coord = coordinator(
