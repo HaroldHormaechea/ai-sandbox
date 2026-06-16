@@ -72,11 +72,20 @@
  *          cmdline --session-id (the LAUNCH id) is unchanged, so a pure exact
  *          anchor stays pinned to the stale pre-clear file forever. So once the
  *          launch file exists, if a STRICTLY-NEWER agentName-ABSENT transcript is
- *          present (claude rotated past its launch session), adopt that newest file
- *          instead (selectMainCurrent). This is still foreign-safe: a teammate file
- *          carries agentName and is excluded, and the no-foreign-adoption-at-startup
- *          guarantee holds because we only ever adopt a file NEWER than our own
- *          already-existing launch transcript.
+ *          present (claude rotated past its launch session) AND that transcript
+ *          belongs to THIS pane's own lineage, adopt that newest file instead
+ *          (selectMainCurrent). UC-91 CORRECTION: the mtime floor + agentName-absent
+ *          filter alone are NOT foreign-safe — they only exclude STALE foreign
+ *          sessions. A CONCURRENTLY-ACTIVE foreign session B' sharing the slug has an
+ *          agentName-absent main transcript that is NEWER than this pane's idle launch
+ *          file, so the pre-UC-91 rotation adopted it (the cross-session conversation
+ *          bleed + wrong/empty agent pills on session→session switch). The lineage
+ *          guard `isOwnLineage` (ownLineagePredicate → collectForeignMainSessionIds)
+ *          enumerates every OTHER live claude main pane in the slug and refuses to
+ *          adopt any transcript stem owned by a different session's --session-id, so
+ *          ONLY this pane's own `/clear` rotation is ever followed. If the process
+ *          table is unreadable the guard degrades to the exact `--session-id` anchor
+ *          (never foreign adoption).
  *       1. Team active (no --session-id, old entrypoint): any teammate process in
  *          the same cwd-slug carries --parent-session-id = the orchestrator's
  *          transcript stem → anchor main to <parent-session-id>.jsonl exactly.
@@ -95,7 +104,8 @@
  * same cwd-slug (AC23): identity-anchoring is mandatory; naive newest-mtime would
  * route a foreign session's conversation to the client, so rotation only ever
  * adopts a file within the pane's own identity family (agentName-absent for main,
- * matching (agentName, teamName) for a teammate).
+ * matching (agentName, teamName) for a teammate) AND — for a main pane (UC-91) —
+ * within the pane's own session lineage, never a stem owned by another live session.
  */
 
 'use strict';
@@ -488,23 +498,39 @@ function selectMainTranscript(candidates, opts) {
 }
 
 /**
- * UC-65 — pick a transcript ROTATION target for a MAIN/orchestrator pane (PURE —
- * unit-testable). candidates: [{ path, mtimeMs, agentNamePresent }]. Returns the
- * newest agentName-ABSENT candidate whose mtime is STRICTLY greater than
- * `currentMtimeMs` and whose path differs from `currentPath`, or null when none.
+ * UC-65/UC-91 — pick a transcript ROTATION target for a MAIN/orchestrator pane
+ * (PURE — unit-testable). candidates: [{ path, stem, mtimeMs, agentNamePresent }].
+ * Returns the newest agentName-ABSENT candidate whose mtime is STRICTLY greater
+ * than `currentMtimeMs`, whose path differs from `currentPath`, AND that passes the
+ * `isOwnLineage` lineage guard, or null when none.
  *
  * This is the signal that claude has rotated past `currentPath` (e.g. after
  * `/clear`, which starts a fresh session jsonl while the process — and its launch
- * --session-id — stay put). Foreign-safe: agentName-present (teammate) transcripts
- * are excluded, so the main pane never adopts a swarm teammate's file; and the
- * strict newer-than-current floor means a stale foreign session is never adopted.
+ * --session-id — stay put). Foreign-safety has THREE layers:
+ *   1. agentName-present (teammate) transcripts are excluded, so the main pane
+ *      never adopts a swarm teammate's file;
+ *   2. the strict newer-than-current floor rejects a STALE foreign session;
+ *   3. (UC-91) `isOwnLineage(stem)` — the pane-LINEAGE guard. ~/.claude is shared
+ *      across sessions on the same cwd-slug (default `./claude-config` mount), so a
+ *      CONCURRENTLY-ACTIVE foreign session's main transcript is also agentName-absent
+ *      AND newer than this pane's idle launch file — layers 1+2 cannot tell it apart
+ *      from this pane's own `/clear` rotation. `isOwnLineage` is the discriminator:
+ *      it returns false for any stem owned by a DIFFERENT live session, so a foreign
+ *      session's transcript is NEVER adopted, at initial resolution OR mid-stream.
+ *
+ * `isOwnLineage` is an INJECTABLE predicate `(stem) => boolean` (resolved in the
+ * impure caller from the live process table — see collectForeignMainSessionIds).
+ * When omitted (legacy callers / pure tests that don't exercise the guard) every
+ * stem is treated as adoptable, preserving the pre-UC-91 behavior.
  */
-function selectRotatedMain(candidates, currentPath, currentMtimeMs) {
+function selectRotatedMain(candidates, currentPath, currentMtimeMs, isOwnLineage) {
+  const ownLineage = typeof isOwnLineage === 'function' ? isOwnLineage : () => true;
   let best = null;
   let bestMtime = currentMtimeMs;
   for (const c of candidates) {
     if (!c || c.agentNamePresent) continue;
     if (c.path === currentPath) continue;
+    if (!ownLineage(c.stem)) continue; // UC-91 — never adopt a foreign session's file
     if (c.mtimeMs > bestMtime) {
       bestMtime = c.mtimeMs;
       best = c.path;
@@ -514,23 +540,89 @@ function selectRotatedMain(candidates, currentPath, currentMtimeMs) {
 }
 
 /**
- * UC-65 — main resolution that FOLLOWS a `/clear` rotation (PURE — unit-testable).
- * candidates: [{ path, stem, mtimeMs, agentNamePresent }]. Anchor by exact
- * --session-id (the launch id); but if claude has rotated past it (a strictly-newer
- * agentName-absent transcript exists), adopt that newest file instead — so a fresh
- * connection AFTER `/clear` backfills the CURRENT transcript, not the stale
- * pre-clear one. Returns null when the launch session-id file is absent, preserving
- * the startup no-foreign-adoption guarantee (a freshly-started session shows a
- * transient no-transcript until its OWN file appears, never a foreign one).
+ * UC-65/UC-91 — main resolution that FOLLOWS a `/clear` rotation (PURE —
+ * unit-testable). candidates: [{ path, stem, mtimeMs, agentNamePresent }]. Anchor by
+ * exact --session-id (the launch id); but if claude has rotated past it (a
+ * strictly-newer agentName-absent transcript that ALSO belongs to this pane's own
+ * lineage) adopt that newest file instead — so a fresh connection AFTER `/clear`
+ * backfills the CURRENT transcript, not the stale pre-clear one. Returns null when
+ * the launch session-id file is absent, preserving the startup no-foreign-adoption
+ * guarantee (a freshly-started session shows a transient no-transcript until its OWN
+ * file appears, never a foreign one).
+ *
+ * `isOwnLineage` (UC-91) is threaded straight into selectRotatedMain — see there.
+ * Without it a concurrently-active foreign session in the shared slug would be
+ * adopted (the UC-91 cross-session bleed); with it only this pane's own rotation is.
  */
-function selectMainCurrent(candidates, sessionId) {
+function selectMainCurrent(candidates, sessionId, isOwnLineage) {
   const exact = selectMainBySessionId(candidates, sessionId);
   if (!exact) return null;
   let exactMtime = -1;
   for (const c of candidates) {
     if (c && c.path === exact && c.mtimeMs > exactMtime) exactMtime = c.mtimeMs;
   }
-  return selectRotatedMain(candidates, exact, exactMtime) || exact;
+  return selectRotatedMain(candidates, exact, exactMtime, isOwnLineage) || exact;
+}
+
+/**
+ * UC-91 — the SET of main-pane session ids OWNED BY OTHER live sessions sharing this
+ * cwd-slug (PURE — unit-testable). procs: [{ pid, sessionId, agentName }] — one per
+ * `claude` process found in the slug. A different session's main pane is agentName-
+ * ABSENT and carries its own launch `--session-id`; that id names a transcript stem
+ * THIS pane must never adopt as a rotation target. Teammate processes (agentName
+ * present) are skipped — they are handled by the (agentName, teamName) agent path,
+ * never by main rotation. Our own pid is skipped so our launch id is NOT marked
+ * foreign. Returns a Set of foreign session-id strings.
+ */
+function collectForeignMainSessionIds(procs, ownPid) {
+  const ids = new Set();
+  for (const p of procs) {
+    if (!p || p.pid === ownPid) continue;
+    if (p.agentName) continue; // teammate — not a main pane
+    if (p.sessionId) ids.add(p.sessionId);
+  }
+  return ids;
+}
+
+/**
+ * UC-91 — enumerate every `claude` process whose cwd maps to `slug`, returning
+ * [{ pid, sessionId, agentName }] (impure /proc walk). Feeds
+ * collectForeignMainSessionIds so the live resolver can build the pane-lineage
+ * guard. Cheap: a single /proc readdir plus a cmdline+cwd read per claude pid, and
+ * it only runs on the rotation path (a candidate strictly newer than our anchor).
+ */
+function enumerateSlugClaudeMains(slug) {
+  const out = [];
+  let pids;
+  try {
+    pids = fs.readdirSync('/proc');
+  } catch (e) {
+    return out;
+  }
+  for (const ent of pids) {
+    if (!/^\d+$/.test(ent)) continue;
+    const pid = parseInt(ent, 10);
+    if (!isClaude(pid)) continue;
+    const cwd = readProcLink('/proc/' + pid + '/cwd');
+    if (!cwd || slugFromCwd(cwd) !== slug) continue;
+    const idn = parseClaudeIdentity(readProc('/proc/' + pid + '/cmdline'));
+    out.push({ pid, sessionId: idn.sessionId, agentName: idn.agentName });
+  }
+  return out;
+}
+
+/**
+ * UC-91 — build the pane-lineage guard `(stem) => boolean` for a MAIN pane resolved
+ * to `claudePid` in `slug` (impure). Returns a predicate that is false for any stem
+ * owned by a DIFFERENT live session, so selectRotatedMain never adopts a foreign
+ * session's transcript. Falls back safely: if the process table can't be read the
+ * guard rejects ALL rotation (predicate over an empty foreign set still excludes
+ * nothing, but the strict mtime floor + exact anchor keep us on our own file), which
+ * matches the approved fallback — never foreign adoption.
+ */
+function ownLineagePredicate(slug, claudePid) {
+  const foreign = collectForeignMainSessionIds(enumerateSlugClaudeMains(slug), claudePid);
+  return (stem) => !foreign.has(stem);
 }
 
 /** List top-level <slug>/*.jsonl as [{ path, stem, mtimeMs }] (impure FS read). */
@@ -666,7 +758,9 @@ function resolveTranscriptForClaude(claudePid) {
       const id = readTranscriptIdentity(c.path, ID_SCAN_BYTES);
       return { path: c.path, stem: c.stem, mtimeMs: c.mtimeMs, agentNamePresent: id.agentNamePresent };
     });
-    return selectMainCurrent(enrichedMain, idn.sessionId);
+    // UC-91 — pane-lineage guard so a concurrently-active FOREIGN session in the
+    // shared slug is never adopted as our `/clear` rotation target.
+    return selectMainCurrent(enrichedMain, idn.sessionId, ownLineagePredicate(slug, claudePid));
   }
   // Old-entrypoint degradation (no --session-id on cmdline): Tier 1 parent-anchor
   // then Tier 2 newest agentName-absent. Enrich with agentNamePresent for Tier 2.
@@ -739,12 +833,15 @@ function detectRotation(claudePid, currentPath) {
     const sel = selectAgentTranscript(enriched, idn.agentName, idn.teamName);
     return sel && sel !== currentPath ? sel : null;
   }
-  // Main / orchestrator pane — adopt a strictly-newer agentName-ABSENT file.
+  // Main / orchestrator pane — adopt a strictly-newer agentName-ABSENT file, but
+  // ONLY within this pane's own lineage (UC-91): a concurrently-active foreign
+  // session's main transcript is also agentName-absent and newer, so without the
+  // lineage guard the live stream would HOP B onto A mid-stream (the sticky bleed).
   const enriched = candidates.map((c) => {
     const id = readTranscriptIdentity(c.path, ID_SCAN_BYTES);
-    return { path: c.path, mtimeMs: c.mtimeMs, agentNamePresent: id.agentNamePresent };
+    return { path: c.path, stem: c.stem, mtimeMs: c.mtimeMs, agentNamePresent: id.agentNamePresent };
   });
-  const sel = selectRotatedMain(enriched, currentPath, curMtime);
+  const sel = selectRotatedMain(enriched, currentPath, curMtime, ownLineagePredicate(slug, claudePid));
   return sel && sel !== currentPath ? sel : null;
 }
 
@@ -2233,8 +2330,13 @@ module.exports = {
   selectMainTranscript,
   // UC-65 — rotation-follow seams (QA unit tests): `/clear` starts a new session
   // jsonl in-process; these pick the rotated/current transcript foreign-safely.
+  // UC-91 — both now take an optional `isOwnLineage(stem) => bool` pane-lineage
+  // guard so a concurrently-active foreign session in the shared slug is never
+  // adopted; collectForeignMainSessionIds is the pure builder of that guard's
+  // foreign-id set from an enumerated [{pid,sessionId,agentName}] process list.
   selectRotatedMain,
   selectMainCurrent,
+  collectForeignMainSessionIds,
   readTranscriptIdentity,
   listTopLevelTranscripts,
   makeReader,
