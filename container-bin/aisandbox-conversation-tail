@@ -79,13 +79,18 @@
  *          sessions. A CONCURRENTLY-ACTIVE foreign session B' sharing the slug has an
  *          agentName-absent main transcript that is NEWER than this pane's idle launch
  *          file, so the pre-UC-91 rotation adopted it (the cross-session conversation
- *          bleed + wrong/empty agent pills on session→session switch). The lineage
- *          guard `isOwnLineage` (ownLineagePredicate → collectForeignMainSessionIds)
- *          enumerates every OTHER live claude main pane in the slug and refuses to
- *          adopt any transcript stem owned by a different session's --session-id, so
- *          ONLY this pane's own `/clear` rotation is ever followed. If the process
- *          table is unreadable the guard degrades to the exact `--session-id` anchor
- *          (never foreign adoption).
+ *          bleed + wrong/empty agent pills on session→session switch). The fix is a
+ *          lineage guard `isOwnLineage` injected into selectRotatedMain/selectMainCurrent
+ *          (both call sites): a rotation candidate is adopted ONLY when proven to be
+ *          THIS pane's own. INTERIM STATE (UC-91): a positive cross-container ownership
+ *          signal is still being designed (the sessions sharing the slug live in
+ *          SEPARATE containers with isolated PID namespaces — the bleed crosses via the
+ *          shared bind-mount/FILES, not processes, so a `/proc`-based foreign scan is
+ *          blind), so `ownLineagePredicate` currently FAILS CLOSED: it adopts NO
+ *          rotation candidate and falls back to the exact `--session-id` anchor. This
+ *          guarantees no foreign adoption (the bleed fix) at the temporary cost of not
+ *          following a same-pane `/clear` rotation; the file-derived ownership signal
+ *          will restore UC-65 rotation-follow without reopening the bleed.
  *       1. Team active (no --session-id, old entrypoint): any teammate process in
  *          the same cwd-slug carries --parent-session-id = the orchestrator's
  *          transcript stem → anchor main to <parent-session-id>.jsonl exactly.
@@ -613,16 +618,34 @@ function enumerateSlugClaudeMains(slug) {
 
 /**
  * UC-91 — build the pane-lineage guard `(stem) => boolean` for a MAIN pane resolved
- * to `claudePid` in `slug` (impure). Returns a predicate that is false for any stem
- * owned by a DIFFERENT live session, so selectRotatedMain never adopts a foreign
- * session's transcript. Falls back safely: if the process table can't be read the
- * guard rejects ALL rotation (predicate over an empty foreign set still excludes
- * nothing, but the strict mtime floor + exact anchor keep us on our own file), which
- * matches the approved fallback — never foreign adoption.
+ * to `claudePid` in `slug` (impure).
+ *
+ * INTERIM FAIL-CLOSED (UC-91, challenger Critical). A `/proc`-based foreign-session
+ * signal is CROSS-CONTAINER-BLIND: every session runs in its OWN container with an
+ * ISOLATED PID namespace (verified — no `pid_mode` / `pid:` / `--pid host` in
+ * docker-compose*.yml or spawn.sh; the helper is `docker compose exec`'d INSIDE the
+ * session container, so `enumerateSlugClaudeMains` only ever sees THIS container's
+ * local /proc). A foreign session A's claude lives in a DIFFERENT container and is
+ * invisible here; the bleed crosses solely via the SHARED `claude-config`
+ * bind-mount (the slug dir on disk), i.e. via FILES, not processes. So the /proc
+ * foreign set is empty in production and a `!foreign.has(stem)` guard would be
+ * fail-OPEN (allow-all) → A's file still adopted → the fix is INERT.
+ *
+ * Until a cross-container-visible POSITIVE ownership signal is derived from the
+ * TRANSCRIPT FILES on the shared mount (being designed by the analyst), we MUST
+ * fail CLOSED: with no positive proof a rotation candidate is THIS pane's own, do
+ * NOT adopt it — return false for every stem, so selectRotatedMain yields null and
+ * selectMainCurrent falls back to the exact `--session-id` anchor. This guarantees
+ * "never adopt a foreign session's transcript" (fixes the bleed) at the interim
+ * cost of not following a same-pane `/clear` rotation; the revised file-based signal
+ * will restore UC-65 rotation-follow. `enumerateSlugClaudeMains` /
+ * `collectForeignMainSessionIds` are retained (exported) for the revised mechanism /
+ * unit tests but are intentionally NOT consulted for a fail-open decision.
  */
 function ownLineagePredicate(slug, claudePid) {
-  const foreign = collectForeignMainSessionIds(enumerateSlugClaudeMains(slug), claudePid);
-  return (stem) => !foreign.has(stem);
+  void slug;
+  void claudePid;
+  return () => false;
 }
 
 /** List top-level <slug>/*.jsonl as [{ path, stem, mtimeMs }] (impure FS read). */
