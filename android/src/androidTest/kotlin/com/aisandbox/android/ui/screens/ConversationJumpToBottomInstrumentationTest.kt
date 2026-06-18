@@ -422,7 +422,8 @@ class ConversationJumpToBottomInstrumentationTest {
         // And follow is re-engaged: a further message sticks to the bottom.
         ui { items.value = items.value + msg("M", 25) }
         composeTestRule.waitForIdle()
-        assertEquals("manual return re-engaged follow", 26, lastVisible(state))
+        // 24 base + 2 appends = 26 items → last index 25.
+        assertEquals("manual return re-engaged follow", 25, lastVisible(state))
     }
 
     @Test
