@@ -55,6 +55,17 @@ services:
       # override AI_SANDBOX_CLAUDE_CONFIG_HOST_PATH to a per-session folder
       # (e.g. ./claude-config-3) to give a session an isolated Claude config.
       - "${AI_SANDBOX_CLAUDE_CONFIG_HOST_PATH:-./claude-config}:/home/claude/.claude"
+      # UC-91 — per-session transcript store. Claude writes conversation
+      # transcripts to ~/.claude/projects/<cwd-slug>/. When claude-config is
+      # SHARED (the default), every session's transcripts co-resolve in the same
+      # slug dir, so one session's chat bleeds into another on session→session
+      # switch (and agent pills resolve to the wrong session). Nesting a
+      # per-session bind at .../projects isolates the transcript store regardless
+      # of the claude-config sharing mode. Compose mounts by destination depth
+      # (parent .../.claude first, then .../.claude/projects), so this overlays
+      # cleanly on top of the claude-config mount above. spawn.sh sets
+      # AI_SANDBOX_CLAUDE_PROJECTS_HOST_PATH to ./claude-projects-<N>.
+      - "${AI_SANDBOX_CLAUDE_PROJECTS_HOST_PATH:-./claude-projects}:/home/claude/.claude/projects"
       # Claude pre-init template — read-only seed material captured by
       # `aisandboxctl secrets seed` (UC06 step d). entrypoint.sh copies
       # this dir into ~/.claude/ exactly once per session (gated by

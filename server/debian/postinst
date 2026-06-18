@@ -106,11 +106,22 @@ case "$1" in
         # the trigger dir exists so the DirectoryNotEmpty watch arms cleanly.
         # `enable --now` starts the .path watch immediately and on every boot.
         # NOTE: the updater.service is intentionally NOT enabled (it is path-
-        # activated only), and ai-sandbox-server's own `systemctl enable` is
-        # performed by the updater on self-update, not here (so a plain operator
-        # install keeps its manual-enable choice).
+        # activated only).
+        #
+        # We also arm boot-time autostart of the server itself so it comes up on
+        # every reboot without a manual `systemctl start` — previously the
+        # operator had to enable it by hand, so a fresh boot left the management
+        # server down until someone ran systemctl. We use plain `enable` here,
+        # NOT `enable --now`: a fresh, not-yet-onboarded install has no PKI
+        # material, so starting it immediately would only crash-latch the unit
+        # `failed` (StartLimitBurst). `enable` just installs the
+        # multi-user.target wants-symlink (the unit ships `WantedBy=
+        # multi-user.target`), so systemd starts the service automatically on the
+        # next boot, once onboarding + `aisandboxctl client mint` have
+        # provisioned it. Idempotent and guarded the same way as the path watch.
         if command -v systemctl >/dev/null 2>&1; then
             systemctl enable --now ai-sandbox-updater.path >/dev/null 2>&1 || true
+            systemctl enable ai-sandbox-server.service >/dev/null 2>&1 || true
         fi
 
         # 3b. UC-38 — versioned session-image rebuild on upgrade. On an UPGRADE
@@ -327,7 +338,7 @@ captured; session image built). Remaining steps:
        present; mint one here, or enroll a device with
        `aisandboxctl client invite <name>`. Both hot-reload — no restart.
 
-  2. sudo systemctl enable --now ai-sandbox-server
+  2. sudo systemctl start ai-sandbox-server   # boot-autostart is already enabled by install
 
 Re-run `sudo aisandboxctl onboard --force` any time to refresh credentials or
 re-capture the Claude pre-init snapshot. The CLI wrapper is at /usr/bin/aisandboxctl.
@@ -347,7 +358,7 @@ ai-sandbox-server installed and onboarded. Remaining steps:
        present; mint one here, or enroll a device with
        `aisandboxctl client invite <name>`. Both hot-reload — no restart.
 
-  2. sudo systemctl enable --now ai-sandbox-server
+  2. sudo systemctl start ai-sandbox-server   # boot-autostart is already enabled by install
 
 Claude pre-init was NOT captured (it needs a terminal). From a terminal, run
 `sudo aisandboxctl onboard` to capture it so spawned sessions skip Claude's
@@ -387,7 +398,7 @@ credentials or re-capture the snapshot. If you haven't already:
        Authorize at least one client; the server returns 401 to every request
        until one is present. Hot-reloads — no restart.
 
-  2. sudo systemctl enable --now ai-sandbox-server
+  2. sudo systemctl start ai-sandbox-server   # boot-autostart is already enabled by install
 
 EOM
         else
@@ -411,7 +422,7 @@ ai-sandbox-server installed. Onboarding was deferred. Next steps:
        present; mint one here, or enroll a device with
        `aisandboxctl client invite <name>`. Both hot-reload — no restart.
 
-  3. sudo systemctl enable --now ai-sandbox-server
+  3. sudo systemctl start ai-sandbox-server   # boot-autostart is already enabled by install
 
 The CLI wrapper is at /usr/bin/aisandboxctl (a thin POSIX shell shim
 around the bundled aisandboxctl jar — `aisandboxctl --help` for usage).

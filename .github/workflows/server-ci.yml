@@ -220,6 +220,15 @@ jobs:
       - name: Run real-docker onboarding / uid-alignment script
         run: ./gradlew :server:realDockerOnboardingTest --no-daemon
 
+      # UC-91 — cross-session transcript isolation guard. Reuses the
+      # ai-context:latest image built by the onboarding step above (hence run in
+      # the same job, after it): spawns two real sessions on the production
+      # compose + per-session ~/.claude/projects mount and asserts B never sees
+      # A's transcript. The script self-cleans its /tmp scratch and prints FAIL
+      # detail to this job's log, so there is no build-dir artefact to upload.
+      - name: Run real-docker UC-91 transcript-isolation script
+        run: ./gradlew :server:realDockerUc91IsolationTest --no-daemon
+
       # On failure, surface the spawn / docker / probe transcripts so triage can
       # read them without a re-run.
       - name: Upload real-docker-onboarding artefacts on failure

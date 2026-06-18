@@ -329,10 +329,19 @@ internal fun SessionsBody(
     // test can drive swipe → dialog → confirm without a live server.
     var deleteTarget by remember { mutableStateOf<SessionSummary?>(null) }
 
-    LazyColumn(
+    // UC-92 — the list and the slim reconnect indicator share one Box so the
+    // banner can be drawn as a true OVERLAY (Alignment.TopCenter) rather than a
+    // list item / sticky header. An overlay never participates in the LazyColumn
+    // layout, so a flapping feed toggling [showReconnectingBanner] on and off can
+    // never reflow / shove the rows (pitfall: layout jank). The scaffold [padding]
+    // moves out here to the Box so both the list and the banner sit below the bar.
+    Box(
         modifier = Modifier
             .fillMaxSize()
             .padding(padding),
+    ) {
+    LazyColumn(
+        modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(horizontal = 16.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp),
     ) {
@@ -426,6 +435,17 @@ internal fun SessionsBody(
                     }
                 }
             }
+        }
+    }
+        // UC-92 (AC2/AC10) — the non-destructive reconnect indicator. Rendered
+        // only when the feed is down AND rows are still known (the full-screen
+        // RetryingBackground above owns the zero-rows case). As a TopCenter
+        // overlay it floats above the list region without reflowing the rows.
+        if (state.showReconnectingBanner) {
+            ReconnectingBanner(
+                status = state.feedStatus,
+                modifier = Modifier.align(Alignment.TopCenter),
+            )
         }
     }
 
@@ -603,6 +623,46 @@ private fun RetryingBackground(
                 )
             }
         }
+    }
+}
+
+/**
+ * UC-92 (AC2/AC10) — the slim, non-destructive reconnect indicator shown ABOVE
+ * the list while the feed is reconnecting/stopped BUT known session rows are
+ * still visible. Unlike [RetryingBackground] (which replaces the whole list
+ * region when zero rows are known), this never hides rows: [SessionsBody]
+ * renders it as a TopCenter Box overlay, so a flapping feed cannot reflow the
+ * list content (pitfall: layout jank).
+ *
+ * <p>Phase-dependent copy (challenger minor 2): while RECONNECTING it reads the
+ * active "Reconnecting…"; once the feed has terminally given up (phase STOPPED)
+ * it reads the static "Not connected" — the same string the full-screen
+ * give-up background uses — so the indicator never implies an in-flight retry
+ * that has actually stopped.
+ */
+@Composable
+private fun ReconnectingBanner(
+    status: SessionsFeedStatus,
+    modifier: Modifier = Modifier,
+) {
+    val text = if (status.phase == SessionsFeedStatus.Phase.STOPPED) {
+        stringResource(R.string.sessions_feed_disconnected)
+    } else {
+        stringResource(R.string.sessions_reconnecting_banner)
+    }
+    Box(
+        modifier = modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.surfaceVariant)
+            .padding(horizontal = 16.dp, vertical = 6.dp)
+            .testTag("sessions_reconnecting_banner"),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            text = text,
+            style = MaterialTheme.typography.bodySmall,
+            color = OnSurfaceMuted,
+        )
     }
 }
 

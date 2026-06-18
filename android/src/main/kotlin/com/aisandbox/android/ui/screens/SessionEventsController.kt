@@ -46,6 +46,14 @@ class SessionEventsController(
     // list can render the "Not connected, retrying…" background. Defaulted to a
     // no-op so pre-UC-70 callers/tests keep compiling.
     private val onStatus: (SessionsFeedStatus) -> Unit = {},
+    // UC-92 — fast-recovery hook fired exactly once when a HEALTHILY-OPEN socket
+    // drops for a non-identity reason (a *transient* drop). The ViewModel wires
+    // this to an immediate REST refresh so the list repaints from the
+    // authoritative GET at once (AC4/AC5) instead of waiting out the back-off.
+    // Defaulted to a no-op so pre-UC-92 callers/tests keep compiling. Safety
+    // (AC6): a genuine cold outage never reaches Open, so this can never fire
+    // there ⇒ it cannot turn an outage into a tight retry loop.
+    private val onTransientDrop: () -> Unit = {},
     // UC-70 — a SINGLE shared clock instance, handed to BOTH this controller and
     // its [ReconnectController], so the next-retry/give-up instants the status
     // carries are computed against the same `now` the back-off schedules against
@@ -199,6 +207,18 @@ class SessionEventsController(
                             // composable routes to the dialog; stop the loop.
                             return@launch
                         }
+                        // UC-92 — the socket had been healthily Open and then
+                        // dropped for a non-identity reason (a TRANSIENT drop:
+                        // delete-induced connection churn, back-nav STOP/START,
+                        // or a flaky link). Kick an immediate REST refresh so the
+                        // list repaints from the authoritative GET at once rather
+                        // than waiting out the exponential back-off (AC4/AC5). The
+                        // back-off was already reset by reconnect.reset() on Open
+                        // above, so the next reconnect dial fires at ~1s. This
+                        // only runs on the Open→non-Revoked terminal edge, so a
+                        // genuine cold outage (which never Opens) can't reach it
+                        // ⇒ no tight retry loop (AC6 preserved).
+                        onTransientDrop()
                     }
 
                     is SessionEventsClient.State.Revoked -> return@launch

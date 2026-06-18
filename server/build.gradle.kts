@@ -240,6 +240,37 @@ val realDockerOnboardingTest by tasks.registering(Exec::class) {
     }
 }
 
+// ── UC-91 real-Docker cross-session transcript isolation step ────────────────
+//
+// Drives `server/ci/real-docker-uc91-isolation.sh`, which spawns TWO real
+// sessions via the production compose + the per-session `~/.claude/projects`
+// (`claude-projects-<N>`) bind, writes a transcript in session A, and asserts
+// session B's projects dir never contains it — the durable two-container guard
+// for the UC-91 conversation-bleed fix (Approach B). A unit test cannot reach
+// this: the sessions are separate, PID-isolated containers, and a dev sandbox's
+// leaky /proc would false-positive a /proc-based check; only the filesystem-level
+// behavioral assertion across two real containers is trustworthy.
+//
+// Needs `ai-context:latest` (built by realDockerOnboardingTest) → ordered after
+// it. No jar dependency: the path under test is the host scripts + compose mount
+// layout, not the server fat-jar. Gated on AI_SANDBOX_REAL_DOCKER_IT=1 like its
+// siblings; the script itself does not re-check the env var.
+val realDockerUc91IsolationTest by tasks.registering(Exec::class) {
+    group = "verification"
+    description = "Spawns two sessions and asserts per-session ~/.claude/projects isolation (UC-91)."
+    mustRunAfter(realDockerOnboardingTest)
+    workingDir = rootProject.projectDir
+    executable = "bash"
+    args = listOf("server/ci/real-docker-uc91-isolation.sh")
+    environment("AI_SANDBOX_REAL_DOCKER_IT", System.getenv("AI_SANDBOX_REAL_DOCKER_IT") ?: "")
+    if (System.getenv("RUNNER_TEMP") != null) {
+        environment("RUNNER_TEMP", System.getenv("RUNNER_TEMP")!!)
+    }
+    if (System.getenv("AI_SANDBOX_REAL_DOCKER_IT") != "1") {
+        enabled = false
+    }
+}
+
 // ── OAS generation (docs-only profile) ──────────────────────────────────────
 val generateOpenApiDocs by tasks.registering(JavaExec::class) {
     group = "documentation"

@@ -498,6 +498,13 @@ function selectMainTranscript(candidates, opts) {
  * --session-id — stay put). Foreign-safe: agentName-present (teammate) transcripts
  * are excluded, so the main pane never adopts a swarm teammate's file; and the
  * strict newer-than-current floor means a stale foreign session is never adopted.
+ *
+ * UC-91: cross-session transcripts no longer co-reside — a per-session
+ * ~/.claude/projects mount (docker-compose.yml / spawn.sh, `claude-projects-<N>`)
+ * provides the isolation, so this resolver only ever sees its OWN session's files.
+ * Do NOT add a foreign-session guard here (e.g. a /proc or registry lineage check):
+ * that was the abandoned bb5009d approach and isolation belongs at the MOUNT layer,
+ * not in this pure resolver. Keep this function the clean newest-mtime rotation pick.
  */
 function selectRotatedMain(candidates, currentPath, currentMtimeMs) {
   let best = null;
