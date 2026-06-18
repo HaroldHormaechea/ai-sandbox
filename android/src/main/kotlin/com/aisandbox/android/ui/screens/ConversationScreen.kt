@@ -37,6 +37,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material3.Badge
 import androidx.compose.material3.BadgedBox
@@ -67,11 +68,15 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.semantics
@@ -84,7 +89,9 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.aisandbox.android.R
+import com.aisandbox.android.conversation.AnswerItem
 import com.aisandbox.android.conversation.ConversationItem
+import com.aisandbox.android.conversation.PendingSheet
 import com.aisandbox.android.conversation.ToolDetailState
 import com.aisandbox.android.conversation.TurnPhase
 import com.aisandbox.android.net.ModelInfo
@@ -143,6 +150,12 @@ fun ConversationScreen(
 
     var menuOpen by remember { mutableStateOf(false) }
     val listState = rememberLazyListState()
+
+    // UC-60/UC-90 — a selected background-subagent pill is a READ-ONLY view: it has no pane to
+    // inject into and the server hard-blocks input to a `subagent:` id, so the answer box is
+    // suppressed and the composer disabled. Computed once at screen level (UC-90) because both
+    // the bottom-bar composer gating AND the new top-anchored question slot read it.
+    val readOnly = selectedTargetId.startsWith(SUBAGENT_ID_PREFIX)
 
     // UC-81 — one hoisted copy action shared by every bubble (both sides + teammate) and
     // the UC-41 tool-detail popup. Places the FULL text on the system clipboard via the
@@ -212,27 +225,17 @@ fun ConversationScreen(
             )
         },
         bottomBar = {
-            // UC-60 — a selected background-subagent pill is a READ-ONLY view: it has no
-            // pane to inject into and the server hard-blocks input to a `subagent:` id, so
-            // suppress the answer sheet and disable the composer (with an explanatory
-            // placeholder) rather than offering inputs that would be no-ops.
-            val readOnly = selectedTargetId.startsWith(SUBAGENT_ID_PREFIX)
-            Column(modifier = Modifier.imePadding().navigationBarsPadding()) {
-                if (!readOnly) {
-                    pendingSheet?.let { sheet ->
-                        QuestionSheet(
-                            sheet = sheet,
-                            onSubmit = viewModel::submitAnswer,
-                            onSubmitBatch = viewModel::submitAnswerBatch,
-                        )
-                    }
-                }
-                Composer(
-                    enabled = !readOnly && pendingSheet == null,
-                    onSubmit = viewModel::submitComposer,
-                    readOnly = readOnly,
-                )
-            }
+            // UC-90 — the answer box no longer lives here. It has moved to a top-anchored,
+            // collapsible slot in the content Column (see [AnchoredQuestionBox]) so the
+            // conversation list can scroll beneath it. The bottom bar keeps ONLY the composer.
+            // Composer gating is UNCHANGED: it stays locked while a question is pending
+            // (collapsed or not), so collapsing the question never re-enables free-form input.
+            Composer(
+                modifier = Modifier.imePadding().navigationBarsPadding(),
+                enabled = !readOnly && pendingSheet == null,
+                onSubmit = viewModel::submitComposer,
+                readOnly = readOnly,
+            )
         },
     ) { innerPadding ->
         Column(modifier = Modifier.fillMaxSize().padding(innerPadding)) {
@@ -242,6 +245,21 @@ fun ConversationScreen(
                 onSelect = viewModel::selectTarget,
             )
             ConnectionBanner(state)
+            // UC-90 — the pending question/plan box, anchored ABOVE the scrollable transcript
+            // (a sibling of the list Box, NOT inside [ConversationContent], so the UC-89
+            // auto-follow list + jump-to-bottom FAB stay byte-untouched and keep working while
+            // a question is anchored — AC10). Expanded by default; collapses to a header bar so
+            // the user can read/scroll the messages beneath it (AC1/AC2). Suppressed in the
+            // read-only subagent view, matching the composer gating.
+            if (!readOnly) {
+                pendingSheet?.let { sheet ->
+                    AnchoredQuestionBox(
+                        sheet = sheet,
+                        onSubmit = viewModel::submitAnswer,
+                        onSubmitBatch = viewModel::submitAnswerBatch,
+                    )
+                }
+            }
             Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
                 ConversationContent(
                     items = items,
@@ -282,6 +300,120 @@ fun ConversationScreen(
             )
         }
     }
+}
+
+/**
+ * UC-90 — the top-anchored, collapsible answer box. Wraps the existing [QuestionSheet]
+ * (rendered UNCHANGED) with an always-present header bar carrying a short label and a
+ * collapse/expand toggle. Lives in a top slot of the chat screen, above the scrollable
+ * transcript, so the conversation can scroll beneath it (AC1/AC2) while the question stays
+ * pending and answerable (AC6). `internal` so same-package instrumented tests can drive it
+ * (same seam style as [ConversationContent]).
+ *
+ *  - **Expanded by default** ([collapsed] = false), keyed on `sheet.questionUuid` so a NEW
+ *    question re-expands and the state survives rotation (AC3).
+ *  - **Collapsed** shows only the header bar (AC4); the whole multi-question group collapses
+ *    or expands as ONE unit because the entire [QuestionSheet] is the collapse target (AC7).
+ *  - **State preservation (AC5) — MOUNTED-ZERO-HEIGHT, never unmounted.** The [QuestionSheet]
+ *    subtree stays in composition at all times; collapsing only swaps its modifier to
+ *    `height(0.dp).clipToBounds()` + `clearAndSetSemantics {}`. Because the subtree stays
+ *    COMPOSED, QuestionSheet's `remember(questionUuid)` selections / free-text / paged
+ *    `current` SURVIVE a collapse→expand cycle. `clearAndSetSemantics` frees space (AC8) and
+ *    removes it from the a11y/semantics tree while collapsed (AC11) — so collapsed-state tests
+ *    assert with `assertDoesNotExist()`. `LocalFocusManager.clearFocus()` is called on collapse
+ *    so a now-hidden "Other" text field can't keep the IME open.
+ *  - **No internal height cap (AC8):** the expanded box is bounded only by a fraction of the
+ *    available height (so a very tall group can't starve the list to zero before the user can
+ *    collapse it) and given ONE viewport-bounded scroll region so Send / Next / Submit stay
+ *    reachable; otherwise it grows naturally and collapse is the mitigation.
+ */
+@Composable
+internal fun AnchoredQuestionBox(
+    sheet: PendingSheet,
+    onSubmit: (questionUuid: String, questionIndex: Int, selections: List<Int>, freeText: String) -> Unit,
+    onSubmitBatch: (questionUuid: String, items: List<AnswerItem>) -> Unit = { _, _ -> },
+    modifier: Modifier = Modifier,
+) {
+    // Expanded by default; resets per question (AC3) and survives rotation/process death.
+    var collapsed by rememberSaveable(sheet.questionUuid) { mutableStateOf(false) }
+    val focusManager = LocalFocusManager.current
+    // ONE hoisted scroll state so the scroll position survives the collapse→expand modifier swap.
+    val sheetScroll = rememberScrollState()
+
+    val pendingLabel = stringResource(R.string.conversation_question_pending_label)
+    val shortLabel = questionShortLabel(sheet, pendingLabel)
+    val collapseDescription = stringResource(R.string.conversation_question_collapse)
+    val expandDescription = stringResource(R.string.conversation_question_expand)
+
+    Column(modifier = modifier.fillMaxWidth().testTag("question_anchor")) {
+        // Always-present header bar: short label + collapse/expand toggle (AC4).
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp, top = 4.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                text = shortLabel,
+                style = MaterialTheme.typography.labelLarge,
+                color = OnSurface,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            IconButton(
+                onClick = {
+                    // Drop focus BEFORE hiding the sheet so a hidden OutlinedTextField can't
+                    // keep the soft keyboard up over the now-collapsed box.
+                    if (!collapsed) focusManager.clearFocus()
+                    collapsed = !collapsed
+                },
+                modifier = Modifier.testTag("question_collapse_toggle"),
+            ) {
+                Icon(
+                    imageVector = if (collapsed) Icons.Filled.KeyboardArrowDown else Icons.Filled.KeyboardArrowUp,
+                    contentDescription = if (collapsed) expandDescription else collapseDescription,
+                )
+            }
+        }
+
+        // The expanded sheet stays in composition always (state preservation, AC5). When
+        // collapsed it is forced to zero height + cleared from semantics; when expanded it is
+        // bounded by a fraction of the available height and scrolls within that bound (AC8).
+        BoxWithConstraints(modifier = Modifier.fillMaxWidth()) {
+            val maxExpandedHeight = maxHeight * 0.6f
+            val sheetModifier = if (collapsed) {
+                Modifier
+                    .height(0.dp)
+                    .clipToBounds()
+                    .clearAndSetSemantics {}
+            } else {
+                Modifier
+                    .heightIn(max = maxExpandedHeight)
+                    .verticalScroll(sheetScroll)
+            }
+            Box(modifier = sheetModifier) {
+                QuestionSheet(
+                    sheet = sheet,
+                    onSubmit = onSubmit,
+                    onSubmitBatch = onSubmitBatch,
+                )
+            }
+        }
+    }
+}
+
+/**
+ * UC-90 — the compact label shown in the [AnchoredQuestionBox] header (and the collapsed
+ * bar). Plan approval → "Plan approval"; a question group → the first question's `header`,
+ * falling back to its `question` text, falling back to [pendingLabel] (the localized
+ * "Question pending"). Pure + `internal` so QA can unit-test it directly.
+ */
+internal fun questionShortLabel(sheet: PendingSheet, pendingLabel: String): String = when (sheet) {
+    is PendingSheet.Plan -> "Plan approval"
+    is PendingSheet.Questions ->
+        sheet.questions.firstOrNull()
+            ?.let { q -> q.header.ifBlank { q.question } }
+            ?.ifBlank { pendingLabel }
+            ?: pendingLabel
 }
 
 /**
