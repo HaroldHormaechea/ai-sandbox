@@ -162,9 +162,32 @@ fun AiSandboxApp() {
             container.deepLinkEvents.pendingSession.collect { n ->
                 if (n != null) {
                     if (start == Routes.Sessions) {
+                        // UC-93 — on Navigation-Compose 2.9.8, launchSingleTop
+                        // alone already re-keys this destination on a warm deep-link
+                        // (verified on-device: warm A→B and A→A both re-enter
+                        // ConversationScreen and re-fire its LaunchedEffect(sessionN)
+                        // → attach(target)). So popUpTo is NOT what fixes the attach
+                        // path / the wedged-question defect. popUpTo(ConversationPattern)
+                        // { inclusive = true } is retained purely as back-stack hygiene:
+                        // it bounds the warm deep-link to a single conversation entry
+                        // (popUpTo targets conversation/{n}, not the start, so the
+                        // sessions list stays underneath per UC-69 AC4) and keeps
+                        // parity with UC-91's prescribed nav. The sessions-list
+                        // navigate (a plain navigate, below) is intentionally untouched.
                         navController.navigate(Routes.conversationFor(n)) {
+                            popUpTo(Routes.ConversationPattern) { inclusive = true }
                             launchSingleTop = true
                         }
+                        // UC-93 (Case R) — a warm deep-link can re-enter the process-cached
+                        // ConversationController for the target session while it is still
+                        // selecting a read-only `subagent:` pane (left there by a prior
+                        // background-subagent pill tap). That selection is re-asserted on every
+                        // reconnect, so the server tails the subagent pane, the pending-question
+                        // re-emit finds no answerable ask, and ConversationScreen.readOnly hides
+                        // the question box + composer = the wedge. Re-focus the answerable `main`
+                        // pane on the same cached controller (idempotent; a strict no-op when the
+                        // selection is already `main`/`swarm:`) so the pending question renders.
+                        container.conversationController(n).focusAnswerableTargetForDeepLink()
                     }
                     container.deepLinkEvents.consume()
                 }

@@ -398,6 +398,33 @@ class ConversationController(
         client?.sendSelectTarget(targetId)
     }
 
+    /**
+     * UC-93 — un-wedge a warm notification deep-link that lands on a process-cached controller
+     * whose selection was left on a read-only `subagent:` pane.
+     *
+     * A deep-link can re-enter a [AppContainer.conversationController] that this process previously
+     * left selecting a background-subagent pill (via [selectTarget]). `subagent:` ids are read-only
+     * (UC-60), and the selection is re-asserted to the server on every reconnect, so the server
+     * keeps tailing the subagent pane: the UC-50 pending-question re-emit finds no answerable ask
+     * (the sheet stays null) AND `ConversationScreen.readOnly` gates out the question box + composer.
+     * The result is a wedge — the question never renders even though `main` has a pending ask.
+     *
+     * Calling this on deep-link consumption re-focuses the answerable `main` pane via the existing
+     * [selectTarget], which sends `select-target main` on the live socket (no new connection — UC-88
+     * safe), bumps the transcript epoch + arms switch-suppression (no session→session bleed — UC-91
+     * safe), and flips `selectedTargetId` back to `main` so `readOnly` becomes false and the server
+     * re-tails main + re-emits its pending question.
+     *
+     * The guard is **subagent-only on purpose**: an answerable `main`/`swarm:` selection is left
+     * untouched, so this is a strict no-op for fresh/cold-start controllers and never wipes an
+     * already-populated `_pendingSheet` (which [selectTarget] would clear). Idempotent.
+     */
+    fun focusAnswerableTargetForDeepLink() {
+        if (_selectedTargetId.value.startsWith(TerminalStreamController.SUBAGENT_ID_PREFIX)) {
+            selectTarget(TerminalStreamController.MAIN_TARGET_ID)
+        }
+    }
+
     /** Interrupt the active turn (ESC). */
     fun interrupt() {
         client?.sendInterrupt()

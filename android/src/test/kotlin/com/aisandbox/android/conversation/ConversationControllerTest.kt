@@ -2698,4 +2698,111 @@ class ConversationControllerTest {
             c.close()
         }
     }
+
+    // ──────────────────── Part Z — UC-93 deep-link re-focus (Case R) ──────────
+    // The shipped fix: a warm push-notification deep-link can re-enter a process-cached
+    // ConversationController that was left selecting a read-only `subagent:` pane. While
+    // it stays on the subagent, the server tails the subagent pane (the main pending
+    // question is never re-emitted) AND `ConversationScreen.readOnly` gates the sheet out
+    // — the wedge. [ConversationController.focusAnswerableTargetForDeepLink] re-focuses the
+    // answerable `main` pane via the existing [selectTarget] (epoch bump + switch-suppress +
+    // `select-target main` on the live socket), so the server re-tails main and re-emits its
+    // pending question, and `readOnly` clears. It is a strict no-op for `main`/`swarm:`.
+
+    @Test
+    fun `UC-93 - deep-link re-focus on a subagent selection sends select-target main and the re-emitted question raises the sheet`() {
+        // The crux regression guard at the controller layer. Seed the selection the REAL way
+        // (drive selectTarget down the pill path) onto a `subagent:` id, fire the deep-link
+        // hook, and assert: the server receives `select-target main` (NOT left on the subagent
+        // pane), selection flips to main, and main's re-emitted pending question then renders.
+        val received = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        enqueueRecorder(received, wsRef)
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { c.state.value == TerminalState.Open && wsRef.get() != null }).isTrue
+            // Left selecting a read-only background-subagent pill (as a prior pill tap would).
+            c.selectTarget(TerminalStreamController.SUBAGENT_ID_PREFIX + "agent-3")
+            assertThat(c.selectedTargetId.value).isEqualTo("subagent:agent-3")
+
+            // Deep-link consume hook fires → because the selection is a subagent, re-focus main.
+            c.focusAnswerableTargetForDeepLink()
+            assertThat(c.selectedTargetId.value).isEqualTo(TerminalStreamController.MAIN_TARGET_ID)
+
+            // `select-target main` is the LAST selection sent on the wire — the server is told to
+            // re-tail the answerable main pane, never left tailing the subagent.
+            assertThat(
+                awaitUntil {
+                    received.any {
+                        it.contains(""""type":"select-target"""") && it.contains(""""targetId":"main"""")
+                    }
+                },
+            ).isTrue
+            val lastSelect = received.last { it.contains(""""type":"select-target"""") }
+            assertThat(lastSelect).contains(""""targetId":"main"""")
+
+            // The server re-tails main: backfill (lifts the UC-86 switch-suppress guard), then the
+            // UC-50 per-connection re-emit of main's pending question.
+            val ws = wsRef.get()!!
+            ws.send("""{"type":"backfill-start","source":"main"}""")
+            ws.send("""{"type":"backfill-end","source":"main"}""")
+            assertThat(awaitUntil { !c.backfilling.value }).isTrue
+            ws.send(
+                """{"type":"pending-question","promptKey":"main-q","kind":"questions","plan":"",""" +
+                    """"answerable":true,"questions":[{"question":"Pick","header":"H","multiSelect":false,""" +
+                    """"options":[{"label":"A","description":"a"},{"label":"B","description":"b"}]}]}""",
+            )
+            // The pending question now renders (sheet populated) AND selection is the answerable main.
+            assertThat(awaitUntil { c.pendingSheet.value is PendingSheet.Questions }).isTrue
+            assertThat((c.pendingSheet.value as PendingSheet.Questions).answerable).isTrue
+            assertThat(c.selectedTargetId.value).isEqualTo(TerminalStreamController.MAIN_TARGET_ID)
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
+    fun `UC-93 - deep-link re-focus is a strict no-op on a main selection and never wipes a populated sheet`() {
+        // The negative guard: on a healthy `main` selection the hook must send NO `select-target`
+        // frame, leave the selection on main, and NOT wipe an already-populated sheet (a blind
+        // selectTarget(main) would have nulled it and dropped the question the user is answering).
+        val received = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        enqueueRecorder(received, wsRef)
+        val c = networkedController()
+        c.attach(7)
+        try {
+            assertThat(awaitUntil { c.state.value == TerminalState.Open && wsRef.get() != null }).isTrue
+            // A pending question is already up on the main pane (the normal, healthy case).
+            wsRef.get()!!.send(
+                """{"type":"question","uuid":"uq","source":"main","isSidechain":false,"toolUseId":"tuMain",""" +
+                    """"questions":[{"question":"Pick","header":"H","multiSelect":false,""" +
+                    """"options":[{"label":"A","description":"a"},{"label":"B","description":"b"}]}]}""",
+            )
+            assertThat(awaitUntil { (c.pendingSheet.value as? PendingSheet.Questions)?.questionUuid == "tuMain" }).isTrue
+
+            // Hook fires on a main selection → strict no-op.
+            c.focusAnswerableTargetForDeepLink()
+            Thread.sleep(200) // give any erroneous select-target / sheet-wipe a chance to land
+
+            // No select-target frame went out (connect with main sends none either), selection stays
+            // main, and the populated sheet is untouched.
+            assertThat(received.none { it.contains(""""type":"select-target"""") }).isTrue
+            assertThat(c.selectedTargetId.value).isEqualTo(TerminalStreamController.MAIN_TARGET_ID)
+            assertThat((c.pendingSheet.value as? PendingSheet.Questions)?.questionUuid).isEqualTo("tuMain")
+        } finally {
+            c.close()
+        }
+    }
+
+    @Test
+    fun `UC-93 - deep-link re-focus leaves a swarm selection untouched`() {
+        // The subagent-only guard must not disturb an answerable team (`swarm:`) selection: a
+        // swarm pane is writable, so it is left as-is (no re-focus to main).
+        val c = offlineController()
+        c.selectTarget("swarm:main:0.1")
+        c.focusAnswerableTargetForDeepLink()
+        assertThat(c.selectedTargetId.value).isEqualTo("swarm:main:0.1")
+    }
 }
