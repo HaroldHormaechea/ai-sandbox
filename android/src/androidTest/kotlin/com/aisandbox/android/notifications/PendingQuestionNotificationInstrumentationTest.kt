@@ -94,11 +94,18 @@ class PendingQuestionNotificationInstrumentationTest {
             val navController = rememberNavController()
             captured = navController
             // Verbatim copy of AiSandboxApp's deep-link consume-once LaunchedEffect.
+            // UC-93 — mirrors the shipped fixed nav: popUpTo(conversation/{*}) inclusive
+            // + launchSingleTop, so a WARM deep-link re-keys the destination instead of
+            // reusing the top conversation entry. On the FIRST deep-link there is no
+            // conversation entry yet, so popUpTo is a no-op and Sessions stays under the
+            // conversation (UC-69 AC4 preserved). On a SECOND deep-link it pops the prior
+            // conversation/{*} and pushes a fresh one (re-key), keeping a single entry.
             LaunchedEffect(start) {
                 deepLinks.pendingSession.collect { n ->
                     if (n != null) {
                         if (start == Routes.Sessions) {
                             navController.navigate(Routes.conversationFor(n)) {
+                                popUpTo(Routes.ConversationPattern) { inclusive = true }
                                 launchSingleTop = true
                             }
                         }
@@ -175,7 +182,8 @@ class PendingQuestionNotificationInstrumentationTest {
         val n = composeTestRule.runOnIdle {
             nav().currentBackStackEntry?.arguments?.getInt("n")
         }
-        // launchSingleTop keeps a single conversation entry on top, now for 9.
+        // UC-93 — popUpTo pops conv/3 and pushes a fresh conv/9, so the top entry is
+        // re-keyed (a single conversation entry remains, now for 9).
         assertEquals(9, n)
         assertNull(deepLinks.pendingSession.value)
     }
