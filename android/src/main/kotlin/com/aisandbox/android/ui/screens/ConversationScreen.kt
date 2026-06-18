@@ -2,6 +2,9 @@ package com.aisandbox.android.ui.screens
 
 import android.os.Build
 import android.widget.Toast
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -33,7 +36,10 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.outlined.MoreVert
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.CenterAlignedTopAppBar
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
@@ -43,15 +49,18 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
@@ -63,6 +72,7 @@ import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
@@ -91,6 +101,7 @@ import com.aisandbox.android.ui.theme.OnSurfaceMuted
 import com.aisandbox.android.ui.theme.OnSurfaceVariant
 import com.aisandbox.android.ui.theme.SurfaceLow
 import com.aisandbox.android.ui.theme.Warning
+import kotlinx.coroutines.launch
 
 /**
  * UC-37 — the structured "conversation" view (single-tap from the sessions
@@ -148,9 +159,10 @@ fun ConversationScreen(
         }
     }
 
-    // UC-78 — the anchor-to-bottom effect now lives in [ConversationContent], keyed on
-    // items.size only and gated on `backfilling`, so the initial replay snaps to the bottom
-    // instantly (no top→bottom animation) while live growth still animates the stick.
+    // UC-78/UC-89 — the auto-follow / anchor-to-bottom state machine lives in
+    // [ConversationContent]. It owns a single explicit `autoFollow` flag (one scroll
+    // mechanism, no double-scroll): replay snaps instantly, live growth sticks only while
+    // followed, and a jump-to-bottom button + unread badge surface when the user scrolls up.
 
     Scaffold(
         modifier = Modifier.fillMaxSize(),
@@ -352,23 +364,35 @@ private const val LOADING_OLDER_ROW_KEY = "__loading_older__"
  * `internal` seam so same-package instrumented tests can render representative
  * conversation items deterministically.
  *
- * UC-78 — this seam now OWNS the anchor-to-bottom behavior (previously a
- * `LaunchedEffect(items.size)` in [ConversationScreen] that always *animated*,
- * causing the ugly top→bottom chase as the transcript replayed frame-by-frame
- * over SSE). The anchor is a pure function of list *growth*:
- *  - The list grows 0→N during replay; while [backfilling] (or before the first
- *    anchor) each growth snaps INSTANTLY via `scrollToItem` — no animation, so
- *    the screen opens already at the bottom (AC1/AC6).
- *  - Live growth afterwards `animateScrollToItem`, preserving the existing
- *    stick-to-bottom-on-new-message feel (AC4).
- *  - Non-growth recompositions (rotation, backfilling flips, deduped reconnects
- *    with a stable size) are no-ops, so the view is never pinned and the user can
- *    freely scroll up (AC3). An empty list re-arms the anchor for target switches
- *    and AC5.
- * `backfilling` is read as a plain value — NEVER a [LaunchedEffect] key — so a
- * backfilling flip alone can't re-trigger an anchor. `contentPadding`,
- * `verticalArrangement`, item keys, and row rendering are otherwise verbatim. The
- * working spinner stays in [ConversationScreen] as a sibling below this list.
+ * UC-78/UC-89 — this seam OWNS auto-follow and the jump-to-bottom affordance via a
+ * single explicit state machine (one scroll mechanism — NOT the old UC-78 anchor
+ * layered with a second scroll, which would double-scroll). Three hoisted pieces of
+ * `rememberSaveable` state drive it: `autoFollow` (are we pinned to the bottom?),
+ * `unreadCount` (messages that arrived while scrolled up), and `lastBottomKey` (the
+ * last trailing key we reconciled — parity with the UC-79 anchor).
+ *
+ *  - **Effect A (settle reconcile)** watches `listState.isScrollInProgress` and, on
+ *    each settle, sets `autoFollow`/`unreadCount` from whether we ended `atBottom`.
+ *    This is the single source for "button appears on scroll-up" (AC2) and "manual
+ *    return to bottom re-engages follow + clears the badge + hides the button"
+ *    (AC8). Keying on settle (not live `atBottom`) means an append that briefly
+ *    pushes content below the fold can't spuriously disengage follow.
+ *  - **Effect B (content-driven)** keyed on the last item's KEY (a top-prepend keeps
+ *    the last key, so older-page loads never yank the viewport — the UC-79 contract):
+ *      - empty list → re-arm (`autoFollow=true`, clear badge) for AC9 switches;
+ *      - replay / first content → snap INSTANTLY via `scrollToItem` (AC1/AC6/AC9);
+ *      - followed & no active gesture → `animateScrollToItem`, the stick incl.
+ *        streaming (AC5/AC7);
+ *      - else (scrolled up, or a message landed mid-gesture) → DON'T move; just bump
+ *        the unread badge (AC6), gated to user-perceived messages.
+ *  - **[atBottom]** is a `derivedStateOf` over `layoutInfo`: last visible index within
+ *    ~1 of `totalItemsCount` (the small tolerance, AC1); empty list counts as bottom.
+ *
+ * The button (a `SmallFloatingActionButton` + numeric `Badge`) overlays the list at
+ * `BottomEnd`, inside the list [Box] and above the composer (which lives in the
+ * Scaffold bottom bar), so it never obscures input and respects insets (AC10).
+ * `backfilling` is read as a plain value — NEVER a [LaunchedEffect] key. The working
+ * spinner stays in [ConversationScreen] as a sibling below this list.
  */
 @Composable
 internal fun ConversationContent(
@@ -389,33 +413,114 @@ internal fun ConversationContent(
     onCopy: (String) -> Unit = {},
     onToolTap: (String) -> Unit = {},
 ) {
-    // UC-78/UC-79 (AC8) — bottom-anchor keyed on the LAST item's KEY, not items.size. A
-    // top-prepend (older page) grows the size WITHOUT changing the last item, so it must
-    // never yank the viewport to the bottom (the UC-78 regression UC-79 must avoid). A
-    // genuinely new trailing message changes the last key and re-fires this effect.
+    // UC-89 — the auto-follow state machine. `autoFollow` is the single explicit "pinned to
+    // bottom?" flag (replacing UC-78's implicit at-bottom decision so there is ONE scroll
+    // mechanism, never two layered into a double-scroll). `unreadCount` is the badge value.
+    // `lastBottomKey` tracks the last trailing key we reconciled (parity with the UC-79
+    // anchor). All three are `rememberSaveable` so they survive rotation/process death.
+    var autoFollow by rememberSaveable { mutableStateOf(true) }
+    var unreadCount by rememberSaveable { mutableStateOf(0) }
+    // UC-78/UC-79 (AC8) — keyed on the LAST item's KEY, not items.size. A top-prepend (older
+    // page) grows the size WITHOUT changing the last item, so it must never yank the viewport
+    // to the bottom (the UC-79 contract). A genuinely new trailing message changes the last
+    // key and re-fires Effect B.
     var lastBottomKey by rememberSaveable { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
+
+    // UC-89 (AC1) — "at bottom" within a small tolerance: the last visible item is within ~1
+    // of the end. Uses `totalItemsCount` (not items.size) so it stays correct whether or not
+    // the UC-79 loading-older row is present. An empty list counts as bottom.
+    val atBottom by remember(listState) {
+        derivedStateOf {
+            val layoutInfo = listState.layoutInfo
+            val total = layoutInfo.totalItemsCount
+            if (total == 0) return@derivedStateOf true
+            val lastVisible = layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: return@derivedStateOf false
+            lastVisible >= total - 2
+        }
+    }
+
+    // UC-89 Effect A — reconcile auto-follow on every scroll SETTLE (transition of
+    // isScrollInProgress → false), NOT on live `atBottom`. Settling at the bottom re-engages
+    // follow and clears the badge (AC8, and the AC4 tail after a tap-driven animation lands);
+    // settling away from the bottom suppresses follow so the button shows (AC2). Keying on
+    // settle is deliberate: an append that momentarily pushes new content below the fold (so
+    // `atBottom` flickers false for a frame) must NOT disengage follow — only a real scroll
+    // gesture that comes to rest off-bottom should.
+    LaunchedEffect(listState) {
+        snapshotFlow { listState.isScrollInProgress }
+            .collect { inProgress ->
+                if (!inProgress) {
+                    if (atBottom) {
+                        autoFollow = true
+                        unreadCount = 0
+                    } else {
+                        autoFollow = false
+                    }
+                }
+            }
+    }
+
+    // UC-89 Effect B — content-driven follow + unread counting. Keyed identically to the old
+    // UC-78 anchor (last item's key) so a top-prepend still no-ops and live trailing growth
+    // re-fires. REPLACES the UC-78 anchor body.
     LaunchedEffect(items.lastOrNull()?.key) {
         val lastKey = items.lastOrNull()?.key
         when {
-            lastKey == null -> lastBottomKey = null // re-arm (AC5 empty / target switch)
+            lastKey == null -> {
+                // AC9 — empty list (conversation/target switch arrives as empty→backfill):
+                // re-arm so the next content snaps to the bottom with follow on.
+                lastBottomKey = null
+                autoFollow = true
+                unreadCount = 0
+            }
             lastKey != lastBottomKey -> {
                 val firstAnchor = lastBottomKey == null
                 val target = items.size - 1
-                // AC5 — only stick to the bottom for a live new message when the user is
-                // already at/near the bottom; a user scrolled up reading history (or paging)
-                // is never yanked down. Replay / first content always snaps (AC1/AC6).
-                val nearBottom = run {
-                    val last = listState.layoutInfo.visibleItemsInfo.lastOrNull()?.index ?: -1
-                    last >= target - 1
-                }
-                if (backfilling || firstAnchor) {
-                    listState.scrollToItem(target) // replay / first content — instant (AC1/AC6)
-                } else if (nearBottom) {
-                    listState.animateScrollToItem(target) // live growth, user at bottom — stick (AC4)
+                when {
+                    backfilling || firstAnchor -> {
+                        // Replay / first content — instant snap, follow on (AC1/AC6/AC9).
+                        listState.scrollToItem(target)
+                        autoFollow = true
+                        unreadCount = 0
+                    }
+                    autoFollow && !listState.isScrollInProgress -> {
+                        // AC5/AC7 — followed: stick to the newest content, incl. a streaming
+                        // message growing in place. The `!isScrollInProgress` guard is
+                        // load-bearing: a message landing WHILE the user is mid drag/fling
+                        // must not fire a programmatic scroll that fights the active gesture
+                        // (UC-89 pitfall). Such a message falls through to the counting branch
+                        // below and is reconciled when the gesture settles (Effect A) — do NOT
+                        // "simplify" this into an unconditional animateScrollToItem, that
+                        // reintroduces the double-scroll this state machine exists to remove.
+                        listState.animateScrollToItem(target)
+                        unreadCount = 0
+                    }
+                    else -> {
+                        // AC6 — suppressed (scrolled up) OR a message arrived mid-gesture:
+                        // never move the viewport; only update the unread badge. Count is
+                        // gated to user-perceived messages (see [isUnreadCountable]) so one
+                        // assistant reply (thinking + text + N tool blocks) is ONE increment.
+                        val oldKey = lastBottomKey
+                        val oldIdx = items.indexOfFirst { it.key == oldKey }
+                        val added = if (oldIdx >= 0) {
+                            // Genuine new trailing content appended after the previous anchor.
+                            items.subList(oldIdx + 1, items.size).count { it.isUnreadCountable() }
+                        } else {
+                            // The previous anchor key is gone → the trailing message grew IN
+                            // PLACE (its key folds text.hashCode, which changes as streaming
+                            // text grows). A growing message stays ONE message: add 0 so
+                            // token-by-token growth never inflates the badge. (Accepted rare
+                            // edge per challenger #3: a same-frame in-place growth coalesced
+                            // with a brand-new append undercounts the append by one.)
+                            0
+                        }
+                        unreadCount += added
+                    }
                 }
                 lastBottomKey = lastKey
             }
-            // else: stable last key (recomposition/rotation/backfill-flip/dedup) — no pin (AC3)
+            // else: stable last key (recomposition/rotation/backfill-flip/dedup) — no-op (AC3).
         }
     }
 
@@ -474,18 +579,92 @@ internal fun ConversationContent(
             }
     }
 
-    LazyColumn(
-        state = listState,
-        modifier = modifier,
-        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
-    ) {
-        // UC-79 (AC3) — top loading affordance while an older page is being fetched/parsed.
-        if (loadingOlder) {
-            item(key = LOADING_OLDER_ROW_KEY) { LoadingOlderRow() }
+    // UC-89 — [Box] so the jump-to-bottom button can overlay the list at BottomEnd. The list
+    // fills the box; the button sits inside the list area and above the composer (which lives
+    // in the Scaffold bottom bar), so it can never obscure input (AC10).
+    Box(modifier = modifier) {
+        LazyColumn(
+            state = listState,
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            // UC-79 (AC3) — top loading affordance while an older page is being fetched/parsed.
+            if (loadingOlder) {
+                item(key = LOADING_OLDER_ROW_KEY) { LoadingOlderRow() }
+            }
+            items(items = items, key = { it.key }) { item ->
+                ConversationItemRow(item, onToolTap, fontScale, useAgentColor, onCopy)
+            }
         }
-        items(items = items, key = { it.key }) { item ->
-            ConversationItemRow(item, onToolTap, fontScale, useAgentColor, onCopy)
+
+        // UC-89 — the button is driven by `!autoFollow` (the settle-reconciled flag), NOT live
+        // `!atBottom`, so it doesn't flash for a frame during a follow animation. AC4: tapping
+        // re-engages follow, clears the badge, and animates to the true last item. The target
+        // is `totalItemsCount - 1` (NOT items.size - 1) so the tap lands correctly even while a
+        // UC-79 older page is loading (which adds the loading row at the top).
+        JumpToBottomButton(
+            visible = !autoFollow,
+            unreadCount = unreadCount,
+            onClick = {
+                autoFollow = true
+                unreadCount = 0
+                scope.launch {
+                    val target = (listState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0)
+                    listState.animateScrollToItem(target)
+                }
+            },
+            modifier = Modifier
+                .align(Alignment.BottomEnd)
+                .padding(16.dp),
+        )
+    }
+}
+
+/**
+ * UC-89 — the jump-to-bottom affordance: a small circular FAB with a downward arrow and an
+ * optional numeric unread [Badge], shown (fading in/out) only when auto-follow is suppressed
+ * i.e. the user has scrolled up (AC2/AC3). Tapping it re-engages follow and scrolls to the
+ * latest message (wired by the caller). `internal` so same-package instrumented tests can
+ * locate it by content description.
+ */
+@Composable
+internal fun JumpToBottomButton(
+    visible: Boolean,
+    unreadCount: Int,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    AnimatedVisibility(
+        visible = visible,
+        enter = fadeIn(),
+        exit = fadeOut(),
+        modifier = modifier,
+    ) {
+        val description = stringResource(R.string.conversation_jump_to_bottom)
+        BadgedBox(
+            badge = {
+                // AC3 — numeric unread badge; only while there is something unread. The
+                // count is also exposed as a spoken content description for TalkBack.
+                if (unreadCount > 0) {
+                    val badgeDescription = stringResource(R.string.conversation_unread_badge, unreadCount)
+                    Badge(modifier = Modifier.semantics { contentDescription = badgeDescription }) {
+                        Text(
+                            text = unreadCount.toString(),
+                            style = MaterialTheme.typography.labelSmall,
+                        )
+                    }
+                }
+            },
+        ) {
+            SmallFloatingActionButton(onClick = onClick) {
+                // The Icon's contentDescription is merged onto the button for TalkBack and
+                // gives tests a stable locator (AC10/AC11).
+                Icon(
+                    imageVector = Icons.Filled.KeyboardArrowDown,
+                    contentDescription = description,
+                )
+            }
         }
     }
 }
@@ -930,6 +1109,17 @@ private fun MetaLine(prefix: String, body: String, fontScale: Float = 1f) {
 }
 
 private fun labelFor(source: String): String = if (source.startsWith("subagent:")) "Agent" else "Claude"
+
+/**
+ * UC-89 (AC3) — the unread badge counts USER-PERCEIVED messages only, not every transcript
+ * block. A single assistant reply may be several [ConversationItem]s (thinking + text + N
+ * tool blocks); gating the count to user/assistant/teammate messages makes one reply count
+ * as ONE increment rather than several, matching the AC3 "how many new messages" intent.
+ */
+private fun ConversationItem.isUnreadCountable(): Boolean =
+    this is ConversationItem.UserMessage ||
+        this is ConversationItem.AssistantMessage ||
+        this is ConversationItem.TeammateMessage
 
 /**
  * UC-53 (AC2) — scale a transcript [TextStyle]'s font (and line height, when
