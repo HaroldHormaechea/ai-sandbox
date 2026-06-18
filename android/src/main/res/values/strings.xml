@@ -54,6 +54,12 @@
     <string name="sessions_feed_give_up">Giving up in %1$s</string>
     <string name="sessions_feed_disconnected">Not connected</string>
 
+    <!-- UC-92 — slim, non-destructive reconnect indicator shown ABOVE the list
+         while the feed is reconnecting but known session rows are still visible
+         (AC2/AC10). The terminal-give-up (STOPPED) variant reuses the static
+         sessions_feed_disconnected string above. -->
+    <string name="sessions_reconnecting_banner">Reconnecting…</string>
+
     <!-- New session sheet (UC04-2a) -->
     <string name="new_session_label_hint">e.g. release-build, scratch</string>
     <string name="new_session_help">Image and hardware specs are fixed by the server profile — not selectable from the client.</string>
