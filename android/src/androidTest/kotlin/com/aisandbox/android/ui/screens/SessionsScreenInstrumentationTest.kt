@@ -1046,17 +1046,16 @@ class SessionsScreenInstrumentationTest {
     // (the composable's `now` is captured at composition, well within 1 s of base).
 
     @Test
-    fun reconnecting_feed_shows_light_grey_message_attempt_and_countdown_with_rows_hidden() {
+    fun reconnecting_feed_with_no_rows_shows_light_grey_message_attempt_and_countdown() {
         // Freeze the clock so the countdown's infinite ticker doesn't stall idle.
         composeTestRule.mainClock.autoAdvance = false
         val base = System.currentTimeMillis()
         setBody(
             SessionsUiState(
-                // Stale rows still in state — must be hidden while reconnecting (AC2).
-                sessions = listOf(
-                    SessionSummary(n = 1, label = "alpha", state = "running"),
-                    SessionSummary(n = 2, label = "beta", state = "running"),
-                ),
+                // UC-92 AC3/AC6: the full-screen RetryingBackground appears ONLY when
+                // zero rows are known. With rows present a slim banner is shown instead
+                // (covered by reconnecting_feed_with_known_rows_keeps_rows_and_shows_banner_not_background).
+                sessions = emptyList(),
                 filter = SessionsFilter.ALL,
                 feedStatus = SessionsFeedStatus(
                     phase = SessionsFeedStatus.Phase.RECONNECTING,
@@ -1153,7 +1152,9 @@ class SessionsScreenInstrumentationTest {
     fun stopped_feed_shows_static_not_connected_without_a_countdown() {
         setBody(
             SessionsUiState(
-                sessions = listOf(SessionSummary(n = 1, label = "alpha", state = "running")),
+                // UC-92 AC3: the full-screen "Not connected" background shows only with
+                // zero known rows; with rows present the slim banner is used instead.
+                sessions = emptyList(),
                 filter = SessionsFilter.ALL,
                 feedStatus = SessionsFeedStatus(phase = SessionsFeedStatus.Phase.STOPPED),
             ),
