@@ -57,6 +57,7 @@ import java.util.List;
     @JsonSubTypes.Type(value = ConversationServerMessage.BackfillEnd.class, name = "backfill-end"),
     @JsonSubTypes.Type(value = ConversationServerMessage.PageStart.class, name = "page-start"),
     @JsonSubTypes.Type(value = ConversationServerMessage.PageEnd.class, name = "page-end"),
+    @JsonSubTypes.Type(value = ConversationServerMessage.AnswerEcho.class, name = "answer-echo"),
     @JsonSubTypes.Type(value = ConversationServerMessage.ServerError.class, name = "error")
 })
 public sealed interface ConversationServerMessage
@@ -79,6 +80,7 @@ public sealed interface ConversationServerMessage
                 ConversationServerMessage.BackfillEnd,
                 ConversationServerMessage.PageStart,
                 ConversationServerMessage.PageEnd,
+                ConversationServerMessage.AnswerEcho,
                 ConversationServerMessage.ServerError {
 
     /**
@@ -306,6 +308,32 @@ public sealed interface ConversationServerMessage
      * at 0, or the fetch failed) simply clears the affordance and applies {@code atStart}.
      */
     record PageEnd(boolean atStart) implements ConversationServerMessage {}
+
+    /**
+     * UC-85 — a server→client echo of the answer just received for an
+     * {@code AskUserQuestion}, emitted <b>only under the deterministic-gate
+     * {@code replay} Spring profile</b>. In a normal (production) run an answer is
+     * translated into tmux selection keystrokes by {@link
+     * com.aisandbox.server.stream.service.InputInjectionService} and the session's
+     * own transcript advance is the observable outcome; there is no live tmux
+     * session under replay, so the server instead records the answer (see {@code
+     * ReplayAnswerSink}) and echoes exactly what it received back over the same
+     * WebSocket. This lets the on-device instrumented gate assert UC-57 ("the
+     * selected option is the one actually transmitted") and UC-43 ("each question
+     * of a multi-question batch maps to its own answer frame") by observing the
+     * echoed frame, rather than by eyeballing a screenshot.
+     *
+     * <p>{@code questionUuid} echoes the client {@code Answer.questionUuid()} (or,
+     * for a batch, the {@code AnswerBatch.questionUuid()}); {@code questionIndex}
+     * is the 0-based position within the {@code AskUserQuestion}'s {@code
+     * questions[]} (one {@code AnswerEcho} is emitted per {@code AnswerItem} of a
+     * batch). {@code selections} are the chosen option indices and {@code freeText}
+     * the "Other" free-text value, both exactly as received from the device. This
+     * frame is NEVER produced outside the {@code replay} profile (a production-safety
+     * invariant asserted by the QA guard tests, AC-11).
+     */
+    record AnswerEcho(String questionUuid, int questionIndex, List<Integer> selections, String freeText)
+            implements ConversationServerMessage {}
 
     /** Server-emitted error frame (RFC 9457-ish shape), typically followed by a close. */
     record ServerError(String code, String title, String detail) implements ConversationServerMessage {}

@@ -7,6 +7,7 @@ import java.io.BufferedReader;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.io.Reader;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -135,8 +136,43 @@ public class TranscriptTailService {
 
     private final ProcessExecutor exec;
 
-    public TranscriptTailService(ProcessExecutor exec) {
+    /**
+     * UC-85 — the source that {@link #start} delegates to for opening a live tail.
+     * The default bean is {@link DockerTailSource} (today's {@code docker compose exec}
+     * helper, {@code @Profile("!replay")}); under the deterministic-gate {@code replay}
+     * profile a fixture-file-backed {@code ReplayTailSource} bean is injected instead, so
+     * the whole pump → {@link ConversationEventMapper} → WS-emit path stays byte-identical
+     * while the transcript SOURCE swaps from the live container to committed fixtures.
+     * The one-shot helper modes ({@link #scanPending} etc.) still go through {@link #exec}
+     * directly — under replay those degrade to their empty/IDLE fallbacks (no docker), which
+     * is harmless for the gate (the device opens a session and tails; it does not depend on
+     * switcher badging / detail / paging).
+     */
+    private final TailSource tailSource;
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public TranscriptTailService(ProcessExecutor exec, TailSource tailSource) {
         this.exec = exec;
+        this.tailSource = tailSource;
+    }
+
+    /**
+     * Back-compat constructor for direct unit construction (no Spring): uses the
+     * docker-backed {@link DockerTailSource} source, so existing tests that build the
+     * service with only a {@link ProcessExecutor} keep the pre-UC-85 behaviour.
+     */
+    public TranscriptTailService(ProcessExecutor exec) {
+        this(exec, new DockerTailSource());
+    }
+
+    /**
+     * UC-85 — seam for opening a live transcript tail. The default ({@link DockerTailSource})
+     * spawns the in-container {@code aisandbox-conversation-tail} helper; the {@code replay}
+     * profile supplies a fixture-backed implementation. Either way the returned {@link Tail}
+     * is pumped line-by-line by {@link com.aisandbox.server.stream.handler.SessionConversationHandler}.
+     */
+    public interface TailSource {
+        Tail open(int n, TailTarget target, int backfillLines) throws IOException;
     }
 
     /**
@@ -419,15 +455,7 @@ public class TranscriptTailService {
      * it on teardown / target switch.
      */
     public Tail start(int n, TailTarget target, int backfillLines) throws IOException {
-        List<String> argv = buildArgv(n, target, backfillLines);
-        ProcessBuilder pb = new ProcessBuilder(argv);
-        pb.redirectErrorStream(false);
-        // Discard stderr so a chatty helper can never block on a full stderr pipe
-        // (we never parse it); helper-side warnings are best-effort diagnostics.
-        pb.redirectError(ProcessBuilder.Redirect.DISCARD);
-        Process proc = pb.start();
-        LOG.debug("started transcript tail helper for n={} target={} (pid stream)", n, target);
-        return new Tail(proc);
+        return tailSource.open(n, target, backfillLines);
     }
 
     /** Build the {@code docker compose … exec -T claude-sandbox aisandbox-conversation-tail …} argv. */
@@ -459,9 +487,16 @@ public class TranscriptTailService {
         return argv;
     }
 
-    /** A live transcript-tail handle. Read {@link #readLine()} until null (EOF), then {@link #close()}. */
+    /**
+     * A live transcript-tail handle. Read {@link #readLine()} until null (EOF), then
+     * {@link #close()}. Backed either by an OS {@link Process} (the docker helper — the
+     * production path) or, under the {@code replay} profile, by a bare {@link Reader} over
+     * recorded fixture envelope lines with no process at all ({@code process == null}).
+     */
     public static final class Tail {
+        /** The helper process, or {@code null} for a fixture-backed (replay) tail. */
         private final Process process;
+
         private final BufferedReader reader;
         private final AtomicBoolean closed = new AtomicBoolean(false);
 
@@ -469,6 +504,18 @@ public class TranscriptTailService {
             this.process = process;
             InputStream in = process.getInputStream();
             this.reader = new BufferedReader(new InputStreamReader(in, StandardCharsets.UTF_8));
+        }
+
+        /**
+         * UC-85 — a process-less, fixture-backed tail (the {@code replay} profile). The
+         * {@code reader} replays a recorded {@code <source>\t<raw-json>} / {@code __ctrl__\t…}
+         * envelope stream; closing the {@code Tail} closes the reader (which the replay
+         * reader uses to unblock any answer-gate wait), and {@link #isAlive()} tracks the
+         * closed flag rather than a process liveness probe.
+         */
+        public Tail(Reader reader) {
+            this.process = null;
+            this.reader = (reader instanceof BufferedReader br) ? br : new BufferedReader(reader);
         }
 
         /**
@@ -481,22 +528,31 @@ public class TranscriptTailService {
         }
 
         public boolean isAlive() {
-            return process.isAlive();
+            // A fixture-backed (replay) tail has no process — it is "alive" until closed.
+            return process == null ? !closed.get() : process.isAlive();
         }
 
         public void close() {
             if (!closed.compareAndSet(false, true)) {
                 return;
             }
-            try {
-                process.destroy();
-            } catch (RuntimeException ignored) {
-                // best-effort
+            if (process != null) {
+                try {
+                    process.destroy();
+                } catch (RuntimeException ignored) {
+                    // best-effort
+                }
             }
+            // Closing the reader is what unblocks a replay tail parked on its answer-gate
+            // (the replay reader closes the gate on stream close), and releases the docker
+            // helper's stdout pipe in the production path.
             try {
                 reader.close();
             } catch (IOException ignored) {
                 // best-effort
+            }
+            if (process == null) {
+                return; // fixture-backed tail — no OS process to reap
             }
             // The `docker compose exec` parent dying does not always reap the
             // in-container helper; the helper self-exits when its stdout pipe

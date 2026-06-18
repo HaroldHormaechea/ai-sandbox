@@ -8,6 +8,7 @@ import com.aisandbox.server.mcp.McpLoginInitiator;
 import com.aisandbox.server.stream.dto.ConversationServerMessage;
 import com.aisandbox.server.stream.dto.StreamServerMessage.TargetInfo;
 import com.aisandbox.server.stream.facade.StreamFacade.AuthorizeResult;
+import com.aisandbox.server.stream.replay.ReplayAnswerSink;
 import com.aisandbox.server.stream.service.ConversationEventMapper;
 import com.aisandbox.server.stream.service.InputInjectionService;
 import com.aisandbox.server.stream.service.InputInjectionService.InjectTarget;
@@ -91,6 +92,34 @@ public class ConversationFacade implements McpLoginInitiator {
      * bounded {@code docker exec} sequences, never held across a network wait.
      */
     private final ConcurrentHashMap<Integer, Object> paneLocks = new ConcurrentHashMap<>();
+
+    /**
+     * UC-85 — the deterministic-gate answer sink. Late-bound via a setter (the same pattern
+     * {@link StreamFacade} uses for the swarm enumerator) so existing unit constructions of this
+     * facade compile unchanged. Defaults to {@link ReplayAnswerSink#DISABLED} (production
+     * behaviour: real tmux injection, no echo). Under the {@code replay} profile the recording
+     * sink is injected: {@link #injectAnswer}/{@link #injectAnswerBatch} then record the answer
+     * (which releases the fixture tail's await-answer gate) and SKIP tmux — mirroring the UC-60
+     * read-only no-op-inject branch — and {@link #answerEchoEnabled()} returns {@code true} so the
+     * handler echoes the answer back over the WebSocket.
+     */
+    private volatile ReplayAnswerSink replayAnswerSink = ReplayAnswerSink.DISABLED;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setReplayAnswerSink(ReplayAnswerSink replayAnswerSink) {
+        if (replayAnswerSink != null) {
+            this.replayAnswerSink = replayAnswerSink;
+        }
+    }
+
+    /**
+     * UC-85 — whether the handler should echo an {@code AnswerEcho} back over the WebSocket after
+     * an answer (true only under the {@code replay} profile). Keeps the handler→facade layering:
+     * the handler asks the facade rather than reaching into the sink itself.
+     */
+    public boolean answerEchoEnabled() {
+        return replayAnswerSink.enabled();
+    }
 
     public ConversationFacade(
             StreamFacade streamFacade,
@@ -305,6 +334,22 @@ public class ConversationFacade implements McpLoginInitiator {
         if (guardSubagentInput(AuditAction.CONVERSATION_ANSWER, n, targetId, identity)) {
             return;
         }
+        // UC-85 — deterministic gate: there is no live tmux pane to inject into. Record the
+        // answer (which releases the fixture tail's await-answer gate so the recorded
+        // post-answer frames replay) and skip injection, mirroring the UC-60 no-op branch.
+        if (replayAnswerSink.enabled()) {
+            replayAnswerSink.recordAnswer(n, selections, freeText);
+            audit.logEvent(
+                    AuditAction.CONVERSATION_ANSWER,
+                    "replay",
+                    "n",
+                    n,
+                    "targetId",
+                    targetId == null ? "main" : targetId,
+                    "multiSelect",
+                    multiSelect);
+            return;
+        }
         InjectTarget target = toInjectTarget(resolveBridgeTarget(n, targetId));
         // UC-55 — serialize with any in-flight wizard-option recovery on the same pane.
         synchronized (paneLock(n)) {
@@ -332,6 +377,21 @@ public class ConversationFacade implements McpLoginInitiator {
             throws IOException {
         // UC-60 — read-only subagent pill: no-op + audit, never inject (see injectComposer).
         if (guardSubagentInput(AuditAction.CONVERSATION_ANSWER, n, targetId, identity)) {
+            return;
+        }
+        // UC-85 — deterministic gate: record the batch (releasing the fixture tail's
+        // await-answer gate) and skip tmux injection. See injectAnswer.
+        if (replayAnswerSink.enabled()) {
+            replayAnswerSink.recordAnswerBatch(n, answers == null ? 0 : answers.size());
+            audit.logEvent(
+                    AuditAction.CONVERSATION_ANSWER,
+                    "replay",
+                    "n",
+                    n,
+                    "targetId",
+                    targetId == null ? "main" : targetId,
+                    "batch",
+                    answers == null ? 0 : answers.size());
             return;
         }
         InjectTarget target = toInjectTarget(resolveBridgeTarget(n, targetId));

@@ -615,6 +615,17 @@ public class SessionConversationHandler implements WebSocketHandler {
                         spec.otherIndex(),
                         spec.freeText(),
                         ctx.identity));
+        // UC-85 — under the deterministic-gate replay profile there is no live session to
+        // produce an observable transcript advance, so echo the exact answer we received back
+        // over the WebSocket. The on-device gate asserts this frame to prove the SELECTED option
+        // is the one transmitted (UC-57). No-op (never emitted) outside the replay profile.
+        if (facade.answerEchoEnabled()) {
+            emit(
+                    ctx,
+                    session,
+                    new ConversationServerMessage.AnswerEcho(
+                            a.questionUuid(), a.questionIndex(), a.selections(), a.freeText()));
+        }
         if (q != null) {
             evictCachedQuestion(ctx, q);
         }
@@ -639,6 +650,18 @@ public class SessionConversationHandler implements WebSocketHandler {
             specs.add(deriveAnswerSpec(q, item.questionIndex(), item.selections(), item.freeText()));
         }
         safe(ctx, session, () -> facade.injectAnswerBatch(ctx.n, ctx.selectedTarget.get(), specs, ctx.identity));
+        // UC-85 — deterministic gate: echo one AnswerEcho per question (in tab order), so the
+        // on-device gate can assert each question of the multi-question sheet maps to its own
+        // answer frame (UC-43). No-op outside the replay profile.
+        if (facade.answerEchoEnabled()) {
+            for (ConversationClientMessage.AnswerItem item : items) {
+                emit(
+                        ctx,
+                        session,
+                        new ConversationServerMessage.AnswerEcho(
+                                ab.questionUuid(), item.questionIndex(), item.selections(), item.freeText()));
+            }
+        }
         if (q != null) {
             evictCachedQuestion(ctx, q);
         }

@@ -3,10 +3,12 @@ name: android-testing
 description: >-
   Run Android UI and end-to-end enrollment tests for the ai-sandbox Android
   client on this host's headless emulator. Use when asked to test the Android
-  app, run instrumented Compose tests, verify enrollment, or connect the
-  emulator (AVD) to a local ai-sandbox management server. Covers the full path
-  from a STOPPED AVD and STOPPED server to a verified on-device enrollment, then
-  running the instrumented tests. Linear runbook — follow the phases in order.
+  app, run instrumented Compose tests, verify enrollment, connect the emulator
+  (AVD) to a local ai-sandbox management server, or run the UC-85 deterministic
+  functional gate (and to (re)capture / refresh its replay fixtures). Covers the
+  full path from a STOPPED AVD and STOPPED server to a verified on-device
+  enrollment, then running the instrumented tests. Linear runbook — follow the
+  phases in order.
 ---
 
 # Android testing — ai-sandbox
@@ -20,6 +22,11 @@ emulator**, starting from nothing running. There are two test levels:
   use.
 - **Full enrollment E2E** — the app talks to a real local server over mTLS.
   Needs Phases 1–4.
+- **Deterministic functional gate (UC-85)** — the LLM-free release gate: the real
+  server under the `replay` profile + an on-device instrumented Compose suite. This
+  is the level the `release` skill's Phase 1 gates on. See **§ Deterministic
+  functional gate** below; it is one command and supersedes the old
+  blind-tap-and-eyeball drive.
 
 > **Do NOT use the live QR camera headless.** The emulator's virtual-scene back
 > camera faces a non-overridable test-card; the `wall`/`table` posters aren't in
@@ -243,3 +250,89 @@ agree; the Phase-2 cert covers `localhost`/`127.0.0.1`/`10.0.2.2` so either work
 - **Probe fails 429** — per-IP rate limit; raise `rate-limit-per-window` or wait the window.
 - **Emulator scene renders black** — a non-power-of-two / non-RGB camera poster; irrelevant if you use the camera-free Phase 4 (recommended).
 - **No session cards** — expected without Docker; do Phase 5 or accept the empty-state.
+
+## Deterministic functional gate (UC-85)
+
+The release functional gate (the `release` skill's Phase 1) is **deterministic and
+LLM-free**. It runs the REAL server under a new Spring profile, `replay`, whose only
+behavioural changes are: (a) the conversation transcript SOURCE is a committed fixture
+file instead of the docker `aisandbox-conversation-tail` helper; (b) a synthetic
+sessions list so the device has a card to open; (c) the device's answer is recorded and
+echoed back (an `answer-echo` frame) instead of injected into a (nonexistent) tmux pane.
+Everything else — mTLS, UC-83 enrollment, the WebSocket, the `ConversationEventMapper`,
+the whole Compose stack — stays the real production path. The driver is an on-device
+instrumented Compose suite that interacts by stable `testTag` only (defined in
+`android/.../ui/testtags/GateTestTags.kt`) and asserts programmatically — **no
+`adb input tap` coordinates, no screenshot eyeballing.** This supersedes the old
+blind-tap-and-eyeball drive, which was non-deterministic and chronically blocked by
+launcher/SystemUI ANRs.
+
+### Run the gate
+
+One command (from a STOPPED state — it builds, boots, enrolls, runs, tears down):
+
+```bash
+JAVA_HOME=/path/to/jdk21 ANDROID_HOME=/path/to/android-sdk ./android/gate.sh
+```
+
+Exit 0 = gate passed. Knobs (all optional): `GATE_TEST_PACKAGE` (instrumented suite
+package, default `com.aisandbox.android.gate`), `GATE_ENROLL_CLASS`, `GATE_PORT`,
+`GATE_AVD`, `GATE_KEEP=1` (skip teardown for debugging). The same flow runs in CI via
+the `android-gate` workflow; its `/dev/kvm` precondition is proven by the
+`android-gate-smoke` job.
+
+### What the fixtures exercise
+
+`fixtures/replay/manifest.json` maps each synthetic session `n` to a `*.tail` fixture:
+single-select / multi-select / "Other" free-text questions (UC-55/75), a multi-question
+sheet (UC-43), and a conversation transcript with teammate/subagent bubbles (UC-58),
+a long uncropped message (UC-80), and long-press copy (UC-81). The gate asserts the
+**selected** option is the one transmitted (UC-57) and the per-question mapping (UC-43)
+by observing the server's `answer-echo` frame, not the UI state.
+
+### Scope limitation — UC-79 load-older under replay
+
+Lazy scroll-up paging *older than the backfilled window* (UC-79 `load-older`) is **NOT
+exercised under `replay`**: the server's older-page fetch (`TranscriptTailService
+.fetchPageLines`) shells the docker helper's `--fetch-page`, and there is no docker in a
+replay run, so it returns an empty older page. The gate therefore asserts anchor-to-bottom
+(UC-78) and scroll *within* the backfilled window only. A change that specifically touches
+the `load-older`/paging path needs a targeted check (or a live spot-check) on top of the gate.
+
+## Re-capturing / refreshing replay fixtures (UC-85)
+
+Fixtures are recorded protocol-frame streams; they can drift from the evolving real
+protocol, so an occasional real-Claude re-capture keeps a green gate meaningful (the
+boot-time `ReplayFixtureValidator` catches schema/version drift and malformed lines, but
+not semantic staleness).
+
+**Fixture format.** Each `*.tail` line is one helper envelope: either a transcript line
+`<source>\t<raw-json>` (e.g. `main\t{"type":"assistant",…}`), a helper control line
+`__ctrl__\t<kind>[\t<extra>]` (`backfill-start\t<idx>`, `backfill-end`, `pending-question\t<json>`,
+…), or the replay-only directive `__replay__\tawait-answer` (consumed by the replay reader:
+the tail parks there until the device's answer is recorded, then replays the recorded
+post-answer frames). `manifest.json` carries `schemaVersion` (must equal
+`ReplayFixtureValidator.SCHEMA_VERSION`) and a `scenarios[]` of `{n, target, title, fixture}`.
+
+**To (re)capture from a real session** (the source of truth for the envelope bytes):
+
+1. Run a real ai-sandbox session and open its conversation WebSocket the way the app
+   does (or instrument the in-container helper directly). The helper that produces the
+   envelope stream is `container-bin/aisandbox-conversation-tail`; its stdout IS the
+   `<source>\t<raw-json>` / `__ctrl__\t…` line format the fixtures store.
+2. Capture the helper's stdout for the scenario you want (raise the AskUserQuestion /
+   drive the conversation), keeping the `backfill-start … backfill-end` window and the
+   transcript lines verbatim.
+3. Insert a single `__replay__\tawait-answer` line at the point the session blocked on the
+   answer, and ensure at least one post-answer `turn-end` (a `system`/`turn_duration` line)
+   follows it — the validator requires this so the UC-75 spinner / answer-watchdog clears.
+4. Save as `fixtures/replay/<scenario>.tail`, add/update its `manifest.json` entry, and
+   bump `schemaVersion` **in both** `manifest.json` and `ReplayFixtureValidator.SCHEMA_VERSION`
+   if the line format itself changed (drift detection, AC-2).
+5. Re-run `./android/gate.sh` — the catalog validates every fixture at boot and fails LOUD
+   on any malformed line, schema mismatch, or a question fixture missing its await-gate /
+   post-answer turn-end.
+
+The committed fixtures are hand-authored against the documented format
+(`server/CONVERSATION_PROTOCOL.md`) and the `ConversationEventMapper` contract; a real
+re-capture is the higher-fidelity refresh when the protocol evolves.

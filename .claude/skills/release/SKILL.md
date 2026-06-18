@@ -4,9 +4,10 @@ description: >-
   Cut a release for the ai-sandbox project (multi-track: android-vX.Y.Z and/or
   server-vX.Y.Z). Use when asked to release, cut a release, tag a version, or
   ship the merged use cases. A MANDATORY pre-release functional gate runs first:
-  the Android client is functionally tested against a LIVE server, exercising a
-  single AskUserQuestion AND a multi-question flow, before any tag is pushed.
-  Linear runbook — do not skip the gate.
+  the UC-85 deterministic, LLM-free gate (the `replay`-profile server + the
+  on-device instrumented Compose suite driven by stable testTag) must pass —
+  locally via android/gate.sh or as the android-gate CI job — before any tag is
+  pushed. Linear runbook — do not skip the gate.
 ---
 
 # Release — ai-sandbox
@@ -25,10 +26,15 @@ scope. A change touching both scopes releases both tracks.
 
 > **Hard rule — the functional gate (Phase 1) is a prerequisite for every
 > release.** Per-use-case unit/instrumented tests already passed at merge time;
-> they do NOT replace the live functional gate. A regression in the
-> question/answer paths (UC-43/44/55/57/75) or the conversation view
-> (UC-37/40/41/47/49/50/58/78/79/80/81) only shows up against a real server with
-> a real on-device session. Never push a release tag without a green Phase 1.
+> they do NOT replace the functional gate. A regression in the question/answer
+> paths (UC-43/44/55/57/75) or the conversation view
+> (UC-37/40/41/47/49/50/58/78/79/80/81) only shows up when the real Compose stack
+> drives the real mTLS WebSocket end-to-end. As of UC-85 that gate is
+> **deterministic and LLM-free**: the real server runs under the `replay` Spring
+> profile (committed protocol fixtures instead of a live Claude session) and an
+> on-device instrumented Compose suite drives every gated behaviour by stable
+> `testTag` and asserts it programmatically — no `adb input tap` coordinates, no
+> screenshot eyeballing. Never push a release tag without a green Phase 1.
 
 ---
 
@@ -46,42 +52,61 @@ scope. A change touching both scopes releases both tracks.
 4. Map the merged commits to their use cases (the `UC-NN` in commit subjects /
    the ledger) — you will need this for Phase 3 notes.
 
-## Phase 1 — MANDATORY pre-release functional gate (live server + on-device)
+## Phase 1 — MANDATORY pre-release functional gate (UC-85 deterministic, LLM-free)
 
-Stand up the full live stack and functionally drive the Android client. Use the
-**`android-testing`** skill (Phases 1–4: boot the KVM AVD → build/start the
-management server → enroll the device over mTLS via the **UC-83 QR-from-file
-route** — render the invite as a QR PNG and enroll through the production
-`QrImageDecoder` → `onQrPayload` path, no camera — → instrumented tests). Then,
-beyond the instrumented suite, **functionally exercise the question/answer paths
-against the live server**:
+Run the **deterministic gate**. It is one command and needs NO live Claude
+session, NO LLM in the loop, NO blind `adb input tap`, and NO screenshot
+eyeballing — every gated behaviour is raised from committed protocol fixtures and
+asserted programmatically by an on-device instrumented Compose suite driven by
+stable `testTag`. The mechanics (record/replay, the `replay` Spring profile, the
+fixture-refresh procedure) live in the **`android-testing`** skill; this phase
+just invokes the gate and reads its pass/fail.
 
-1. **Single `AskUserQuestion`** — drive a session whose Claude raises ONE
-   question; confirm the app surfaces it (pending-question indicator + push
-   notification per UC-69/76), the user can answer in-app (UC-55), and the
-   selected option is the one actually sent (UC-57) — not first-visible — for
-   single-select, multi-select, and the "Other" free-text path (UC-75 must not
-   hang on the spinner).
-2. **Multi-question flow** — drive a session that raises a multi-question
-   `AskUserQuestion` sheet (UC-43); confirm each question maps to its own answer
-   frame and the conversation resumes cleanly afterwards.
-3. **Conversation-view sanity** (regression surface from this cycle) — confirm
-   teammate/subagent messages render as distinct non-user bubbles (UC-58),
-   the chat opens anchored at the bottom (UC-78), scrolling up lazily loads older
-   messages without a jump (UC-79), long messages aren't cropped (UC-80), and
-   long-press copy works (UC-81). A booted-emulator screenshot of a real session
-   transcript, eyeballed, is the evidence.
+**Run it one of two equivalent ways:**
 
-**Gate outcome:** all three must pass on a real device against a live server.
-Pull screenshots and actually look at them. If any fails, STOP — it is a
-release blocker; fix it (a new use case / dev-team run) before tagging. If the
-full PKI/enrollment server genuinely cannot be stood up in the current
-environment, do NOT silently proceed: report the blocker, fall back to the
-in-app answer-path instrumented tests as partial assurance, and get explicit
-human sign-off on the residual risk before pushing a tag.
+- **Locally (KVM spawn):**
+  ```bash
+  JAVA_HOME=/path/to/jdk21 ANDROID_HOME=/path/to/android-sdk ./android/gate.sh
+  ```
+  It builds the server bootJar + APKs, stands up the REAL mTLS server under
+  `--spring.profiles.active=replay`, boots the AVD (animations off — AC-10),
+  enrolls via the UC-83 QR-from-file route, runs the instrumented gate suite, and
+  tears down. Exit 0 = gate passed.
+- **In CI:** confirm the **`android-gate`** workflow is green on the commit being
+  released (it runs the same flow emulator-in-CI; the `/dev/kvm` precondition is
+  proven by the `android-gate-smoke` job).
 
-Known environment noise to ignore (not gate failures): the "Quickstep isn't
-responding" launcher ANR overlay on emulator screenshots; the 7 pre-existing
+**What the gate asserts (all programmatic — no eyeballing):**
+
+1. **Single `AskUserQuestion`** — single-select, multi-select, and the "Other"
+   free-text path (UC-55/75; the spinner must clear), and that the **selected**
+   option is the one transmitted (UC-57) — verified by the server's `answer-echo`
+   frame, not the UI state.
+2. **Multi-question sheet** (UC-43) — each question maps to its own answer frame
+   (one `answer-echo` per tab) and the conversation resumes cleanly.
+3. **Conversation-view invariants** — teammate/subagent bubbles render as distinct
+   non-user messages (UC-58), anchor-to-bottom on load (UC-78), uncropped long
+   messages (UC-80), and long-press copy (UC-81), all asserted by `testTag`.
+
+**Gate outcome:** `android/gate.sh` exit 0 (or a green `android-gate` CI run) is
+the pass. Any failure is a **release blocker** — fix it (a new use case /
+dev-team run) before tagging; do NOT push a tag on a red or skipped gate.
+
+**Scope limitation to honour (UC-85):** lazy scroll-up paging *older than the
+backfilled window* (UC-79 `load-older`) is NOT exercised under `replay` — the
+server's older-page fetch uses the docker helper, which is absent in a replay
+run. The gate asserts anchor-to-bottom (UC-78) and in-window scroll only. If a
+release touches the `load-older`/paging path specifically, cover it with a
+targeted check (or a live spot-check) in addition to the gate.
+
+**Demoted (no longer the gate):** the old LLM-driven drive — piloting the Compose
+UI with blind `adb input tap` coordinates against a live Claude session and
+eyeballing pulled screenshots — is REMOVED as the gate (it was non-deterministic
+and chronically blocked by launcher/SystemUI ANRs, e.g. the server-v0.0.52
+cycle). A manual screenshot spot-check is OPTIONAL extra assurance only; it never
+substitutes for, nor blocks on, the deterministic gate.
+
+Known environment noise to ignore (not gate failures): the 7 pre-existing
 `HostScriptComposeEnvTest` failures when `:server:test` runs inside a git
 worktree (a `user.dir`-parent path assumption — unrelated to release scope).
 
