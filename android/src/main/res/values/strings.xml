@@ -252,6 +252,10 @@
     <string name="conversation_copy_message_label">Copy</string>
     <string name="conversation_tool_copy">Copy</string>
 
+    <!-- UC-89 — jump-to-bottom scroll button + unread badge. -->
+    <string name="conversation_jump_to_bottom">Scroll to latest message</string>
+    <string name="conversation_unread_badge">%1$d unread messages</string>
+
     <!-- Status pills -->
     <string name="status_running">running</string>
     <string name="status_starting">starting</string>
