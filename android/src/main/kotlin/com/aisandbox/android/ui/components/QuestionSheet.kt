@@ -6,14 +6,11 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.MaterialTheme
@@ -30,12 +27,14 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.aisandbox.android.conversation.AnswerItem
 import com.aisandbox.android.conversation.ConvQuestion
 import com.aisandbox.android.conversation.PendingSheet
+import com.aisandbox.android.ui.testtags.QuestionTestTags
 import com.aisandbox.android.ui.theme.OnSurface
 import com.aisandbox.android.ui.theme.OnSurfaceMuted
 import com.aisandbox.android.ui.theme.OnSurfaceVariant
@@ -65,7 +64,7 @@ fun QuestionSheet(
     onSubmitBatch: (questionUuid: String, items: List<AnswerItem>) -> Unit = { _, _ -> },
 ) {
     Surface(
-        modifier = modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp),
+        modifier = modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 6.dp).testTag(QuestionTestTags.SHEET),
         color = SurfaceLow,
         shape = RoundedCornerShape(14.dp),
         tonalElevation = 3.dp,
@@ -110,7 +109,7 @@ private fun NotAnswerableBody(sheet: PendingSheet.Questions) {
     )
     Spacer(Modifier.height(8.dp))
     Column(
-        modifier = Modifier.fillMaxWidth().heightIn(max = 200.dp).verticalScroll(rememberScrollState()),
+        modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         sheet.questions.forEachIndexed { i, q ->
@@ -123,6 +122,7 @@ private fun NotAnswerableBody(sheet: PendingSheet.Questions) {
         "⌨  Answer in tmux to continue",
         style = MaterialTheme.typography.bodyMedium,
         color = OnSurfaceMuted,
+        modifier = Modifier.testTag(QuestionTestTags.NOT_ANSWERABLE),
     )
 }
 
@@ -149,7 +149,7 @@ private fun QuestionContent(
     Spacer(Modifier.height(12.dp))
 
     Column(
-        modifier = Modifier.fillMaxWidth().heightIn(max = 280.dp).verticalScroll(rememberScrollState()),
+        modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         q.options.forEachIndexed { idx, opt ->
@@ -159,13 +159,14 @@ private fun QuestionContent(
                 checked = isChecked(idx),
                 multiSelect = q.multiSelect,
                 onToggle = { onToggle(idx) },
+                modifier = Modifier.testTag(QuestionTestTags.option(idx)),
             )
         }
         // The always-present "Other" free-text option (AC10).
         OutlinedTextField(
             value = otherText,
             onValueChange = onOtherChange,
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier.fillMaxWidth().testTag(QuestionTestTags.OTHER_FIELD),
             label = { Text("Other", color = OnSurfaceMuted) },
             placeholder = { Text("Type a custom answer", color = OnSurfaceMuted) },
             singleLine = false,
@@ -218,6 +219,7 @@ private fun SingleQuestionBody(
     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
         Button(
             enabled = canSubmit,
+            modifier = Modifier.testTag(QuestionTestTags.SUBMIT),
             onClick = {
                 val finalSelections = selectionIndices.toMutableList()
                 if (otherSelected) finalSelections.add(q.options.size) // Other index = optionCount
@@ -262,6 +264,7 @@ private fun PagedQuestionBody(
         "Question ${current + 1} of $n",
         style = MaterialTheme.typography.labelMedium,
         color = OnSurfaceMuted,
+        modifier = Modifier.testTag(QuestionTestTags.PROGRESS),
     )
     Spacer(Modifier.height(6.dp))
 
@@ -291,16 +294,21 @@ private fun PagedQuestionBody(
         horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        OutlinedButton(enabled = current > 0, onClick = { current -= 1 }) {
+        OutlinedButton(
+            enabled = current > 0,
+            modifier = Modifier.testTag(QuestionTestTags.BACK),
+            onClick = { current -= 1 },
+        ) {
             Text("Back")
         }
         if (current < n - 1) {
-            Button(onClick = { current += 1 }) {
+            Button(modifier = Modifier.testTag(QuestionTestTags.NEXT), onClick = { current += 1 }) {
                 Text("Next")
             }
         } else {
             Button(
                 enabled = allAnswered,
+                modifier = Modifier.testTag(QuestionTestTags.SUBMIT),
                 onClick = {
                     val items = (0 until n).map { i ->
                         val sels = (selectionsByQ[i] ?: emptySet()).sorted().toMutableList()
@@ -328,7 +336,7 @@ private fun PlanBody(
 ) {
     Text("Plan approval", style = MaterialTheme.typography.labelMedium, color = OnSurfaceMuted)
     Spacer(Modifier.height(6.dp))
-    Column(modifier = Modifier.fillMaxWidth().heightIn(max = 260.dp).verticalScroll(rememberScrollState())) {
+    Column(modifier = Modifier.fillMaxWidth()) {
         Text(
             sheet.plan.ifBlank { "Claude is asking to proceed with its plan." },
             style = MaterialTheme.typography.bodyMedium,
@@ -337,10 +345,16 @@ private fun PlanBody(
     }
     Spacer(Modifier.height(12.dp))
     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)) {
-        OutlinedButton(onClick = { onSubmit(sheet.questionUuid, 0, listOf(1), "") }) {
+        OutlinedButton(
+            modifier = Modifier.testTag(QuestionTestTags.PLAN_REJECT),
+            onClick = { onSubmit(sheet.questionUuid, 0, listOf(1), "") },
+        ) {
             Text("Keep planning")
         }
-        Button(onClick = { onSubmit(sheet.questionUuid, 0, listOf(0), "") }) {
+        Button(
+            modifier = Modifier.testTag(QuestionTestTags.PLAN_APPROVE),
+            onClick = { onSubmit(sheet.questionUuid, 0, listOf(0), "") },
+        ) {
             Text("Approve")
         }
     }
@@ -353,11 +367,12 @@ private fun OptionRow(
     checked: Boolean,
     multiSelect: Boolean,
     onToggle: () -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     val rowModifier = if (multiSelect) {
-        Modifier.fillMaxWidth().toggleable(value = checked, role = Role.Checkbox, onValueChange = { onToggle() })
+        modifier.fillMaxWidth().toggleable(value = checked, role = Role.Checkbox, onValueChange = { onToggle() })
     } else {
-        Modifier.fillMaxWidth().selectable(selected = checked, role = Role.RadioButton, onClick = onToggle)
+        modifier.fillMaxWidth().selectable(selected = checked, role = Role.RadioButton, onClick = onToggle)
     }
     Row(modifier = rowModifier.padding(vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
         if (multiSelect) {

@@ -514,12 +514,18 @@ class SessionsUiStateTest {
         assertThat(s.countAll).isZero()
     }
 
-    // ── UC-70 — showRetryingBackground truth table (AC1/AC2/AC6 + the edge) ───
+    // ── UC-70 / UC-92 — showRetryingBackground truth table ────────────────────
     //
-    // The derived flag the screen reads to decide whether to override the list
-    // region with the light-grey "Not connected, retrying…" background. It must
-    // be TRUE only while the feed is actively reconnecting or has terminally
-    // given up — and crucially FALSE for a healthy connected feed (so a genuine
+    // The derived flag the screen reads to decide whether to OVERRIDE the whole
+    // list region with the full-screen "Not connected, retrying…" background.
+    // UC-92 narrows the contract to "full-screen ONLY when zero rows are known":
+    // the background appears only when there are genuinely ZERO known rows to
+    // show AND the outage is real (REST unreachable / never-responded) OR the
+    // feed has terminally given up (phase STOPPED → a static "Not connected").
+    // With rows still in memory the background is suppressed and the slim
+    // non-destructive banner ([showReconnectingBanner], covered in the UC-92
+    // block below) is used instead, so a transient reconnect never blanks an
+    // in-memory list. It stays FALSE for a healthy connected feed (so a genuine
     // "zero sessions" empty state is NOT mistaken for a disconnect — the use
     // case's headline pitfall) and FALSE during the silent initial connect.
 
@@ -581,16 +587,153 @@ class SessionsUiStateTest {
     }
 
     @Test
-    fun `the retrying background overrides even a non-empty last-known list (AC2)`() {
-        // The feed dropping must not leave stale rows: the flag is true regardless
-        // of the working set, so the screen empties the list region.
+    fun `a reconnecting feed with known rows is NON-destructive — no full-screen background (UC-92 AC2)`() {
+        // UC-92 INVERTS the old UC-70 contract (which blanked the list region on
+        // any reconnect). A transient reconnect must NOT wipe an in-memory list:
+        // with rows still known the full-screen RetryingBackground is suppressed
+        // and the slim non-destructive banner is shown above the preserved rows.
         val s = SessionsUiState(
             sessions = listOf(row(1, "running"), row(2, "running")),
             feedStatus = SessionsFeedStatus(phase = SessionsFeedStatus.Phase.RECONNECTING, attempt = 1),
+            serverResponded = true,
         )
         assertThat(s.visible).isNotEmpty()
         assertThat(s.showRetryingBackground)
-            .`as`("a reconnecting feed empties the list region even with rows still in state (AC2)")
+            .`as`("with rows still in state a reconnect keeps them visible — no full-screen background (AC2)")
+            .isFalse
+        assertThat(s.showReconnectingBanner)
+            .`as`("the slim non-destructive banner is shown above the preserved rows (AC2)")
+            .isTrue
+    }
+
+    // ── UC-92 — non-destructive reconnect: banner vs. full-screen gating ──────
+    //
+    // The headline UC-92 change: the full-screen RetryingBackground is now gated
+    // on `visible.isEmpty()` AND a *genuine* outage, while a slim non-destructive
+    // banner ([showReconnectingBanner]) covers the "rows still known" reconnect.
+    // These cases pin the truth table directly on the two derived flags + the
+    // [genuinelyOffline] heuristic that distinguishes a transient feed blip
+    // (REST still healthy) from a real outage (REST unreachable / never-answered).
+
+    @Test
+    fun `genuinelyOffline is false when REST is healthy and the server has answered (UC-92)`() {
+        // A transient events-socket drop (delete churn / back-nav re-START) leaves
+        // REST reachable and the server having answered → NOT genuinely offline.
+        val s = SessionsUiState(serverResponded = true, unreachable = false)
+        assertThat(s.genuinelyOffline).isFalse
+    }
+
+    @Test
+    fun `genuinelyOffline is true when REST is unreachable or the server never answered (UC-92 AC6)`() {
+        assertThat(SessionsUiState(unreachable = true, serverResponded = true).genuinelyOffline)
+            .`as`("a failed REST interaction marks the outage genuine")
+            .isTrue
+        assertThat(SessionsUiState(unreachable = false, serverResponded = false).genuinelyOffline)
+            .`as`("a server that has never answered this session is genuinely offline")
+            .isTrue
+    }
+
+    @Test
+    fun `reconnecting with rows shows the banner and never the background regardless of REST health (UC-92 AC2)`() {
+        // Both the transient (REST healthy) and the genuinely-offline-but-rows-known
+        // cases keep the rows: visible.isNotEmpty() alone suppresses the full-screen
+        // background, so a reconnect never blanks a populated list.
+        for (responded in listOf(true, false)) {
+            val s = SessionsUiState(
+                sessions = listOf(row(1, "running")),
+                feedStatus = SessionsFeedStatus(phase = SessionsFeedStatus.Phase.RECONNECTING, attempt = 2),
+                serverResponded = responded,
+                unreachable = !responded,
+            )
+            assertThat(s.showReconnectingBanner)
+                .`as`("rows known + feed down → slim banner (serverResponded=%s)", responded)
+                .isTrue
+            assertThat(s.showRetryingBackground)
+                .`as`("rows known → never the full-screen background (serverResponded=%s)", responded)
+                .isFalse
+        }
+    }
+
+    @Test
+    fun `zero rows + reconnecting + reachable shows neither background nor banner — normal empty state (UC-92 AC7)`() {
+        // AC7 — the only session was just deleted: zero rows but REST is healthy.
+        // Neither the full-screen background NOR the banner shows → the normal
+        // empty state renders (not the retrying surface).
+        val s = SessionsUiState(
+            sessions = emptyList(),
+            feedStatus = SessionsFeedStatus(phase = SessionsFeedStatus.Phase.RECONNECTING, attempt = 1),
+            serverResponded = true,
+            unreachable = false,
+        )
+        assertThat(s.visible).isEmpty()
+        assertThat(s.genuinelyOffline).isFalse
+        assertThat(s.showRetryingBackground)
+            .`as`("zero rows but REST healthy → normal empty state, NOT the retrying background (AC7)")
+            .isFalse
+        assertThat(s.showReconnectingBanner)
+            .`as`("the banner needs known rows; with none it stays hidden (AC7)")
+            .isFalse
+    }
+
+    @Test
+    fun `zero rows + reconnecting + genuinely offline shows the full-screen background (UC-92 AC6)`() {
+        // AC6 — a real outage with no rows known: the full-screen retrying state
+        // is preserved (both the REST-unreachable and the never-responded paths).
+        val unreachable = SessionsUiState(
+            sessions = emptyList(),
+            feedStatus = SessionsFeedStatus(phase = SessionsFeedStatus.Phase.RECONNECTING, attempt = 4),
+            unreachable = true,
+            serverResponded = true,
+        )
+        assertThat(unreachable.showRetryingBackground)
+            .`as`("genuine outage (REST unreachable) + zero rows → full-screen background (AC6)")
+            .isTrue
+        assertThat(unreachable.showReconnectingBanner).isFalse
+
+        val neverResponded = SessionsUiState(
+            sessions = emptyList(),
+            feedStatus = SessionsFeedStatus(phase = SessionsFeedStatus.Phase.RECONNECTING, attempt = 1),
+            serverResponded = false,
+        )
+        assertThat(neverResponded.showRetryingBackground)
+            .`as`("server never answered + zero rows → full-screen background (AC6)")
+            .isTrue
+    }
+
+    @Test
+    fun `terminally STOPPED feed with known rows shows the banner, not the full-screen background (UC-92 AC10)`() {
+        // The stale-phase edge: even once the feed has terminally given up
+        // (phase STOPPED), as long as rows are still known the list keeps them
+        // behind the slim banner — never the full-screen background. (The STOPPED
+        // banner copy switches to the static "Not connected" in the composable.)
+        val s = SessionsUiState(
+            sessions = listOf(row(1, "running"), row(2, "stopped")),
+            feedStatus = SessionsFeedStatus(phase = SessionsFeedStatus.Phase.STOPPED),
+            serverResponded = true,
+        )
+        assertThat(s.showRetryingBackground)
+            .`as`("STOPPED with rows known still keeps them visible (AC10)")
+            .isFalse
+        assertThat(s.showReconnectingBanner)
+            .`as`("a gave-up feed with rows shows the slim banner above them (AC10)")
+            .isTrue
+    }
+
+    @Test
+    fun `terminally STOPPED feed with zero rows still shows the full-screen background (UC-92 — STOPPED arm)`() {
+        // Symmetric to the above: with NO rows the STOPPED arm of the gate keeps
+        // the full-screen "Not connected" surface (independent of genuinelyOffline).
+        val s = SessionsUiState(
+            sessions = emptyList(),
+            feedStatus = SessionsFeedStatus(phase = SessionsFeedStatus.Phase.STOPPED),
+            serverResponded = true,
+            unreachable = false,
+        )
+        assertThat(s.genuinelyOffline)
+            .`as`("REST healthy → not genuinely offline …")
+            .isFalse
+        assertThat(s.showRetryingBackground)
+            .`as`("… but the STOPPED arm still shows the full-screen background when zero rows are known")
             .isTrue
     }
 

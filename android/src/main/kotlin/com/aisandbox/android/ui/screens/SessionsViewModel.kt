@@ -68,6 +68,13 @@ class SessionsViewModel(application: Application) : AndroidViewModel(application
         // so a disconnected/reconnecting feed surfaces the "Not connected,
         // retrying…" background on the same single [state] StateFlow.
         onStatus = { status -> coordinator.applyFeedStatus(status) },
+        // UC-92 — on a *transient* events-socket drop (the socket had Opened
+        // successfully and then dropped for a non-identity reason — delete-
+        // induced connection churn, back-nav STOP/START, a flaky link),
+        // immediately re-fetch the list over REST so the rows repaint at once
+        // instead of waiting out the exponential back-off (AC4/AC5). A genuine
+        // cold outage never reaches Open, so this never fires there (AC6).
+        onTransientDrop = { coordinator.refresh() },
     )
 
     init {
@@ -261,18 +268,54 @@ data class SessionsUiState(
         }
 
     /**
-     * UC-70 — whether the list region should render the light-grey
-     * "Not connected, retrying…" background instead of the rows / normal empty
-     * state (AC1, AC2). True while the feed is actively reconnecting
-     * ([SessionsFeedStatus.reconnecting]) AND, per challenger hard-req #4, once
-     * it has terminally given up (phase STOPPED → a static "Not connected"). The
-     * silent CONNECTING phase (initial connect, no failure yet) and the normal
-     * CONNECTED phase both leave this false, so the message never flashes during
-     * a healthy first connect or distracts from a genuine "zero sessions" empty
-     * state.
+     * UC-70 — the coarse "is the live feed down right now" signal: true while
+     * the feed is actively reconnecting ([SessionsFeedStatus.reconnecting]) or,
+     * per challenger hard-req #4, once it has terminally given up (phase STOPPED).
+     * The silent CONNECTING phase (initial connect, no failure yet) and the
+     * normal CONNECTED phase both leave this false. UC-92 derives BOTH the
+     * full-screen [showRetryingBackground] and the slim [showReconnectingBanner]
+     * from this, gating them on whether any rows are still known.
+     */
+    val isFeedDisconnected: Boolean
+        get() = feedStatus.reconnecting || feedStatus.phase == SessionsFeedStatus.Phase.STOPPED
+
+    /**
+     * UC-92 — a *genuine* outage vs. a *transient* feed blip. Reuses the UC-52
+     * [unreachable] flag (the last REST interaction failed) and the UC-54
+     * [serverResponded] flag (the server has answered at least once this
+     * session): the feed counts as genuinely offline only when REST is also
+     * unreachable OR the server has never responded. A transient events-socket
+     * drop (delete-induced churn, back-nav re-START) leaves REST healthy, so
+     * this stays false and the list keeps its rows behind the slim banner.
+     */
+    val genuinelyOffline: Boolean
+        get() = unreachable || !serverResponded
+
+    /**
+     * UC-70 / UC-92 — render the full-screen "Not connected, retrying…"
+     * background ONLY when there are genuinely zero known rows to show AND the
+     * outage is real (REST unreachable / never-responded) or the feed has
+     * terminally given up (phase STOPPED → a static "Not connected"). With rows
+     * in hand the non-destructive [showReconnectingBanner] is used instead
+     * (AC2/AC3/AC10), so a transient reconnect never blanks an in-memory list.
+     * Because this branch requires `visible.isEmpty()`, the rule holds in EVERY
+     * feed phase (RECONNECTING / STOPPED / CONNECTING). When zero rows are known
+     * but REST is still healthy (e.g. the only session was just deleted), both
+     * this and the banner stay false → the normal empty state shows (AC7).
      */
     val showRetryingBackground: Boolean
-        get() = feedStatus.reconnecting || feedStatus.phase == SessionsFeedStatus.Phase.STOPPED
+        get() = isFeedDisconnected && visible.isEmpty() &&
+            (genuinelyOffline || feedStatus.phase == SessionsFeedStatus.Phase.STOPPED)
+
+    /**
+     * UC-92 (AC2/AC10) — show the slim, non-destructive reconnect indicator
+     * above the list whenever the feed is disconnected/reconnecting BUT known
+     * rows are still in state. Keeps every row visible (never the full-screen
+     * background) through a transient drop, whether triggered by a delete-
+     * induced feed churn or by back-navigation re-entering the list.
+     */
+    val showReconnectingBanner: Boolean
+        get() = isFeedDisconnected && visible.isNotEmpty()
 }
 
 /** Filter chip selection. */

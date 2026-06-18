@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "_comment": "UC-85 deterministic-gate fixtures. schemaVersion is checked at boot against ReplayFixtureValidator.SCHEMA_VERSION; bump both together when the fixture/protocol format changes (drift detection, AC-2). Each scenario is exposed as a synthetic running session whose conversation WebSocket replays the named *.tail envelope stream. Re-capture procedure: see .claude/skills/android-testing/SKILL.md.",
+  "scenarios": [
+    { "n": 1, "target": "single-question-single", "title": "Single-select question", "fixture": "single-question-single.tail" },
+    { "n": 2, "target": "single-question-multi", "title": "Multi-select question", "fixture": "single-question-multi.tail" },
+    { "n": 3, "target": "single-question-other", "title": "Other free-text question", "fixture": "single-question-other.tail" },
+    { "n": 4, "target": "multi-question", "title": "Multi-question sheet", "fixture": "multi-question.tail" },
+    { "n": 5, "target": "conversation-transcript", "title": "Conversation transcript", "fixture": "conversation-transcript.tail" },
+    { "n": 6, "target": "pending-question-single", "title": "Pane-signal pending question", "fixture": "pending-question-single.tail" }
+  ]
+}

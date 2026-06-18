@@ -1,0 +1,8 @@
+__ctrl__	backfill-start	0
+main	{"type":"user","uuid":"u1","isSidechain":false,"message":{"content":"Which region should I target?"}}
+__ctrl__	backfill-end
+__ctrl__	pending-question	{"key":"tu-other","kind":"questions","plan":"","questions":[{"question":"Which region? (or type your own via Other)","header":"Region","multiSelect":false,"options":[{"label":"us-east-1","description":"N. Virginia"},{"label":"eu-west-1","description":"Ireland"}]}]}
+__replay__	await-answer
+main	{"type":"user","uuid":"u2","isSidechain":false,"message":{"content":[{"type":"tool_result","tool_use_id":"tu-other","is_error":false,"content":"Custom region received."}]}}
+main	{"type":"assistant","uuid":"a2","isSidechain":false,"message":{"content":[{"type":"text","text":"Using the region you entered."}]}}
+main	{"type":"system","subtype":"turn_duration","uuid":"te1","durationMs":1300,"messageCount":3}

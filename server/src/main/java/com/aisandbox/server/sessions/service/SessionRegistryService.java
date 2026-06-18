@@ -31,12 +31,35 @@ public class SessionRegistryService {
     private final HostShellSessionService hostShell;
     private final AtomicReference<Cached> cache = new AtomicReference<>(new Cached(Instant.EPOCH, List.of()));
 
+    /**
+     * UC-85 — sessions not backed by a running Docker container. Late-bound via a setter (the
+     * same pattern {@link com.aisandbox.server.stream.facade.StreamFacade} uses for the swarm
+     * enumerator) so existing unit constructions of this service compile unchanged. Defaults to
+     * {@link SyntheticSessionSource#NONE}; under the {@code replay} profile the
+     * {@code ReplaySyntheticSessions} bean is injected and reports {@code exclusive()=true}, so
+     * {@link #list()} returns the deterministic fixture sessions without running {@code docker}.
+     */
+    private volatile SyntheticSessionSource synthetic = SyntheticSessionSource.NONE;
+
     public SessionRegistryService(DockerEnumerationService enumeration, HostShellSessionService hostShell) {
         this.enumeration = enumeration;
         this.hostShell = hostShell;
     }
 
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setSyntheticSessionSource(SyntheticSessionSource synthetic) {
+        if (synthetic != null) {
+            this.synthetic = synthetic;
+        }
+    }
+
     public List<SessionRecord> list() throws IOException {
+        // UC-85 — under the replay profile the synthetic catalog is authoritative: return its
+        // deterministic records and never shell out to docker (there is none in a replay run).
+        SyntheticSessionSource syn = this.synthetic;
+        if (syn.exclusive()) {
+            return List.copyOf(syn.records());
+        }
         Cached c = cache.get();
         if (Instant.now().isBefore(c.takenAt().plus(TTL))) {
             return c.records();

@@ -1,0 +1,33 @@
+# UC-85 — deterministic functional-gate profile ("replay").
+#
+# Activated ONLY by the gate harness (android/gate.sh and the android-gate CI
+# job) via `--spring.profiles.active=replay`. It MUST NEVER be activated on a
+# production deployment: it serves recorded protocol fixtures instead of the
+# live docker `aisandbox-conversation-tail` helper, exposes synthetic sessions,
+# and echoes answers instead of injecting them into a live tmux session. The
+# boot-time ReplayProfileGuard aborts startup if this profile is active next to a
+# production marker (AC-11, layer 3), and no shipped artifact (systemd unit,
+# .deb, operator zip, CI bundle) may ever set this profile (AC-11, layer 2).
+#
+# Everything else — mTLS, UC-83 enrollment, the conversation WebSocket, the
+# ConversationEventMapper, the whole answer/conversation protocol — stays the
+# REAL production path; only the transcript SOURCE and the (absent) live session
+# change.
+
+ai-sandbox:
+  server:
+    replay:
+      # Directory holding manifest.json + the *.tail fixtures, resolved relative
+      # to the server process working directory. The gate launches the bootJar
+      # from the repo root, so this points at the committed fixtures.
+      dir: fixtures/replay
+      # How long a replay tail waits at an await-answer gate for the device's
+      # answer before giving up (ms). Generous, so a slow emulator never trips it.
+      answer-timeout-ms: 30000
+      # If this path exists while the replay profile is active, the server aborts
+      # at boot (production-safety fail-fast). Defaults to the systemd prod config.
+      production-marker-path: /etc/ai-sandbox-server/config.yaml
+
+logging:
+  level:
+    com.aisandbox.server.stream.replay: INFO

@@ -1,0 +1,8 @@
+__ctrl__	backfill-start	0
+main	{"type":"user","uuid":"u1","isSidechain":false,"message":{"content":"Set up the new service."}}
+__ctrl__	backfill-end
+__ctrl__	pending-question	{"key":"tu-batch","kind":"questions","plan":"","questions":[{"question":"Which language?","header":"Language","multiSelect":false,"options":[{"label":"Java","description":"JVM, LTS"},{"label":"Kotlin","description":"JVM, concise"}]},{"question":"Which build tools? (select all)","header":"Build","multiSelect":true,"options":[{"label":"Gradle","description":"Kotlin DSL"},{"label":"Maven","description":"XML"}]}]}
+__replay__	await-answer
+main	{"type":"user","uuid":"u2","isSidechain":false,"message":{"content":[{"type":"tool_result","tool_use_id":"tu-batch","is_error":false,"content":"All answers received."}]}}
+main	{"type":"assistant","uuid":"a2","isSidechain":false,"message":{"content":[{"type":"text","text":"Scaffolding the service with your choices."}]}}
+main	{"type":"system","subtype":"turn_duration","uuid":"te1","durationMs":1700,"messageCount":3}
