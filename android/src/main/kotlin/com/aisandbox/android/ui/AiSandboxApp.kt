@@ -178,6 +178,16 @@ fun AiSandboxApp() {
                             popUpTo(Routes.ConversationPattern) { inclusive = true }
                             launchSingleTop = true
                         }
+                        // UC-93 (Case R) — a warm deep-link can re-enter the process-cached
+                        // ConversationController for the target session while it is still
+                        // selecting a read-only `subagent:` pane (left there by a prior
+                        // background-subagent pill tap). That selection is re-asserted on every
+                        // reconnect, so the server tails the subagent pane, the pending-question
+                        // re-emit finds no answerable ask, and ConversationScreen.readOnly hides
+                        // the question box + composer = the wedge. Re-focus the answerable `main`
+                        // pane on the same cached controller (idempotent; a strict no-op when the
+                        // selection is already `main`/`swarm:`) so the pending question renders.
+                        container.conversationController(n).focusAnswerableTargetForDeepLink()
                     }
                     container.deepLinkEvents.consume()
                 }
