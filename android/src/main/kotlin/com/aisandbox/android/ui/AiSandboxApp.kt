@@ -162,7 +162,21 @@ fun AiSandboxApp() {
             container.deepLinkEvents.pendingSession.collect { n ->
                 if (n != null) {
                     if (start == Routes.Sessions) {
+                        // UC-93 — pop any existing conversation/{*} entry and push a
+                        // fresh one so a WARM deep-link (a conversation already on top)
+                        // re-keys the destination instead of reusing the entry and
+                        // mutating its args in place. The fresh entry makes
+                        // ConversationScreen re-enter → its LaunchedEffect(sessionN)
+                        // re-fires → attach(target) opens the socket → the server
+                        // re-emits the pending question → the QuestionSheet renders.
+                        // Without popUpTo, launchSingleTop alone reused the top
+                        // conversation entry across different n and attach(B) never
+                        // fired (the wedged-chat defect). Sessions stays under the
+                        // conversation (popUpTo targets conversation/{n}, not the
+                        // start), preserving UC-69 AC4 back-stack. The sessions-list
+                        // navigate (a plain navigate, below) is intentionally untouched.
                         navController.navigate(Routes.conversationFor(n)) {
+                            popUpTo(Routes.ConversationPattern) { inclusive = true }
                             launchSingleTop = true
                         }
                     }
