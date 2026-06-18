@@ -12,7 +12,9 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.Test
@@ -383,5 +385,155 @@ class SessionEventsControllerStatusTest {
         assertThat(emissions)
             .`as`("an unconfigured feed stays silent — never flashes the retrying background (hard-req #5)")
             .isEmpty()
+    }
+
+    // ── UC-92 — onTransientDrop fast-recovery hook (AC5 / AC9) ────────────────
+    //
+    // The controller fires [onTransientDrop] exactly once on the Open→terminal
+    // (non-Revoked) edge — a socket that had healthily Opened and then dropped
+    // for a non-identity reason (delete-induced churn, back-nav STOP/START, a
+    // flaky link). The ViewModel wires this to an immediate REST refresh so the
+    // list repaints at once instead of waiting out the back-off. Two invariants
+    // are pinned here at the source: (1) the hook fires on a transient drop and
+    // the back-off reset on Open makes the FIRST post-drop reconnect dial at ~1s
+    // (AC5/AC9 fast recovery); (2) a genuine cold outage (a socket that NEVER
+    // Opens) can NOT reach the hook, so it can never turn an outage into a tight
+    // retry loop (AC6 safety).
+
+    /** A client whose `state` flow is [stateFlow] (so the test can drop it). */
+    private fun clientWith(stateFlow: MutableStateFlow<SessionEventsClient.State>): SessionEventsClient {
+        val client = Mockito.mock(SessionEventsClient::class.java)
+        Mockito.`when`(client.state).thenReturn(stateFlow)
+        Mockito.`when`(client.incoming).thenReturn(MutableSharedFlow<SessionEventMessage>())
+        return client
+    }
+
+    @Test
+    fun transient_drop_after_open_fires_onTransientDrop_once_and_first_reconnect_is_1s() = runTest {
+        val loopScope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        val emissions = mutableListOf<SessionsFeedStatus>()
+        var drops = 0
+        val profile = Mockito.mock(ServerProfile::class.java)
+        val profileStore = profileStoreReturning(profile)
+
+        // The first dial opens; every later dial returns an inert disconnected
+        // client (we cancel before the back-off delay elapses, so it is never
+        // actually built — but be robust if it is).
+        val openState = MutableStateFlow<SessionEventsClient.State>(SessionEventsClient.State.Open)
+        var calls = 0
+        val controller = SessionEventsController(
+            profileStore = profileStore,
+            httpClientFactory = { Mockito.mock(AiSandboxHttpClient::class.java) },
+            eventsClientFactory = {
+                calls++
+                if (calls == 1) {
+                    clientWith(openState)
+                } else {
+                    fakeClient(SessionEventsClient.State.Disconnected("post-drop"))
+                }
+            },
+            onSnapshot = {},
+            onDelta = { _, _ -> },
+            onStatus = { emissions.add(it) },
+            onTransientDrop = { drops++ },
+            nowMs = { testScheduler.currentTime },
+            scope = loopScope,
+        )
+
+        controller.connect()
+        advanceUntilIdle()
+        // The socket is healthily Open and the loop is parked on the terminal
+        // wait — the hook must NOT have fired yet.
+        assertThat(drops)
+            .`as`("the hook does not fire while the socket is healthily Open")
+            .isEqualTo(0)
+        assertThat(emissions.last().phase).isEqualTo(SessionsFeedStatus.Phase.CONNECTED)
+
+        // Drop the healthy socket for a NON-identity reason (a transient drop).
+        openState.value = SessionEventsClient.State.Disconnected("transient-churn")
+        runCurrent()
+        loopScope.cancel()
+
+        // AC5/AC9 — the hook fired exactly once on the Open→terminal edge …
+        assertThat(drops)
+            .`as`("a transient drop of a healthy socket fires the fast-recovery hook exactly once")
+            .isEqualTo(1)
+
+        // … and because the back-off was reset on Open, the FIRST post-drop
+        // reconnect dial is scheduled at ~1s (not a climbed back-off delay).
+        val firstWaitAfterDrop = emissions.last { it.activity == SessionsFeedStatus.ReconnectActivity.WAITING }
+        assertThat(firstWaitAfterDrop.attempt)
+            .`as`("back-off was reset on Open → the first post-drop attempt is 1")
+            .isEqualTo(1)
+        assertThat(firstWaitAfterDrop.nextRetryAtMs)
+            .`as`("AC5/AC9 — first reconnect dial after a transient drop fires at ~1s")
+            .isEqualTo(1_000L)
+    }
+
+    @Test
+    fun revoked_terminal_does_not_fire_onTransientDrop() = runTest {
+        // A 4401 Revoked teardown is an IDENTITY event, not a transient drop —
+        // the loop returns before the hook, so a revocation must NOT trigger a
+        // REST refresh (it routes to the cert dialog instead).
+        val loopScope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        var drops = 0
+        val profile = Mockito.mock(ServerProfile::class.java)
+        val profileStore = profileStoreReturning(profile)
+        val openState = MutableStateFlow<SessionEventsClient.State>(SessionEventsClient.State.Open)
+        val controller = SessionEventsController(
+            profileStore = profileStore,
+            httpClientFactory = { Mockito.mock(AiSandboxHttpClient::class.java) },
+            eventsClientFactory = { clientWith(openState) },
+            onSnapshot = {},
+            onDelta = { _, _ -> },
+            onStatus = {},
+            onTransientDrop = { drops++ },
+            nowMs = { testScheduler.currentTime },
+            scope = loopScope,
+        )
+
+        controller.connect()
+        advanceUntilIdle()
+        openState.value = SessionEventsClient.State.Revoked
+        runCurrent()
+        loopScope.cancel()
+
+        assertThat(drops)
+            .`as`("a Revoked (4401) teardown is an identity event — the transient-drop hook must NOT fire")
+            .isEqualTo(0)
+    }
+
+    @Test
+    fun cold_outage_that_never_opens_never_fires_onTransientDrop() = runTest {
+        // AC6 safety — a genuine cold outage: every dial fails (never Open). The
+        // loop backs off and retries forever, but the Open→terminal edge is never
+        // reached, so the fast-recovery hook can NEVER fire ⇒ it cannot turn an
+        // outage into a tight retry loop.
+        val loopScope = CoroutineScope(UnconfinedTestDispatcher(testScheduler))
+        var drops = 0
+        val profile = Mockito.mock(ServerProfile::class.java)
+        val profileStore = profileStoreReturning(profile)
+        val controller = SessionEventsController(
+            profileStore = profileStore,
+            httpClientFactory = { Mockito.mock(AiSandboxHttpClient::class.java) },
+            eventsClientFactory = { fakeClient(SessionEventsClient.State.Disconnected("cold-outage")) },
+            onSnapshot = {},
+            onDelta = { _, _ -> },
+            onStatus = {},
+            onTransientDrop = { drops++ },
+            nowMs = { testScheduler.currentTime },
+            scope = loopScope,
+        )
+
+        controller.connect()
+        // Let several back-off cycles (1+2+4+8+10… s) elapse — the feed keeps
+        // failing to open the whole time.
+        advanceTimeBy(30_000)
+        runCurrent()
+        loopScope.cancel()
+
+        assertThat(drops)
+            .`as`("AC6 — a socket that never Opens can never reach the transient-drop hook")
+            .isEqualTo(0)
     }
 }

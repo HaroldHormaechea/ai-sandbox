@@ -1315,4 +1315,104 @@ class SessionsScreenInstrumentationTest {
         ).assertIsDisplayed()
         assertChannelsClose(dotArgb(), Success.toArgb())
     }
+
+    // ── UC-92 — non-destructive reconnect indicator (AC2 / AC9 / AC10) ────────
+    //
+    // The headline UC-92 regression: a reconnecting events feed must NOT blank an
+    // in-memory list. With rows still known, [SessionsBody] keeps every row
+    // visible and overlays a slim "Reconnecting…" banner — the full-screen
+    // [RetryingBackground] (testTag "sessions_retrying_background") must be
+    // ABSENT. These drive the real production composable at the render seam.
+
+    /** Two known rows + a feed mid-reconnect, REST still healthy (a transient drop). */
+    private val reconnectingWithRowsState = SessionsUiState(
+        sessions = listOf(
+            SessionSummary(n = 1, label = "alpha", state = "running"),
+            SessionSummary(n = 2, label = "beta", state = "running"),
+        ),
+        filter = SessionsFilter.ALL,
+        serverResponded = true,
+        feedStatus = SessionsFeedStatus(
+            phase = SessionsFeedStatus.Phase.RECONNECTING,
+            attempt = 1,
+        ),
+    )
+
+    /**
+     * UC-92 AC2/AC9 — REPRO: a session is deleted, the events feed drops into
+     * RECONNECTING, but the remaining rows are still held in state. The list
+     * must keep those rows visible with the slim reconnect banner above them and
+     * must NOT replace the region with the full-screen retrying background.
+     */
+    @Test
+    fun reconnecting_feed_with_known_rows_keeps_rows_and_shows_banner_not_background() {
+        composeTestRule.setContent {
+            AiSandboxTheme {
+                SessionsBody(
+                    padding = PaddingValues(),
+                    onOpenTerminal = {},
+                    state = reconnectingWithRowsState,
+                    onSelectFilter = {},
+                    onOpen = {},
+                    onConfirmDelete = { _, _ -> },
+                )
+            }
+        }
+
+        // Rows stay visible (no blank list) …
+        composeTestRule.onNodeWithTag("session-card-1").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("session-card-2").assertIsDisplayed()
+        // … the slim non-destructive banner is shown above them …
+        composeTestRule.onNodeWithTag("sessions_reconnecting_banner").assertIsDisplayed()
+        // … and the full-screen retrying background is NEVER rendered with rows known.
+        composeTestRule.onNodeWithTag("sessions_retrying_background").assertDoesNotExist()
+    }
+
+    /**
+     * UC-92 AC10 — back-navigation: entering a session STOPs the list (closes the
+     * events socket) and returning re-STARTs it (refresh() + connectEvents()).
+     * During that reconnect window the rows are repainted from REST while the
+     * socket re-opens. Modelled at the render seam as a state transition
+     * CONNECTED-with-rows → RECONNECTING-with-rows: the rows must stay visible the
+     * WHOLE time, the banner appears, and the full-screen background never shows.
+     */
+    @Test
+    fun returning_to_the_list_repaints_rows_with_banner_never_the_full_screen_background() {
+        // A snapshot-backed holder read inside composition; flipping it models the
+        // re-entry repaint (rows from REST) with the events feed still reconnecting.
+        val connectedWithRows = reconnectingWithRowsState.copy(
+            feedStatus = SessionsFeedStatus(), // CONNECTED + IDLE
+        )
+        val stateHolder = mutableStateOf(connectedWithRows)
+
+        composeTestRule.setContent {
+            AiSandboxTheme {
+                SessionsBody(
+                    padding = PaddingValues(),
+                    onOpenTerminal = {},
+                    state = stateHolder.value,
+                    onSelectFilter = {},
+                    onOpen = {},
+                    onConfirmDelete = { _, _ -> },
+                )
+            }
+        }
+
+        // On the list, connected: rows visible, no banner, no full-screen background.
+        composeTestRule.onNodeWithTag("session-card-1").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("sessions_reconnecting_banner").assertDoesNotExist()
+        composeTestRule.onNodeWithTag("sessions_retrying_background").assertDoesNotExist()
+
+        // Re-enter the list (back-nav): rows repaint from REST while the events
+        // socket re-opens → the feed is briefly RECONNECTING with rows known.
+        composeTestRule.runOnIdle { stateHolder.value = reconnectingWithRowsState }
+        composeTestRule.waitForIdle()
+
+        // The rows never blanked, the slim banner is shown, and the full-screen
+        // retrying background is never rendered during the reconnect window.
+        composeTestRule.onNodeWithTag("session-card-1").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("session-card-2").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("sessions_reconnecting_banner").assertIsDisplayed()
+        composeTestRule.onNodeWithTag("sessions_retrying_background").assertDoesNotExist()
+    }
 }
