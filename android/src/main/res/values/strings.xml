@@ -256,6 +256,12 @@
     <string name="conversation_jump_to_bottom">Scroll to latest message</string>
     <string name="conversation_unread_badge">%1$d unread messages</string>
 
+    <!-- UC-90 — anchored, collapsible question box: collapse/expand toggle content
+         descriptions + the compact header fallback label. -->
+    <string name="conversation_question_collapse">Collapse question</string>
+    <string name="conversation_question_expand">Expand question</string>
+    <string name="conversation_question_pending_label">Question pending</string>
+
     <!-- Status pills -->
     <string name="status_running">running</string>
     <string name="status_starting">starting</string>

@@ -6,14 +6,11 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.MaterialTheme
@@ -110,7 +107,7 @@ private fun NotAnswerableBody(sheet: PendingSheet.Questions) {
     )
     Spacer(Modifier.height(8.dp))
     Column(
-        modifier = Modifier.fillMaxWidth().heightIn(max = 200.dp).verticalScroll(rememberScrollState()),
+        modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         sheet.questions.forEachIndexed { i, q ->
@@ -149,7 +146,7 @@ private fun QuestionContent(
     Spacer(Modifier.height(12.dp))
 
     Column(
-        modifier = Modifier.fillMaxWidth().heightIn(max = 280.dp).verticalScroll(rememberScrollState()),
+        modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
         q.options.forEachIndexed { idx, opt ->
@@ -328,7 +325,7 @@ private fun PlanBody(
 ) {
     Text("Plan approval", style = MaterialTheme.typography.labelMedium, color = OnSurfaceMuted)
     Spacer(Modifier.height(6.dp))
-    Column(modifier = Modifier.fillMaxWidth().heightIn(max = 260.dp).verticalScroll(rememberScrollState())) {
+    Column(modifier = Modifier.fillMaxWidth()) {
         Text(
             sheet.plan.ifBlank { "Claude is asking to proceed with its plan." },
             style = MaterialTheme.typography.bodyMedium,
