@@ -2,6 +2,7 @@ package com.aisandbox.server.cli;
 
 import com.aisandbox.server.cli.secrets.ClaudePreInitStep;
 import com.aisandbox.server.cli.secrets.ConsoleIO;
+import com.aisandbox.server.cli.secrets.DindStateStep;
 import com.aisandbox.server.cli.secrets.EncryptedKeyDecryptor;
 import com.aisandbox.server.cli.secrets.EnsureSandboxImage;
 import com.aisandbox.server.cli.secrets.GhTokenStep;
@@ -274,6 +275,24 @@ public class SecretsSeedCommand implements Runnable {
             ensureDir(templatesDir, "rwxr-x---", posix);
 
             Ownership ownership = posix ? Ownership.resolve(systemUserName, "secrets seed") : null;
+
+            // UC-94 § AC2 (Part B-seed) — provision the server-owned
+            // <secrets-dir>/dind/{subuid,subgid} files so a `pki init` +
+            // `secrets seed` install (no `onboard`) still satisfies AC2 at
+            // install time. Only the subid half runs here (state-root repair is
+            // onboard/postinst's job). Best-effort + delegates to the same
+            // bundled script as onboard + postinst (anti-drift). Derived owner.
+            Path dindScript = installDir.resolve("host/devtools.d/dind/ensure-host-subid.sh");
+            String serviceOwner = systemUserName + ":" + systemUserName;
+            try {
+                new DindStateStep(processRunner, consoleIO).ensureSubid(dindScript, secretsDir, serviceOwner);
+            } catch (IOException | InterruptedException e) {
+                if (e instanceof InterruptedException) {
+                    Thread.currentThread().interrupt();
+                }
+                System.err.println("aisandboxctl secrets seed: DinD subuid provisioning could not run ("
+                        + e.getMessage() + "); the spawn-time guard remains as a fallback. Continuing.");
+            }
 
             // AC16 — guarantee ai-context:latest before the docker-using
             // steps. Skip when neither interactive step is in play (both

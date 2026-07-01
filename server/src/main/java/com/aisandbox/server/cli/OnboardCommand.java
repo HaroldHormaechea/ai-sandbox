@@ -3,6 +3,7 @@ package com.aisandbox.server.cli;
 import com.aisandbox.server.cli.secrets.ClaudePreInitStep;
 import com.aisandbox.server.cli.secrets.ConsoleIO;
 import com.aisandbox.server.cli.secrets.DevToolsStep;
+import com.aisandbox.server.cli.secrets.DindStateStep;
 import com.aisandbox.server.cli.secrets.EncryptedKeyDecryptor;
 import com.aisandbox.server.cli.secrets.EnsureSandboxImage;
 import com.aisandbox.server.cli.secrets.GhTokenStep;
@@ -348,6 +349,27 @@ public class OnboardCommand implements Callable<Integer> {
         if (ownership != null) {
             ownership.chown(secretsDir);
             ownership.chown(templatesDir);
+        }
+
+        // ── UC-94 — DinD bind-source repair + subuid/subgid provisioning ──
+        // Repair stale root-owned per-session bind-source debris under the
+        // state root, then provision the server-owned
+        // <secrets-dir>/dind/{subuid,subgid} files. Runs root-privileged here
+        // (onboard requires root) so it can do what the non-root spawn.sh guard
+        // cannot. Best-effort: a failure warns but never aborts onboarding
+        // (parity with the install never-fail contract). Derived owner — never
+        // a hard-coded uid. Delegates to the two bundled scripts so postinst and
+        // this path share one implementation (anti-drift).
+        Path dindScriptsDir = installDir.resolve("host/devtools.d/dind");
+        String serviceOwner = systemUserName + ":" + systemUserName;
+        try {
+            new DindStateStep(processRunner, consoleIO).run(dindScriptsDir, secretsDir, sessionsDir, serviceOwner);
+        } catch (IOException | InterruptedException e) {
+            if (e instanceof InterruptedException) {
+                Thread.currentThread().interrupt();
+            }
+            System.err.println("aisandboxctl onboard: DinD state provisioning could not run (" + e.getMessage()
+                    + "); the spawn-time guard remains as a fallback. Continuing.");
         }
 
         // ── decide which secret components need gathering ──────────────

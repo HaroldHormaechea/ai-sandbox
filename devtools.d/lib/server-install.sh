@@ -22,19 +22,35 @@
 #
 #   • Creates FILE's parent directory and FILE itself if missing (as the calling
 #     user, so the host file is owned correctly up front).
+#   • Self-heals a path that EXISTS but is not a regular file — a directory the
+#     Docker daemon auto-created root:root over a missing bind source, a stray
+#     symlink, a fifo — by removing it and recreating an empty regular file
+#     (UC-94 § AC3), provided the parent is writable. A root-owned parent still
+#     yields a non-zero return (repairing that needs root → deb postinst /
+#     `aisandboxctl onboard`, never this non-root spawn-time guard).
 #   • A no-op when the EXACT line is already present — re-running setup makes no
 #     duplicate entries and no repeated mutation (AC#3).
 #   • Appends without touching any other line, so a pre-existing `claude` entry
 #     is never clobbered when adding the `sandbox` entry, and vice versa (AC#6).
 #
-# Returns non-zero only if the directory/file could not be created or the append
-# failed (e.g. ownership/permission problem) — the caller hard-gates on that.
+# Returns non-zero only if the directory/file could not be created/healed or the
+# append failed (e.g. ownership/permission problem) — the caller hard-gates on
+# that.
 aisb_subuid_ensure_line() {
     local file="$1" owner="$2" start="$3" count="$4" dir line
     line="${owner}:${start}:${count}"
     dir="$(dirname -- "$file")"
     [ -d "$dir" ] || mkdir -p -- "$dir" || return 1
-    [ -f "$file" ] || : > "$file" || return 1
+    # Ensure FILE is a regular file. If it exists but is the wrong type
+    # (directory / symlink / fifo) — the root-created-directory trap UC-94
+    # repairs — remove it first, then recreate. `-e` misses dangling symlinks,
+    # so test `-L` too. `rm -rf` blast radius is bounded to this exact path.
+    if [ ! -f "$file" ]; then
+        if [ -e "$file" ] || [ -L "$file" ]; then
+            rm -rf -- "$file" || return 1
+        fi
+        : > "$file" || return 1
+    fi
     # Exact line already delegated → nothing to do (idempotent, AC#3).
     if grep -qxF -- "$line" "$file" 2>/dev/null; then
         return 0

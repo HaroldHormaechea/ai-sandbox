@@ -344,6 +344,12 @@ jobs:
                   # (SandboxDockerfile COPYs devtools.d/ into the image).
                   test -f /opt/ai-sandbox-server/host/devtools.d/dind/manifest.sh
                   test -f /opt/ai-sandbox-server/host/devtools.d/lib/versions.sh
+                  # UC-94 — the DinD state-repair / subid-provision helpers ship
+                  # NON-EXECUTABLE (invoked via `bash <path>` from postinst + the
+                  # onboard/secrets-seed step), so this is a `test -f` PRESENCE
+                  # check, NOT the `test -x` executable-bit loop above.
+                  test -f /opt/ai-sandbox-server/host/devtools.d/dind/ensure-host-subid.sh
+                  test -f /opt/ai-sandbox-server/host/devtools.d/dind/repair-state-root.sh
                   # AC5,AC6 — SandboxDockerfile COPYs git-hooks/ into the image,
                   # so the bundle must ship it under host/git-hooks/. Catching
                   # this in the install-flow phase (loud "file missing" error)

@@ -42,6 +42,18 @@ import org.springframework.stereotype.Service;
  *       interpolated by {@code docker-compose.yml}'s claude-template
  *       RO bind-mount source. Captured by
  *       {@code aisandboxctl secrets seed}'s Claude pre-init step.</li>
+ *   <li>{@code AI_SANDBOX_DIND_SUBUID_HOST_PATH} /
+ *       {@code AI_SANDBOX_DIND_SUBGID_HOST_PATH} (UC-94 § AC2) —
+ *       {@code <secrets.dir>/dind/subuid} and {@code …/subgid}, the
+ *       server-owned files {@code docker-compose.dind.yml} binds read-only
+ *       over the session's {@code /etc/subuid} / {@code /etc/subgid}.
+ *       Exported UNCONDITIONALLY (inert when DinD is off — only the dind
+ *       compose override references them) so the bind never falls back to
+ *       the {@code ./secrets/dind/} default the Docker daemon would
+ *       auto-create {@code root:root} under the state-root cwd. The files
+ *       are provisioned + chowned to the service user by
+ *       {@code aisandboxctl onboard} / {@code secrets seed} via the bundled
+ *       {@code ensure-host-subid.sh}.</li>
  * </ul>
  */
 @Service
@@ -144,6 +156,20 @@ public class ScriptExecutorService {
                 (secretsDir.getParent() != null) ? secretsDir.getParent() : Path.of("/etc/ai-sandbox-server");
         Path claudeTemplate = templatesParent.resolve("templates").resolve("claude-config");
         env.put("AI_SANDBOX_CLAUDE_TEMPLATE_HOST_PATH", claudeTemplate.toString());
+
+        // UC-94 § AC2 — wire the DinD subuid/subgid bind sources at the
+        // server-owned secrets dir (/etc/ai-sandbox-server/secrets/dind/),
+        // matching the documented design and `ensure-host-subid.sh`'s write
+        // target. Without these, docker-compose.dind.yml's
+        // `${AI_SANDBOX_DIND_SUBUID_HOST_PATH:-./secrets/dind/subuid}` default
+        // resolves under the state-root cwd, where the Docker daemon
+        // auto-creates the missing bind source as a root:root DIRECTORY and the
+        // mount onto the /etc/subuid FILE fails with "not a directory". Exported
+        // unconditionally: inert for non-DinD spawns (nothing reads them unless
+        // the dind override is layered), so AC7 (no-regression) holds.
+        Path dindDir = secretsDir.resolve("dind");
+        env.put("AI_SANDBOX_DIND_SUBUID_HOST_PATH", dindDir.resolve("subuid").toString());
+        env.put("AI_SANDBOX_DIND_SUBGID_HOST_PATH", dindDir.resolve("subgid").toString());
 
         // UC-17 — run the session container as the numeric owner of the
         // secrets dir (consumed by docker-compose.yml's `user:` field), so it
