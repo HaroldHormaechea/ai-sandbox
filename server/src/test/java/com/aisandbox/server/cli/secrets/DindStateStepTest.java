@@ -143,12 +143,28 @@ class DindStateStepTest {
         FakeProcessRunner runner = new FakeProcessRunner();
         FakeConsoleIO io = new FakeConsoleIO();
 
-        new DindStateStep(runner, io).run(dindDir, secretsDir, stateRoot, OWNER);
+        // The skip warning is emitted to System.err (NOT the ConsoleIO stream)
+        // so a fully flag-driven `secrets seed` run stays silent on ConsoleIO —
+        // the invariant SecretsSeedCommandTest relies on. Capture stderr around
+        // the call and restore it in a finally.
+        ByteArrayOutputStream errBuf = new ByteArrayOutputStream();
+        PrintStream origErr = System.err;
+        System.setErr(new PrintStream(errBuf, true));
+        try {
+            new DindStateStep(runner, io).run(dindDir, secretsDir, stateRoot, OWNER);
+        } finally {
+            System.setErr(origErr);
+        }
 
         assertThat(runner.captureCalls)
                 .as("a missing bundled script must NOT shell out")
                 .isEmpty();
-        assertThat(io.allOutput()).as("the missing-script path warns and skips").contains("bundled script not found");
+        assertThat(errBuf.toString())
+                .as("the missing-script path warns on stderr and skips")
+                .contains("bundled script not found");
+        assertThat(io.allOutput())
+                .as("the skip warning must NOT leak to ConsoleIO (flag-driven ⇒ silent ConsoleIO invariant)")
+                .doesNotContain("bundled script not found");
     }
 
     @Test
