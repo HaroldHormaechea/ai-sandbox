@@ -298,9 +298,8 @@ class DebPostinstContractTest {
         // exact state-root + derived owner.
         assertThat(code)
                 .as("UC-94 Part D — postinst MUST `bash`-invoke repair-state-root.sh by its host/ path")
-                .containsPattern(
-                        "bash\\s+\"?\\$?\\{?AISB_DIND_DIR\\}?/repair-state-root\\.sh\"?|"
-                                + "bash\\s+\"?/opt/ai-sandbox-server/host/devtools\\.d/dind/repair-state-root\\.sh\"?");
+                .containsPattern("bash\\s+\"?\\$?\\{?AISB_DIND_DIR\\}?/repair-state-root\\.sh\"?|"
+                        + "bash\\s+\"?/opt/ai-sandbox-server/host/devtools\\.d/dind/repair-state-root\\.sh\"?");
         assertThat(code)
                 .as("UC-94 Part D — repair invocation carries --state-root + derived --owner")
                 .containsPattern("--state-root\\s+/var/lib/ai-sandbox-server/sessions")
@@ -310,9 +309,8 @@ class DebPostinstContractTest {
         // server-owned secrets dir + derived owner.
         assertThat(code)
                 .as("UC-94 Part B — postinst MUST `bash`-invoke ensure-host-subid.sh by its host/ path")
-                .containsPattern(
-                        "bash\\s+\"?\\$?\\{?AISB_DIND_DIR\\}?/ensure-host-subid\\.sh\"?|"
-                                + "bash\\s+\"?/opt/ai-sandbox-server/host/devtools\\.d/dind/ensure-host-subid\\.sh\"?");
+                .containsPattern("bash\\s+\"?\\$?\\{?AISB_DIND_DIR\\}?/ensure-host-subid\\.sh\"?|"
+                        + "bash\\s+\"?/opt/ai-sandbox-server/host/devtools\\.d/dind/ensure-host-subid\\.sh\"?");
         assertThat(code)
                 .as("UC-94 Part B — ensure invocation carries --secrets-dir + derived --owner")
                 .containsPattern("--secrets-dir\\s+/etc/ai-sandbox-server/secrets");
@@ -332,6 +330,53 @@ class DebPostinstContractTest {
         assertThat(text)
                 .as("UC-94 — the dind repair/provision block MUST NOT break the postinst exit 0 contract")
                 .containsPattern("(?m)^exit 0\\s*$");
+    }
+
+    /**
+     * UC-94 fresh-install regression guard. The two bundled helpers must run
+     * ONLY on an upgrade/reinstall over an already-provisioned host — never on a
+     * fresh install, where {@code ensure-host-subid.sh} would pre-create
+     * {@code /etc/ai-sandbox-server/secrets} and make the subsequent
+     * {@code aisandboxctl pki init} refuse with a "conflict" error. The postinst
+     * snapshots {@code SECRETS_DIR_PREEXISTS} / {@code STATE_ROOT_PREEXISTS}
+     * BEFORE block 3 pre-creates the state-root tree, then nests each helper
+     * invocation inside the matching {@code = "1"} (already-provisioned) guard.
+     *
+     * <p>This test asserts that each {@code bash <helper>} invocation is nested
+     * directly inside its PREEXISTS guard (and that the snapshots are captured),
+     * so dropping the guard — the exact fresh-install regression fixed in this
+     * UC — can never silently return. It complements {@link
+     * #postinst_bash_invokes_both_uc94_dind_helpers_by_path_and_stays_exit_zero},
+     * which only asserts the invocations are present.
+     */
+    @Test
+    void postinst_uc94_helpers_are_guarded_upgrade_only_by_the_preexists_snapshot() throws IOException {
+        String code = stripCommentLines(postinst());
+
+        // The provisioned-host snapshot is captured (guard defaults to 0, flips
+        // to 1 only when the target already exists before this install).
+        assertThat(code)
+                .as("UC-94 — STATE_ROOT_PREEXISTS is snapshotted from the sessions state-root")
+                .containsPattern("STATE_ROOT_PREEXISTS=0")
+                .containsPattern("if \\[ -d /var/lib/ai-sandbox-server/sessions \\]; then\\s+STATE_ROOT_PREEXISTS=1");
+        assertThat(code)
+                .as("UC-94 — SECRETS_DIR_PREEXISTS is snapshotted from the secrets dir")
+                .containsPattern("SECRETS_DIR_PREEXISTS=0")
+                .containsPattern("if \\[ -d /etc/ai-sandbox-server/secrets \\]; then\\s+SECRETS_DIR_PREEXISTS=1");
+
+        // repair-state-root.sh runs ONLY inside the STATE_ROOT_PREEXISTS guard.
+        assertThat(code)
+                .as("UC-94 — repair-state-root.sh is nested inside the STATE_ROOT_PREEXISTS upgrade-only guard")
+                .containsPattern("(?s)if \\[ \"\\$STATE_ROOT_PREEXISTS\" = \"1\" \\]; then"
+                        + "\\s+if \\[ -f \"\\$AISB_DIND_DIR/repair-state-root\\.sh\" \\]; then"
+                        + "\\s+bash \"\\$AISB_DIND_DIR/repair-state-root\\.sh\"");
+
+        // ensure-host-subid.sh runs ONLY inside the SECRETS_DIR_PREEXISTS guard.
+        assertThat(code)
+                .as("UC-94 — ensure-host-subid.sh is nested inside the SECRETS_DIR_PREEXISTS upgrade-only guard")
+                .containsPattern("(?s)if \\[ \"\\$SECRETS_DIR_PREEXISTS\" = \"1\" \\]; then"
+                        + "\\s+if \\[ -f \"\\$AISB_DIND_DIR/ensure-host-subid\\.sh\" \\]; then"
+                        + "\\s+bash \"\\$AISB_DIND_DIR/ensure-host-subid\\.sh\"");
     }
 
     // ── UC-19 — new packaging contract ────────────────────────────────

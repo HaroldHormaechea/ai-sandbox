@@ -148,9 +148,7 @@ class DindStateStepTest {
         assertThat(runner.captureCalls)
                 .as("a missing bundled script must NOT shell out")
                 .isEmpty();
-        assertThat(io.allOutput())
-                .as("the missing-script path warns and skips")
-                .contains("bundled script not found");
+        assertThat(io.allOutput()).as("the missing-script path warns and skips").contains("bundled script not found");
     }
 
     @Test
