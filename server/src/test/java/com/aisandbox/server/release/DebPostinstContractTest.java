@@ -266,6 +266,74 @@ class DebPostinstContractTest {
                 .containsPattern("(?is)starts fine on an empty\\s+allowlist");
     }
 
+    /**
+     * UC-94 Part B/D — anti-drift packaging contract. The postinst MUST invoke
+     * BOTH bundled helpers by their {@code /opt/ai-sandbox-server/host/…} path
+     * via {@code bash <path>} — the same single implementation
+     * {@code aisandboxctl onboard} / {@code secrets seed} call through
+     * {@link com.aisandbox.server.cli.secrets.DindStateStep}, so the deb and the
+     * Java side can never diverge on the repair name-set or the subid content:
+     *
+     * <ul>
+     *   <li>{@code repair-state-root.sh --state-root /var/lib/ai-sandbox-server/sessions
+     *       --owner ai-sandbox-server:ai-sandbox-server} (Part D — re-own stale
+     *       root-owned per-session bind sources + drop legacy dind debris);</li>
+     *   <li>{@code ensure-host-subid.sh --secrets-dir /etc/ai-sandbox-server/secrets
+     *       --owner ai-sandbox-server:ai-sandbox-server} (Part B — provision the
+     *       server-owned subuid/subgid delegation files).</li>
+     * </ul>
+     *
+     * <p>Both are invoked via {@code bash} (the deb ships them NON-EXECUTABLE),
+     * each guarded by a {@code [ -f … ]} presence test and terminated with
+     * {@code || true} so a missing/failing helper never breaks the postinst's
+     * {@code exit 0} contract. A regression to {@code sh}, a hard-coded owner, or
+     * a dropped invocation would break this test.
+     */
+    @Test
+    void postinst_bash_invokes_both_uc94_dind_helpers_by_path_and_stays_exit_zero() throws IOException {
+        String text = postinst();
+        String code = stripCommentLines(text);
+
+        // repair-state-root.sh — bash-invoked, by full install path, with the
+        // exact state-root + derived owner.
+        assertThat(code)
+                .as("UC-94 Part D — postinst MUST `bash`-invoke repair-state-root.sh by its host/ path")
+                .containsPattern(
+                        "bash\\s+\"?\\$?\\{?AISB_DIND_DIR\\}?/repair-state-root\\.sh\"?|"
+                                + "bash\\s+\"?/opt/ai-sandbox-server/host/devtools\\.d/dind/repair-state-root\\.sh\"?");
+        assertThat(code)
+                .as("UC-94 Part D — repair invocation carries --state-root + derived --owner")
+                .containsPattern("--state-root\\s+/var/lib/ai-sandbox-server/sessions")
+                .containsPattern("--owner\\s+ai-sandbox-server:ai-sandbox-server");
+
+        // ensure-host-subid.sh — bash-invoked, by full install path, with the
+        // server-owned secrets dir + derived owner.
+        assertThat(code)
+                .as("UC-94 Part B — postinst MUST `bash`-invoke ensure-host-subid.sh by its host/ path")
+                .containsPattern(
+                        "bash\\s+\"?\\$?\\{?AISB_DIND_DIR\\}?/ensure-host-subid\\.sh\"?|"
+                                + "bash\\s+\"?/opt/ai-sandbox-server/host/devtools\\.d/dind/ensure-host-subid\\.sh\"?");
+        assertThat(code)
+                .as("UC-94 Part B — ensure invocation carries --secrets-dir + derived --owner")
+                .containsPattern("--secrets-dir\\s+/etc/ai-sandbox-server/secrets");
+
+        // The helper dir literal the postinst resolves both scripts against MUST
+        // be the host/ install path (where the deb ships the devtools.d tree).
+        assertThat(text)
+                .as("UC-94 — the helper dir literal points at the bundled host/devtools.d/dind path")
+                .contains("/opt/ai-sandbox-server/host/devtools.d/dind");
+
+        // Both invocations are guarded (presence check) and best-effort (|| true),
+        // and the file still ends with the unconditional exit 0.
+        assertThat(code)
+                .as("UC-94 — each helper is guarded by a `[ -f … ]` presence test")
+                .contains("if [ -f \"$AISB_DIND_DIR/repair-state-root.sh\" ]; then")
+                .contains("if [ -f \"$AISB_DIND_DIR/ensure-host-subid.sh\" ]; then");
+        assertThat(text)
+                .as("UC-94 — the dind repair/provision block MUST NOT break the postinst exit 0 contract")
+                .containsPattern("(?m)^exit 0\\s*$");
+    }
+
     // ── UC-19 — new packaging contract ────────────────────────────────
 
     /** Convenience — read the postinst, skipping when it isn't on disk (cwd≠server/). */
