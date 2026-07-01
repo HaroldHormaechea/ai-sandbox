@@ -603,6 +603,26 @@ public class SessionConversationHandler implements WebSocketHandler {
                 a.questionUuid() == null ? null : ctx.pendingQuestions.get(a.questionUuid());
         InputInjectionService.BatchAnswerSpec spec =
                 deriveAnswerSpec(q, a.questionIndex(), a.selections(), a.freeText());
+        // UC-85 — under the deterministic-gate replay profile there is no live session to
+        // produce an observable transcript advance, so echo the exact answer we received back
+        // over the WebSocket. The on-device gate asserts this frame to prove the SELECTED option
+        // is the one transmitted (UC-57). No-op (never emitted) outside the replay profile.
+        //
+        // UC-96 — the echo MUST be emitted BEFORE the gate-releasing injectAnswer call below.
+        // Under replay, recordAnswer offers the replay gate token, which unparks the tail pump;
+        // the pump then races to EOF → tryEmitComplete on this same outbound sink, and emit()'s
+        // tryEmitNext ignores its EmitResult, so an echo enqueued after completion is silently
+        // dropped (FAIL_TERMINATED). Enqueuing it into the still-live sink first removes the race
+        // (Reactor unicast onBackpressureBuffer is FIFO + terminal-after-data). Kept symmetric
+        // with applyAnswerBatch so the single-question leg cannot regress. Replay-only via
+        // answerEchoEnabled() (false in production ⇒ zero production behavior change).
+        if (facade.answerEchoEnabled()) {
+            emit(
+                    ctx,
+                    session,
+                    new ConversationServerMessage.AnswerEcho(
+                            a.questionUuid(), a.questionIndex(), a.selections(), a.freeText()));
+        }
         safe(
                 ctx,
                 session,
@@ -615,17 +635,6 @@ public class SessionConversationHandler implements WebSocketHandler {
                         spec.otherIndex(),
                         spec.freeText(),
                         ctx.identity));
-        // UC-85 — under the deterministic-gate replay profile there is no live session to
-        // produce an observable transcript advance, so echo the exact answer we received back
-        // over the WebSocket. The on-device gate asserts this frame to prove the SELECTED option
-        // is the one transmitted (UC-57). No-op (never emitted) outside the replay profile.
-        if (facade.answerEchoEnabled()) {
-            emit(
-                    ctx,
-                    session,
-                    new ConversationServerMessage.AnswerEcho(
-                            a.questionUuid(), a.questionIndex(), a.selections(), a.freeText()));
-        }
         if (q != null) {
             evictCachedQuestion(ctx, q);
         }
@@ -649,10 +658,21 @@ public class SessionConversationHandler implements WebSocketHandler {
         for (ConversationClientMessage.AnswerItem item : items) {
             specs.add(deriveAnswerSpec(q, item.questionIndex(), item.selections(), item.freeText()));
         }
-        safe(ctx, session, () -> facade.injectAnswerBatch(ctx.n, ctx.selectedTarget.get(), specs, ctx.identity));
         // UC-85 — deterministic gate: echo one AnswerEcho per question (in tab order), so the
         // on-device gate can assert each question of the multi-question sheet maps to its own
         // answer frame (UC-43). No-op outside the replay profile.
+        //
+        // UC-96 — the echoes MUST be emitted BEFORE the gate-releasing injectAnswerBatch call
+        // below. Under replay, recordAnswerBatch offers the replay gate token, which unparks the
+        // tail pump; the pump then races to EOF → tryEmitComplete on this same outbound sink, and
+        // emit()'s tryEmitNext ignores its EmitResult, so an echo enqueued after completion is
+        // silently dropped (FAIL_TERMINATED). A batch lands TWO post-unpark emits, so its second
+        // echo is the one that loses the race — the exact multi-fails/single-passes differential.
+        // Enqueuing both echoes into the still-live sink first removes the race (Reactor unicast
+        // onBackpressureBuffer is FIFO + terminal-after-data). Uses only ab.questionUuid() + the
+        // already-sorted items (no dependency on specs or on injectAnswerBatch's void return), so
+        // it moves cleanly. Replay-only via answerEchoEnabled() (false in production ⇒ zero
+        // production behavior change).
         if (facade.answerEchoEnabled()) {
             for (ConversationClientMessage.AnswerItem item : items) {
                 emit(
@@ -662,6 +682,7 @@ public class SessionConversationHandler implements WebSocketHandler {
                                 ab.questionUuid(), item.questionIndex(), item.selections(), item.freeText()));
             }
         }
+        safe(ctx, session, () -> facade.injectAnswerBatch(ctx.n, ctx.selectedTarget.get(), specs, ctx.identity));
         if (q != null) {
             evictCachedQuestion(ctx, q);
         }
