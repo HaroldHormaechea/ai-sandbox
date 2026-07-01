@@ -269,8 +269,15 @@ _aisb_normalize_title() {
 # mode parity. Both flags are harmless for subcommands that ignore them
 # (e.g. `compose exec` resolves the project by container labels), and are
 # kept for consistency so every invocation is shaped identically.
-ai_sandbox_compose() {
-    local flags=()
+# UC95 — shared compose-flag assembly. Populates the caller-named array
+# (nameref) with the -f / --project-directory flags. Single source of truth so
+# both ai_sandbox_compose (used by clean.sh, lifecycle.sh, attach.sh,
+# spawn.sh:265) and the timeout-wrapped ai_sandbox_ready_probe shape their
+# `docker compose` invocation identically — no drift between the wrapper and
+# the probe.
+ai_sandbox_compose_flags() {
+    local -n _asc_flags="$1"
+    _asc_flags=()
     local base="${AI_SANDBOX_COMPOSE_FILE:-}"
     # UC22 — when override files are requested in developer mode (no explicit
     # base compose file), make the base explicit. Otherwise a bare `-f
@@ -278,19 +285,78 @@ ai_sandbox_compose() {
     if [ -n "${AI_SANDBOX_EXTRA_COMPOSE_FILES:-}" ] && [ -z "$base" ]; then
         base="docker-compose.yml"
     fi
-    [ -n "$base" ] && flags+=(-f "$base")
+    [ -n "$base" ] && _asc_flags+=(-f "$base")
     # UC22 — optional override compose files (e.g. docker-compose.kvm.yml for
     # /dev/kvm passthrough on Android-testing images). Space-separated, applied
     # AFTER the base so they layer on top. Unset → behaviour identical to
     # pre-UC22.
     local extra
     for extra in ${AI_SANDBOX_EXTRA_COMPOSE_FILES:-}; do
-        flags+=(-f "$extra")
+        _asc_flags+=(-f "$extra")
     done
     if [ -n "${AI_SANDBOX_HOST_STATE_ROOT:-}" ]; then
-        flags+=(--project-directory "$AI_SANDBOX_HOST_STATE_ROOT")
+        _asc_flags+=(--project-directory "$AI_SANDBOX_HOST_STATE_ROOT")
     fi
+}
+
+ai_sandbox_compose() {
+    local flags=()
+    ai_sandbox_compose_flags flags
     docker compose "${flags[@]}" "$@"
+}
+
+# UC95 — bounded single readiness probe. CRITICAL: `timeout` must wrap the
+# `docker` BINARY, not the ai_sandbox_compose shell function — `timeout` execs a
+# program and cannot wrap a function. We therefore rebuild the SAME compose
+# flags via the shared helper (ai_sandbox_compose_flags) and invoke
+# `docker compose … exec …` directly under timeout. `--kill-after` guarantees a
+# SIGKILL so a wedged probe leaves no `docker` client outliving the poll (AC#6).
+# Returns the probe rc: 0 = marker present (ready); any non-zero — including
+# 124 (timed out) — = not ready, so the caller keeps polling. Per-probe timeout
+# and kill-grace are env-tunable (defaults ~12s / 3s).
+ai_sandbox_ready_probe() {
+    local project="$1"
+    local flags=()
+    ai_sandbox_compose_flags flags
+    if command -v timeout >/dev/null 2>&1; then
+        timeout --kill-after="${AISB_READY_PROBE_KILL_GRACE:-3s}" \
+            "${AISB_READY_PROBE_TIMEOUT:-12s}" \
+            docker compose "${flags[@]}" -p "$project" \
+            exec -T claude-sandbox test -f /tmp/aisandbox-ready >/dev/null 2>&1
+    else
+        # `timeout` absent → direct, UNBOUNDED probe. This degrades to today's
+        # behavior, NOT a guaranteed bound: a truly-hung `docker compose exec`
+        # still blocks here indefinitely, because the wall-clock deadline in
+        # ai_sandbox_wait_devtools_ready is only checked BETWEEN iterations and
+        # cannot interrupt a probe that never returns. `timeout` IS present on
+        # the supported host (coreutils), so this path is defensive-only.
+        if [ -z "${_AISB_READY_TIMEOUT_WARNED:-}" ]; then
+            warn "timeout(1) not found — readiness probes run unbounded; a hung 'docker compose exec' can still stall the poll." >&2
+            _AISB_READY_TIMEOUT_WARNED=1
+        fi
+        docker compose "${flags[@]}" -p "$project" \
+            exec -T claude-sandbox test -f /tmp/aisandbox-ready >/dev/null 2>&1
+    fi
+}
+
+# UC95 — wall-clock-bounded readiness wait. Polls ai_sandbox_ready_probe until
+# the marker appears or the deadline elapses. The TOTAL wait is bounded by real
+# clock time via $SECONDS (default 1200s ≈ today's ~20-min budget), so no number
+# of hung/slow probes can extend it past the deadline — each probe is itself
+# bounded by ai_sandbox_ready_probe. Fast path: a successful first probe returns
+# 0 immediately with no sleep. The probe stays inside the `if` so rc 124 never
+# trips `set -e`. Returns 0 = ready; 1 = deadline reached without the marker.
+ai_sandbox_wait_devtools_ready() {
+    local project="$1"
+    local start=$SECONDS
+    local deadline=$(( start + ${AISB_READY_DEADLINE_SECS:-1200} ))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        if ai_sandbox_ready_probe "$project"; then
+            return 0
+        fi
+        sleep "${AISB_READY_PROBE_INTERVAL:-2}"
+    done
+    return 1
 }
 
 # ── UC27 — manifest-driven development-tools catalog ────────────────────────

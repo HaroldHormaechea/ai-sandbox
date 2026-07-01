@@ -278,17 +278,11 @@ fi
 # spawn path is byte-identical to today (AC#6,#12).
 if [ -n "${AI_SANDBOX_DEVTOOLS:-}" ]; then
     info "  devtools      : waiting for in-container provisioning to finish…" >&2
-    ready=0
-    tries=0
-    while [ "$tries" -lt 600 ]; do
-        if ai_sandbox_compose -p "$PROJECT" exec -T claude-sandbox test -f /tmp/aisandbox-ready >/dev/null 2>&1; then
-            ready=1
-            break
-        fi
-        tries=$((tries + 1))
-        sleep 2
-    done
-    if [ "$ready" = "1" ]; then
+    # UC-95 — bounded wall-clock wait. Each probe is per-call timeout-bounded and
+    # the whole poll is capped by a real clock deadline, so a hung
+    # `docker compose exec` can no longer wedge the loop (see lib.sh
+    # ai_sandbox_wait_devtools_ready / ai_sandbox_ready_probe).
+    if ai_sandbox_wait_devtools_ready "$PROJECT"; then
         ok "Devtools provisioned; session ready."
     else
         warn "Session started but the readiness marker was not seen within ~20 min — provisioning may still be running or may have failed."
