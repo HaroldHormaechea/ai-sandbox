@@ -116,7 +116,12 @@ public final class DindStateStep {
         }
         // A partial / non-standard install missing the bundled helper is not
         // fatal — warn and skip, mirroring DevToolsStep's missing-selector path.
-        io.println("  DinD state step: bundled script not found at " + script + " — skipping.");
+        // Emitted to System.err (NOT the ConsoleIO stream) so a fully
+        // flag-driven `secrets seed` run stays silent on ConsoleIO — that
+        // "flag-driven steps emit nothing through ConsoleIO" invariant is
+        // asserted by SecretsSeedCommandTest. This matches warnOnFailure below
+        // and SecretsSeedCommand's own catch block, which also use System.err.
+        System.err.println("  DinD state step: bundled script not found at " + script + " — skipping.");
         return false;
     }
 
