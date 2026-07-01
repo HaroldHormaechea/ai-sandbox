@@ -121,6 +121,67 @@ class ScriptExecutorServiceTest {
                 .containsEntry("AI_SANDBOX_COMPOSE_FILE", "/fake/docker-compose.yml")
                 .containsEntry("AI_SANDBOX_HOST_STATE_ROOT", HOST_STATE_ROOT.toString())
                 .containsEntry("AI_SANDBOX_SECRETS_HOST_PATH", SECRETS_DIR.toString());
+
+        // UC-94 § AC2 — the DinD subuid/subgid bind sources are wired to the
+        // server-owned secrets dir (<secrets.dir>/dind/{subuid,subgid}) so the
+        // dind compose override never falls back to the ./secrets/dind/ default
+        // the Docker daemon would auto-create root:root under the state-root cwd.
+        assertThat(env.getValue())
+                .containsEntry("AI_SANDBOX_DIND_SUBUID_HOST_PATH", "/etc/ai-sandbox-server/secrets/dind/subuid")
+                .containsEntry("AI_SANDBOX_DIND_SUBGID_HOST_PATH", "/etc/ai-sandbox-server/secrets/dind/subgid");
+    }
+
+    /**
+     * UC-94 § AC2 — the two DinD host-path vars are derived purely from
+     * {@code secrets.dir} (leaf {@code dind/subuid} + {@code dind/subgid}) and
+     * are exported UNCONDITIONALLY, i.e. on every spawn regardless of whether
+     * DinD is enabled. They are inert for a non-DinD spawn (nothing reads them
+     * unless the dind compose override is layered), so AC7 (no-regression)
+     * holds; the point of the assertion is that the server never leaves them to
+     * the daemon-auto-create default. A caller-supplied secrets dir proves the
+     * derivation is not hardcoded to the production path.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void spawn_wires_dind_subid_paths_under_the_secrets_dir() throws Exception {
+        Path customSecrets = Path.of("/srv/custom-secrets");
+        HostScriptLocator loc = locator();
+        ProcessExecutor exec = mock(ProcessExecutor.class);
+        when(exec.run(any(), any(), any(), any())).thenReturn(new ProcessExecutor.Result(0, "", ""));
+        ScriptExecutorService svc = new ScriptExecutorService(loc, exec, props(customSecrets));
+
+        svc.spawn(new SpawnCommand(null, WorkspaceMode.SHARED, ClaudeConfigMode.SHARED), Duration.ofSeconds(5));
+
+        ArgumentCaptor<Map<String, String>> env = ArgumentCaptor.forClass(Map.class);
+        verify(exec).run(any(), any(), env.capture(), any());
+        assertThat(env.getValue())
+                .as("UC-94 — dind subuid/subgid host paths derive from secrets.dir + /dind/{subuid,subgid}")
+                .containsEntry("AI_SANDBOX_DIND_SUBUID_HOST_PATH", "/srv/custom-secrets/dind/subuid")
+                .containsEntry("AI_SANDBOX_DIND_SUBGID_HOST_PATH", "/srv/custom-secrets/dind/subgid");
+    }
+
+    /**
+     * UC-94 § AC2/AC7 — the dev-mode 2-arg ctor (props == null → empty env)
+     * omits the dind host-path vars entirely, byte-identical to the historical
+     * bare-environment behaviour. The dind compose override then resolves its
+     * own {@code ./secrets/dind/…} default relative to the developer-mode cwd,
+     * exactly as before UC-94.
+     */
+    @Test
+    @SuppressWarnings("unchecked")
+    void dev_mode_two_arg_ctor_omits_dind_subid_paths() throws Exception {
+        HostScriptLocator loc = locator();
+        ProcessExecutor exec = mock(ProcessExecutor.class);
+        when(exec.run(any(), any(), any(), any())).thenReturn(new ProcessExecutor.Result(0, "", ""));
+        ScriptExecutorService svc = new ScriptExecutorService(loc, exec);
+
+        svc.spawn(new SpawnCommand(null, WorkspaceMode.SHARED, ClaudeConfigMode.SHARED), Duration.ofSeconds(5));
+
+        ArgumentCaptor<Map<String, String>> env = ArgumentCaptor.forClass(Map.class);
+        verify(exec).run(any(), any(), env.capture(), any());
+        assertThat(env.getValue())
+                .doesNotContainKey("AI_SANDBOX_DIND_SUBUID_HOST_PATH")
+                .doesNotContainKey("AI_SANDBOX_DIND_SUBGID_HOST_PATH");
     }
 
     @Test

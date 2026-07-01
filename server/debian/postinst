@@ -37,6 +37,34 @@ case "$1" in
             IS_UPGRADE=1
         fi
 
+        # UC-94 — snapshot whether this host was ALREADY provisioned, BEFORE
+        # block 3 below pre-creates the state-root tree. The bundled repair/
+        # ensure helpers (block 3c) MUST be no-ops on a fresh install:
+        #   • ensure-host-subid.sh does `install -d <secrets-dir>/dind`, which
+        #     would CREATE /etc/ai-sandbox-server/secrets — but that dir is
+        #     `pki init`/`onboard`/`secrets seed`'s to create, and a
+        #     pre-existing secrets dir makes `pki init` refuse ("conflict:
+        #     /etc/ai-sandbox-server/secrets"). Postinst must NOT create it.
+        #   • repair-state-root.sh has nothing to repair on a first install (no
+        #     per-session bind-source debris yet).
+        # So each helper runs ONLY when its target already exists — i.e. an
+        # upgrade/reinstall over an already-provisioned host (the UC-94 self-heal
+        # scenario, incl. reinstall-over-purge, where /var/lib is not dpkg-tracked
+        # and the debris survives). The state-root check must be captured HERE
+        # because block 3 (`install -d … /var/lib/ai-sandbox-server/sessions`)
+        # creates that dir unconditionally; the secrets dir is never created by
+        # postinst, so a plain existence test is a faithful "already provisioned"
+        # signal for it. On a fresh install, `aisandboxctl onboard` / `secrets
+        # seed` provision the dind subid files later via DindStateStep (unchanged).
+        SECRETS_DIR_PREEXISTS=0
+        if [ -d /etc/ai-sandbox-server/secrets ]; then
+            SECRETS_DIR_PREEXISTS=1
+        fi
+        STATE_ROOT_PREEXISTS=0
+        if [ -d /var/lib/ai-sandbox-server/sessions ]; then
+            STATE_ROOT_PREEXISTS=1
+        fi
+
         # 1. systemd daemon reload.
         if command -v systemctl >/dev/null 2>&1; then
             systemctl daemon-reload || true
@@ -100,6 +128,42 @@ case "$1" in
         # Purge cleanup is already covered by `rm -rf /var/lib/ai-sandbox-server`
         # in postrm. Idempotent on re-installs.
         install -d -m 0750 -o ai-sandbox-server -g ai-sandbox-server /var/lib/ai-sandbox-server/update-trigger
+
+        # 3c. UC-94 — repair stale root-owned per-session bind-source debris and
+        #     provision the server-owned DinD subuid/subgid delegation files. The
+        #     Docker daemon auto-creates any missing per-session bind source
+        #     root:root; because /var/lib is not dpkg-tracked, that debris
+        #     survives `apt purge` + reinstall, so re-running the repair on a
+        #     reinstall over that surviving state is what makes the install
+        #     self-heal (guarded on pre-existence — see below). Both helpers are
+        #     the SINGLE implementation shared with `aisandboxctl onboard` /
+        #     `secrets seed` (anti-drift) and ship NON-EXECUTABLE in the deb, so
+        #     they MUST be invoked via `bash <path>` (a `test -x` would also be
+        #     wrong — see server-ci.yml's presence check). Guarded + idempotent;
+        #     `|| true` keeps postinst's `exit 0` contract even on failure.
+        #     FRESH-INSTALL GUARD (UC-94 CI regression fix): each helper runs
+        #     only when its target ALREADY existed before this install (see the
+        #     PREEXISTS snapshot above). On a fresh install both are skipped, so
+        #     postinst never pre-creates /etc/ai-sandbox-server/secrets and the
+        #     subsequent `aisandboxctl pki init` (which owns that dir) does not
+        #     hit a spurious "refusing to overwrite" conflict. The `[ -f … ]`
+        #     presence tests stay as the inner guard so the invocation lines
+        #     remain present (DebPostinstContractTest asserts them verbatim).
+        AISB_DIND_DIR=/opt/ai-sandbox-server/host/devtools.d/dind
+        if [ "$STATE_ROOT_PREEXISTS" = "1" ]; then
+            if [ -f "$AISB_DIND_DIR/repair-state-root.sh" ]; then
+                bash "$AISB_DIND_DIR/repair-state-root.sh" \
+                    --state-root /var/lib/ai-sandbox-server/sessions \
+                    --owner ai-sandbox-server:ai-sandbox-server || true
+            fi
+        fi
+        if [ "$SECRETS_DIR_PREEXISTS" = "1" ]; then
+            if [ -f "$AISB_DIND_DIR/ensure-host-subid.sh" ]; then
+                bash "$AISB_DIND_DIR/ensure-host-subid.sh" \
+                    --secrets-dir /etc/ai-sandbox-server/secrets \
+                    --owner ai-sandbox-server:ai-sandbox-server || true
+            fi
+        fi
 
         # 3a. UC-84 — enable the self-update trigger watch. Guarded + container-
         # tolerant (no systemd in chroots/containers → `|| true`). Enabled after

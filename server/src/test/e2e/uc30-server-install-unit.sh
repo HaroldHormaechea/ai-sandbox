@@ -134,6 +134,54 @@ aisb_subuid_ensure_line "$_g" claude 100000 65536
 assert_file_has "AC#6 hand-written sandbox entry preserved when claude is added" "$_g" "sandbox:165536:65536"
 assert_file_has "AC#6 claude appended after a pre-existing sandbox" "$_g" "claude:100000:65536"
 
+# ── UC-94 AC#3 self-heal — a path that EXISTS but is NOT a regular file (the
+#    root-created-DIRECTORY trap, plus a stray symlink / fifo) is removed and
+#    recreated as an empty regular file, provided the parent is writable. The
+#    `rm -rf` blast radius is bounded to the exact target path.
+
+# (i) pre-existing DIRECTORY where a regular file must live → rm + recreate.
+_heal_dir="$_A/heal-dir/subuid"
+mkdir -p "$_heal_dir"   # the target path is itself a directory (docker root-create trap)
+aisb_subuid_ensure_line "$_heal_dir" claude 100000 65536; _rc=$?
+assert_rc "AC#3 self-heal: a pre-existing DIRECTORY at the target is healed (rc 0)" 0 "$_rc"
+if [ -f "$_heal_dir" ]; then
+  t_ok "AC#3 self-heal: the healed target is now a regular file (was a directory)"
+else
+  t_bad "AC#3 self-heal: target is still not a regular file after healing a directory"
+fi
+assert_file_has "AC#3 self-heal: the delegation line is written into the healed file" "$_heal_dir" "claude:100000:65536"
+assert_eq "AC#3 self-heal: the healed file has exactly one line" "1" "$(wc -l <"$_heal_dir" | tr -d ' ')"
+
+# (ii-a) pre-existing FIFO → rm + recreate as a regular file.
+if command -v mkfifo >/dev/null 2>&1; then
+  _heal_fifo="$_A/heal-fifo/subuid"
+  mkdir -p "$(dirname -- "$_heal_fifo")"
+  mkfifo "$_heal_fifo"
+  aisb_subuid_ensure_line "$_heal_fifo" sandbox 165536 65536; _rc=$?
+  assert_rc "AC#3 self-heal: a pre-existing FIFO at the target is healed (rc 0)" 0 "$_rc"
+  if [ -f "$_heal_fifo" ] && [ ! -p "$_heal_fifo" ]; then
+    t_ok "AC#3 self-heal: the healed target is now a regular file (was a fifo)"
+  else
+    t_bad "AC#3 self-heal: target is not a regular file after healing a fifo"
+  fi
+  assert_file_has "AC#3 self-heal: delegation written into the healed fifo path" "$_heal_fifo" "sandbox:165536:65536"
+else
+  t_skip "AC#3 self-heal: mkfifo unavailable — fifo self-heal case skipped"
+fi
+
+# (ii-b) DANGLING SYMLINK (missed by `-e`, caught by `-L`) → rm + recreate.
+_heal_link="$_A/heal-link/subuid"
+mkdir -p "$(dirname -- "$_heal_link")"
+ln -s "$_A/heal-link/no-such-target-$$" "$_heal_link"   # dangling on purpose
+aisb_subuid_ensure_line "$_heal_link" claude 100000 65536; _rc=$?
+assert_rc "AC#3 self-heal: a DANGLING SYMLINK at the target is healed (rc 0)" 0 "$_rc"
+if [ -f "$_heal_link" ] && [ ! -L "$_heal_link" ]; then
+  t_ok "AC#3 self-heal: the healed target is a regular file, not a symlink"
+else
+  t_bad "AC#3 self-heal: target is still a symlink / not a regular file after healing"
+fi
+assert_file_has "AC#3 self-heal: delegation written into the healed symlink path" "$_heal_link" "claude:100000:65536"
+
 # Failure path → non-zero (caller hard-gates): an unwritable parent dir.
 _ro="$_A/readonly"
 mkdir -p "$_ro"
@@ -362,7 +410,8 @@ assert_grep "AC#8 doctor reports /dev/fuse accessibility" '/dev/fuse' "$DIND_BIN
 # (syntax-clean) on every changed shell file; flag the lint itself as env-gated.
 _synfail=0
 for _f in "$REPO_ROOT/lib.sh" "$SERVER_INSTALL_LIB" "$DIND_MANIFEST" "$SETUP_SH" \
-          "$REPO_ROOT/entrypoint.sh" "$DIND_BIN"; do
+          "$REPO_ROOT/entrypoint.sh" "$DIND_BIN" \
+          "$DEVTOOLS_D/dind/ensure-host-subid.sh" "$DEVTOOLS_D/dind/repair-state-root.sh"; do
   if bash -n "$_f" 2>/dev/null; then
     t_ok "AC#9 bash -n syntax-clean: ${_f#"$REPO_ROOT"/}"
   else
@@ -378,6 +427,91 @@ fi
 # AC#8 — LIVE doctor/start/selftest against real Docker + a real /etc subuid
 # write requires privilege this unprivileged session user lacks. Operator gate.
 t_skip "AC#8 live 'aisandbox-dind doctor/start/selftest' — operator-sign-off gate (needs real Docker + privileged /etc write)"
+
+# ═════════════════════════════════════════════════════════════════════════════
+# F — UC-94 repair-state-root.sh: re-owns ONLY the known per-session bind-source
+#     name-set (never a blanket sessions/* glob), leaves the UC-62 host-shell
+#     siblings + other state dirs untouched, removes the legacy root-owned
+#     secrets/dind debris (keeping a non-empty secrets/), and is idempotent +
+#     never fatal. chown-to-another-owner needs root, so a PATH-shadowing fake
+#     `chown` records WHICH entries the script targets (observable without root).
+# ═════════════════════════════════════════════════════════════════════════════
+REPAIR_SCRIPT="$DEVTOOLS_D/dind/repair-state-root.sh"
+if [ ! -f "$REPAIR_SCRIPT" ]; then
+  t_bad "UC-94 repair-state-root.sh missing at $REPAIR_SCRIPT"
+else
+  _F="$(mktemp -d)"
+  _sr="$_F/sessions"
+  # Known per-session bind sources (the EXACT repair name-set).
+  mkdir -p "$_sr/workspace" "$_sr/workspace-1" "$_sr/claude-config" \
+           "$_sr/claude-config-99" "$_sr/claude-projects-5"
+  # Siblings that MUST be left untouched (UC-62 host-shell + other state dirs).
+  mkdir -p "$_sr/server-ssh-home" "$_sr/docker-config" "$_sr/update-trigger" "$_sr/enrollment"
+  : > "$_sr/server-ssh.sock"
+  # Legacy root-owned dind debris to be removed; a sibling keeps secrets/ alive.
+  mkdir -p "$_sr/secrets/dind"
+  : > "$_sr/secrets/other"
+
+  # Fake chown: logs the args it is asked to apply, always succeeds.
+  _fakebin="$_F/bin"
+  mkdir -p "$_fakebin"
+  CHOWN_LOG="$_F/chown.log"; : > "$CHOWN_LOG"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'printf "%%s\\n" "$*" >> "%s"\n' "$CHOWN_LOG"
+    printf 'exit 0\n'
+  } > "$_fakebin/chown"
+  chmod +x "$_fakebin/chown"
+
+  PATH="$_fakebin:$PATH" bash "$REPAIR_SCRIPT" \
+      --state-root "$_sr" --owner "testowner:testgroup"; _rc=$?
+  assert_rc "AC#5 repair-state-root.sh returns 0 (idempotent, never fatal)" 0 "$_rc"
+
+  _chowned="$(cat "$CHOWN_LOG")"
+  # The exact name-set is re-owned.
+  assert_contains "AC#5 workspace is re-owned"        "$_chowned" "$_sr/workspace"
+  assert_contains "AC#5 workspace-* is re-owned"      "$_chowned" "$_sr/workspace-1"
+  assert_contains "AC#5 claude-config is re-owned"    "$_chowned" "$_sr/claude-config"
+  assert_contains "AC#5 claude-config-* is re-owned"  "$_chowned" "$_sr/claude-config-99"
+  assert_contains "AC#5 claude-projects-* is re-owned" "$_chowned" "$_sr/claude-projects-5"
+  # Siblings MUST NOT be touched (narrow scope — never a sessions/* glob).
+  assert_not_contains "AC#5 server-ssh.sock left untouched" "$_chowned" "server-ssh.sock"
+  assert_not_contains "AC#5 server-ssh-home left untouched" "$_chowned" "server-ssh-home"
+  assert_not_contains "AC#5 docker-config left untouched"   "$_chowned" "docker-config"
+  assert_not_contains "AC#5 update-trigger left untouched"  "$_chowned" "update-trigger"
+  assert_not_contains "AC#5 enrollment left untouched"      "$_chowned" "enrollment"
+  # Legacy dind debris removed; non-empty secrets/ preserved (rmdir refuses it).
+  if [ ! -e "$_sr/secrets/dind" ]; then
+    t_ok "AC#5 legacy secrets/dind debris removed"
+  else
+    t_bad "AC#5 legacy secrets/dind debris NOT removed"
+  fi
+  if [ -e "$_sr/secrets/other" ]; then
+    t_ok "AC#5 non-empty secrets/ preserved (unrelated sibling content kept)"
+  else
+    t_bad "AC#5 secrets/ wrongly removed while it still held unrelated content"
+  fi
+  # Repair re-owns, never DELETES a matched entry.
+  if [ -d "$_sr/workspace" ] && [ -d "$_sr/claude-projects-5" ]; then
+    t_ok "AC#5 matched entries still present after repair (re-own, not delete)"
+  else
+    t_bad "AC#5 a matched per-session entry was deleted by repair"
+  fi
+
+  # Never fatal: missing --state-root, or an absent state-root dir → exit 0.
+  bash "$REPAIR_SCRIPT" --owner "x:y"; assert_rc "AC#5 no --state-root arg → exit 0 (never fatal)" 0 $?
+  bash "$REPAIR_SCRIPT" --state-root "$_F/does-not-exist" --owner "x:y"
+  assert_rc "AC#5 absent state-root dir → exit 0 (never fatal)" 0 $?
+
+  # Idempotent: a second run over an already-repaired tree still returns 0 and
+  # leaves the siblings + preserved secrets/ intact.
+  : > "$CHOWN_LOG"
+  PATH="$_fakebin:$PATH" bash "$REPAIR_SCRIPT" \
+      --state-root "$_sr" --owner "testowner:testgroup"; _rc=$?
+  assert_rc "AC#5 second repair run is idempotent (rc 0)" 0 "$_rc"
+
+  rm -rf "$_F"
+fi
 
 # ── summary ──────────────────────────────────────────────────────────────────
 printf '\n──────────────────────────────────────────────\n'
