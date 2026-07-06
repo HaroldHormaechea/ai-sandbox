@@ -437,9 +437,41 @@ tagged `source: subagent:<agentId>` (complementing the per-line `isSidechain`).
 ## Input injection — keystroke mapping (centralized, version-pinned)
 
 All mapping lives in `InputInjectionService`, pinned to Claude Code
-**2.1.169** (`InputInjectionService.PINNED_CLAUDE_VERSION`). A version bump is a
-single-file change (RISK 3). Only well-defined cases are mapped; everything else
-relies on long-press→tmux (AC24).
+**2.1.169** (`InputInjectionService.PINNED_CLAUDE_VERSION`). Only well-defined
+cases are mapped; everything else relies on long-press→tmux (AC24).
+
+### Claude Code version pin & bump policy (UC-97)
+
+Claude Code itself is **pinned at image-build time**, not installed rolling-latest.
+Historically the injection walk was described as "a single-file change" on a bump,
+but the TUI/transcript shape is a contract shared by several components, so a bump
+touches all of them. The pinned version is declared in **one authoritative place per
+concern**, and all of them MUST move together:
+
+| Location | What it pins |
+|----------|--------------|
+| `SandboxDockerfile` → `ARG CLAUDE_CODE_VERSION` | the actually-installed npm version (the only real lever) |
+| `InputInjectionService.PINNED_CLAUDE_VERSION` | keystroke-injection walk contract |
+| `container-bin/aisandbox-conversation-tail` → `PENDING_QUESTION_CHROME.pinnedClaudeVersion` and `PENDING_PLAN_APPROVAL_CHROME.pinnedClaudeVersion` | pane-scraper chrome contract |
+| `CONVERSATION_PROTOCOL.md` (this file) | prose reference |
+| `PROJECT_BRIEF.md` → `stack.versions.claude_code` | brief-of-record |
+
+**A deployed sandbox's Claude Code version moves ONLY via an image rebuild**
+(`docker compose build`) — there is no runtime updater for Claude Code
+(`ai-sandbox-updater.sh` self-updates the `ai-sandbox-server` `.deb` only, never npm;
+UC-97 AC8). So bumping the pin is a **deliberate, gated change**:
+
+1. Choose the new version X = the **newest version that passes the UC-85 functional
+   gate** (the pending-question detect+deliver leg, `android/gate.sh`).
+2. Edit `ARG CLAUDE_CODE_VERSION` and reconcile every row above to X.
+3. Recapture the C1 pane-signal fixtures (`fixtures/pane-signal/*`) against X and
+   re-green the live UC-85 gate. If the pane chrome or keystroke walk regressed under
+   X, **retune them for X or fall back to the next-newest gate-passing version** — do
+   not just bump the constant.
+4. Rebuild the image so the pin reaches deployments.
+
+The drift guard (UC-85 gate leg + committed pane-signal fixtures) turns **red** if a
+future version silently breaks the signal — so drift can't reach production unnoticed.
 
 | Action            | Keystrokes (`tmux send-keys`)                                              |
 |-------------------|---------------------------------------------------------------------------|
