@@ -1618,6 +1618,26 @@ test('UC-97 C1 — parsePendingPrompt recognizes the REAL multi-question wizard 
   assert.ok(/Favorite color/.test(blob) && /Favorite size/.test(blob), 'expected both wizard headers in the parsed payload');
 });
 
+// UC-97 (AC3) — REAL 80-column plan-approval pane where the marker phrase WRAPS. Live
+// validation surfaced that the session container's tmux `main` runs at width 80, where
+// "Claude has written up a plan and is ready to execute. Would you like to / proceed?"
+// spans two lines — a single-line marker regex misses it and the plan sheet never renders.
+// The fix flattens whitespace/newlines before the marker test; this fixture (captured live
+// at width 80 on 2.1.169) locks it so an 80-col plan-wrap can never silently regress again.
+const UC97_REAL_EXITPLAN_WRAPPED_80COL_PANE = readPaneFixture('exitplanmode-wrapped-80col.2.1.169.pane.txt');
+
+test('UC-97 AC3 — REAL 80-col WRAPPED ExitPlanMode pane is detected (width-robust; would fail a single-line marker)', () => {
+  // Guard: the fixture genuinely wraps — the contiguous marker phrase is NOT present on one line.
+  assert.ok(
+    !/Would you like to proceed\?/.test(UC97_REAL_EXITPLAN_WRAPPED_80COL_PANE),
+    'fixture must be genuinely wrapped (no contiguous "Would you like to proceed?") — else it does not exercise the width-robustness fix',
+  );
+  // The width-robust predicate flattens the wrap and detects the plan approval.
+  assert.strictEqual(helper.looksLikePendingPlanApproval(UC97_REAL_EXITPLAN_WRAPPED_80COL_PANE), true);
+  // No collision: a plan approval is never mis-detected as an AskUserQuestion.
+  assert.strictEqual(helper.looksLikePendingAskUserQuestion(UC97_REAL_EXITPLAN_WRAPPED_80COL_PANE), false);
+});
+
 // Mutual exclusion + the 3-line output contract. Composes the TWO real production
 // seams (looksLikePendingAskUserQuestion + deriveWorking) exactly as
 // conversationName() composes them, and pins the line-3 token mapping + the
