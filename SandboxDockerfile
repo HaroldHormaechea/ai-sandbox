@@ -25,6 +25,18 @@ ENV LC_ALL=C.UTF-8
 ENV HOME=/home/claude
 
 ARG GITLEAKS_VERSION=8.21.0
+# UC-97 — pin Claude Code to a gate-verified known-good version instead of the
+# previous unpinned `latest-at-build` install. The scraper (PENDING_QUESTION_CHROME
+# in container-bin/aisandbox-conversation-tail) and the keystroke-injection walk
+# (InputInjectionService.PINNED_CLAUDE_VERSION) are TUNED to a specific TUI/transcript
+# shape; an unpinned upgrade silently drifts that shape out from under them and breaks
+# pending-question detection/delivery (UC-50, UC-97). Bumping this is a DELIBERATE
+# change: edit this ARG, recapture the C1 pane-signal fixtures, and re-green the live
+# UC-85 functional gate (android/gate.sh pending-question leg) before release. Keep this
+# value in lock-step with InputInjectionService.PINNED_CLAUDE_VERSION, the two helper
+# `pinnedClaudeVersion` constants, CONVERSATION_PROTOCOL.md, and PROJECT_BRIEF.md
+# (stack.versions.claude_code).
+ARG CLAUDE_CODE_VERSION=2.1.169
 # BuildKit auto-populates TARGETARCH (amd64 / arm64 / ...). Used below to pick
 # the right RTK release tarball.
 ARG TARGETARCH
@@ -82,7 +94,7 @@ RUN set -eu; \
     if getent passwd node >/dev/null 2>&1; then userdel node; fi; \
     if getent group node >/dev/null 2>&1; then groupdel node 2>/dev/null || true; fi; \
     useradd -u 1000 -m -d /home/claude -s /bin/bash claude; \
-    npm install -g @anthropic-ai/claude-code; \
+    npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}; \
     curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_$(uname -m | sed 's/x86_64/x64/;s/aarch64/arm64/').tar.gz" \
        | tar -xz -C /usr/local/bin gitleaks; \
     chmod +x /usr/local/bin/gitleaks; \
@@ -102,8 +114,9 @@ RUN set -eu; \
     chmod g+w /etc/passwd
 
 # RTK (Rust Token Killer) — bundled CLI proxy that compresses Bash output before
-# it reaches the LLM. Rolling latest at build time (matches the
-# @anthropic-ai/claude-code pinning policy, NOT the pinned gitleaks pattern).
+# it reaches the LLM. Rolling latest at build time (unlike @anthropic-ai/claude-code,
+# which is now pinned via ARG CLAUDE_CODE_VERSION above (UC-97), and unlike the pinned
+# gitleaks pattern). RTK has no TUI-shape contract with the scraper, so rolling it is safe.
 # On amd64 the upstream musl build is statically linked, so it runs unchanged on
 # the glibc base; on arm64 the gnu build runs natively on glibc (no gcompat shim
 # needed now that the base is always glibc). Source: https://github.com/rtk-ai/rtk

@@ -263,6 +263,7 @@ state, not a hard failure.
 | `interrupt`         | — (ESC into the session)                                  | —  |
 | `enumerate-targets` | —                                                         | 16, 18 |
 | `fetch-detail`      | `toolUseId`, `uuid` — request the full input + result for one tool call | 41 |
+| `resync-pending`    | — re-derive + re-emit the current pane pending-state (warm re-attach) | 97 |
 | `close`             | `reason`                                                  | —  |
 
 ### On-demand tool detail (`fetch-detail` → `tool-detail`, UC-41 AC5/AC6/AC9)
@@ -280,6 +281,30 @@ single `__ctrl__\tdetail-not-found` control line; the server maps that (and any
 non-zero exit / timeout / exception) to a `tool-detail` frame with
 `available=false` (AC9). The fetch is audited as `conversation_fetch_detail`
 (`ok` / `miss`).
+
+### Pending-question resync (`resync-pending`, UC-97)
+
+On a **warm** conversation (re-)attach — the client's `ConversationController.attach`
+returns early because the connect loop is still active — the streaming re-emit path
+does NOT re-send a still-blocked prompt (the helper's once-per-key `emittedPendingKey`
+guard), so a pending sheet the client cleared on a transient (a racing `pending-clear`
+from a concurrent tail, or a `turn-end`) **while the ask is still live** never
+re-populates until a fresh connection. That is the user-visible "I have to exit and
+re-enter the conversation to see the question" symptom.
+
+To close it, the client sends `resync-pending` on every warm attach. It is **not**
+injected into the tmux session — it is a server-local read. The server re-derives the
+CURRENT pane pending-state via the helper one-shot
+(`aisandbox-conversation-tail --resync-pending`), which captures the VISIBLE pane (the
+transcript is blind to a live blocking ask — UC-49/UC-50) and, if a prompt is live,
+prints the SAME `__ctrl__\tpending-question\t<json {kind,questions,plan,key}>` payload
+the streaming path emits (else `__ctrl__\tpending-clear`, and nothing on a capture/parse
+miss so prior state is retained). The server maps that payload through the same
+`PendingPrompt` path (including UC-55 multi-question option recovery) and re-emits
+`pending-question` / `pending-clear` to the client **regardless of tail state**, so the
+sheet re-appears with no exit/re-enter. `--resync-pending` is pane-based and distinct
+from `--scan-pending` (transcript-based, used only for the UC-37/AC18 switcher badge),
+which is left unchanged.
 
 ### Multi-question answers (`answer-batch`, UC-43 AC2/AC3/AC4)
 
@@ -437,9 +462,41 @@ tagged `source: subagent:<agentId>` (complementing the per-line `isSidechain`).
 ## Input injection — keystroke mapping (centralized, version-pinned)
 
 All mapping lives in `InputInjectionService`, pinned to Claude Code
-**2.1.169** (`InputInjectionService.PINNED_CLAUDE_VERSION`). A version bump is a
-single-file change (RISK 3). Only well-defined cases are mapped; everything else
-relies on long-press→tmux (AC24).
+**2.1.169** (`InputInjectionService.PINNED_CLAUDE_VERSION`). Only well-defined
+cases are mapped; everything else relies on long-press→tmux (AC24).
+
+### Claude Code version pin & bump policy (UC-97)
+
+Claude Code itself is **pinned at image-build time**, not installed rolling-latest.
+Historically the injection walk was described as "a single-file change" on a bump,
+but the TUI/transcript shape is a contract shared by several components, so a bump
+touches all of them. The pinned version is declared in **one authoritative place per
+concern**, and all of them MUST move together:
+
+| Location | What it pins |
+|----------|--------------|
+| `SandboxDockerfile` → `ARG CLAUDE_CODE_VERSION` | the actually-installed npm version (the only real lever) |
+| `InputInjectionService.PINNED_CLAUDE_VERSION` | keystroke-injection walk contract |
+| `container-bin/aisandbox-conversation-tail` → `PENDING_QUESTION_CHROME.pinnedClaudeVersion` and `PENDING_PLAN_APPROVAL_CHROME.pinnedClaudeVersion` | pane-scraper chrome contract |
+| `CONVERSATION_PROTOCOL.md` (this file) | prose reference |
+| `PROJECT_BRIEF.md` → `stack.versions.claude_code` | brief-of-record |
+
+**A deployed sandbox's Claude Code version moves ONLY via an image rebuild**
+(`docker compose build`) — there is no runtime updater for Claude Code
+(`ai-sandbox-updater.sh` self-updates the `ai-sandbox-server` `.deb` only, never npm;
+UC-97 AC8). So bumping the pin is a **deliberate, gated change**:
+
+1. Choose the new version X = the **newest version that passes the UC-85 functional
+   gate** (the pending-question detect+deliver leg, `android/gate.sh`).
+2. Edit `ARG CLAUDE_CODE_VERSION` and reconcile every row above to X.
+3. Recapture the C1 pane-signal fixtures (`fixtures/pane-signal/*`) against X and
+   re-green the live UC-85 gate. If the pane chrome or keystroke walk regressed under
+   X, **retune them for X or fall back to the next-newest gate-passing version** — do
+   not just bump the constant.
+4. Rebuild the image so the pin reaches deployments.
+
+The drift guard (UC-85 gate leg + committed pane-signal fixtures) turns **red** if a
+future version silently breaks the signal — so drift can't reach production unnoticed.
 
 | Action            | Keystrokes (`tmux send-keys`)                                              |
 |-------------------|---------------------------------------------------------------------------|

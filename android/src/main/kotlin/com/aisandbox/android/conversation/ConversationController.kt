@@ -255,7 +255,17 @@ class ConversationController(
     /** Start (or no-op resume) the connect/reconnect loop. Idempotent. */
     fun attach(n: Int) {
         require(n == sessionN) { "controller bound to $sessionN, attach($n)" }
-        if (connectJob?.isActive == true) return
+        if (connectJob?.isActive == true) {
+            // UC-97 — warm re-attach: the connect loop is already live, so this would otherwise
+            // no-op, and the server's streaming re-emit won't re-send a still-blocked prompt (the
+            // helper's once-per-key guard). Explicitly ask the server to re-derive the current
+            // pane pending-state and re-emit it, so a sheet lost to a transient (racing
+            // pending-clear / turn-end) while the ask is STILL live re-populates WITHOUT the user
+            // having to exit and re-enter the conversation. A cold attach below re-backfills on a
+            // fresh connection, which re-delivers the pending prompt naturally, so no resync there.
+            client?.sendResyncPending()
+            return
+        }
         startConnectLoop()
     }
 
@@ -399,25 +409,34 @@ class ConversationController(
     }
 
     /**
-     * UC-93 — un-wedge a warm notification deep-link that lands on a process-cached controller
-     * whose selection was left on a read-only `subagent:` pane.
+     * UC-93 / UC-97 — un-wedge a warm (re-)entry that lands on a process-cached controller whose
+     * selection was left on a read-only `subagent:` pane.
      *
-     * A deep-link can re-enter a [AppContainer.conversationController] that this process previously
-     * left selecting a background-subagent pill (via [selectTarget]). `subagent:` ids are read-only
-     * (UC-60), and the selection is re-asserted to the server on every reconnect, so the server
-     * keeps tailing the subagent pane: the UC-50 pending-question re-emit finds no answerable ask
-     * (the sheet stays null) AND `ConversationScreen.readOnly` gates out the question box + composer.
-     * The result is a wedge — the question never renders even though `main` has a pending ask.
+     * Any warm re-entry — a notification deep-link (UC-93) **or** simply opening the conversation
+     * normally from the sessions list (UC-97 instance (c)) — can re-enter a
+     * [AppContainer.conversationController] that this process previously left selecting a
+     * background-subagent pill (via [selectTarget]). `subagent:` ids are read-only (UC-60), and the
+     * selection is re-asserted to the server on every reconnect, so the server keeps tailing the
+     * subagent pane: the UC-50 pending-question re-emit finds no answerable ask (the sheet stays
+     * null) AND `ConversationScreen.readOnly` gates out the question box + composer. The result is a
+     * wedge — the question never renders even though `main` has a pending ask.
      *
-     * Calling this on deep-link consumption re-focuses the answerable `main` pane via the existing
-     * [selectTarget], which sends `select-target main` on the live socket (no new connection — UC-88
-     * safe), bumps the transcript epoch + arms switch-suppression (no session→session bleed — UC-91
-     * safe), and flips `selectedTargetId` back to `main` so `readOnly` becomes false and the server
-     * re-tails main + re-emits its pending question.
+     * Calling this on every entry (deep-link consumption AND normal [ConversationViewModel.attach])
+     * re-focuses the answerable `main` pane via the existing [selectTarget], which sends
+     * `select-target main` on the live socket (no new connection — UC-88 safe), bumps the transcript
+     * epoch + arms switch-suppression (no session→session bleed — UC-91 safe), and flips
+     * `selectedTargetId` back to `main` so `readOnly` becomes false and the server re-tails main +
+     * re-emits its pending question.
      *
      * The guard is **subagent-only on purpose**: an answerable `main`/`swarm:` selection is left
      * untouched, so this is a strict no-op for fresh/cold-start controllers and never wipes an
-     * already-populated `_pendingSheet` (which [selectTarget] would clear). Idempotent.
+     * already-populated `_pendingSheet` (which [selectTarget] would clear). Idempotent — safe to call
+     * on both the warm-reattach and fresh-attach paths. Render-gating (`readOnly` in
+     * `ConversationScreen`) is deliberately left intact so a genuine read-only subagent view still
+     * suppresses the composer + sheet (no UC-90/UC-60 regression).
+     *
+     * Named `…ForDeepLink` for historical (UC-93) reasons; UC-97 generalized its callers to the
+     * normal warm-open path ([ConversationViewModel.attach]) too — the behaviour is entry-agnostic.
      */
     fun focusAnswerableTargetForDeepLink() {
         if (_selectedTargetId.value.startsWith(TerminalStreamController.SUBAGENT_ID_PREFIX)) {

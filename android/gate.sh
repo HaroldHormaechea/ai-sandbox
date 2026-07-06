@@ -34,6 +34,22 @@
 #   GATE_SKIP_EMULATOR   set to 1 to reuse an ALREADY-RUNNING emulator (CI: the
 #                        reactivecircus action owns the AVD lifecycle) — gate.sh then
 #                        neither creates/launches nor kills the emulator.
+#
+#   ── UC-97 drift-guard LIVE leg (C2) — all optional ──
+#   GATE_LIVE_CLAUDE     set to 1 to ALSO run the live drift-guard leg after the
+#                        deterministic gate: a REAL pinned Claude Code raises a live
+#                        single + multi AskUserQuestion and the leg asserts the pane
+#                        scraper detects it and the sheet renders in-view. Default 0
+#                        (the deterministic gate stays LLM-free; this leg needs a
+#                        live Claude + auth). When 0, the leg is skipped cleanly.
+#   GATE_LIVE_REQUIRED   set to 1 to make the live leg MANDATORY — if Claude/auth is
+#                        unavailable the gate HARD-FAILS instead of skipping. The
+#                        release gate sets this so drift cannot ship unnoticed (AC10).
+#                        Default 0 (unavailable ⇒ skip with a warning).
+#   GATE_CLAUDE_VERSION  the pinned Claude Code version the live leg must run
+#                        (default: parsed from SandboxDockerfile's ARG CLAUDE_CODE_VERSION).
+#   GATE_LIVE_TEST_PACKAGE  on-device instrumented package for the live in-view
+#                        sheet-render assertion (default com.aisandbox.android.gate.live).
 set -euo pipefail
 
 # ── resolve repo + required env ────────────────────────────────────────────────
@@ -228,3 +244,53 @@ log "running the deterministic gate suite ($GATE_TEST_PACKAGE)"
   com.aisandbox.android.debug.test/androidx.test.runner.AndroidJUnitRunner" | tee "$GATE_DIR/log/gate.out"
 assert_tests_ran "$GATE_MIN_TESTS" "$GATE_DIR/log/gate.out" "deterministic gate suite"
 log "DETERMINISTIC GATE PASSED ✅"
+
+# ── 6. UC-97 drift-guard LIVE leg (C2) — OPTIONAL, Claude-availability-gated ──────
+# Steps 1-5 are the deterministic, LLM-free contract and remain the required path.
+# This leg is the UC-97 drift guard (AC10): it drives a REAL pinned Claude Code,
+# raises a live single + multi AskUserQuestion, and asserts the pending question is
+# (a) detected at the PANE layer by the in-container streaming helper and (b)
+# rendered in-view on-device — so a future Claude Code version that drifts the
+# TUI/transcript shape out from under the scraper turns this leg RED before release.
+#
+# Detection asserts on the PANE signal (the streaming helper's `__ctrl__<TAB>pending-question`
+# line), NOT `--scan-pending`: the latter reads the transcript tail and is blind to a
+# live blocking AskUserQuestion (the assistant turn is buffered in memory, never
+# written to the transcript while Claude blocks — UC-49/UC-50 latent gap).
+#
+# OPT-IN (needs a live Claude + working auth): off by default. In the release gate,
+# set GATE_LIVE_REQUIRED=1 so an unavailable live env HARD-FAILS instead of skipping.
+run_live_drift_guard() {
+  local driver="$REPO/android/gate-live-claude.sh"
+  local ver="${GATE_CLAUDE_VERSION:-$(grep -oE 'ARG CLAUDE_CODE_VERSION=[0-9][0-9.]*' "$REPO/SandboxDockerfile" | head -1 | cut -d= -f2)}"
+  local live_pkg="${GATE_LIVE_TEST_PACKAGE:-com.aisandbox.android.gate.live}"
+
+  if [ "${GATE_LIVE_CLAUDE:-0}" != "1" ]; then
+    log "UC-97 live drift-guard leg: SKIPPED (GATE_LIVE_CLAUDE!=1). The deterministic gate above is authoritative; set GATE_LIVE_CLAUDE=1 to also run the live leg."
+    return 0
+  fi
+
+  # Availability probe — the live leg needs the sandbox stack + a driver script.
+  local unavailable=""
+  command -v docker >/dev/null 2>&1 || unavailable="docker not on PATH"
+  [ -z "$ver" ] && unavailable="could not resolve pinned CLAUDE_CODE_VERSION from SandboxDockerfile"
+  [ -x "$driver" ] || unavailable="live driver missing/not executable: $driver"
+
+  if [ -n "$unavailable" ]; then
+    if [ "${GATE_LIVE_REQUIRED:-0}" = "1" ]; then
+      echo "::error:: UC-97 live drift-guard leg REQUIRED (GATE_LIVE_REQUIRED=1) but unavailable: $unavailable"; exit 1
+    fi
+    log "UC-97 live drift-guard leg: SKIPPED ($unavailable). Set GATE_LIVE_REQUIRED=1 to hard-fail instead."
+    return 0
+  fi
+
+  log "UC-97 live drift-guard leg: driving live Claude Code $ver (pane-signal detect + on-device render)"
+  # The driver exits non-zero on a detection/render miss or a version mismatch;
+  # set -e + pipefail propagate that as the gate result.
+  GATE_DIR="$GATE_DIR" DEV="$DEV" ADB="$ADB" ANDROID_HOME="$ANDROID_HOME" \
+    GATE_CLAUDE_VERSION="$ver" GATE_LIVE_TEST_PACKAGE="$live_pkg" REPO="$REPO" \
+    "$driver" 2>&1 | tee "$GATE_DIR/log/live-drift-guard.out"
+  log "UC-97 LIVE DRIFT-GUARD LEG PASSED ✅"
+}
+
+run_live_drift_guard

@@ -1,0 +1,50 @@
+cd /home/claude/proj && claude --dangerously-skip-permissions
+claude@c6827ceeef0a:~/proj$ cd /home/claude/proj && claude --dangerously-skip-permissions
+╭─── Claude Code v2.1.169 ─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│                                              │ Tips for getting started                                                                                                                                                  │
+│             Welcome back Harold!             │ Ask Claude to create a new app or clone a repository                                                                                                                      │
+│                                              │ ───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── │
+│                    ▐▛███▜▌                   │ What's new                                                                                                                                                                │
+│                   ▝▜█████▛▘                  │ Claude Sonnet 5 sessions no longer use the mid-conversation system role for harness reminders                                                                             │
+│                     ▘▘ ▝▝                    │ Changed `AskUserQuestion` dialogs to no longer auto-continue by default; opt into an idle timeout via `/config`                                                           │
+│                                              │ Changed the "default" permission mode to "Manual" across the CLI, `--help`, VS Code, and JetBrains; `--permission-mode manual` and `"defaultMode": "manual"` are accepte… │
+│   Sonnet 4.6 · Claude API · IriusRisk S.L.   │ /release-notes for more                                                                                                                                                   │
+│                    ~/proj                    │                                                                                                                                                                           │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯
+
+
+❯ Use the AskUserQuestion tool right now to ask me a single question: do I prefer the color red or the color blue? Provide exactly those two options. Do not do anything else first.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ ☐ Color preference
+
+Do you prefer the color red or the color blue?
+
+❯ 1. Red
+     You prefer the color red.
+  2. Blue
+     You prefer the color blue.
+  3. Type something.
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  4. Chat about this
+
+Enter to select · ↑/↓ to navigate · Esc to cancel
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

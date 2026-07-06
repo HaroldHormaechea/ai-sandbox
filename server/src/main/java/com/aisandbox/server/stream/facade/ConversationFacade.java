@@ -210,6 +210,25 @@ public class ConversationFacade implements McpLoginInitiator {
     }
 
     /**
+     * UC-97 — re-derive the CURRENT pane pending-state for a client warm-attach
+     * {@code resync-pending}, so a pending sheet the client lost to a transient (while the ask
+     * is still live) can be re-emitted without an exit/re-enter. Resolves {@code targetId} to
+     * the SAME tail coordinates {@link #startTail} uses (so the helper captures the correct
+     * pane) and runs the one-shot {@code --resync-pending} (pane-based full payload — the
+     * transcript is blind to a live blocking ask, UC-49/UC-50). Returns the raw control payload
+     * ({@code "pending-question<TAB><json>"} / {@code "pending-clear"}) or {@code null} on a
+     * miss. A subagent target has no tmux pane to read a pending prompt from, so it yields
+     * {@code null} (nothing to re-derive). Read-only + one-shot: no {@code @Transactional} (no
+     * DB), consistent with the other tail one-shots. Never throws.
+     */
+    public String resyncPending(int n, String targetId) {
+        if (isSubagentTarget(targetId)) {
+            return null;
+        }
+        return tail.resyncPending(n, toTailTarget(resolveBridgeTarget(n, targetId)));
+    }
+
+    /**
      * UC-41 (AC5/AC6/AC9) — on-demand fetch of the FULL, untruncated input + result for
      * one tool call, in response to a client {@code fetch-detail}. Resolves {@code targetId}
      * to its tail coordinates, re-reads the transcript via the helper, renders the

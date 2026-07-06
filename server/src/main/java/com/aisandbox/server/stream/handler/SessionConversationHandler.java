@@ -421,6 +421,75 @@ public class SessionConversationHandler implements WebSocketHandler {
         emit(ctx, session, new ConversationServerMessage.PendingClear(promptKey == null ? "" : promptKey));
     }
 
+    /**
+     * UC-97 — handle a client {@code resync-pending} (warm re-attach): re-derive the CURRENT
+     * pane pending-state via the facade and re-emit it, so a sheet the client lost to a
+     * transient while the ask is STILL live re-populates without an exit/re-enter (the user's
+     * "I have to exit and come back to see the question"). The streaming re-emit path no-ops on
+     * a warm socket and the helper's once-per-key guard won't re-send a still-blocked prompt,
+     * so this explicit re-derive is the only path that closes the gap.
+     *
+     * <p>Runs on a {@code boundedElastic} inbound thread (the re-derive spawns a one-shot
+     * helper — blocking I/O that must not touch the single pump thread), so it deliberately
+     * uses ONLY thread-safe state: the {@code ConcurrentHashMap} question cache, the
+     * {@code outboundLock}-guarded {@link #emit}, and the stateless {@link #recoverMultiQuestion}
+     * / mapper. It never touches the pump-thread-only dedup guards ({@code recoveredKeys} /
+     * {@code recoverySuppressUntilMs}). Skips when the transcript path owns the sheet this turn
+     * (volatile read of {@code transcriptPromptThisTurn}); any failure degrades to a no-op
+     * (retain the client's prior state) and never crashes the pump.
+     */
+    private void resyncPending(WebSocketSession session, ConvCtx ctx) {
+        if (ctx.transcriptPromptThisTurn) {
+            return; // transcript owns the sheet this turn — leave it alone
+        }
+        String payload;
+        try {
+            payload = facade.resyncPending(ctx.n, ctx.selectedTarget.get());
+        } catch (RuntimeException e) {
+            LOG.warn(
+                    "UC-97 resync-pending re-derive failed for n={} target={}: {}",
+                    ctx.n,
+                    ctx.selectedTarget.get(),
+                    e.toString());
+            return;
+        }
+        if (payload == null || payload.isBlank()) {
+            return; // no pane pending / miss — retain the client's prior state
+        }
+        int tab = payload.indexOf('\t');
+        String kind = tab < 0 ? payload : payload.substring(0, tab);
+        String rest = tab < 0 ? "" : payload.substring(tab + 1);
+        if (TranscriptTailService.CTRL_PENDING_CLEAR.equals(kind)) {
+            // Authoritative "no pending on the pane": clear the client's sheet for every key we
+            // have cached for this target (the open sheet's questionUuid is one of them). No-op
+            // when nothing is cached. Touches only the ConcurrentHashMap + outboundLock emit.
+            for (String k : new java.util.ArrayList<>(ctx.pendingQuestions.keySet())) {
+                ctx.pendingQuestions.remove(k);
+                emit(ctx, session, new ConversationServerMessage.PendingClear(k));
+            }
+            return;
+        }
+        if (!TranscriptTailService.CTRL_PENDING_QUESTION.equals(kind)) {
+            return;
+        }
+        ConversationServerMessage.PendingPrompt pp = mapper.mapPendingPrompt(rest);
+        if (pp == null) {
+            return; // malformed payload — retain prior state (AC20 parity)
+        }
+        // Recover full per-tab options for a header-only multi-question, exactly like the
+        // streaming path, so the resynced sheet is answerable. recoverMultiQuestion only reads
+        // ctx.n/selectedTarget and calls the facade + mapper — safe off the pump thread.
+        boolean multiHeaderOnly = "questions".equals(pp.kind())
+                && !pp.answerable()
+                && pp.questions() != null
+                && pp.questions().size() > 1;
+        if (multiHeaderOnly) {
+            pp = recoverMultiQuestion(ctx, pp);
+        }
+        cacheQuestion(ctx, mapper.pendingPromptToQuestion(pp)); // pendingQuestions is a ConcurrentHashMap
+        emit(ctx, session, pp);
+    }
+
     private void cacheQuestion(ConvCtx ctx, ConversationServerMessage.Question q) {
         cachePut(ctx, q.toolUseId(), q);
         cachePut(ctx, q.uuid(), q);
@@ -510,6 +579,8 @@ public class SessionConversationHandler implements WebSocketHandler {
                     .schedule(() -> fetchDetail(session, ctx, fd));
             case ConversationClientMessage.LoadOlder lo -> Schedulers.boundedElastic()
                     .schedule(() -> loadOlder(session, ctx));
+            case ConversationClientMessage.ResyncPending rp -> Schedulers.boundedElastic()
+                    .schedule(() -> resyncPending(session, ctx));
             case ConversationClientMessage.Close c -> session.close(
                             CloseStatus.NORMAL.withReason(c.reason() == null ? "client-close" : c.reason()))
                     .subscribe();
@@ -888,10 +959,11 @@ public class SessionConversationHandler implements WebSocketHandler {
          * frame is emitted this turn, cleared on {@code TurnStart}/{@code TurnEnd}.
          * While set, the pane-signal {@link ConversationServerMessage.PendingPrompt} is
          * suppressed so the two delivery paths never both raise a sheet (transcript
-         * wins). Mutated and read only on the single tail-pump thread, so a plain field
-         * is sufficient — no cross-thread visibility concern.
+         * wins). Mutated only on the single tail-pump thread; also READ off-thread by the
+         * UC-97 {@code resync-pending} handler (a {@code boundedElastic} inbound thread), so
+         * it is {@code volatile} for safe cross-thread visibility of that guard.
          */
-        boolean transcriptPromptThisTurn = false;
+        volatile boolean transcriptPromptThisTurn = false;
 
         /**
          * UC-55 — promptKeys whose full per-tab options have been recovered and emitted as

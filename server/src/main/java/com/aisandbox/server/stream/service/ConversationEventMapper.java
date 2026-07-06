@@ -16,7 +16,10 @@ import org.springframework.stereotype.Service;
  * of its arguments, so it is fully unit-testable against recorded transcript
  * lines.
  *
- * <p>Transcript shape (verified against {@code claude 2.1.159}, RND §10–§11):
+ * <p>Transcript shape (pinned Claude Code {@code 2.1.169} — see {@link
+ * InputInjectionService#PINNED_CLAUDE_VERSION}; shape originally captured on
+ * {@code 2.1.159}, RND §10–§11, and reconciled up to the pinned version in UC-97
+ * as the pane path — not the transcript — now carries pending questions):
  * one JSON object per content block, written as the block completes. Each line
  * carries {@code type} ({@code user} | {@code assistant} | {@code system}),
  * {@code uuid}, {@code isSidechain}, {@code timestamp}, and (for user/assistant)

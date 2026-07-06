@@ -15,15 +15,26 @@ name: android-gate
 
 on:
   workflow_dispatch:
+    inputs:
+      live_claude:
+        description: >-
+          Also run the UC-97 live drift-guard leg (real pinned Claude Code raises a
+          live AskUserQuestion; asserts pane-signal detection + on-device render).
+          Requires a runner with a running ai-sandbox session + Claude auth —
+          GitHub-hosted runners have neither, so the leg SKIPS there. Default false.
+        type: boolean
+        default: false
   push:
     branches:
       - 'main'
       - 'feat/uc-85-deterministic-llm-free-functional-gate'
+      - 'feat/uc-97-pending-question-regression-pin-claude-code'
   pull_request:
     paths:
       - 'android/**'
       - 'server/**'
       - 'fixtures/replay/**'
+      - 'fixtures/pane-signal/**'
       - '.github/workflows/android-gate.yml'
 
 permissions:
@@ -75,7 +86,11 @@ jobs:
           # SINGLE-LINE script (the action runs each line as a separate `sh -c`):
           # gate.sh reuses this emulator (GATE_SKIP_EMULATOR=1) and leaves teardown to
           # the ephemeral runner (GATE_KEEP=1). Its exit code is the gate result.
-          script: GATE_SKIP_EMULATOR=1 GATE_KEEP=1 ./android/gate.sh
+          # GATE_LIVE_CLAUDE comes from the manual-dispatch input (default 0); the
+          # UC-97 live drift-guard leg is opt-in and SKIPS on GitHub-hosted runners
+          # (no live Claude/sandbox). The release gate runs the live leg on a suitable
+          # runner with GATE_LIVE_REQUIRED=1.
+          script: GATE_SKIP_EMULATOR=1 GATE_KEEP=1 GATE_LIVE_CLAUDE=${{ inputs.live_claude && '1' || '0' }} ./android/gate.sh
 
       - name: Upload gate logs
         if: always()

@@ -30,6 +30,7 @@ import java.util.List;
     @JsonSubTypes.Type(value = ConversationClientMessage.EnumerateTargets.class, name = "enumerate-targets"),
     @JsonSubTypes.Type(value = ConversationClientMessage.FetchDetail.class, name = "fetch-detail"),
     @JsonSubTypes.Type(value = ConversationClientMessage.LoadOlder.class, name = "load-older"),
+    @JsonSubTypes.Type(value = ConversationClientMessage.ResyncPending.class, name = "resync-pending"),
     @JsonSubTypes.Type(value = ConversationClientMessage.Close.class, name = "close")
 })
 public sealed interface ConversationClientMessage
@@ -41,6 +42,7 @@ public sealed interface ConversationClientMessage
                 ConversationClientMessage.EnumerateTargets,
                 ConversationClientMessage.FetchDetail,
                 ConversationClientMessage.LoadOlder,
+                ConversationClientMessage.ResyncPending,
                 ConversationClientMessage.Close {
 
     /**
@@ -123,6 +125,22 @@ public sealed interface ConversationClientMessage
      * read; it is NOT injected into the tmux session.
      */
     record LoadOlder() implements ConversationClientMessage {}
+
+    /**
+     * UC-97 — ask the server to re-derive the CURRENT pane pending-state and re-emit it,
+     * sent by the client on a WARM (re-)attach. The streaming re-emit path no-ops on a warm
+     * socket ({@code ConversationController.attach} returns early when the connect job is
+     * still active) and the helper's once-per-key guard won't re-send a still-blocked prompt,
+     * so a pending sheet the client cleared on a transient (racing {@code pending-clear} /
+     * {@code turn-end}) while the ask is STILL live never re-populates until a fresh
+     * connection ("exit and re-enter to see the question"). This frame closes that gap: the
+     * server re-derives the pane (not the transcript, which is blind to a live ask — UC-49/
+     * UC-50) and re-emits a {@link ConversationServerMessage.PendingPrompt} /
+     * {@link ConversationServerMessage.PendingClear} regardless of tail state. Like
+     * {@code fetch-detail}/{@code load-older} it is a server-local read; NOT injected into the
+     * tmux session. No payload — it always targets the connection's currently-selected target.
+     */
+    record ResyncPending() implements ConversationClientMessage {}
 
     /** Client-initiated clean close. */
     record Close(String reason) implements ConversationClientMessage {}

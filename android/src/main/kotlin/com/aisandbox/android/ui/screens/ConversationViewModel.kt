@@ -120,12 +120,20 @@ class ConversationViewModel(application: Application) : AndroidViewModel(applica
     fun attach(sessionN: Int) {
         if (this.sessionN == sessionN && controller != null) {
             controller?.attach(sessionN)
+            // UC-97 — on a warm re-attach, correct a stale read-only `subagent:` selection back to
+            // `main` so a pending question renders in-view (instance (c): open-conversation-normally).
+            // Idempotent + subagent-only, so an answerable `main`/`swarm:` selection is untouched.
+            controller?.focusAnswerableTargetForDeepLink()
             return
         }
         this.sessionN = sessionN
         val c = container.conversationController(sessionN)
         controller = c
         c.attach(sessionN)
+        // UC-97 — same guard on the fresh-attach path; a strict no-op on cold start (selection
+        // defaults to `main`), but corrects a process-cached controller re-resolved with a stale
+        // subagent selection.
+        c.focusAnswerableTargetForDeepLink()
         viewModelScope.launch { c.state.collect { _state.value = it } }
         viewModelScope.launch { c.items.collect { _items.value = it } }
         viewModelScope.launch { c.targets.collect { _targets.value = it } }
