@@ -51,6 +51,21 @@ skip_or_fail() {
   exit 0
 }
 
+# ── X11 runtime precheck (emulator dependency) ───────────────────────────────────
+# The headless emulator's QEMU binary dynamically links libX11 even with -no-window;
+# on an unprovisioned host it crashes silently at boot (QA hit exactly this; CI's
+# /dev/kvm smoke does NOT catch it). Verify the libs resolve and fail LOUD here —
+# SKIP under GATE_LIVE_REQUIRED=0, hard-fail with a clear message under =1.
+x11_ok=1
+for lib in libX11.so.6 libX11-xcb.so.1; do
+  if command -v ldconfig >/dev/null 2>&1; then
+    ldconfig -p 2>/dev/null | grep -q "$lib" || x11_ok=0
+  elif ! find /usr/lib /lib -name "$lib" 2>/dev/null | grep -q .; then
+    x11_ok=0
+  fi
+done
+[ "$x11_ok" = 1 ] || skip_or_fail "X11 runtime libs (libX11.so.6 / libX11-xcb.so.1) not resolvable — the emulator's QEMU crashes at boot without them. Install them (e.g. apt-get install -y libx11-6 libx11-xcb1) to run the live leg."
+
 # ── resolve a running sandbox session ────────────────────────────────────────────
 SESSION="${GATE_LIVE_SESSION:-}"
 if [ -z "$SESSION" ]; then
@@ -72,6 +87,18 @@ LIVE_VER="$(dexec claude --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]
   || fail "live Claude Code is $LIVE_VER but the pin is $GATE_CLAUDE_VERSION — rebuild the image (docker compose build) so the pin reaches the session."
 log "live Claude Code version matches the pin ($LIVE_VER) ✅"
 
+# ── onboarding gate: the session must be seeded PAST Claude Code onboarding ────────
+# A fresh session shows onboarding (theme → trust-folder → bypass-perms warning) which
+# EATS the first prompt, so the driven AskUserQuestion is never raised (QA-confirmed).
+# Require the session to be seeded (~/.claude/.claude.json with hasCompletedOnboarding +
+# creds) BEFORE driving. We VERIFY (never fabricate creds) and skip/fail with a clear
+# pointer if unseeded, rather than silently sending into an onboarding dialog.
+if ! dexec sh -c 'cat "$HOME/.claude/.claude.json" 2>/dev/null' \
+     | grep -q '"hasCompletedOnboarding"[[:space:]]*:[[:space:]]*true'; then
+  skip_or_fail "live session $SESSION is not past Claude Code onboarding (~/.claude/.claude.json lacks hasCompletedOnboarding:true) — onboarding would eat the driven prompt. Seed the session's creds + onboarding state first (the entrypoint's pre-init template, or stage ~/.claude)."
+fi
+log "live session is past onboarding ✅"
+
 # ── drive one AskUserQuestion and assert the PANE signal fires ────────────────────
 # Raises a question in the live session, then tails the pane via the streaming
 # helper for up to $TIMEOUT and asserts `__ctrl__<TAB>pending-question` appears.
@@ -79,8 +106,8 @@ assert_pane_pending() {
   local kind="$1" prompt="$2" cap="$GATE_DIR/log/live-$kind.tail"
 
   log "raising a live $kind AskUserQuestion"
-  # @qa-tune: the prompt that reliably makes Claude call AskUserQuestion (single vs
-  # multi) and BLOCK awaiting the answer, confirmed in the A0 repro.
+  # Prompts below are QA-live-validated on Claude Code 2.1.169 (the sheet renders
+  # ~20-24s after send; the default GATE_LIVE_TIMEOUT=90 is comfortable).
   dexec tmux send-keys -t "$PANE" -l "$prompt"
   dexec tmux send-keys -t "$PANE" Enter
 
@@ -99,11 +126,12 @@ assert_pane_pending() {
   sleep 2
 }
 
-# @qa-tune: prompt wording confirmed live in A0.
+# Prompt wording confirmed live on 2.1.169 (QA A0) to reliably make Claude call
+# AskUserQuestion and BLOCK, without doing anything else first (which would eat the turn).
 assert_pane_pending "single" \
-  "Use the AskUserQuestion tool to ask me one single-select question with two options, then wait for my answer."
+  "Use the AskUserQuestion tool right now to ask me a single question: do I prefer the color red or the color blue? Provide exactly those two options. Do not do anything else first."
 assert_pane_pending "multi" \
-  "Use the AskUserQuestion tool to ask me two questions at once (a multi-question sheet), then wait for my answers."
+  "Use the AskUserQuestion tool to ask me TWO questions at once in a single call: (1) favorite color: Red or Blue; (2) favorite size: Small or Large. Ask both together now."
 
 log "PANE DETECTION (single + multi) PASSED ✅"
 
