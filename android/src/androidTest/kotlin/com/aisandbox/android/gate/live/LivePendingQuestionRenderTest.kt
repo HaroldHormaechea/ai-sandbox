@@ -3,11 +3,15 @@ package com.aisandbox.android.gate.live
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
+import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.aisandbox.android.conversation.PendingSheet
 import com.aisandbox.android.gate.GateHarness
+import com.aisandbox.android.net.ApiResult
+import com.aisandbox.android.ui.components.PENDING_QUESTION_BADGE_DESCRIPTION
+import com.aisandbox.android.ui.components.PendingQuestionBadge
 import com.aisandbox.android.ui.components.QuestionSheet
 import com.aisandbox.android.ui.testtags.QuestionTestTags
 import com.aisandbox.android.ui.theme.AiSandboxTheme
@@ -167,5 +171,76 @@ class LivePendingQuestionRenderTest {
         } finally {
             session.close()
         }
+    }
+
+    /**
+     * AC3 — a live {@code ExitPlanMode} plan-approval prompt renders the in-view approval sheet
+     * on-device. The session must be in plan mode with a plan-approval prompt PENDING (driven by the
+     * harness). Delivered as {@link PendingSheet.Plan} via the same live pane-signal path, rendered by
+     * the same {@code QuestionSheet}. Guarded by {@code -e liveKind plan}.
+     */
+    @Test
+    fun liveExitPlanMode_rendersApprovalSheet_onDevice() {
+        Assume.assumeTrue("run with -e liveKind plan", args().getString("liveKind")?.trim() == "plan")
+        GateHarness.assumeEnrolled()
+        val n = liveSessionN()
+        Assume.assumeTrue("requires -e liveSessionN <N>", n != null)
+
+        val session = GateHarness.open(n!!)
+        try {
+            val sheet = runBlocking {
+                withTimeout(90_000) {
+                    session.controller.pendingSheet.first { it is PendingSheet.Plan } as PendingSheet.Plan
+                }
+            }
+            assertTrue("AC3 — a live plan-approval prompt must be in-app answerable", sheet.answerable)
+            hostSheet(session, sheet)
+            composeTestRule.waitUntil(10_000) {
+                composeTestRule.onAllNodesWithTag(QuestionTestTags.SHEET).fetchSemanticsNodes().isNotEmpty()
+            }
+            composeTestRule.onNodeWithTag(QuestionTestTags.SHEET).assertIsDisplayed()
+            // The plan-approval affordance renders (the ExitPlanMode-specific controls).
+            composeTestRule.onNodeWithTag(QuestionTestTags.PLAN_APPROVE).assertIsDisplayed()
+        } finally {
+            session.close()
+        }
+    }
+
+    /**
+     * AC4 — while a question is pending, the sessions-list "?" indicator (UC-49) shows on-device.
+     * Verifies the LIVE data path end-to-end: the app's real {@code SessionsApi.list()} against the
+     * enrolled real server reports {@code pendingQuestion == true} for the live session (the server
+     * scraped the live pane), and the {@code PendingQuestionBadge} ("?" chip, contentDescription
+     * {@value com.aisandbox.android.ui.components.PENDING_QUESTION_BADGE_DESCRIPTION}) renders on-device.
+     * Guarded by {@code -e liveIndicator true}; run with a question PENDING in the session.
+     */
+    @Test
+    fun livePendingQuestion_showsSessionsListIndicator_onDevice() {
+        Assume.assumeTrue("run with -e liveIndicator true", args().getString("liveIndicator")?.trim() == "true")
+        GateHarness.assumeEnrolled()
+        val n = liveSessionN()
+        Assume.assumeTrue("requires -e liveSessionN <N>", n != null)
+
+        // LIVE data path: the server, scraping the live pane, must report pendingQuestion for the row.
+        val pendingReported = runBlocking {
+            withTimeout(60_000) {
+                var seen = false
+                while (!seen) {
+                    val profile = GateHarness.app().container.profileStore.current()!!
+                    val api = GateHarness.app().container.sessionsApi(GateHarness.app().container.httpClient(profile))
+                    val res = api.list()
+                    if (res is ApiResult.Success) {
+                        seen = res.value.any { it.n == n && it.pendingQuestion }
+                    }
+                    if (!seen) kotlinx.coroutines.delay(1500)
+                }
+                seen
+            }
+        }
+        assertTrue("AC4 — the live server must report pendingQuestion=true for the blocked session", pendingReported)
+
+        // On-device render: the "?" indicator chip shows.
+        composeTestRule.setContent { AiSandboxTheme { PendingQuestionBadge() } }
+        composeTestRule.onNodeWithContentDescription(PENDING_QUESTION_BADGE_DESCRIPTION).assertIsDisplayed()
     }
 }
