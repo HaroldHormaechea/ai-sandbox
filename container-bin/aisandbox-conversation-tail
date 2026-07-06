@@ -1542,11 +1542,22 @@ const PLAN_APPROVAL_CHROME = {
  * UC-50 — PURE predicate (exported for QA): does the captured VISIBLE pane show a
  * pending {@code ExitPlanMode} plan-approval awaiting an answer? Requires the plan
  * marker AND the option cursor. Returns false for empty/non-string input.
+ *
+ * <p>UC-97 (AC3) width-robustness: the session container's tmux {@code main} runs at
+ * the default 80 columns (the entrypoint creates it detached, no {@code -x}), where the
+ * marker phrase "Would you like to proceed?" WRAPS across two lines — so a single-line
+ * regex misses it and the plan sheet never renders. We collapse whitespace runs
+ * (including newlines) to a single space before testing the marker, so a wrapped phrase
+ * still matches; the {@code ❯} option-cursor requirement (tested on the raw pane) keeps
+ * this from false-positiving on prose. Wide widths are unaffected (collapsing an
+ * already-one-line phrase is a no-op for the match). Only plan-approval detection is
+ * touched — {@link looksLikePendingAskUserQuestion} is width-robust and left as-is.
  */
 function looksLikePendingPlanApproval(paneText) {
   if (typeof paneText !== 'string' || paneText.length === 0) return false;
   const c = PLAN_APPROVAL_CHROME;
-  return c.marker.test(paneText) && c.optionCursor.test(paneText);
+  const flattened = paneText.replace(/\s+/g, ' ');
+  return c.marker.test(flattened) && c.optionCursor.test(paneText);
 }
 
 // Volatile pane lines (spinner / status bar / nav hints) stripped before hashing
