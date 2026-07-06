@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 import com.aisandbox.server.cli.secrets.EnsureSandboxImage;
 import com.aisandbox.server.cli.secrets.ServerVersion;
+import com.aisandbox.server.stream.service.InputInjectionService;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -73,5 +74,46 @@ class SandboxDockerfileContractTest {
                         EnsureSandboxImage.LABEL_KEY, EnsureSandboxImage.BUILD_ARG)
                 .containsPattern("(?m)^\\s*LABEL\\s+" + Pattern.quote(EnsureSandboxImage.LABEL_KEY) + "=\"\\$\\{"
                         + Pattern.quote(EnsureSandboxImage.BUILD_ARG) + "\\}\"\\s*$");
+    }
+
+    /**
+     * UC-97 AC8/AC9 — Claude Code MUST be PINNED in the image build, replacing the old
+     * unpinned {@code latest-at-build} install. The pane-chrome scraper
+     * ({@code container-bin/aisandbox-conversation-tail} {@code PENDING_QUESTION_CHROME})
+     * and the keystroke-injection walk ({@link InputInjectionService#PINNED_CLAUDE_VERSION})
+     * are TUNED to a specific TUI/transcript shape; an unpinned upgrade silently drifts that
+     * shape out from under them and breaks pending-question detection/delivery (UC-50, UC-97).
+     *
+     * <p>This is the deterministic drift anchor: the {@code SandboxDockerfile} ARG default MUST
+     * equal the in-code pin {@link InputInjectionService#PINNED_CLAUDE_VERSION}, so a future bump
+     * that edits only one of the two turns this test RED before release (AC9 — a bump is a single
+     * deliberate, gate-verified change kept in lock-step).
+     */
+    @Test
+    void dockerfile_pins_claude_code_version_in_lockstep_with_the_code_constant() throws IOException {
+        String text = dockerfile();
+        assertThat(text)
+                .as(
+                        "UC-97 AC8 — SandboxDockerfile MUST declare `ARG CLAUDE_CODE_VERSION=%s` (== InputInjectionService.PINNED_CLAUDE_VERSION)",
+                        InputInjectionService.PINNED_CLAUDE_VERSION)
+                .containsPattern("(?m)^\\s*ARG\\s+CLAUDE_CODE_VERSION\\s*=\\s*"
+                        + Pattern.quote(InputInjectionService.PINNED_CLAUDE_VERSION) + "\\s*$");
+    }
+
+    /**
+     * UC-97 AC8 — the install line MUST consume the pinned build arg
+     * ({@code @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}}), never an unpinned or
+     * {@code @latest} install. Asserting the interpolation form (not a hard-coded version)
+     * keeps the single version lever the ARG above.
+     */
+    @Test
+    void dockerfile_installs_claude_code_from_the_pinned_build_arg() throws IOException {
+        String text = dockerfile();
+        assertThat(text)
+                .as("UC-97 AC8 — Claude Code MUST be installed at the pinned ARG version")
+                .containsPattern("@anthropic-ai/claude-code@\\$\\{CLAUDE_CODE_VERSION\\}");
+        assertThat(text)
+                .as("UC-97 AC8 — Claude Code MUST NOT be installed unpinned via @latest")
+                .doesNotContain("@anthropic-ai/claude-code@latest");
     }
 }

@@ -1568,6 +1568,56 @@ test('UC-49 PENDING_QUESTION_CHROME stays pinned to the Claude build (lock-step 
   assert.strictEqual(helper.PENDING_QUESTION_CHROME.pinnedClaudeVersion, '2.1.169');
 });
 
+// ════════════════════════════════════════════════════════════════════════════
+// UC-97 C1 — REAL pinned-version pane-signal drift fixtures.
+//
+// The UC-49 constants above are hand-authored APPROXIMATIONS of the chrome. These
+// tests read the VERBATIM `tmux capture-pane -p` bytes captured from a LIVE Claude
+// Code 2.1.169 session blocked on each real prompt (see
+// `fixtures/pane-signal/README.md` for provenance + capture method). Because the
+// bytes are the real pinned TUI, they turn RED if a future Claude Code version
+// restyles the pending-question / plan-approval chrome out from under
+// PENDING_QUESTION_CHROME / PLAN_APPROVAL_CHROME — the drift guard that would have
+// caught UC-50/UC-97 (AC10). LLM-free + deterministic.
+// ════════════════════════════════════════════════════════════════════════════
+
+const PANE_FIXTURE_DIR = path.join(__dirname, '..', 'fixtures', 'pane-signal');
+const readPaneFixture = (name) => fs.readFileSync(path.join(PANE_FIXTURE_DIR, name), 'utf8');
+const UC97_REAL_SINGLE_PANE = readPaneFixture('single-question.2.1.169.pane.txt');
+const UC97_REAL_MULTI_PANE = readPaneFixture('multi-question.2.1.169.pane.txt');
+const UC97_REAL_EXITPLAN_PANE = readPaneFixture('exitplanmode.2.1.169.pane.txt');
+
+test('UC-97 C1 — REAL 2.1.169 single-select AskUserQuestion pane is detected as pending (AC10 drift guard)', () => {
+  assert.strictEqual(helper.looksLikePendingAskUserQuestion(UC97_REAL_SINGLE_PANE), true);
+  // ExitPlanMode exclusion must NOT fire on a genuine question pane.
+  assert.strictEqual(helper.looksLikePendingPlanApproval(UC97_REAL_SINGLE_PANE), false);
+});
+
+test('UC-97 C1 — REAL 2.1.169 multi-question wizard pane is detected as pending (AC10 drift guard)', () => {
+  assert.strictEqual(helper.looksLikePendingAskUserQuestion(UC97_REAL_MULTI_PANE), true);
+});
+
+test('UC-97 C1 — REAL 2.1.169 ExitPlanMode pane is plan-approval, NOT an AskUserQuestion (exclusion holds live)', () => {
+  assert.strictEqual(helper.looksLikePendingPlanApproval(UC97_REAL_EXITPLAN_PANE), true);
+  assert.strictEqual(helper.looksLikePendingAskUserQuestion(UC97_REAL_EXITPLAN_PANE), false);
+});
+
+test('UC-97 C1 — parsePendingPrompt extracts the answerable payload from the REAL single pane', () => {
+  const p = helper.parsePendingPrompt(UC97_REAL_SINGLE_PANE);
+  assert.ok(p, 'expected a parsed pending prompt, got null');
+  assert.strictEqual(p.kind, 'questions');
+  const blob = JSON.stringify(p);
+  assert.ok(/Red/.test(blob) && /Blue/.test(blob), 'expected the Red/Blue options in the parsed payload');
+});
+
+test('UC-97 C1 — parsePendingPrompt recognizes the REAL multi-question wizard headers', () => {
+  const p = helper.parsePendingPrompt(UC97_REAL_MULTI_PANE);
+  assert.ok(p, 'expected a parsed pending prompt, got null');
+  assert.strictEqual(p.kind, 'questions');
+  const blob = JSON.stringify(p);
+  assert.ok(/Favorite color/.test(blob) && /Favorite size/.test(blob), 'expected both wizard headers in the parsed payload');
+});
+
 // Mutual exclusion + the 3-line output contract. Composes the TWO real production
 // seams (looksLikePendingAskUserQuestion + deriveWorking) exactly as
 // conversationName() composes them, and pins the line-3 token mapping + the
