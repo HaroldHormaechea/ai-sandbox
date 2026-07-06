@@ -116,6 +116,13 @@ function parseArgs(argv) {
     backfill: 200,
     projectsDir: path.join(os.homedir() || '/home/claude', '.claude', 'projects'),
     scanPending: false,
+    // UC-97 — one-shot PANE-based re-derive of the current pending-prompt state, for
+    // the server's `resync-pending` (warm client re-attach). Unlike --scan-pending
+    // (transcript tail, blind to a live blocking ask — UC-49/UC-50), this captures the
+    // VISIBLE pane and emits the SAME full answerable payload the streaming loop emits,
+    // so a sheet the client lost while the ask is still live can be re-populated without
+    // an exit/re-enter. Capture-only (no keystroke).
+    resyncPending: false,
     // UC-41 — one-shot detail fetch for a single tool call (AC5).
     fetchDetail: false,
     toolUseId: null,
@@ -157,6 +164,7 @@ function parseArgs(argv) {
       case '--backfill': a.backfill = Math.max(1, parseInt(argv[++i], 10) || 200); break;
       case '--projects-dir': a.projectsDir = argv[++i]; break;
       case '--scan-pending': a.scanPending = true; break;
+      case '--resync-pending': a.resyncPending = true; break;
       case '--fetch-detail': a.fetchDetail = true; break;
       case '--tool-use-id': a.toolUseId = argv[++i]; break;
       case '--fetch-page': a.fetchPage = true; break;
@@ -1779,6 +1787,42 @@ function parsePaneOnce() {
 }
 
 /**
+ * UC-97 — one-shot PANE-based re-derive of the CURRENT pending-prompt state, for the
+ * server's `resync-pending` request (a warm client re-attach whose streaming socket
+ * no-ops the re-emit, and whose once-per-key guard won't re-send a still-blocked prompt).
+ * Emits the SAME control payload the streaming loop emits so the server can feed it
+ * straight into its existing dispatch:
+ *   __ctrl__\tpending-question\t<json {kind,questions,plan,key}>   when a prompt is live
+ *   __ctrl__\tpending-clear                                        when the pane shows none
+ * On a capture/parse miss it prints NOTHING (exit 0) so the server RETAINS its prior state
+ * (failure policy (b)) rather than tearing down a good sheet. Derives from the VISIBLE pane
+ * (the transcript is blind to a live blocking ask — UC-49/UC-50), reusing the streaming
+ * path's exact predicates + parser so it can never diverge from live delivery.
+ */
+function resyncPending() {
+  const paneText = capturePaneText();
+  if (paneText == null) return; // capture failed → emit nothing; server keeps prior state
+  const pending = looksLikePendingAskUserQuestion(paneText) || looksLikePendingPlanApproval(paneText);
+  if (!pending) {
+    out('__ctrl__\t' + CTRL_PENDING_CLEAR);
+    return;
+  }
+  const parsed = parsePendingPrompt(paneText);
+  if (!parsed || !parsed.key) return; // pending but unparseable → keep prior state
+  out(
+    '__ctrl__\t' +
+      CTRL_PENDING_QUESTION +
+      '\t' +
+      JSON.stringify({
+        kind: parsed.kind,
+        questions: parsed.questions,
+        plan: parsed.plan,
+        key: parsed.key,
+      }),
+  );
+}
+
+/**
  * UC-69 — PURE: the notification BODY text for a pending AskUserQuestion — the
  * FIRST question's prompt (AC3: when several questions are raised together, the
  * first one). Takes the parsed prompt from {@link parsePendingPrompt}; prefers the
@@ -2173,6 +2217,14 @@ if (require.main === module) {
       scanPending();
     } catch (e) {
       out('idle');
+    }
+    process.exit(0);
+  } else if (ARGS.resyncPending) {
+    // UC-97 — any failure prints nothing so the server retains its prior pending state.
+    try {
+      resyncPending();
+    } catch (e) {
+      /* emit nothing on failure (failure policy (b)) */
     }
     process.exit(0);
   } else if (ARGS.fetchDetail) {

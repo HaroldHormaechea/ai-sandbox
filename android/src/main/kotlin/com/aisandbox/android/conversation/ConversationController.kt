@@ -255,7 +255,17 @@ class ConversationController(
     /** Start (or no-op resume) the connect/reconnect loop. Idempotent. */
     fun attach(n: Int) {
         require(n == sessionN) { "controller bound to $sessionN, attach($n)" }
-        if (connectJob?.isActive == true) return
+        if (connectJob?.isActive == true) {
+            // UC-97 — warm re-attach: the connect loop is already live, so this would otherwise
+            // no-op, and the server's streaming re-emit won't re-send a still-blocked prompt (the
+            // helper's once-per-key guard). Explicitly ask the server to re-derive the current
+            // pane pending-state and re-emit it, so a sheet lost to a transient (racing
+            // pending-clear / turn-end) while the ask is STILL live re-populates WITHOUT the user
+            // having to exit and re-enter the conversation. A cold attach below re-backfills on a
+            // fresh connection, which re-delivers the pending prompt naturally, so no resync there.
+            client?.sendResyncPending()
+            return
+        }
         startConnectLoop()
     }
 

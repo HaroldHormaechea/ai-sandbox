@@ -86,6 +86,13 @@ class ConversationClient(
     fun sendLoadOlder(): Boolean = sendText("""{"type":"load-older"}""")
 
     /**
+     * UC-97 — on a WARM (re-)attach, ask the server to re-derive the current pane pending-state
+     * and re-emit it, so a pending sheet lost to a transient while the ask is STILL live
+     * re-populates without an exit/re-enter. Server-local read (pane capture), not injected.
+     */
+    fun sendResyncPending(): Boolean = sendText("""{"type":"resync-pending"}""")
+
+    /**
      * Send a structured answer. [selections] are option indices; [freeText] is
      * the always-present "Other" value (empty when unused).
      */

@@ -263,6 +263,7 @@ state, not a hard failure.
 | `interrupt`         | — (ESC into the session)                                  | —  |
 | `enumerate-targets` | —                                                         | 16, 18 |
 | `fetch-detail`      | `toolUseId`, `uuid` — request the full input + result for one tool call | 41 |
+| `resync-pending`    | — re-derive + re-emit the current pane pending-state (warm re-attach) | 97 |
 | `close`             | `reason`                                                  | —  |
 
 ### On-demand tool detail (`fetch-detail` → `tool-detail`, UC-41 AC5/AC6/AC9)
@@ -280,6 +281,30 @@ single `__ctrl__\tdetail-not-found` control line; the server maps that (and any
 non-zero exit / timeout / exception) to a `tool-detail` frame with
 `available=false` (AC9). The fetch is audited as `conversation_fetch_detail`
 (`ok` / `miss`).
+
+### Pending-question resync (`resync-pending`, UC-97)
+
+On a **warm** conversation (re-)attach — the client's `ConversationController.attach`
+returns early because the connect loop is still active — the streaming re-emit path
+does NOT re-send a still-blocked prompt (the helper's once-per-key `emittedPendingKey`
+guard), so a pending sheet the client cleared on a transient (a racing `pending-clear`
+from a concurrent tail, or a `turn-end`) **while the ask is still live** never
+re-populates until a fresh connection. That is the user-visible "I have to exit and
+re-enter the conversation to see the question" symptom.
+
+To close it, the client sends `resync-pending` on every warm attach. It is **not**
+injected into the tmux session — it is a server-local read. The server re-derives the
+CURRENT pane pending-state via the helper one-shot
+(`aisandbox-conversation-tail --resync-pending`), which captures the VISIBLE pane (the
+transcript is blind to a live blocking ask — UC-49/UC-50) and, if a prompt is live,
+prints the SAME `__ctrl__\tpending-question\t<json {kind,questions,plan,key}>` payload
+the streaming path emits (else `__ctrl__\tpending-clear`, and nothing on a capture/parse
+miss so prior state is retained). The server maps that payload through the same
+`PendingPrompt` path (including UC-55 multi-question option recovery) and re-emits
+`pending-question` / `pending-clear` to the client **regardless of tail state**, so the
+sheet re-appears with no exit/re-enter. `--resync-pending` is pane-based and distinct
+from `--scan-pending` (transcript-based, used only for the UC-37/AC18 switcher badge),
+which is left unchanged.
 
 ### Multi-question answers (`answer-batch`, UC-43 AC2/AC3/AC4)
 

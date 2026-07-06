@@ -272,6 +272,46 @@ public class TranscriptTailService {
     }
 
     /**
+     * UC-97 — one-shot, bounded re-derive of {@code target}'s CURRENT pane pending-state, for
+     * the client's warm-attach {@code resync-pending} request. Runs the helper in
+     * {@code --resync-pending} mode: it captures the VISIBLE pane and, if it shows a blocking
+     * {@code AskUserQuestion}/{@code ExitPlanMode}, emits the SAME full
+     * {@code {kind,questions,plan,key}} payload the streaming path emits (else a bare
+     * pending-clear), then exits — so {@link ProcessExecutor#run} is appropriate, like {@link
+     * #scanPending}. Derives from the PANE, not the transcript (the transcript is blind to a
+     * live blocking ask — UC-49/UC-50). Returns the raw control payload with the
+     * {@code __ctrl__} envelope prefix stripped ({@code "pending-question<TAB><json>"} or
+     * {@code "pending-clear"}), or {@code null} on any miss/failure (the caller then re-emits
+     * nothing, retaining the client's prior state). Never throws.
+     */
+    public String resyncPending(int n, TailTarget target) {
+        try {
+            List<String> argv = new ArrayList<>(buildArgv(n, target, 1));
+            argv.add("--resync-pending");
+            ProcessExecutor.Result r = exec.run(argv, null, SCAN_TIMEOUT);
+            if (r.exitCode() != 0 || r.stdout() == null) {
+                return null;
+            }
+            String out = r.stdout().trim();
+            if (out.isEmpty() || out.contains(CTRL_BACKFILL_START)) {
+                return null; // empty (capture/parse miss) or a defensive non-scan artifact
+            }
+            String prefix = CTRL_SOURCE + "\t";
+            if (out.startsWith(prefix)) {
+                out = out.substring(prefix.length());
+            }
+            // Only ever a pending-question / pending-clear control line; ignore anything else.
+            if (out.startsWith(CTRL_PENDING_QUESTION) || out.startsWith(CTRL_PENDING_CLEAR)) {
+                return out;
+            }
+            return null;
+        } catch (IOException io) {
+            LOG.debug("resyncPending failed for n={} target={}: {}", n, target, io.toString());
+            return null;
+        }
+    }
+
+    /**
      * UC-41 (AC5/AC9) — one-shot, bounded re-read of {@code target}'s transcript for
      * the raw {@code tool_use} + {@code tool_result} lines of a single {@code toolUseId}.
      * Runs the helper in {@code --fetch-detail} mode (resolve transcript once, scan main +
