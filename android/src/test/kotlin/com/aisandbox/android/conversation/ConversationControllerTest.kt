@@ -2805,4 +2805,59 @@ class ConversationControllerTest {
         c.focusAnswerableTargetForDeepLink()
         assertThat(c.selectedTargetId.value).isEqualTo("swarm:main:0.1")
     }
+
+    // ──────────────────── Part A1 — UC-97 resync-pending on warm re-attach ──────
+    // The shipped A1 fix: a warm re-attach (connectJob still live) would otherwise no-op, and the
+    // server's streaming re-emit won't re-send a still-blocked prompt (the helper's once-per-key
+    // guard). So a pending sheet the client lost to a transient (racing pending-clear / turn-end)
+    // while the ask is STILL live would only re-appear on a fresh connection — the user's "exit and
+    // re-enter to see it" symptom (AC5). ConversationController.attach() now sends `resync-pending`
+    // on the warm path; the server re-derives the live pane and re-emits the pending question, so
+    // the sheet re-populates WITHOUT a reconnect.
+
+    @Test
+    fun `UC-97 A1 - a warm re-attach sends resync-pending and the re-emitted question re-populates a transient-cleared sheet`() {
+        val received = java.util.concurrent.CopyOnWriteArrayList<String>()
+        val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
+        enqueueRecorder(received, wsRef)
+        val c = networkedController()
+        c.attach(7) // cold attach → connect loop live
+        try {
+            assertThat(awaitUntil { c.state.value == TerminalState.Open && wsRef.get() != null }).isTrue
+            val ws = wsRef.get()!!
+
+            // A live pending question is up on the main pane…
+            ws.send(
+                """{"type":"pending-question","promptKey":"pane-k1","kind":"questions","plan":"",""" +
+                    """"answerable":true,"questions":[{"question":"Pick","header":"H","multiSelect":false,""" +
+                    """"options":[{"label":"A","description":"a"},{"label":"B","description":"b"}]}]}""",
+            )
+            assertThat(awaitUntil { c.pendingSheet.value is PendingSheet.Questions }).isTrue
+
+            // …then a TRANSIENT clears it while the ask is still live in the pane (turn-end nulls the
+            // sheet; the helper won't re-emit the same key on this warm socket).
+            ws.send("""{"type":"turn-end"}""")
+            assertThat(awaitUntil { c.pendingSheet.value == null }).isTrue
+
+            // Warm re-attach (the ViewModel's re-entry): the connect loop is still live, so this must
+            // send `resync-pending` rather than silently no-op.
+            received.clear()
+            c.attach(7)
+            assertThat(
+                awaitUntil { received.any { it.contains(""""type":"resync-pending"""") } },
+            ).isTrue
+
+            // The server re-derives the live pane and re-emits the pending question → the sheet
+            // re-populates with NO reconnect (fail-before A1: warm attach no-op'd, sheet stayed null).
+            ws.send(
+                """{"type":"pending-question","promptKey":"pane-k1","kind":"questions","plan":"",""" +
+                    """"answerable":true,"questions":[{"question":"Pick","header":"H","multiSelect":false,""" +
+                    """"options":[{"label":"A","description":"a"},{"label":"B","description":"b"}]}]}""",
+            )
+            assertThat(awaitUntil { c.pendingSheet.value is PendingSheet.Questions }).isTrue
+            assertThat((c.pendingSheet.value as PendingSheet.Questions).answerable).isTrue
+        } finally {
+            c.close()
+        }
+    }
 }
