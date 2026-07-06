@@ -99,62 +99,94 @@ if ! dexec sh -c 'cat "$HOME/.claude/.claude.json" 2>/dev/null' \
 fi
 log "live session is past onboarding ✅"
 
-# ── drive one AskUserQuestion and assert the PANE signal fires ────────────────────
-# Raises a question in the live session, then tails the pane via the streaming
-# helper for up to $TIMEOUT and asserts `__ctrl__<TAB>pending-question` appears.
-assert_pane_pending() {
-  local kind="$1" prompt="$2" cap="$GATE_DIR/log/live-$kind.tail"
+# ── on-device render prerequisites (validated up-front) ───────────────────────────
+# The on-device leg (QA's com.aisandbox.android.gate.live suite) asserts the sheet
+# actually RENDERS in-app — the core of what the use case wants validated. It MUST run
+# while a question is still PENDING (see the per-shape loop below), and reads two
+# instrumentation args from the suite's header contract: `-e liveSessionN <N>` (the
+# ai-sandbox-<N> under test) and `-e liveQuestionKind <single|multi>`; without them the
+# suite Assume-SKIPs (a no-op green). Set GATE_LIVE_SKIP_ONDEVICE=1 to assert pane
+# detection only.
+ONDEVICE=1
+if [ "${GATE_LIVE_SKIP_ONDEVICE:-0}" = "1" ]; then
+  ONDEVICE=0
+  log "on-device render assertion: DISABLED (GATE_LIVE_SKIP_ONDEVICE=1) — pane detection only"
+else
+  : "${DEV:?DEV unset (needed for the on-device render leg)}"
+  : "${ADB:?ADB unset}"
+  : "${GATE_LIVE_TEST_PACKAGE:?GATE_LIVE_TEST_PACKAGE unset}"
+  # The suite needs the numeric session N (from ai-sandbox-<N>) for -e liveSessionN.
+  LIVE_N="${SESSION##*-}"
+  case "$LIVE_N" in
+    '' | *[!0-9]*)
+      skip_or_fail "cannot derive a numeric session N from '$SESSION' for the on-device suite's -e liveSessionN (expected an ai-sandbox-<N> project; set GATE_LIVE_SESSION accordingly)."
+      ;;
+  esac
+fi
 
+# ── raise a question and assert the PANE signal fires (does NOT dismiss) ───────────
+# Sends the prompt, then tails the pane via the streaming helper for up to $TIMEOUT and
+# asserts `__ctrl__<TAB>pending-question` appears. Leaves the question PENDING on return
+# (Claude blocks until answered/escaped) so the on-device suite has a live sheet to render.
+raise_and_assert_pane() {
+  local kind="$1" prompt="$2" cap="$GATE_DIR/log/live-$kind.tail"
   log "raising a live $kind AskUserQuestion"
-  # Prompts below are QA-live-validated on Claude Code 2.1.169 (the sheet renders
-  # ~20-24s after send; the default GATE_LIVE_TIMEOUT=90 is comfortable).
+  # Prompts are QA-live-validated on Claude Code 2.1.169 (the sheet renders ~20-24s after
+  # send; the default GATE_LIVE_TIMEOUT=90 is comfortable).
   dexec tmux send-keys -t "$PANE" -l "$prompt"
   dexec tmux send-keys -t "$PANE" Enter
-
-  # Stream the pane via the helper and wait (bounded) for the pane pending signal.
-  # `timeout` bounds the tail; grep -q returns as soon as the control line appears.
+  # `timeout` bounds the tail; grep -q returns as soon as the control line appears. Killing
+  # the read-only observer helper does NOT resolve the prompt — it stays pending.
   if dexec timeout "$TIMEOUT" "$HELPER" --pane "$PANE" 2>/dev/null \
-       | tee "$cap" | grep -q "$(printf 'pending-question')"; then
+       | tee "$cap" | grep -q 'pending-question'; then
     log "$kind: pane pending-question signal detected ✅"
   else
     dexec tmux send-keys -t "$PANE" Escape 2>/dev/null || true
     fail "$kind: pane pending-question signal NOT detected within ${TIMEOUT}s — Claude Code $LIVE_VER may have drifted the TUI shape out from under PENDING_QUESTION_CHROME. Retune the scraper for this version or fall back to the next-newest gate-passing pin. (capture: $cap)"
   fi
+}
 
-  # Clear the pending state before the next case (interrupt the turn).
+# ── run QA's on-device render suite for $kind WHILE a question is pending ──────────
+run_ondevice_render() {
+  local kind="$1" out="$GATE_DIR/log/live-render-$kind.out"
+  log "running the on-device live render suite ($GATE_LIVE_TEST_PACKAGE, kind=$kind, sessionN=$LIVE_N)"
+  # Header contract: -e liveSessionN <N> + -e liveQuestionKind <single|multi> (else the
+  # suite Assume-SKIPs → a green no-op). Pass both to actually exercise the in-app render.
+  "$ADB" -s "$DEV" shell "am instrument -w \
+    -e package $GATE_LIVE_TEST_PACKAGE \
+    -e liveSessionN $LIVE_N \
+    -e liveQuestionKind $kind \
+    com.aisandbox.android.debug.test/androidx.test.runner.AndroidJUnitRunner" | tee "$out"
+  if grep -q 'FAILURES!!!' "$out"; then
+    fail "on-device live render suite ($kind): test failures — see $out"
+  fi
+  if grep -qE 'OK \([1-9][0-9]* test' "$out"; then
+    log "$kind: on-device render suite passed ✅"
+  else
+    fail "on-device live render suite ($kind) ran zero/failed tests (a green gate with no tests is a failure — check that -e liveSessionN/-e liveQuestionKind match the suite's header). See $out"
+  fi
+}
+
+# ── dismiss the currently-pending question (interrupt the turn) + settle ───────────
+dismiss_pending() {
   dexec tmux send-keys -t "$PANE" Escape 2>/dev/null || true
   sleep 2
 }
 
+# ── per shape: raise → assert pane → render WHILE pending → dismiss ────────────────
 # Prompt wording confirmed live on 2.1.169 (QA A0) to reliably make Claude call
 # AskUserQuestion and BLOCK, without doing anything else first (which would eat the turn).
-assert_pane_pending "single" \
-  "Use the AskUserQuestion tool right now to ask me a single question: do I prefer the color red or the color blue? Provide exactly those two options. Do not do anything else first."
-assert_pane_pending "multi" \
-  "Use the AskUserQuestion tool to ask me TWO questions at once in a single call: (1) favorite color: Red or Blue; (2) favorite size: Small or Large. Ask both together now."
+# `|`-delimited (the prompts contain no `|`); first field = kind, remainder = prompt.
+for spec in \
+  "single|Use the AskUserQuestion tool right now to ask me a single question: do I prefer the color red or the color blue? Provide exactly those two options. Do not do anything else first." \
+  "multi|Use the AskUserQuestion tool to ask me TWO questions at once in a single call: (1) favorite color: Red or Blue; (2) favorite size: Small or Large. Ask both together now."; do
+  kind="${spec%%|*}"
+  prompt="${spec#*|}"
+  raise_and_assert_pane "$kind" "$prompt"
+  [ "$ONDEVICE" = 1 ] && run_ondevice_render "$kind" # runs while the question is still live
+  dismiss_pending
+done
 
 log "PANE DETECTION (single + multi) PASSED ✅"
-
-# ── on-device in-view render assertion (QA-owned live instrumented suite) ─────────
-if [ "${GATE_LIVE_SKIP_ONDEVICE:-0}" = "1" ]; then
-  log "on-device render assertion: SKIPPED (GATE_LIVE_SKIP_ONDEVICE=1) — pane detection only"
-  exit 0
-fi
-: "${DEV:?DEV unset (needed for the on-device render leg)}"
-: "${ADB:?ADB unset}"
-: "${GATE_LIVE_TEST_PACKAGE:?GATE_LIVE_TEST_PACKAGE unset}"
-
-log "running the on-device live render suite ($GATE_LIVE_TEST_PACKAGE)"
-OUT="$GATE_DIR/log/live-render.out"
-"$ADB" -s "$DEV" shell "am instrument -w \
-  -e package $GATE_LIVE_TEST_PACKAGE \
-  com.aisandbox.android.debug.test/androidx.test.runner.AndroidJUnitRunner" | tee "$OUT"
-# Reuse gate.sh's zero-tests-is-a-failure discipline inline (this script may run standalone).
-if grep -q "FAILURES!!!" "$OUT"; then fail "on-device live render suite: test failures — see $OUT"; fi
-if grep -qE 'OK \([1-9][0-9]* test' "$OUT"; then
-  log "on-device live render suite passed ✅"
-else
-  fail "on-device live render suite ran zero/failed tests (a green gate with no tests is a failure). See $OUT"
-fi
-
+[ "$ONDEVICE" = 1 ] && log "ON-DEVICE RENDER (single + multi) PASSED ✅"
 log "UC-97 LIVE DRIFT-GUARD LEG COMPLETE ✅"
