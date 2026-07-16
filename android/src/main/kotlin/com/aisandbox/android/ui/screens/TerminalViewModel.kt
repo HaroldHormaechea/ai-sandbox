@@ -9,6 +9,7 @@ import com.aisandbox.android.net.SessionSummary
 import com.aisandbox.android.terminal.KeyboardSettingsStore
 import com.aisandbox.android.terminal.StreamTarget
 import com.aisandbox.android.terminal.TerminalStreamController
+import com.aisandbox.android.terminal.encodeComposerLine
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
@@ -72,6 +73,20 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
     val conversationalKeyboard: StateFlow<Boolean> =
         container.keyboardSettings.conversational
             .stateIn(viewModelScope, SharingStarted.Eagerly, KeyboardSettingsStore.DEFAULT_CONVERSATIONAL)
+
+    /**
+     * UC-99 — the terminal input mode: `true` (default) = the decoupled native
+     * composer (real IME/autocorrect + local echo, one-shot send via
+     * [submitComposerLine]); `false` = raw Termux passthrough (per-keystroke, kept
+     * for power / interactive-TUI use). The screen feeds this into the terminal
+     * body to pick the input surface and to gate
+     * [com.aisandbox.android.ui.components.TerminalSurface]'s `inputEnabled`.
+     * Persisted in the process-scoped [KeyboardSettingsStore] so the choice
+     * survives back-navigation and process death.
+     */
+    val terminalComposerEnabled: StateFlow<Boolean> =
+        container.keyboardSettings.terminalComposerEnabled
+            .stateIn(viewModelScope, SharingStarted.Eagerly, KeyboardSettingsStore.DEFAULT_TERMINAL_COMPOSER)
 
     /**
      * The current session's summary, used by the hamburger Delete action's
@@ -158,6 +173,24 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
     /** UC-36 (AC#7) — persist the conversational-keyboard toggle. */
     fun setConversationalKeyboard(enabled: Boolean) {
         viewModelScope.launch { container.keyboardSettings.setConversational(enabled) }
+    }
+
+    /**
+     * UC-99 — submit a finalized composer line to the PTY. The line was typed in
+     * the decoupled native composer (full IME/autocorrect, local echo, no
+     * per-keystroke round-trip), so it is delivered ONCE as UTF-8 + a trailing CR
+     * via the existing stdin path — the same path the raw view and modifier bar
+     * use. Blank input is a no-op (nothing to send). [encodeComposerLine] is the
+     * single shared encoder the on-device gate test also drives.
+     */
+    fun submitComposerLine(text: String) {
+        if (text.isBlank()) return
+        controller?.sendStdin(encodeComposerLine(text))
+    }
+
+    /** UC-99 — persist the terminal input-mode toggle (composer ⇄ raw). */
+    fun setTerminalComposer(enabled: Boolean) {
+        viewModelScope.launch { container.keyboardSettings.setTerminalComposer(enabled) }
     }
 
     /** AC#4 — forward a resize when the rendered geometry changes. */

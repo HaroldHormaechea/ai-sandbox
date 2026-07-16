@@ -1,6 +1,7 @@
 package com.aisandbox.android.ui.screens
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -30,6 +31,7 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -62,11 +64,13 @@ import com.aisandbox.android.terminal.TerminalStreamController
 import com.aisandbox.android.terminal.service.TerminalForegroundService
 import com.aisandbox.android.ui.components.AgentSwitcherBar
 import com.aisandbox.android.ui.components.BatteryOptPrompt
+import com.aisandbox.android.ui.components.Composer
 import com.aisandbox.android.ui.components.HapticEventListener
 import com.aisandbox.android.ui.components.KeyEncoding
 import com.aisandbox.android.ui.components.KeyEvent
 import com.aisandbox.android.ui.components.ModifierBar
 import com.aisandbox.android.ui.components.TerminalSurface
+import com.aisandbox.android.ui.testtags.TerminalComposerTestTags
 import com.aisandbox.android.ui.theme.AiSandboxMonoTypography
 import com.aisandbox.android.ui.theme.BgWorkbench
 import com.aisandbox.android.ui.theme.OnSurface
@@ -296,6 +300,10 @@ private fun TerminalBody(
     val selectedTargetId by viewModel.selectedTargetId.collectAsState()
     // UC-36 (AC#7) — conversational vs raw/char keyboard mode, persisted.
     val conversational by viewModel.conversationalKeyboard.collectAsState()
+    // UC-99 — terminal input mode: the decoupled composer (default) vs raw Termux
+    // passthrough. Persisted. Picks the input surface and gates TerminalSurface's
+    // `inputEnabled` so exactly one surface owns focus/IME at a time.
+    val composerMode by viewModel.terminalComposerEnabled.collectAsState()
 
     // UC-23 — the body wrapper owns the Scaffold's system-bar insets via
     // padding(padding) and *consumes* them via consumeWindowInsets(padding) so
@@ -332,18 +340,74 @@ private fun TerminalBody(
             },
             // The real terminal surface (Termux TerminalView via AndroidView).
             // It fills the requiredHeight-pinned slot supplied by the layout.
+            // UC-99 — in composer mode the raw view is NOT the input surface, so
+            // `inputEnabled = false` gates its focus/IME; only raw mode re-enables
+            // the historical per-keystroke path.
             terminal = {
                 TerminalSurface(
                     controller = controller,
                     conversational = conversational,
+                    inputEnabled = !composerMode,
                     modifier = Modifier.fillMaxSize(),
                 )
             },
-            // AC15 / AC3 modifier bar — docked above the keyboard by the layout.
+            // UC-99 — the input bar: an always-visible mode toggle plus, in
+            // composer mode, the decoupled native composer. Docked in the SAME
+            // ime cluster as the modifier bar (see TerminalScaffoldLayout).
+            inputBar = {
+                TerminalInputBar(
+                    composerMode = composerMode,
+                    onToggleMode = { viewModel.setTerminalComposer(!composerMode) },
+                    onSubmit = viewModel::submitComposerLine,
+                )
+            },
+            // AC15 / AC3 modifier bar — docked above the keyboard by the layout,
+            // present in BOTH modes (per-key control for interactive TUIs).
             modifierBar = {
                 ModifierBar(onKey = { event -> dispatchKey(event, viewModel) })
             },
         )
+    }
+}
+
+/**
+ * UC-99 — the terminal input bar: an always-visible composer ⇄ raw-passthrough
+ * mode toggle, and (in composer mode) the decoupled native [Composer] reused
+ * from UC-37. The composer delivers a finalized line one-shot to the PTY via
+ * [TerminalViewModel.submitComposerLine] (UTF-8 + CR) — full IME/autocorrect and
+ * local echo, no per-keystroke round-trip. In raw mode only the toggle shows and
+ * the [TerminalSurface] regains focus for the historical per-keystroke path.
+ */
+@Composable
+private fun TerminalInputBar(
+    composerMode: Boolean,
+    onToggleMode: () -> Unit,
+    onSubmit: (String) -> Unit,
+) {
+    Column(modifier = Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp),
+            horizontalArrangement = Arrangement.End,
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            TextButton(
+                onClick = onToggleMode,
+                modifier = Modifier.testTag(TerminalComposerTestTags.MODE_TOGGLE),
+            ) {
+                Text(
+                    text = if (composerMode) "Switch to raw input" else "Switch to composer",
+                    style = MaterialTheme.typography.labelMedium,
+                )
+            }
+        }
+        if (composerMode) {
+            Composer(
+                enabled = true,
+                onSubmit = onSubmit,
+                inputTestTag = TerminalComposerTestTags.INPUT,
+                sendTestTag = TerminalComposerTestTags.SEND,
+            )
+        }
     }
 }
 
@@ -366,6 +430,8 @@ private fun TerminalBody(
  * @param imeInsets the sole inset source for this layout (AC#8 test seam).
  * @param agentSwitcher slot; receives `compact = imeVisible` (AC#4).
  * @param terminal slot; sized by this layout via requiredHeight (see below).
+ * @param inputBar slot (UC-99); the composer / mode-toggle input bar, docked in
+ *   the SAME ime cluster as the modifier bar, directly above it.
  * @param modifierBar slot; docked above the keyboard via windowInsetsPadding.
  */
 // `internal` (not `private`) so the androidTest source set can inject a
@@ -376,6 +442,7 @@ internal fun TerminalScaffoldLayout(
     imeInsets: WindowInsets = WindowInsets.ime,
     agentSwitcher: @Composable (compact: Boolean) -> Unit,
     terminal: @Composable () -> Unit,
+    inputBar: @Composable () -> Unit = {},
     modifierBar: @Composable () -> Unit,
 ) {
     val density = LocalDensity.current
@@ -433,18 +500,22 @@ internal fun TerminalScaffoldLayout(
             }
         }
 
-        // AC#3 — dock the modifier bar directly above the keyboard. The wrapper
-        // consumed the nav-bar inset, so windowInsetsPadding(imeInsets) nets
-        // max(ime, navBar) on the bottom edge: it rests on the nav bar with the
-        // keyboard down and rides up to sit on the keyboard when it's shown.
-        // The ModifierBar's internals (escape sequences / KeyEncoding) are
-        // untouched, so AC#3's sequence correctness is preserved.
-        Box(
-            modifier = Modifier
-                .windowInsetsPadding(imeInsets)
-                .testTag(ModifierBarTestTag),
-        ) {
-            modifierBar()
+        // AC#3 + UC-99 — ONE ime cluster docked above the keyboard: the input bar
+        // (composer / mode toggle) sits directly on top of the modifier bar, and
+        // the whole cluster rides up together. windowInsetsPadding(imeInsets) is
+        // applied ONCE here (the wrapper consumed the nav-bar inset), so it nets
+        // max(ime, navBar) on the bottom edge — resting on the nav bar with the
+        // keyboard down and on the keyboard when it's shown. The modifier bar is
+        // the last child so it stays docked directly above the keyboard; the
+        // ModifierBar's internals (escape sequences / KeyEncoding) are untouched,
+        // so AC#3's sequence correctness is preserved. The requiredHeight terminal
+        // seam above is unaffected — it pins the viewport height no matter how tall
+        // this cluster grows, so no PTY resize is emitted (UC-23 AC#2).
+        Column(modifier = Modifier.windowInsetsPadding(imeInsets)) {
+            inputBar()
+            Box(modifier = Modifier.testTag(ModifierBarTestTag)) {
+                modifierBar()
+            }
         }
     }
 }

@@ -46,10 +46,36 @@ class KeyboardSettingsStore(private val context: Context) {
         context.keyboardSettingsDataStore.edit { it[CONVERSATIONAL_KEY] = enabled }
     }
 
+    /**
+     * UC-99 — the terminal input mode: `true` (default) = the decoupled native
+     * composer (a real Compose text field with full IME/autocorrect + local echo,
+     * one-shot send over the existing PTY stdin path); `false` = raw Termux
+     * passthrough (the historical per-keystroke path, kept for power /
+     * interactive-TUI use). Independent of [conversational], which only shapes the
+     * raw path's IME inputType — the composer always uses the platform IME
+     * regardless.
+     */
+    val terminalComposerEnabled: Flow<Boolean> =
+        context.keyboardSettingsDataStore.data.map { prefs ->
+            prefs[TERMINAL_COMPOSER_KEY] ?: DEFAULT_TERMINAL_COMPOSER
+        }
+
+    /** One-shot read for non-flow contexts. */
+    suspend fun currentTerminalComposer(): Boolean = terminalComposerEnabled.first()
+
+    /** UC-99 — persist the terminal input-mode toggle across sessions. */
+    suspend fun setTerminalComposer(enabled: Boolean) {
+        context.keyboardSettingsDataStore.edit { it[TERMINAL_COMPOSER_KEY] = enabled }
+    }
+
     companion object {
         /** UC-36 — the user asked for conversational input to be the default. */
         const val DEFAULT_CONVERSATIONAL = true
         private val CONVERSATIONAL_KEY = booleanPreferencesKey("conversational_keyboard")
+
+        /** UC-99 — the decoupled composer is the default terminal input surface. */
+        const val DEFAULT_TERMINAL_COMPOSER = true
+        private val TERMINAL_COMPOSER_KEY = booleanPreferencesKey("terminal_composer_enabled")
     }
 }
 

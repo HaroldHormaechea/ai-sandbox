@@ -34,6 +34,7 @@ fun TerminalSurface(
     controller: TerminalStreamController,
     conversational: Boolean,
     modifier: Modifier = Modifier,
+    inputEnabled: Boolean = true,
 ) {
     val context = LocalContext.current
     val textSizePx = (DEFAULT_TEXT_SIZE_SP * context.resources.displayMetrics.scaledDensity).toInt()
@@ -42,26 +43,52 @@ fun TerminalSurface(
         modifier = modifier,
         factory = { ctx ->
             TerminalView(ctx, null).apply {
-                isFocusable = true
-                isFocusableInTouchMode = true
-                setTerminalViewClient(AiSandboxTerminalViewClient(ctx, this, textSizePx, conversational))
+                // UC-99 — the raw Termux view only takes focus / IME when it is the
+                // active input surface. In composer mode (`inputEnabled = false`) the
+                // decoupled Compose composer owns input, so the view must NOT be
+                // focusable or grab the IME; otherwise a tap would steal focus and
+                // re-open the raw (laggy, autocorrect-mangling) input path.
+                isFocusable = inputEnabled
+                isFocusableInTouchMode = inputEnabled
+                setTerminalViewClient(
+                    AiSandboxTerminalViewClient(ctx, this, textSizePx, conversational, inputEnabled),
+                )
                 setTextSize(textSizePx)
                 attachSession(controller.wsSession.session)
                 controller.wsSession.bindView(this)
-                // Take focus so the IME / hardware keyboard targets the terminal.
-                requestFocus()
+                // Take focus so the IME / hardware keyboard targets the terminal —
+                // only when the raw view is the active input surface (UC-99).
+                if (inputEnabled) requestFocus()
             }
         },
         // UC-36 (AC#7) — when the conversational toggle flips mid-session, push the
         // new value into the client and force the IME to re-query the inputType via
         // restartInput(). Guarded so a redundant recomposition doesn't restart the
         // IME (which would dismiss any in-flight composing region).
+        //
+        // UC-99 — when the input MODE flips (composer ⇄ raw), gate the raw view's
+        // focusability and hand focus over deterministically: entering raw mode the
+        // view (re)takes focus + IME; entering composer mode it clears focus and
+        // hides the soft keyboard so the Compose composer owns input cleanly.
         update = { view ->
             val client = view.mClient as? AiSandboxTerminalViewClient
             if (client != null && client.conversational != conversational) {
                 client.conversational = conversational
                 val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
                 imm?.restartInput(view)
+            }
+            if (client != null && client.inputEnabled != inputEnabled) {
+                client.inputEnabled = inputEnabled
+                view.isFocusable = inputEnabled
+                view.isFocusableInTouchMode = inputEnabled
+                val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager
+                if (inputEnabled) {
+                    view.requestFocus()
+                    imm?.showSoftInput(view, InputMethodManager.SHOW_IMPLICIT)
+                } else {
+                    view.clearFocus()
+                    imm?.hideSoftInputFromWindow(view.windowToken, 0)
+                }
             }
         },
         onRelease = { view -> controller.wsSession.unbindView(view) },
@@ -82,6 +109,10 @@ private class AiSandboxTerminalViewClient(
     // UC-36 — mutable so TerminalSurface.update() can flip the mode mid-session
     // (followed by InputMethodManager.restartInput to re-query the inputType).
     var conversational: Boolean,
+    // UC-99 — mutable so TerminalSurface.update() can flip the input mode
+    // (composer ⇄ raw). When false the composer owns input, so this view must not
+    // grab focus or the soft keyboard on a tap.
+    var inputEnabled: Boolean,
 ) : TerminalViewClient {
 
     override fun onScale(scale: Float): Float {
@@ -90,6 +121,10 @@ private class AiSandboxTerminalViewClient(
     }
 
     override fun onSingleTapUp(e: MotionEvent?) {
+        // UC-99 — in composer mode the raw view is not the input surface; a tap
+        // must NOT steal focus or re-open the raw IME path (that is exactly the
+        // laggy / autocorrect-mangling path the composer replaces).
+        if (!inputEnabled) return
         // AC#2 — tapping the surface opens the soft keyboard.
         view.requestFocus()
         val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as? InputMethodManager

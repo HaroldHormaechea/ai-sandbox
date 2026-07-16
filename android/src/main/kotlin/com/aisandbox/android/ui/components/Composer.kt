@@ -52,6 +52,13 @@ fun Composer(
     onSubmit: (String) -> Unit,
     modifier: Modifier = Modifier,
     readOnly: Boolean = false,
+    // UC-99 — testTags are parametrized (defaults = the conversation composer's
+    // [ComposerTestTags]) so the SAME component can be reused as the terminal
+    // (tmux phone-view) input surface with its own stable tags
+    // ([com.aisandbox.android.ui.testtags.TerminalComposerTestTags]) without the
+    // two surfaces colliding on a single tag when both are in the tree.
+    inputTestTag: String = ComposerTestTags.INPUT,
+    sendTestTag: String = ComposerTestTags.SEND,
 ) {
     var text by rememberSaveable { mutableStateOf("") }
     val placeholder = remember(enabled, readOnly) {
@@ -71,7 +78,7 @@ fun Composer(
             OutlinedTextField(
                 value = text,
                 onValueChange = { text = it },
-                modifier = Modifier.weight(1f).heightIn(min = 48.dp, max = 160.dp).testTag(ComposerTestTags.INPUT),
+                modifier = Modifier.weight(1f).heightIn(min = 48.dp, max = 160.dp).testTag(inputTestTag),
                 enabled = enabled,
                 placeholder = { Text(placeholder, color = OnSurfaceMuted) },
                 // Multiline (AC9): allow newlines; Send is an explicit button so the
@@ -92,7 +99,7 @@ fun Composer(
                     }
                 },
                 enabled = enabled && text.isNotBlank(),
-                modifier = Modifier.size(48.dp).testTag(ComposerTestTags.SEND),
+                modifier = Modifier.size(48.dp).testTag(sendTestTag),
             ) {
                 Icon(
                     imageVector = Icons.AutoMirrored.Outlined.Send,
