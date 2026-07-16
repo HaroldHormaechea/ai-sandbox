@@ -290,4 +290,54 @@ class ApiMappersTest {
         assertThat(spec.transport()).isNull();
         assertThat(spec.name()).isEqualTo("x");
     }
+
+    // ── UC-98 — workspace project DTO mapping + SpawnRequest threading ────────
+
+    @Test
+    void toWorkspaceProjectSummary_carries_id_and_name_onto_the_api_dto() {
+        // Rule 5 boundary — the internal WorkspaceProject(id,name) becomes the
+        // REST WorkspaceProjectSummary(id,displayName) the Android drop-down decodes.
+        com.aisandbox.server.workspace.dto.WorkspaceProject p =
+                new com.aisandbox.server.workspace.dto.WorkspaceProject("my-project", "my-project");
+
+        ApiDtos.WorkspaceProjectSummary s = ApiMappers.toWorkspaceProjectSummary(p);
+
+        assertThat(s.id()).isEqualTo("my-project");
+        assertThat(s.displayName()).isEqualTo("my-project");
+    }
+
+    @Test
+    void toWorkspaceProjectSummaries_maps_each_project_in_order() {
+        List<ApiDtos.WorkspaceProjectSummary> out = ApiMappers.toWorkspaceProjectSummaries(List.of(
+                new com.aisandbox.server.workspace.dto.WorkspaceProject("alpha", "alpha"),
+                new com.aisandbox.server.workspace.dto.WorkspaceProject("beta", "beta")));
+
+        assertThat(out).extracting(ApiDtos.WorkspaceProjectSummary::id).containsExactly("alpha", "beta");
+    }
+
+    @Test
+    void toSpawnCommand_threads_a_selected_workspace_project() {
+        // AC9 — a real selection is carried end-to-end into the internal SpawnCommand.
+        ApiDtos.SpawnRequest req = new ApiDtos.SpawnRequest("lbl", "shared", "shared", "proj-1");
+
+        com.aisandbox.server.sessions.dto.SpawnCommand cmd = ApiMappers.toSpawnCommand(req);
+
+        assertThat(cmd.workspaceProject()).isEqualTo("proj-1");
+    }
+
+    @Test
+    void toSpawnCommand_normalises_a_blank_workspace_project_to_null() {
+        // AC9 — a blank selection behaves exactly like "None" (null), a first-class request.
+        ApiDtos.SpawnRequest req = new ApiDtos.SpawnRequest("lbl", "shared", "shared", "   ");
+
+        assertThat(ApiMappers.toSpawnCommand(req).workspaceProject()).isNull();
+    }
+
+    @Test
+    void toSpawnCommand_keeps_a_null_workspace_project_null() {
+        // AC3/AC9 — "None" (null) is a first-class, valid spawn request.
+        ApiDtos.SpawnRequest req = new ApiDtos.SpawnRequest("lbl", "shared", "shared", null);
+
+        assertThat(ApiMappers.toSpawnCommand(req).workspaceProject()).isNull();
+    }
 }
