@@ -5,6 +5,7 @@ import java.io.IOException;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Predicate;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -57,6 +58,34 @@ public class InputInjectionService {
 
     /** The Claude Code TUI build these keystroke mappings were verified against. */
     public static final String PINNED_CLAUDE_VERSION = "2.1.169";
+
+    /**
+     * UC-98 (Bug 1) — the pane substring that marks Claude's interactive input prompt box as
+     * READY to accept a keystroke, used ONLY by the spawn-scoped {@link #injectSpawnPrompt}
+     * gate. This is a <b>substring-presence</b> check (NOT a structural TUI parse, so it stays
+     * off the Node pane-parser's pin surface); it is pinned to {@link #PINNED_CLAUDE_VERSION}
+     * alongside every other keystroke mapping in this class.
+     *
+     * <p>{@code "for shortcuts"} is the idle-composer footer hint ({@code "? for shortcuts"})
+     * Claude Code renders once the input box is interactive and empty — it is absent while the
+     * TUI is still booting, which is exactly the spawn race Bug 1 fixes: the container readiness
+     * marker ({@code /tmp/aisandbox-ready}) means the tmux session exists, NOT that Claude's
+     * prompt is live. The needle is matched case-insensitively on a whitespace-flattened capture
+     * so an 80-column wrap cannot hide it. <b>QA must live-verify this marker against the pinned
+     * build</b> (top TUI-pin risk); if it proves unreliable at 80 cols the documented fallback is
+     * the {@code "Claude Code v" + PINNED_CLAUDE_VERSION} welcome banner. A version bump re-checks
+     * this constant together with the other pinned mappings.
+     */
+    public static final String PROMPT_READY_MARKER = "for shortcuts";
+
+    /** UC-98 (Bug 1) — how long to poll {@code capture-pane} for the ready prompt before degrading. */
+    private static final Duration SPAWN_GATE_TIMEOUT = Duration.ofSeconds(30);
+
+    /** UC-98 (Bug 1) — how long to poll for the typed literal to echo before declining to submit. */
+    private static final Duration SPAWN_CONFIRM_TIMEOUT = Duration.ofSeconds(10);
+
+    /** UC-98 (Bug 1) — pause between {@code capture-pane} polls in the gate/confirm loops. */
+    private static final Duration SPAWN_POLL_INTERVAL = Duration.ofMillis(500);
 
     /**
      * UC-55 — the wizard-tab NAVIGATION keys, the ONLY keystrokes the read-only
@@ -123,6 +152,70 @@ public class InputInjectionService {
         }
         typeMultiline(n, target, text);
         sendKeys(n, target, "Enter"); // CR submits the turn
+    }
+
+    /**
+     * UC-98 (Bug 1) — outcome of the spawn-scoped {@link #injectSpawnPrompt}, so the caller
+     * ({@link com.aisandbox.server.stream.facade.ConversationFacade#inject}) can audit which
+     * branch the injection took. Every non-{@link #SUBMITTED} branch sends <b>zero</b> Enter —
+     * the exactly-once submit guarantee.
+     */
+    public enum SpawnInjectOutcome {
+        /** Prompt was ready, the typed literal was confirmed on the pane, and exactly one Enter submitted it. */
+        SUBMITTED,
+        /** Gate timed out — the input prompt never became ready, so NOTHING was typed and no Enter was sent. */
+        PROMPT_NOT_READY,
+        /** The literal was typed but never echoed onto the pane, so it was NOT submitted (graceful degrade). */
+        TYPE_NOT_CONFIRMED
+    }
+
+    /**
+     * UC-98 (Bug 1) — inject the fixed spawn/setup prompt into a freshly-spawned session with an
+     * explicit gate→type→confirm→submit choreography, fixing the submit-timing race the shared
+     * {@link #injectComposer} hits on the spawn path. {@code injectComposer} types then fires
+     * {@code Enter} back-to-back; on the spawn path that runs the instant the container readiness
+     * marker appears — before Claude's TUI input prompt is interactive — so the {@code Enter} is
+     * lost and the prompt is staged but never submitted.
+     *
+     * <p>This variant instead, on the SAME argv-only {@link ProcessExecutor} surface (adding only
+     * {@code capture-pane} reads), does:
+     * <ol>
+     *   <li><b>Gate</b> — poll {@code capture-pane} until {@link #PROMPT_READY_MARKER} is present.
+     *       On timeout: log, inject nothing, return {@link SpawnInjectOutcome#PROMPT_NOT_READY}
+     *       (0 submits).</li>
+     *   <li><b>Type</b> the literal via the shared newline-safe {@link #typeMultiline} (no commit
+     *       keystroke).</li>
+     *   <li><b>Confirm</b> — poll {@code capture-pane} until the typed literal is echoed onto the
+     *       pane (a substring-presence check). On timeout: log, do NOT press Enter, return
+     *       {@link SpawnInjectOutcome#TYPE_NOT_CONFIRMED} (never a blind submit).</li>
+     *   <li><b>Submit</b> — send <b>exactly one</b> {@code Enter} (the sole submit across all
+     *       branches) and return {@link SpawnInjectOutcome#SUBMITTED}.</li>
+     * </ol>
+     *
+     * <p>The shared {@link #injectComposer} is deliberately left untouched — the conversation
+     * composer works precisely because by the time a human types, the TUI is long ready; only the
+     * spawn path fires pre-prompt.
+     */
+    public SpawnInjectOutcome injectSpawnPrompt(int n, InjectTarget target, String text) throws IOException {
+        if (text == null || text.isEmpty()) {
+            return SpawnInjectOutcome.SUBMITTED; // nothing to submit — no-op, mirrors injectComposer's blank guard
+        }
+        // 1. GATE — never type until the interactive input prompt box is on the pane.
+        if (!pollPaneUntil(n, target, SPAWN_GATE_TIMEOUT, InputInjectionService::promptReady)) {
+            LOG.warn("UC-98 spawn-inject gate timed out for n={} (prompt-not-ready); injecting nothing", n);
+            return SpawnInjectOutcome.PROMPT_NOT_READY;
+        }
+        // 2. TYPE the literal (newline-safe, no trailing commit keystroke).
+        typeMultiline(n, target, text);
+        // 3. CONFIRM — never submit until the literal is echoed back onto the pane.
+        String needle = confirmNeedle(text);
+        if (!pollPaneUntil(n, target, SPAWN_CONFIRM_TIMEOUT, pane -> paneContains(pane, needle))) {
+            LOG.warn("UC-98 spawn-inject type not confirmed for n={} (type-not-confirmed); NOT submitting", n);
+            return SpawnInjectOutcome.TYPE_NOT_CONFIRMED;
+        }
+        // 4. Exactly one Enter — the sole submit.
+        sendKeys(n, target, "Enter");
+        return SpawnInjectOutcome.SUBMITTED;
     }
 
     /**
@@ -384,17 +477,26 @@ public class InputInjectionService {
     }
 
     private List<String> sendKeysBase(int n, InjectTarget target) {
-        String project = "ai-sandbox-" + n;
         InjectTarget t = (target == null) ? InjectTarget.main() : target;
-        List<String> argv =
-                new ArrayList<>(List.of("docker", "compose", "-p", project, "exec", "-T", "claude-sandbox", "tmux"));
+        List<String> argv = dockerComposeTmux(n, t);
+        argv.add("send-keys");
+        argv.add("-t");
+        argv.add(t.spec());
+        return argv;
+    }
+
+    /**
+     * {@code docker compose -p ai-sandbox-N exec -T claude-sandbox tmux [-S socket]} — the shared
+     * argv prefix for every tmux invocation ({@code send-keys} and {@code capture-pane}). Pure
+     * argv, no shell, no interpolation — same contract as the rest of this class.
+     */
+    private List<String> dockerComposeTmux(int n, InjectTarget t) {
+        List<String> argv = new ArrayList<>(
+                List.of("docker", "compose", "-p", "ai-sandbox-" + n, "exec", "-T", "claude-sandbox", "tmux"));
         if (t.socket() != null && !t.socket().isBlank()) {
             argv.add("-S");
             argv.add(t.socket());
         }
-        argv.add("send-keys");
-        argv.add("-t");
-        argv.add(t.spec());
         return argv;
     }
 
@@ -404,5 +506,97 @@ public class InputInjectionService {
             LOG.warn("send-keys failed (exit={}): {}", r.exitCode(), r.stderr());
             throw new IOException("tmux send-keys failed: " + r.stderr());
         }
+    }
+
+    // ──────────────────────── UC-98 (Bug 1) spawn-inject gate/confirm ────────────────────────
+
+    /**
+     * Poll {@code capture-pane} for {@code target} until {@code condition} holds or {@code timeout}
+     * elapses. Returns {@code true} once the condition is met, {@code false} on timeout or thread
+     * interruption. A failed/empty capture is treated as "not yet" (keep polling) — never fatal.
+     * Intended for the post-spawn daemon thread, where a bounded blocking poll is safe (the spawn
+     * readiness wait already blocks there).
+     */
+    private boolean pollPaneUntil(int n, InjectTarget target, Duration timeout, Predicate<String> condition)
+            throws IOException {
+        long deadlineNanos = System.nanoTime() + timeout.toNanos();
+        while (true) {
+            String pane = capturePane(n, target);
+            if (pane != null && condition.test(pane)) {
+                return true;
+            }
+            if (System.nanoTime() >= deadlineNanos) {
+                return false;
+            }
+            try {
+                Thread.sleep(SPAWN_POLL_INTERVAL.toMillis());
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+    }
+
+    /**
+     * {@code tmux capture-pane -p -t <spec>} — the visible pane text, or {@code null} on any
+     * failure (non-zero exit, exec error, empty capture). {@code null} means "unknown, keep
+     * polling"; it is never propagated as an error, so a transient capture failure can never turn
+     * into a blind submit.
+     */
+    private String capturePane(int n, InjectTarget target) {
+        InjectTarget t = (target == null) ? InjectTarget.main() : target;
+        List<String> argv = dockerComposeTmux(n, t);
+        argv.add("capture-pane");
+        argv.add("-p");
+        argv.add("-t");
+        argv.add(t.spec());
+        try {
+            ProcessExecutor.Result r = exec.run(argv, null, TIMEOUT);
+            if (r.exitCode() != 0) {
+                LOG.debug("capture-pane failed (exit={}): {}", r.exitCode(), r.stderr());
+                return null;
+            }
+            String out = r.stdout();
+            return (out == null || out.isEmpty()) ? null : out;
+        } catch (IOException e) {
+            LOG.debug("capture-pane errored for n={}: {}", n, e.toString());
+            return null;
+        }
+    }
+
+    /**
+     * Is Claude's interactive input prompt box present on {@code paneText}? A substring-presence
+     * check for {@link #PROMPT_READY_MARKER} on a whitespace-flattened, case-folded capture (so an
+     * 80-column wrap of the footer hint cannot hide the marker). NOT a structural TUI parse.
+     */
+    private static boolean promptReady(String paneText) {
+        return paneContains(paneText, PROMPT_READY_MARKER);
+    }
+
+    /** Whitespace-flattened, case-insensitive substring-presence test. Null-safe (empty needle → false). */
+    private static boolean paneContains(String paneText, String needle) {
+        if (paneText == null || needle == null || needle.isBlank()) {
+            return false;
+        }
+        String flatPane = paneText.replaceAll("\\s+", " ").toLowerCase(java.util.Locale.ROOT);
+        String flatNeedle = needle.replaceAll("\\s+", " ")
+                .toLowerCase(java.util.Locale.ROOT)
+                .trim();
+        return flatPane.contains(flatNeedle);
+    }
+
+    /**
+     * The confirm-step needle for {@code text}: its first non-blank line, trimmed. The spawn prompt
+     * is single-line, so this is the whole prompt; for a hypothetical multiline literal it is the
+     * first line, which is enough to prove the input box accepted the typed text before we submit.
+     */
+    private static String confirmNeedle(String text) {
+        for (String line : text.split("\n", -1)) {
+            String trimmed = line.trim();
+            if (!trimmed.isEmpty()) {
+                return trimmed;
+            }
+        }
+        return text.trim();
     }
 }
