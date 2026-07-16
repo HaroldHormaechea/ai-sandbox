@@ -68,6 +68,29 @@ object ComposerTestTags {
 }
 
 /**
+ * UC-99 — stable `testTag`s for the terminal (tmux phone-view) input surface. The
+ * decoupled native [com.aisandbox.android.ui.components.Composer] is reused there
+ * as the default input mode (real IME/autocorrect + local echo, one-shot send
+ * over the existing PTY stdin path), so it carries its own tags — distinct from
+ * the conversation composer's [ComposerTestTags] — plus a mode toggle that flips
+ * between the composer and the raw Termux passthrough. Like the other tags in
+ * this file they are part of the production UI contract: QA's mandatory on-device
+ * instrumented Compose test in `com.aisandbox.android.gate` drives this surface by
+ * these tags only. Renaming one is a breaking change for that suite — update it in
+ * lockstep.
+ */
+object TerminalComposerTestTags {
+    /** The terminal composer text input. */
+    const val INPUT = "terminal_composer_input"
+
+    /** The terminal composer send button. */
+    const val SEND = "terminal_composer_send"
+
+    /** The composer ⇄ raw-passthrough input-mode toggle. */
+    const val MODE_TOGGLE = "terminal_composer_mode_toggle"
+}
+
+/**
  * UC-98 — stable `testTag`s for the "New session" sheet's workspace-project drop-down. Like the
  * other tags in this file they are part of the production UI contract: QA's mandatory on-device
  * instrumented Compose test drives the drop-down by these tags only. Renaming one is a breaking
