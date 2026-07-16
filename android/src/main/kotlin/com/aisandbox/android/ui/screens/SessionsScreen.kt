@@ -35,12 +35,15 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.MenuAnchorType
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
@@ -86,11 +89,13 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.aisandbox.android.R
 import com.aisandbox.android.net.LifecycleAction
 import com.aisandbox.android.net.SessionSummary
+import com.aisandbox.android.net.WorkspaceProjectInfo
 import com.aisandbox.android.ui.components.AttachedBadge
 import com.aisandbox.android.ui.components.PendingQuestionBadge
 import com.aisandbox.android.ui.components.ServerSshBadge
 import com.aisandbox.android.ui.components.SessionAvatar
 import com.aisandbox.android.ui.components.StatusPill
+import com.aisandbox.android.ui.testtags.NewSessionTestTags
 import com.aisandbox.android.ui.theme.AiSandboxMonoTypography
 import com.aisandbox.android.ui.theme.ErrorTone
 import com.aisandbox.android.ui.theme.OnSurface
@@ -293,17 +298,22 @@ fun SessionsScreen(
     }
 
     if (showNewSheet) {
+        // UC-98 — fetch the workspace-project catalogue when the sheet opens (AC2).
+        LaunchedEffect(Unit) { viewModel.loadWorkspaceProjects() }
+        val projectsState by viewModel.workspaceProjects.collectAsState()
         ModalBottomSheet(
             onDismissRequest = { showNewSheet = false },
             sheetState = sheetState,
         ) {
             NewSessionSheet(
                 spawning = state.spawning,
+                projects = projectsState.projectsOrEmpty,
                 onCancel = {
                     coroutineScope.launch { sheetState.hide(); showNewSheet = false }
                 },
-                onSpawn = { label ->
-                    viewModel.spawn(label.takeIf { it.isNotBlank() })
+                onSpawn = { label, projectId ->
+                    // UC-98 — projectId is the selected project's id, or null for "None" (AC3/AC9).
+                    viewModel.spawn(label.takeIf { it.isNotBlank() }, projectId)
                     coroutineScope.launch { sheetState.hide(); showNewSheet = false }
                 },
             )
@@ -982,13 +992,40 @@ private fun isAttachable(state: String): Boolean =
 
 // ── UC04-2a New session sheet ───────────────────────────────────────────────
 
+/**
+ * UC04-2a / UC-98 — the "New session" bottom-sheet body. Beyond the label field
+ * it now offers a workspace-project drop-down (UC-98): a "None" default (which
+ * preserves today's spawn exactly, AC3) plus one entry per [projects] item. The
+ * sheet is server-free — it takes the already-fetched [projects] list and emits
+ * the chosen id via [onSpawn] (`null` for "None", AC9) — so QA's mandatory
+ * on-device instrumented Compose test can drive it in isolation by the stable
+ * [NewSessionTestTags] tags without a live server. Visibility is `internal`
+ * (not `private`) precisely so that instrumented test can reference it.
+ *
+ * @param projects the selectable projects (already fetched); the drop-down adds
+ *   "None" on top and is shown in BOTH workspace modes (AC7)
+ * @param onSpawn  invoked with (label, projectId) — projectId is the selected
+ *   project's id, or `null` when "None" is selected (AC2/AC3/AC9)
+ */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun NewSessionSheet(
+internal fun NewSessionSheet(
     spawning: Boolean,
+    projects: List<WorkspaceProjectInfo>,
     onCancel: () -> Unit,
-    onSpawn: (String) -> Unit,
+    onSpawn: (label: String, projectId: String?) -> Unit,
 ) {
     var label by rememberSaveable { mutableStateOf("") }
+    // UC-98 — the selected project id; null == "None", the pre-selected default (AC3).
+    var selectedProjectId by rememberSaveable { mutableStateOf<String?>(null) }
+    var expanded by remember { mutableStateOf(false) }
+
+    val noneLabel = stringResource(R.string.new_session_project_none)
+    // If a previously-selected project vanished from a refreshed list, fall back
+    // to "None" for display so the field never shows a stale/blank selection.
+    val selectedProject = projects.firstOrNull { it.id == selectedProjectId }
+    val selectionText = selectedProject?.displayName?.ifBlank { selectedProject.id } ?: noneLabel
+
     Column(modifier = Modifier.fillMaxWidth().padding(horizontal = 24.dp, vertical = 16.dp)) {
         Text(
             text = stringResource(R.string.sessions_new_session),
@@ -1009,13 +1046,57 @@ private fun NewSessionSheet(
             enabled = !spawning,
             modifier = Modifier.fillMaxWidth(),
         )
+        Spacer(Modifier.height(16.dp))
+        // UC-98 — workspace-project selector. Always present (both modes, AC7);
+        // "None" is the pre-selected default (AC3).
+        ExposedDropdownMenuBox(
+            expanded = expanded,
+            onExpandedChange = { if (!spawning) expanded = it },
+            modifier = Modifier.testTag(NewSessionTestTags.PROJECT_DROPDOWN),
+        ) {
+            OutlinedTextField(
+                value = selectionText,
+                onValueChange = {},
+                readOnly = true,
+                enabled = !spawning,
+                label = { Text(stringResource(R.string.new_session_project_label)) },
+                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .menuAnchor(MenuAnchorType.PrimaryNotEditable)
+                    .testTag(NewSessionTestTags.PROJECT_DROPDOWN_FIELD),
+            )
+            ExposedDropdownMenu(
+                expanded = expanded,
+                onDismissRequest = { expanded = false },
+            ) {
+                DropdownMenuItem(
+                    text = { Text(noneLabel) },
+                    onClick = {
+                        selectedProjectId = null
+                        expanded = false
+                    },
+                    modifier = Modifier.testTag(NewSessionTestTags.PROJECT_OPTION_NONE),
+                )
+                projects.forEach { project ->
+                    DropdownMenuItem(
+                        text = { Text(project.displayName.ifBlank { project.id }) },
+                        onClick = {
+                            selectedProjectId = project.id
+                            expanded = false
+                        },
+                        modifier = Modifier.testTag(NewSessionTestTags.projectOption(project.id)),
+                    )
+                }
+            }
+        }
         Spacer(Modifier.height(24.dp))
         Row(horizontalArrangement = Arrangement.End, modifier = Modifier.fillMaxWidth()) {
             TextButton(onClick = onCancel, enabled = !spawning) {
                 Text(stringResource(R.string.new_session_cancel))
             }
             Spacer(Modifier.width(8.dp))
-            Button(onClick = { onSpawn(label) }, enabled = !spawning) {
+            Button(onClick = { onSpawn(label, selectedProjectId) }, enabled = !spawning) {
                 Text(stringResource(R.string.new_session_spawn))
             }
         }

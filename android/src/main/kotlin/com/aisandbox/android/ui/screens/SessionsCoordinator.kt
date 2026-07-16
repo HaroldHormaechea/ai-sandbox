@@ -249,7 +249,7 @@ class SessionsCoordinator(
         return keep
     }
 
-    fun spawn(label: String?) {
+    fun spawn(label: String?, workspaceProject: String? = null) {
         if (state.value.spawning) return
         scope.launch {
             state.value = state.value.copy(spawning = true, lastError = null)
@@ -288,7 +288,9 @@ class SessionsCoordinator(
                 return@launch
             }
             try {
-                when (val r = apiFactory(profile).spawn(label)) {
+                // UC-98 — forward the selected workspace-project id (null == "None",
+                // preserving today's spawn exactly, AC3/AC9).
+                when (val r = apiFactory(profile).spawn(label, workspaceProject)) {
                     is ApiResult.Success -> {
                         // UC-61 — USE the authoritative SessionSummary the server
                         // returned (previously discarded). Drop every optimistic

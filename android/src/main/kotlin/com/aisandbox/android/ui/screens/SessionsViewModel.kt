@@ -4,12 +4,15 @@ import android.app.Application
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.aisandbox.android.AiSandboxApplication
+import com.aisandbox.android.net.ApiResult
 import com.aisandbox.android.net.LifecycleAction
 import com.aisandbox.android.net.ServerProfile
 import com.aisandbox.android.net.SessionSummary
+import com.aisandbox.android.net.WorkspaceProjectInfo
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 
 /**
  * UC04-2 sessions list ViewModel.
@@ -42,6 +45,18 @@ class SessionsViewModel(application: Application) : AndroidViewModel(application
 
     private val _state = MutableStateFlow(SessionsUiState())
     val state: StateFlow<SessionsUiState> = _state.asStateFlow()
+
+    /**
+     * UC-98 — the workspace projects offered in the "New session" sheet's
+     * drop-down, fetched from `GET /v1/workspace/projects` when the sheet opens
+     * ([loadWorkspaceProjects]). Kept in a SEPARATE flow from [state] (mirroring
+     * [com.aisandbox.android.ui.screens.ConversationViewModel]'s model-menu flow)
+     * so a catalogue fetch never perturbs the sessions-list render state. Any
+     * failure resolves to [WorkspaceProjectsState.Error]; the sheet still offers
+     * "None" so spawning is always possible (AC3/AC7).
+     */
+    private val _workspaceProjects = MutableStateFlow<WorkspaceProjectsState>(WorkspaceProjectsState.Idle)
+    val workspaceProjects: StateFlow<WorkspaceProjectsState> = _workspaceProjects.asStateFlow()
 
     private val coordinator = SessionsCoordinator(
         state = _state,
@@ -85,7 +100,38 @@ class SessionsViewModel(application: Application) : AndroidViewModel(application
 
     fun selectFilter(filter: SessionsFilter) = coordinator.selectFilter(filter)
 
-    fun spawn(label: String?) = coordinator.spawn(label)
+    /** UC-98 — spawn carrying the optional workspace-project selection (null == "None"). */
+    fun spawn(label: String?, workspaceProject: String? = null) = coordinator.spawn(label, workspaceProject)
+
+    /**
+     * UC-98 — fetch the workspace-project catalogue for the "New session" sheet's
+     * drop-down (AC2). Publishes [WorkspaceProjectsState.Loading] immediately,
+     * then [Loaded] / [Error] from `GET /v1/workspace/projects`. Mirrors
+     * [com.aisandbox.android.ui.screens.ConversationViewModel.loadModels]. A null
+     * profile (not enrolled) or any transport / HTTP failure resolves to
+     * [WorkspaceProjectsState.Error] — the sheet still offers "None" so spawning
+     * remains possible (AC3/AC7). Driven by the screen when the sheet opens.
+     */
+    fun loadWorkspaceProjects() {
+        _workspaceProjects.value = WorkspaceProjectsState.Loading
+        viewModelScope.launch {
+            val profile = container.profileStore.current()
+            if (profile == null) {
+                _workspaceProjects.value = WorkspaceProjectsState.Error("Not enrolled")
+                return@launch
+            }
+            val result = try {
+                container.workspaceProjectsApi(container.httpClient(profile)).list()
+            } catch (t: Throwable) {
+                _workspaceProjects.value = WorkspaceProjectsState.Error(t.message ?: t.javaClass.simpleName)
+                return@launch
+            }
+            _workspaceProjects.value = when (result) {
+                is ApiResult.Success -> WorkspaceProjectsState.Loaded(result.value)
+                is ApiResult.HttpFailure -> WorkspaceProjectsState.Error(result.detail.ifBlank { result.code })
+            }
+        }
+    }
 
     fun delete(n: Int, force: Boolean) = coordinator.delete(n, force)
 
@@ -112,6 +158,24 @@ class SessionsViewModel(application: Application) : AndroidViewModel(application
         eventsController.close()
         super.onCleared()
     }
+}
+
+/**
+ * UC-98 — state of the "New session" sheet's workspace-project catalogue fetch.
+ * Mirrors [com.aisandbox.android.ui.screens.ModelMenuState]. The drop-down always
+ * renders a "None" option regardless of this state, so a Loading / Error state
+ * simply means no real projects are offered yet — spawning is never blocked
+ * (AC3/AC7).
+ */
+sealed interface WorkspaceProjectsState {
+    data object Idle : WorkspaceProjectsState
+    data object Loading : WorkspaceProjectsState
+    data class Loaded(val projects: List<WorkspaceProjectInfo>) : WorkspaceProjectsState
+    data class Error(val message: String) : WorkspaceProjectsState
+
+    /** The real projects to render right now — empty unless [Loaded]. */
+    val projectsOrEmpty: List<WorkspaceProjectInfo>
+        get() = (this as? Loaded)?.projects ?: emptyList()
 }
 
 /**

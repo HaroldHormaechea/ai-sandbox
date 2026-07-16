@@ -16,6 +16,7 @@ import com.aisandbox.android.net.SessionEventsClient
 import com.aisandbox.android.net.SessionsApi
 import com.aisandbox.android.net.StreamClient
 import com.aisandbox.android.net.TerminatingSessionsStore
+import com.aisandbox.android.net.WorkspaceProjectsApi
 import com.aisandbox.android.terminal.KeyboardSettingsStore
 import com.aisandbox.android.terminal.TerminalStreamController
 import com.aisandbox.android.ui.settings.AppearanceSettingsStore
@@ -112,6 +113,9 @@ class AppContainer(applicationContext: Context) {
 
     /** UC-66 — build a per-profile client for the model-catalogue endpoint (GET /v1/models). */
     fun modelsApi(client: AiSandboxHttpClient): ModelsApi = ModelsApi(client)
+
+    /** UC-98 — build a per-profile client for the workspace-project catalogue (GET /v1/workspace/projects). */
+    fun workspaceProjectsApi(client: AiSandboxHttpClient): WorkspaceProjectsApi = WorkspaceProjectsApi(client)
 
     /** UC-67 — build a per-profile client for the per-session MCP management endpoints. */
     fun mcpApi(client: AiSandboxHttpClient): McpApi = McpApi(client)

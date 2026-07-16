@@ -13,6 +13,7 @@ import java.util.List;
 import java.util.function.Predicate;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Service;
 
 /**
@@ -53,6 +54,7 @@ public class WorkspaceProjectService {
      */
     private final Predicate<Path> filter;
 
+    @Autowired
     public WorkspaceProjectService(ServerProperties props) {
         this(props, path -> true);
     }

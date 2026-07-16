@@ -135,7 +135,9 @@ public final class ApiDtos {
                             description = "Stable id of the project — sent back as SpawnRequest.workspaceProject.",
                             example = "my-project")
                     String id,
-            @Schema(description = "Human-readable name shown in the drop-down (the folder name).", example = "my-project")
+            @Schema(
+                            description = "Human-readable name shown in the drop-down (the folder name).",
+                            example = "my-project")
                     String displayName) {}
 
     @Schema(description = "UC-67 — one of a session's MCP servers, returned by GET /v1/sessions/{n}/mcp.")

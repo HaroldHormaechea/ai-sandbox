@@ -66,3 +66,23 @@ object ComposerTestTags {
     /** The composer send button. */
     const val SEND = "composer_send"
 }
+
+/**
+ * UC-98 — stable `testTag`s for the "New session" sheet's workspace-project drop-down. Like the
+ * other tags in this file they are part of the production UI contract: QA's mandatory on-device
+ * instrumented Compose test drives the drop-down by these tags only. Renaming one is a breaking
+ * change for that suite — update it in lockstep.
+ */
+object NewSessionTestTags {
+    /** The [androidx.compose.material3.ExposedDropdownMenuBox] wrapping the project selector. */
+    const val PROJECT_DROPDOWN = "new_session_project_dropdown"
+
+    /** The read-only anchor text field that opens the drop-down and shows the current selection. */
+    const val PROJECT_DROPDOWN_FIELD = "new_session_project_dropdown_field"
+
+    /** The "None" menu item (the pre-selected default). */
+    const val PROJECT_OPTION_NONE = "new_session_project_option_none"
+
+    /** A real project's menu item, by its stable id. */
+    fun projectOption(id: String): String = "new_session_project_option_$id"
+}

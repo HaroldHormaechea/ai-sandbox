@@ -353,7 +353,8 @@ public class SessionFacade {
         // between listing and spawn.
         Optional<WorkspaceProject> atSchedule = projects.find(projectId);
         if (atSchedule.isEmpty()) {
-            audit.logEvent(AuditAction.SESSION_WORKSPACE_INJECT, "skip", "n", n, "project", projectId, "reason", "stale");
+            audit.logEvent(
+                    AuditAction.SESSION_WORKSPACE_INJECT, "skip", "n", n, "project", projectId, "reason", "stale");
             return;
         }
         postSpawnExecutor.execute(() -> runWorkspaceProjectInjection(n, projectId, ready, projects, injector));
@@ -374,7 +375,14 @@ public class SessionFacade {
             // AC6 — only inject once the session's readiness marker is up.
             if (!ready.awaitReady(n, READINESS_TIMEOUT, READINESS_POLL_INTERVAL)) {
                 audit.logEvent(
-                        AuditAction.SESSION_WORKSPACE_INJECT, "skip", "n", n, "project", projectId, "reason", "not-ready");
+                        AuditAction.SESSION_WORKSPACE_INJECT,
+                        "skip",
+                        "n",
+                        n,
+                        "project",
+                        projectId,
+                        "reason",
+                        "not-ready");
                 return;
             }
             // AC10 — re-validate immediately before injecting; the folder may
