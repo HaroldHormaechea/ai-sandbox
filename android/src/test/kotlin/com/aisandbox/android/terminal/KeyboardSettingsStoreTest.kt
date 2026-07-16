@@ -51,4 +51,13 @@ class KeyboardSettingsStoreTest {
         // future flip of the constant is a conscious, blamed change.
         assertThat(KeyboardSettingsStore.DEFAULT_CONVERSATIONAL).isTrue()
     }
+
+    @Test
+    fun `UC-99 - terminal composer is the default input surface`() {
+        // AC#5 — the decoupled composer (lag + autocorrect fix) is the DEFAULT
+        // terminal input mode; raw passthrough is the opt-in escape hatch. Pinned
+        // as a pure constant (no DataStore I/O, so no race with the round-trip
+        // test above) so flipping the default is a deliberate, blamed change.
+        assertThat(KeyboardSettingsStore.DEFAULT_TERMINAL_COMPOSER).isTrue()
+    }
 }
