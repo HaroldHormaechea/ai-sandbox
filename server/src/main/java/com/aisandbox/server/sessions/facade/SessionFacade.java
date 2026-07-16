@@ -4,6 +4,7 @@ import com.aisandbox.server.audit.AuditAction;
 import com.aisandbox.server.audit.AuditLogger;
 import com.aisandbox.server.config.ServerProperties;
 import com.aisandbox.server.config.SpecialSessions;
+import com.aisandbox.server.sessions.SpawnPromptInjector;
 import com.aisandbox.server.sessions.dto.LifecycleAction;
 import com.aisandbox.server.sessions.dto.SessionDetail;
 import com.aisandbox.server.sessions.dto.SessionRecord;
@@ -14,13 +15,17 @@ import com.aisandbox.server.sessions.service.HostShellSessionService;
 import com.aisandbox.server.sessions.service.ProcessExecutor;
 import com.aisandbox.server.sessions.service.SandboxImageState;
 import com.aisandbox.server.sessions.service.ScriptExecutorService;
+import com.aisandbox.server.sessions.service.SessionReadinessService;
 import com.aisandbox.server.sessions.service.SessionRegistryService;
 import com.aisandbox.server.sessions.service.TerminatingSessions;
+import com.aisandbox.server.workspace.dto.WorkspaceProject;
+import com.aisandbox.server.workspace.facade.WorkspaceProjectFacade;
 import java.io.IOException;
 import java.time.Duration;
 import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.Optional;
+import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.ReentrantLock;
 import org.slf4j.Logger;
@@ -69,6 +74,50 @@ public class SessionFacade {
      */
     private volatile SandboxImageFacade sandboxImage;
 
+    /**
+     * UC-98 — the workspace-project catalogue facade, readiness probe, and the
+     * prompt-injection port. All three are injected via {@code @Autowired(required
+     * = false)} setters (same late-binding pattern as {@link #hostShell} /
+     * {@link #sandboxImage}) so the pre-UC-98 unit constructions of this facade
+     * compile unchanged. In production all three are always present; when any is
+     * unset (pre-UC-98 tests) the post-spawn injection is skipped entirely and
+     * spawning behaves exactly as before (AC3). Cross-domain reads go
+     * facade-to-facade ({@code sessions → workspace}); the readiness probe is a
+     * same-domain service; the inject is behind the {@link SpawnPromptInjector}
+     * port implemented by the conversation domain (edge {@code stream →
+     * sessions}) — all acyclic.
+     */
+    private volatile WorkspaceProjectFacade workspaceProjects;
+
+    private volatile SessionReadinessService readiness;
+
+    private volatile SpawnPromptInjector promptInjector;
+
+    /**
+     * UC-98 — how long to wait for a freshly-spawned session's readiness marker
+     * before giving up on the setup-prompt injection, and how often to re-probe.
+     * The marker appears after the container's UC-27 provisioning + tmux/Claude
+     * come up, which can take a while, so the window is generous; the injection
+     * is best-effort, so a timeout simply skips it (the session is unaffected).
+     */
+    private static final Duration READINESS_TIMEOUT = Duration.ofMinutes(5);
+
+    private static final Duration READINESS_POLL_INTERVAL = Duration.ofSeconds(2);
+
+    /**
+     * UC-98 — runs the post-spawn readiness-wait + inject OFF the request thread
+     * so {@code POST /v1/sessions} returns as soon as {@code spawn.sh} does
+     * (AC6: injection is independent of the response / the user attaching).
+     * Defaults to a fresh daemon thread per task; a test injects a synchronous
+     * executor via {@link #setPostSpawnExecutor} to assert the inject ordering
+     * deterministically.
+     */
+    private volatile Executor postSpawnExecutor = task -> {
+        Thread t = new Thread(task, "uc98-post-spawn-inject");
+        t.setDaemon(true);
+        t.start();
+    };
+
     public SessionFacade(
             SessionRegistryService registry,
             ScriptExecutorService executor,
@@ -96,6 +145,35 @@ public class SessionFacade {
     @Autowired(required = false)
     public void setSandboxImage(SandboxImageFacade sandboxImage) {
         this.sandboxImage = sandboxImage;
+    }
+
+    /** UC-98 — late-binding injection of the workspace-project catalogue facade (see field doc). */
+    @Autowired(required = false)
+    public void setWorkspaceProjects(WorkspaceProjectFacade workspaceProjects) {
+        this.workspaceProjects = workspaceProjects;
+    }
+
+    /** UC-98 — late-binding injection of the readiness probe (see field doc). */
+    @Autowired(required = false)
+    public void setReadiness(SessionReadinessService readiness) {
+        this.readiness = readiness;
+    }
+
+    /** UC-98 — late-binding injection of the prompt-injection port (see field doc). */
+    @Autowired(required = false)
+    public void setPromptInjector(SpawnPromptInjector promptInjector) {
+        this.promptInjector = promptInjector;
+    }
+
+    /**
+     * UC-98 — override the executor that runs the post-spawn readiness-wait +
+     * inject. Visible for testing: a test passes a synchronous executor
+     * ({@code Runnable::run}) so the inject ordering (only after {@code
+     * awaitReady} is true, exactly once) can be asserted without a background
+     * thread.
+     */
+    void setPostSpawnExecutor(Executor postSpawnExecutor) {
+        this.postSpawnExecutor = postSpawnExecutor;
     }
 
     /**
@@ -224,9 +302,108 @@ public class SessionFacade {
                     cmd.workspaceMode().name(),
                     "claudeConfigMode",
                     cmd.claudeConfigMode().name());
+            // UC-98 — if a workspace project was selected, schedule the off-request
+            // readiness-wait + one-shot setup-prompt injection. "None" (null) is a
+            // no-op, so spawning without a project is byte-identical to pre-UC-98
+            // (AC3). The scheduling never affects the spawn's success/response.
+            scheduleWorkspaceProjectInjection(assignedN, cmd.workspaceProject());
             return assignedN;
         } finally {
             spawnMutex.release();
+        }
+    }
+
+    /**
+     * UC-98 — schedule the post-spawn workspace-project setup-prompt injection
+     * for session {@code n}, if a project was selected.
+     *
+     * <p>Runs entirely off the request thread (AC6): the request has already
+     * spawned the session, so this only pre-seeds the prompt before the user
+     * attaches. Nothing here can fail the spawn — every path is guarded and
+     * best-effort.
+     *
+     * <p>Flow:
+     *
+     * <ol>
+     *   <li>"None" (null id) → do nothing (AC3).</li>
+     *   <li>Collaborators unwired (pre-UC-98 tests) → skip silently.</li>
+     *   <li>Re-validate the id against the LIVE listing at schedule time; an
+     *       absent id (stale/deleted between listing and spawn) degrades to
+     *       "no project" — skip + audit, spawn already CREATED (AC10).</li>
+     *   <li>Otherwise submit a task that waits for readiness, re-validates the
+     *       id ONE more time immediately before injecting (AC10), then injects
+     *       + submits the fixed prompt EXACTLY once (AC4).</li>
+     * </ol>
+     */
+    private void scheduleWorkspaceProjectInjection(int n, String projectId) {
+        if (projectId == null) {
+            return; // "None" — preserve today's spawn behaviour exactly (AC3).
+        }
+        // Null-guard the @Autowired(required=false) collaborators BEFORE any
+        // thread could dereference them (challenger's non-blocking note): a
+        // pre-UC-98 wiring with any of them unset simply skips injection.
+        WorkspaceProjectFacade projects = this.workspaceProjects;
+        SessionReadinessService ready = this.readiness;
+        SpawnPromptInjector injector = this.promptInjector;
+        if (projects == null || ready == null || injector == null) {
+            LOG.debug("UC-98 post-spawn injection skipped for session {}: collaborators unwired", n);
+            return;
+        }
+        // Re-validate at SCHEDULE time (AC10): the folder may have been deleted
+        // between listing and spawn.
+        Optional<WorkspaceProject> atSchedule = projects.find(projectId);
+        if (atSchedule.isEmpty()) {
+            audit.logEvent(
+                    AuditAction.SESSION_WORKSPACE_INJECT, "skip", "n", n, "project", projectId, "reason", "stale");
+            return;
+        }
+        postSpawnExecutor.execute(() -> runWorkspaceProjectInjection(n, projectId, ready, projects, injector));
+    }
+
+    /**
+     * UC-98 — the off-request task body: wait for readiness, re-validate, inject.
+     * Never throws — a failure here must not crash the daemon thread or affect
+     * the (already successful) spawn.
+     */
+    private void runWorkspaceProjectInjection(
+            int n,
+            String projectId,
+            SessionReadinessService ready,
+            WorkspaceProjectFacade projects,
+            SpawnPromptInjector injector) {
+        try {
+            // AC6 — only inject once the session's readiness marker is up.
+            if (!ready.awaitReady(n, READINESS_TIMEOUT, READINESS_POLL_INTERVAL)) {
+                audit.logEvent(
+                        AuditAction.SESSION_WORKSPACE_INJECT,
+                        "skip",
+                        "n",
+                        n,
+                        "project",
+                        projectId,
+                        "reason",
+                        "not-ready");
+                return;
+            }
+            // AC10 — re-validate immediately before injecting; the folder may
+            // have vanished during the (potentially long) readiness wait.
+            Optional<WorkspaceProject> preInject = projects.find(projectId);
+            if (preInject.isEmpty()) {
+                audit.logEvent(
+                        AuditAction.SESSION_WORKSPACE_INJECT, "skip", "n", n, "project", projectId, "reason", "stale");
+                return;
+            }
+            // AC4/AC5 — the fixed prompt with the folder name substituted, typed
+            // and submitted exactly once (the injector presses Enter).
+            String folder = preInject.get().name();
+            injector.inject(n, "We will work in the project " + folder + ".");
+            audit.logEvent(AuditAction.SESSION_WORKSPACE_INJECT, "ok", "n", n, "project", folder);
+        } catch (IOException | RuntimeException e) {
+            // Non-fatal: the session is already spawned. Log + audit, never retry
+            // or re-inject (AC4 — exactly once), never crash the thread.
+            LOG.warn("UC-98 setup-prompt injection failed for session {} (project {}): {}", n, projectId, e.toString());
+            audit.logEvent(
+                    AuditAction.SESSION_WORKSPACE_INJECT, "fail", "n", n, "project", projectId, "error", e.toString());
         }
     }
 

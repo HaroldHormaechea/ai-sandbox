@@ -58,7 +58,14 @@ public enum AuditAction {
     // {target}; result is ok / update_trigger_failed. The privileged install +
     // restart is performed by the independent root ai-sandbox-updater unit, NOT
     // by the server — so this line records only that the trigger was emitted.
-    SERVER_UPDATE_APPLY;
+    SERVER_UPDATE_APPLY,
+    // UC-98 — the server auto-injected the workspace-project setup prompt
+    // ("We will work in the project <folder>.") into a freshly-spawned session
+    // after its readiness marker came up. Payload carries {n, project}; result
+    // is ok (injected once), skip (stale/absent project id — AC10, or readiness
+    // never confirmed), or fail (the inject itself errored — non-fatal, the
+    // session is already spawned). Never retried / re-injected.
+    SESSION_WORKSPACE_INJECT;
 
     public String wire() {
         return name().toLowerCase();

@@ -65,6 +65,9 @@
     <string name="new_session_help">Image and hardware specs are fixed by the server profile — not selectable from the client.</string>
     <string name="new_session_cancel">Cancel</string>
     <string name="new_session_spawn">Spawn</string>
+    <!-- UC-98 workspace-project drop-down -->
+    <string name="new_session_project_label">Workspace project</string>
+    <string name="new_session_project_none">None</string>
 
     <!-- Delete dialog (UC04-2b) -->
     <string name="delete_title">Delete ai-sandbox-%1$d?</string>

@@ -5,6 +5,7 @@ import com.aisandbox.server.audit.AuditLogger;
 import com.aisandbox.server.config.ServerProperties;
 import com.aisandbox.server.identity.ClientIdentity;
 import com.aisandbox.server.mcp.McpLoginInitiator;
+import com.aisandbox.server.sessions.SpawnPromptInjector;
 import com.aisandbox.server.stream.dto.ConversationServerMessage;
 import com.aisandbox.server.stream.dto.StreamServerMessage.TargetInfo;
 import com.aisandbox.server.stream.facade.StreamFacade.AuthorizeResult;
@@ -39,7 +40,7 @@ import org.springframework.stereotype.Component;
  * reuse of {@link StreamFacade} is a facade-to-facade call, per the same profile.
  */
 @Component
-public class ConversationFacade implements McpLoginInitiator {
+public class ConversationFacade implements McpLoginInitiator, SpawnPromptInjector {
 
     private static final Logger LOG = LoggerFactory.getLogger(ConversationFacade.class);
 
@@ -336,6 +337,27 @@ public class ConversationFacade implements McpLoginInitiator {
         injection.injectComposer(n, toInjectTarget(resolveBridgeTarget(n, SwarmEnumerationService.MAIN_ID)), "/mcp");
         audit.logEvent(
                 AuditAction.MCP_LOGIN, "ok", "n", n, "fingerprint", identity == null ? "" : identity.fingerprintHex());
+    }
+
+    /**
+     * UC-98 — inject and submit the fixed workspace-project setup prompt into
+     * session {@code n}'s live <b>main</b> pane. This is the {@code sessions}
+     * domain's {@link SpawnPromptInjector} port, implemented here (edge {@code
+     * stream → sessions}) so the {@code sessions} facade can pre-seed the prompt
+     * without depending on the {@code stream} services (mirrors the {@link
+     * McpLoginInitiator} port-inversion precedent).
+     *
+     * <p>Always the main (orchestrator) pane — the setup prompt is for the
+     * session's primary Claude, not a teammate tile. {@link
+     * InputInjectionService#injectComposer} types the text and presses Enter, so
+     * this both injects and submits (AC4). The audit line records a
+     * <b>server-actor</b> input (no client fingerprint) so it is distinguishable
+     * from a client-driven composer submission.
+     */
+    @Override
+    public void inject(int n, String text) throws IOException {
+        injection.injectComposer(n, InjectTarget.main(), text);
+        audit.logEvent(AuditAction.CONVERSATION_INPUT, "ok", "n", n, "targetId", "main", "actor", "server");
     }
 
     /** AC11 — translate a structured answer into the session's selection keystrokes. */

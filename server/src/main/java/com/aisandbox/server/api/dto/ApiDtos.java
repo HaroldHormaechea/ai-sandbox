@@ -101,7 +101,17 @@ public final class ApiDtos {
                     @Pattern(regexp = "[A-Za-z0-9._:/+\\- ]{1,64}")
                     String label,
             @Schema(description = "shared | isolated", defaultValue = "shared") String workspaceMode,
-            @Schema(description = "shared | isolated", defaultValue = "shared") String claudeConfigMode) {}
+            @Schema(description = "shared | isolated", defaultValue = "shared") String claudeConfigMode,
+            @Schema(
+                            description = "UC-98 — id of the selected workspace project (a folder name from"
+                                    + " GET /v1/workspace/projects). Omit / null for the \"None\" default, which"
+                                    + " preserves today's spawn behaviour exactly (no setup prompt injected). When a"
+                                    + " real project is chosen, the server auto-injects and submits"
+                                    + " \"We will work in the project {folder}.\" into the session's Claude once it is"
+                                    + " ready, before the user attaches.",
+                            example = "my-project")
+                    @Pattern(regexp = "[A-Za-z0-9._+\\- ]{1,128}")
+                    String workspaceProject) {}
 
     @Schema(description = "Body of POST /v1/clients.")
     public record AddClientRequest(
@@ -118,6 +128,17 @@ public final class ApiDtos {
     public record ModelSummary(
             @Schema(description = "Model id/alias sent to Claude Code via `/model <id>`.", example = "opus") String id,
             @Schema(description = "Human-readable label for the model picker.", example = "Opus 4.8") String label) {}
+
+    @Schema(description = "UC-98 — a selectable workspace project returned by GET /v1/workspace/projects.")
+    public record WorkspaceProjectSummary(
+            @Schema(
+                            description = "Stable id of the project — sent back as SpawnRequest.workspaceProject.",
+                            example = "my-project")
+                    String id,
+            @Schema(
+                            description = "Human-readable name shown in the drop-down (the folder name).",
+                            example = "my-project")
+                    String displayName) {}
 
     @Schema(description = "UC-67 — one of a session's MCP servers, returned by GET /v1/sessions/{n}/mcp.")
     public record McpServerSummary(

@@ -66,10 +66,19 @@ class SessionsApi(private val http: AiSandboxHttpClient) {
         }
     }
 
-    suspend fun spawn(label: String?): ApiResult<SessionSummary> = withContext(Dispatchers.IO) {
+    suspend fun spawn(label: String?, workspaceProject: String? = null): ApiResult<SessionSummary> =
+        withContext(Dispatchers.IO) {
         val body = JSON.encodeToString(
             SpawnRequest.serializer(),
-            SpawnRequest(label = label, workspaceMode = null, claudeConfigMode = null),
+            // UC-98 — carry the optional workspace-project selection (its id / folder
+            // name), or null for the "None" default (AC3/AC9). @JsonInclude(NON_NULL)
+            // on the server DTO + this null keep a "None" spawn byte-identical to before.
+            SpawnRequest(
+                label = label,
+                workspaceMode = null,
+                claudeConfigMode = null,
+                workspaceProject = workspaceProject,
+            ),
         ).toRequestBody(JSON_MEDIA_TYPE)
         val req = Request.Builder().url("$base/v1/sessions").post(body).build()
         client.newCall(req).execute().use { resp ->
@@ -272,6 +281,13 @@ data class SpawnRequest(
     val label: String? = null,
     val workspaceMode: String? = null,
     val claudeConfigMode: String? = null,
+    /**
+     * UC-98 — the selected workspace project's id (its folder name), or null for
+     * the "None" default. Mirrors the server's optional
+     * `ApiDtos.SpawnRequest.workspaceProject`; null keeps a "None" spawn
+     * byte-identical to pre-UC-98 (AC3/AC9).
+     */
+    val workspaceProject: String? = null,
 )
 
 /**

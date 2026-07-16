@@ -46,7 +46,13 @@ public final class ApiMappers {
         WorkspaceMode wm = parseWorkspace(req == null ? null : req.workspaceMode());
         ClaudeConfigMode cm = parseClaudeConfig(req == null ? null : req.claudeConfigMode());
         String label = req == null ? null : req.label();
-        return new SpawnCommand(label, wm, cm);
+        // UC-98 — thread the optional workspace-project selection through (AC9).
+        // A blank string is normalised to null so "" behaves exactly like "None".
+        String project = req == null ? null : req.workspaceProject();
+        if (project != null && project.isBlank()) {
+            project = null;
+        }
+        return new SpawnCommand(label, wm, cm, project);
     }
 
     private static WorkspaceMode parseWorkspace(String s) {
@@ -71,6 +77,18 @@ public final class ApiMappers {
 
     public static ApiDtos.ModelSummary toModelSummary(com.aisandbox.server.models.dto.ModelDescriptor m) {
         return new ApiDtos.ModelSummary(m.id(), m.label());
+    }
+
+    /** UC-98 — internal workspace-project DTO → API summary (rule 5). */
+    public static ApiDtos.WorkspaceProjectSummary toWorkspaceProjectSummary(
+            com.aisandbox.server.workspace.dto.WorkspaceProject p) {
+        return new ApiDtos.WorkspaceProjectSummary(p.id(), p.name());
+    }
+
+    /** UC-98 — list variant of {@link #toWorkspaceProjectSummary}. */
+    public static List<ApiDtos.WorkspaceProjectSummary> toWorkspaceProjectSummaries(
+            List<com.aisandbox.server.workspace.dto.WorkspaceProject> ps) {
+        return ps.stream().map(ApiMappers::toWorkspaceProjectSummary).toList();
     }
 
     public static ApiDtos.McpServerSummary toMcpServerSummary(com.aisandbox.server.mcp.dto.McpServerStatus s) {

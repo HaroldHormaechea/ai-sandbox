@@ -290,6 +290,23 @@ paths:
             '*/*':
               schema:
                 type: object
+  /v1/workspace/projects:
+    get:
+      tags:
+      - workspace-controller
+      summary: List the selectable workspace projects (top-level folders under the
+        shared workspace root).
+      operationId: listProjects
+      responses:
+        "200":
+          description: All selectable projects (may be empty when the workspace root
+            is absent or has no folders).
+          content:
+            '*/*':
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/WorkspaceProjectSummary"
   /v1/sessions/{n}:
     get:
       tags:
@@ -467,6 +484,16 @@ components:
           type: string
           default: shared
           description: shared | isolated
+        workspaceProject:
+          type: string
+          description: "UC-98 — id of the selected workspace project (a folder name\
+            \ from GET /v1/workspace/projects). Omit / null for the \"None\" default,\
+            \ which preserves today's spawn behaviour exactly (no setup prompt injected).\
+            \ When a real project is chosen, the server auto-injects and submits \"\
+            We will work in the project {folder}.\" into the session's Claude once\
+            \ it is ready, before the user attaches."
+          example: my-project
+          pattern: "[A-Za-z0-9._+\\- ]{1,128}"
     McpAddRequest:
       type: object
       description: "Body of POST /v1/sessions/{n}/mcp (UC-82) — register a new MCP\
@@ -664,6 +691,18 @@ components:
       required:
       - certPem
       - name
+    WorkspaceProjectSummary:
+      type: object
+      description: UC-98 — a selectable workspace project returned by GET /v1/workspace/projects.
+      properties:
+        id:
+          type: string
+          description: Stable id of the project — sent back as SpawnRequest.workspaceProject.
+          example: my-project
+        displayName:
+          type: string
+          description: Human-readable name shown in the drop-down (the folder name).
+          example: my-project
     SessionDetailDto:
       type: object
       description: "Detail returned by GET /v1/sessions/{n}."

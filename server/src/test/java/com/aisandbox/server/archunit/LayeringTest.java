@@ -230,4 +230,23 @@ class LayeringTest {
                 .beAnnotatedWith("org.springframework.transaction.annotation.Transactional");
         rule.allowEmptyShould(true).check(PRODUCTION);
     }
+
+    @Test
+    void workspace_slice_does_not_reach_into_sessions_or_stream() {
+        // UC-98 — the workspace catalogue is a leaf domain: it depends only on
+        // `config` (for the host-state root). The cross-domain edges go the OTHER
+        // way (sessions → workspace facade-to-facade for the AC10 membership
+        // check). A workspace → sessions/stream import would reintroduce a cycle
+        // (sessions → workspace → sessions). Belt-and-suspenders alongside the
+        // global no_cycles scan so a regression blames the right slice.
+        // Fully-qualified prefixes on purpose: a bare `..stream..` also matches
+        // `java.util.stream`, which the facade legitimately uses (Stream.filter).
+        ArchRule rule = noClasses()
+                .that()
+                .resideInAPackage("com.aisandbox.server.workspace..")
+                .should()
+                .dependOnClassesThat()
+                .resideInAnyPackage("com.aisandbox.server.sessions..", "com.aisandbox.server.stream..");
+        rule.allowEmptyShould(true).check(PRODUCTION);
+    }
 }
