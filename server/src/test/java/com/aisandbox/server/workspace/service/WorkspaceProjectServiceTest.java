@@ -9,8 +9,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 import java.util.function.Predicate;
-import org.junit.jupiter.api.io.TempDir;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 /**
  * UC-98 — the workspace-project catalogue service enumerates the immediate
@@ -99,7 +99,8 @@ class WorkspaceProjectServiceTest {
     void empty_list_when_root_exists_but_has_no_folders() throws Exception {
         seedWorkspaceRoot(); // workspace/ exists but is empty
 
-        assertThat(new WorkspaceProjectService(propsWithRoot(hostStateRoot)).list()).isEmpty();
+        assertThat(new WorkspaceProjectService(propsWithRoot(hostStateRoot)).list())
+                .isEmpty();
     }
 
     @Test
@@ -113,8 +114,7 @@ class WorkspaceProjectServiceTest {
         Files.createDirectory(workspace.resolve("no-brief"));
 
         Predicate<Path> onlyWithBrief = dir -> Files.isRegularFile(dir.resolve("PROJECT_BRIEF.md"));
-        List<WorkspaceProject> out =
-                new WorkspaceProjectService(propsWithRoot(hostStateRoot), onlyWithBrief).list();
+        List<WorkspaceProject> out = new WorkspaceProjectService(propsWithRoot(hostStateRoot), onlyWithBrief).list();
 
         assertThat(out).extracting(WorkspaceProject::id).containsExactly("has-brief");
     }

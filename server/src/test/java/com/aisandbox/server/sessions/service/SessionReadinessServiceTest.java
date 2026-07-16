@@ -65,8 +65,7 @@ class SessionReadinessServiceTest {
         new SessionReadinessService(exec).isReady(7);
 
         @SuppressWarnings("unchecked")
-        org.mockito.ArgumentCaptor<List<String>> argv =
-                org.mockito.ArgumentCaptor.forClass(List.class);
+        org.mockito.ArgumentCaptor<List<String>> argv = org.mockito.ArgumentCaptor.forClass(List.class);
         verify(exec).run(argv.capture(), any(), any(Duration.class));
         assertThat(argv.getValue())
                 .containsSubsequence("docker", "compose", "-p", "ai-sandbox-7")
@@ -79,8 +78,7 @@ class SessionReadinessServiceTest {
         // not ready, not ready, then ready.
         when(exec.run(any(), any(), any(Duration.class))).thenReturn(exit(1), exit(1), exit(0));
 
-        boolean ready = new SessionReadinessService(exec)
-                .awaitReady(3, Duration.ofSeconds(5), Duration.ofMillis(1));
+        boolean ready = new SessionReadinessService(exec).awaitReady(3, Duration.ofSeconds(5), Duration.ofMillis(1));
 
         assertThat(ready).isTrue();
         verify(exec, atLeast(3)).run(any(), any(), any(Duration.class));
@@ -91,8 +89,7 @@ class SessionReadinessServiceTest {
         ProcessExecutor exec = mock(ProcessExecutor.class);
         when(exec.run(any(), any(), any(Duration.class))).thenReturn(exit(1));
 
-        boolean ready = new SessionReadinessService(exec)
-                .awaitReady(3, Duration.ofMillis(20), Duration.ofMillis(1));
+        boolean ready = new SessionReadinessService(exec).awaitReady(3, Duration.ofMillis(20), Duration.ofMillis(1));
 
         assertThat(ready).isFalse();
     }

@@ -33,9 +33,7 @@ class WorkspaceControllerTest {
     void returns_the_catalogue_as_a_bare_array_of_id_displayName() {
         WorkspaceProjectFacade facade = mock(WorkspaceProjectFacade.class);
         when(facade.listProjects())
-                .thenReturn(List.of(
-                        new WorkspaceProject("alpha", "alpha"),
-                        new WorkspaceProject("beta", "beta")));
+                .thenReturn(List.of(new WorkspaceProject("alpha", "alpha"), new WorkspaceProject("beta", "beta")));
 
         clientFor(facade)
                 .get()

@@ -43,8 +43,8 @@ class SpawnCommandTest {
         assertThatThrownBy(() ->
                         new SpawnCommand("lbl", WorkspaceMode.SHARED, ClaudeConfigMode.SHARED, "../../etc/passwd"))
                 .isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() ->
-                        new SpawnCommand("lbl", WorkspaceMode.SHARED, ClaudeConfigMode.SHARED, "proj; rm -rf /"))
+        assertThatThrownBy(
+                        () -> new SpawnCommand("lbl", WorkspaceMode.SHARED, ClaudeConfigMode.SHARED, "proj; rm -rf /"))
                 .isInstanceOf(IllegalArgumentException.class);
     }
 

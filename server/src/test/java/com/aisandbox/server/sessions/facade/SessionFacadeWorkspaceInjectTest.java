@@ -158,8 +158,7 @@ class SessionFacadeWorkspaceInjectTest {
     void id_that_vanishes_during_the_readiness_wait_injects_nothing() throws Exception {
         Rig r = rig(true);
         // AC10 — present at schedule time, gone by the pre-inject re-validation.
-        when(r.projects().find("racy"))
-                .thenReturn(Optional.of(new WorkspaceProject("racy", "racy")), Optional.empty());
+        when(r.projects().find("racy")).thenReturn(Optional.of(new WorkspaceProject("racy", "racy")), Optional.empty());
         when(r.readiness().awaitReady(eq(5), any(Duration.class), any(Duration.class)))
                 .thenReturn(true);
 

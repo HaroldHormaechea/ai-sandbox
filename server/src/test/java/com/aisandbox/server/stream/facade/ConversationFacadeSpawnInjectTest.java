@@ -3,7 +3,6 @@ package com.aisandbox.server.stream.facade;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.verify;
 
 import com.aisandbox.server.audit.AuditAction;
 import com.aisandbox.server.audit.AuditLogger;
@@ -73,7 +72,14 @@ class ConversationFacadeSpawnInjectTest {
         order.verify(injection).injectComposer(eq(5), eq(InjectTarget.main()), eq(text));
         // Server-actor audit line (actor=server, targetId=main), ordered after the inject.
         order.verify(audit)
-                .logEvent(eq(AuditAction.CONVERSATION_INPUT), eq("ok"), eq("n"), eq(5), eq("targetId"), eq("main"),
-                        eq("actor"), eq("server"));
+                .logEvent(
+                        eq(AuditAction.CONVERSATION_INPUT),
+                        eq("ok"),
+                        eq("n"),
+                        eq(5),
+                        eq("targetId"),
+                        eq("main"),
+                        eq("actor"),
+                        eq("server"));
     }
 }
