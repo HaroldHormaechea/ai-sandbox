@@ -3,6 +3,7 @@ package com.aisandbox.server.stream.service;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.atLeast;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -11,10 +12,12 @@ import static org.mockito.Mockito.when;
 import com.aisandbox.server.sessions.service.ProcessExecutor;
 import com.aisandbox.server.stream.service.InputInjectionService.BatchAnswerSpec;
 import com.aisandbox.server.stream.service.InputInjectionService.InjectTarget;
+import com.aisandbox.server.stream.service.InputInjectionService.SpawnInjectOutcome;
 import java.io.IOException;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Predicate;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -726,5 +729,202 @@ class InputInjectionServiceTest {
         assertThat(keySeq(calls)).containsExactly("Right", "Right", "Left", "Left");
         // No literal sends anywhere in the walk.
         assertThat(calls).allSatisfy(c -> assertThat(c).doesNotContain("-l"));
+    }
+
+    // ──────────── UC-98 (Bug 1) — spawn-scoped gate→type→confirm→exactly-once Enter ────────────
+
+    /** The fixed workspace-project setup prompt shape the spawn path injects. */
+    private static final String SPAWN_TEXT = "We will work in the project cool-folder.";
+
+    /** Capture EVERY argv run() handed the executor, in call order (no fixed-count assertion). */
+    @SuppressWarnings("unchecked")
+    private List<List<String>> allArgvsInOrder() throws Exception {
+        ArgumentCaptor<List<String>> cap = ArgumentCaptor.forClass(List.class);
+        verify(exec, atLeast(1)).run(cap.capture(), any(), any(Duration.class));
+        return cap.getAllValues();
+    }
+
+    private static boolean isCapturePane(List<String> argv) {
+        return argv.contains("capture-pane");
+    }
+
+    private static boolean isLiteralSend(List<String> argv) {
+        return argv.contains("-l");
+    }
+
+    private static boolean isNamedKey(List<String> argv, String key) {
+        return !argv.contains("-l") && argv.contains("send-keys") && argv.get(argv.size() - 1).equals(key);
+    }
+
+    private static int firstIndex(List<List<String>> calls, Predicate<List<String>> p) {
+        for (int i = 0; i < calls.size(); i++) {
+            if (p.test(calls.get(i))) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private static long count(List<List<String>> calls, Predicate<List<String>> p) {
+        return calls.stream().filter(p).count();
+    }
+
+    /**
+     * Happy path — the choreography is strictly gate → type → confirm → EXACTLY ONE Enter.
+     * The fake pane starts showing the ready marker; once the literal is typed the fake echoes it
+     * back, so the confirm poll succeeds only AFTER the type. Proves the exactly-once submit
+     * contract (AC4): the single Enter is emitted last, after the typed literal is confirmed on the
+     * pane.
+     */
+    @Test
+    void spawn_inject_gates_then_types_then_confirms_then_sends_exactly_one_Enter() throws Exception {
+        StringBuilder pane = new StringBuilder("Welcome to Claude Code\n  ? for shortcuts");
+        when(exec.run(any(), any(), any(Duration.class))).thenAnswer(inv -> {
+            List<String> argv = inv.getArgument(0);
+            if (isCapturePane(argv)) {
+                return new ProcessExecutor.Result(0, pane.toString(), "");
+            }
+            if (isLiteralSend(argv)) {
+                // The TUI echoes the typed literal onto the input line — model that.
+                pane.append('\n').append(argv.get(argv.size() - 1));
+            }
+            return new ProcessExecutor.Result(0, "", "");
+        });
+
+        SpawnInjectOutcome outcome = svc.injectSpawnPrompt(7, InjectTarget.main(), SPAWN_TEXT);
+
+        assertThat(outcome).isEqualTo(SpawnInjectOutcome.SUBMITTED);
+
+        List<List<String>> calls = allArgvsInOrder();
+        int firstGate = firstIndex(calls, InputInjectionServiceTest::isCapturePane);
+        int literalIdx = firstIndex(calls, c -> isLiteralSend(c) && c.get(c.size() - 1).equals(SPAWN_TEXT));
+        int enterIdx = firstIndex(calls, c -> isNamedKey(c, "Enter"));
+
+        // The literal was typed exactly once and submitted with exactly one Enter (exactly-once).
+        assertThat(count(calls, c -> isLiteralSend(c) && c.get(c.size() - 1).equals(SPAWN_TEXT)))
+                .isEqualTo(1);
+        assertThat(count(calls, c -> isNamedKey(c, "Enter"))).isEqualTo(1);
+
+        // Order: a GATE capture-pane precedes the type; the type precedes the single Enter.
+        assertThat(firstGate).isGreaterThanOrEqualTo(0);
+        assertThat(firstGate).isLessThan(literalIdx);
+        assertThat(literalIdx).isLessThan(enterIdx);
+
+        // A CONFIRM capture-pane sits between the type and the Enter (never a blind submit).
+        boolean confirmBetween = false;
+        for (int i = literalIdx + 1; i < enterIdx; i++) {
+            if (isCapturePane(calls.get(i))) {
+                confirmBetween = true;
+                break;
+            }
+        }
+        assertThat(confirmBetween)
+                .withFailMessage("a confirm capture-pane must precede the Enter — the submit is never blind")
+                .isTrue();
+
+        // The Enter is the FINAL send-keys — nothing is typed or submitted after it.
+        assertThat(enterIdx).isEqualTo(calls.size() - 1);
+    }
+
+    /**
+     * Gate timeout — the input prompt never becomes ready, so NOTHING is typed and NO Enter is
+     * sent (zero submits). Outcome is {@link SpawnInjectOutcome#PROMPT_NOT_READY}. The fake pane
+     * never shows the ready marker and interrupts the poll thread so the bounded gate loop exits
+     * promptly (exercising the real {@code pollPaneUntil} exit path — the outcome is identical to a
+     * wall-clock timeout) rather than blocking for the full 30s gate window.
+     */
+    @Test
+    void spawn_inject_gate_timeout_types_nothing_and_sends_zero_Enter() throws Exception {
+        when(exec.run(any(), any(), any(Duration.class))).thenAnswer(inv -> {
+            List<String> argv = inv.getArgument(0);
+            if (isCapturePane(argv)) {
+                Thread.currentThread().interrupt(); // force the bounded poll to exit now
+                return new ProcessExecutor.Result(0, "Loading Claude Code…", ""); // no ready marker
+            }
+            return new ProcessExecutor.Result(0, "", "");
+        });
+
+        SpawnInjectOutcome outcome = svc.injectSpawnPrompt(7, InjectTarget.main(), SPAWN_TEXT);
+        Thread.interrupted(); // clear the interrupt flag so it can't leak into later tests
+
+        assertThat(outcome).isEqualTo(SpawnInjectOutcome.PROMPT_NOT_READY);
+
+        List<List<String>> calls = allArgvsInOrder();
+        // Zero typing, zero submit — the exactly-once guarantee's failure branch sends no keys.
+        assertThat(count(calls, InputInjectionServiceTest::isLiteralSend)).isZero();
+        assertThat(count(calls, c -> isNamedKey(c, "Enter"))).isZero();
+        // Only capture-pane (gate probe) calls were made.
+        assertThat(calls).allSatisfy(c -> assertThat(isCapturePane(c)).isTrue());
+    }
+
+    /**
+     * Confirm timeout — the prompt is ready (gate passes) and the literal IS typed, but it never
+     * echoes onto the pane, so NO Enter is sent (never a blind submit). Outcome is
+     * {@link SpawnInjectOutcome#TYPE_NOT_CONFIRMED}. The fake keeps the ready marker (so the gate
+     * passes on its first poll, before any sleep) but never appends the typed literal, and
+     * interrupts the poll thread so the confirm loop exits promptly.
+     */
+    @Test
+    void spawn_inject_confirm_timeout_types_but_sends_zero_Enter() throws Exception {
+        when(exec.run(any(), any(), any(Duration.class))).thenAnswer(inv -> {
+            List<String> argv = inv.getArgument(0);
+            if (isCapturePane(argv)) {
+                // Ready marker present (gate passes) but the typed literal is never echoed.
+                Thread.currentThread().interrupt();
+                return new ProcessExecutor.Result(0, "Welcome to Claude Code\n  ? for shortcuts", "");
+            }
+            return new ProcessExecutor.Result(0, "", "");
+        });
+
+        SpawnInjectOutcome outcome = svc.injectSpawnPrompt(7, InjectTarget.main(), SPAWN_TEXT);
+        Thread.interrupted(); // clear the interrupt flag
+
+        assertThat(outcome).isEqualTo(SpawnInjectOutcome.TYPE_NOT_CONFIRMED);
+
+        List<List<String>> calls = allArgvsInOrder();
+        // The literal WAS typed (gate passed) …
+        assertThat(count(calls, c -> isLiteralSend(c) && c.get(c.size() - 1).equals(SPAWN_TEXT)))
+                .isEqualTo(1);
+        // … but it was NEVER submitted — zero Enter on the confirm-timeout branch.
+        assertThat(count(calls, c -> isNamedKey(c, "Enter"))).isZero();
+    }
+
+    /** A blank/empty spawn prompt is a no-op: nothing is captured, typed, or submitted. */
+    @Test
+    void spawn_inject_empty_text_is_a_noop_submitted() throws Exception {
+        SpawnInjectOutcome outcome = svc.injectSpawnPrompt(7, InjectTarget.main(), "");
+
+        assertThat(outcome).isEqualTo(SpawnInjectOutcome.SUBMITTED);
+        verify(exec, times(0)).run(any(), any(), any(Duration.class));
+    }
+
+    /**
+     * The gate uses {@code capture-pane} on the SAME argv-only executor surface as {@code
+     * send-keys} — pure argv, no shell — so the probe can never smuggle a second command. Also
+     * pins that the ready-marker constant is the one the gate matches.
+     */
+    @Test
+    void spawn_inject_capture_pane_is_argv_only_and_uses_the_pinned_ready_marker() throws Exception {
+        StringBuilder pane = new StringBuilder("boot\n" + InputInjectionService.PROMPT_READY_MARKER);
+        when(exec.run(any(), any(), any(Duration.class))).thenAnswer(inv -> {
+            List<String> argv = inv.getArgument(0);
+            if (isCapturePane(argv)) {
+                return new ProcessExecutor.Result(0, pane.toString(), "");
+            }
+            if (isLiteralSend(argv)) {
+                pane.append('\n').append(argv.get(argv.size() - 1));
+            }
+            return new ProcessExecutor.Result(0, "", "");
+        });
+
+        svc.injectSpawnPrompt(9, InjectTarget.main(), SPAWN_TEXT);
+
+        List<List<String>> calls = allArgvsInOrder();
+        List<String> gate = calls.get(firstIndex(calls, InputInjectionServiceTest::isCapturePane));
+        // argv-only capture-pane: no shell wrapper, targets the resolved spec.
+        assertThat(gate).containsSubsequence("capture-pane", "-p", "-t", "main");
+        assertThat(gate).doesNotContain("bash", "sh", "-c", ";", "&&");
+        // The marker the production gate polls for is the pinned footer hint.
+        assertThat(InputInjectionService.PROMPT_READY_MARKER).isEqualTo("for shortcuts");
     }
 }
