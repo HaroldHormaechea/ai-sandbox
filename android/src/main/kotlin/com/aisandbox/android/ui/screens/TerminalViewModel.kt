@@ -188,6 +188,16 @@ class TerminalViewModel(application: Application) : AndroidViewModel(application
         controller?.sendStdin(encodeComposerLine(text))
     }
 
+    /**
+     * UC-99 (Bug 2) — the pane's PENDING input line, read cursor-anchored from the
+     * live emulator buffer, or "" when there is nothing recognizable to prefill. The
+     * screen calls this when the terminal composer opens and passes the result as
+     * the composer's `initialText`, so it opens as an editable mirror of what is
+     * already on the PTY input line (and send REPLACES it — see [encodeComposerLine]).
+     * No controller (detached) → "".
+     */
+    fun readPendingInputLine(): String = controller?.readPendingInputLine() ?: ""
+
     /** UC-99 — persist the terminal input-mode toggle (composer ⇄ raw). */
     fun setTerminalComposer(enabled: Boolean) {
         viewModelScope.launch { container.keyboardSettings.setTerminalComposer(enabled) }
