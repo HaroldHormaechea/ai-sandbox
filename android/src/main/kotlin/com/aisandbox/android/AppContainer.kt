@@ -9,6 +9,7 @@ import com.aisandbox.android.net.DeepLinkEvents
 import com.aisandbox.android.net.GitHubReleaseClient
 import com.aisandbox.android.net.McpApi
 import com.aisandbox.android.net.ModelsApi
+import com.aisandbox.android.net.MuxConnectionManager
 import com.aisandbox.android.net.ServerProfile
 import com.aisandbox.android.net.ServerProfileStore
 import com.aisandbox.android.net.ServerUpdateApi
@@ -109,6 +110,19 @@ class AppContainer(applicationContext: Context) {
     fun httpClient(profile: ServerProfile): AiSandboxHttpClient =
         AiSandboxHttpClient(profile = profile, identity = identity)
 
+    /**
+     * UC-100 — the app-scoped owner of the **single** multiplexed `/v1/mux`
+     * WebSocket. All realtime channels (per-session `stream` + `conversation`,
+     * the global `events` feed, and `control`) share this one connection, so a
+     * delete→create flow no longer spins up four uncoordinated sockets that
+     * trip the server's per-IP TLS rate limiter (AC1). It follows the active
+     * server profile (rebuilding the socket on re-enrollment) and owns the one
+     * `ReconnectController` + the authoritative subscription set. The `*Client`
+     * factories below now hand out thin channel adapters over it.
+     */
+    val muxConnectionManager: MuxConnectionManager =
+        MuxConnectionManager(profileStore = profileStore, httpClientFactory = ::httpClient)
+
     fun sessionsApi(client: AiSandboxHttpClient): SessionsApi = SessionsApi(client)
 
     /** UC-66 — build a per-profile client for the model-catalogue endpoint (GET /v1/models). */
@@ -130,12 +144,16 @@ class AppContainer(applicationContext: Context) {
      */
     fun gitHubReleaseClient(): GitHubReleaseClient = GitHubReleaseClient()
 
+    // UC-100 — the WS client factories now hand out thin channel adapters over the
+    // single [muxConnectionManager]; the `client` (per-profile HTTP) arg is retained
+    // in the signatures (the controllers still pass it) but ignored for the WS leg,
+    // since the mux socket follows the profile centrally. REST still uses `client`.
     fun streamClient(client: AiSandboxHttpClient, sessionN: Int): StreamClient =
-        StreamClient(http = client, sessionN = sessionN)
+        StreamClient(manager = muxConnectionManager, sessionN = sessionN)
 
-    /** UC-37 — build a per-profile client for the structured-conversation channel. */
+    /** UC-37 → UC-100 — a `conversation`-channel adapter over the single mux connection. */
     fun conversationClient(client: AiSandboxHttpClient, sessionN: Int): ConversationClient =
-        ConversationClient(http = client, sessionN = sessionN)
+        ConversationClient(manager = muxConnectionManager, sessionN = sessionN)
 
     /**
      * UC-32 — build a client for the live sessions-list push feed
@@ -144,7 +162,7 @@ class AppContainer(applicationContext: Context) {
      * on each reconnect attempt.
      */
     fun sessionEventsClient(client: AiSandboxHttpClient): SessionEventsClient =
-        SessionEventsClient(http = client)
+        SessionEventsClient(manager = muxConnectionManager)
 
     // ── Terminal stream controllers (UC-21) ─────────────────────────────────
     // Process-scoped, keyed by session N. Owning the controller here (not in

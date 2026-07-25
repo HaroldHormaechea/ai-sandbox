@@ -412,6 +412,7 @@ object TlsFailureTranslation {
             rawMessage = event.rawMessage,
         )
         NetworkEvent.CertRevoked,
+        NetworkEvent.ServerUpgradeRequired,
         NetworkEvent.ServerUnreachable,
         is NetworkEvent.StreamReconnecting,
         is NetworkEvent.StreamGaveUp,

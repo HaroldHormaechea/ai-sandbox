@@ -101,6 +101,19 @@ sealed interface NetworkEvent {
     data object CertRevoked : NetworkEvent
 
     /**
+     * UC-100 (AC8) — the single `/v1/mux` WebSocket was refused for a protocol
+     * version mismatch: the server closed with code **4426** after the
+     * `hello`/`welcome` handshake disagreed (new-client↔old-server or vice
+     * versa), or the pre-connect `GET /v1/capabilities` probe reported a
+     * missing / different `ws_protocol`. The hard cut requires matched client
+     * and server versions, so the root composable routes this to the
+     * update-required screen (reusing the existing `AppUpdate*`/`ServerUpdate*`
+     * machinery) rather than looping the reconnect back-off. Disjoint from
+     * [CertRevoked] (4401).
+     */
+    data object ServerUpgradeRequired : NetworkEvent
+
+    /**
      * UC-52 — a TRANSIENT connectivity failure: the server is briefly
      * unreachable (connection refused, socket timeout, unknown host, a
      * dropped socket, or any non-TLS {@link java.io.IOException}) rather
