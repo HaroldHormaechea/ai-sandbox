@@ -348,16 +348,28 @@ public class ConversationFacade implements McpLoginInitiator, SpawnPromptInjecto
      * McpLoginInitiator} port-inversion precedent).
      *
      * <p>Always the main (orchestrator) pane — the setup prompt is for the
-     * session's primary Claude, not a teammate tile. {@link
-     * InputInjectionService#injectComposer} types the text and presses Enter, so
-     * this both injects and submits (AC4). The audit line records a
+     * session's primary Claude, not a teammate tile. Bug 1 (UC-98): the shared
+     * {@link InputInjectionService#injectComposer} typed then pressed Enter
+     * back-to-back, which on the spawn path fires before Claude's TUI input
+     * prompt is interactive, so the Enter is lost and the prompt is staged but
+     * never submitted. This now calls the spawn-scoped
+     * {@link InputInjectionService#injectSpawnPrompt}, which gates on the prompt
+     * being ready, confirms the typed literal echoed, then submits with exactly
+     * one Enter (and submits nothing on either timeout). The audit line records a
      * <b>server-actor</b> input (no client fingerprint) so it is distinguishable
-     * from a client-driven composer submission.
+     * from a client-driven composer submission, tagged with the inject outcome
+     * ({@code ok} / {@code prompt-not-ready} / {@code type-not-confirmed}).
      */
     @Override
     public void inject(int n, String text) throws IOException {
-        injection.injectComposer(n, InjectTarget.main(), text);
-        audit.logEvent(AuditAction.CONVERSATION_INPUT, "ok", "n", n, "targetId", "main", "actor", "server");
+        InputInjectionService.SpawnInjectOutcome outcome = injection.injectSpawnPrompt(n, InjectTarget.main(), text);
+        String result =
+                switch (outcome) {
+                    case SUBMITTED -> "ok";
+                    case PROMPT_NOT_READY -> "prompt-not-ready";
+                    case TYPE_NOT_CONFIRMED -> "type-not-confirmed";
+                };
+        audit.logEvent(AuditAction.CONVERSATION_INPUT, result, "n", n, "targetId", "main", "actor", "server");
     }
 
     /** AC11 — translate a structured answer into the session's selection keystrokes. */

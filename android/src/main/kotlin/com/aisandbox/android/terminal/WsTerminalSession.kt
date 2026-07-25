@@ -77,6 +77,14 @@ class WsTerminalSession(
     }
 
     /**
+     * UC-99 (Bug 2) — the pane's PENDING input line, read cursor-anchored from the
+     * live emulator buffer via [PendingInputReader], or "" when there is nothing
+     * recognizable to prefill. Main-thread only (the emulator is fed/marshalled on
+     * the main thread; callers — the Compose dispatch path — already run there).
+     */
+    fun readPendingInputLine(): String = PendingInputReader.readPendingInputLine(session.emulator)
+
+    /**
      * UC-36 — flush any pending IME composing word on the bound view to the PTY.
      * Used before out-of-band input (the ModifierBar's control bytes) so a
      * half-composed word is committed + echoed in order (AC#5). No-op when no
