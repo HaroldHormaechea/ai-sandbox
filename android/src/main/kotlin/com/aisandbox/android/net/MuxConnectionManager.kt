@@ -44,8 +44,12 @@ class MuxConnectionManager(
     private val textRelays = ConcurrentHashMap<String, MutableSharedFlow<String>>()
     private val binaryRelays = ConcurrentHashMap<Int, MutableSharedFlow<ByteArray>>()
 
-    // Authoritative subscription set (survives profile rebuilds).
-    private val subscriptions: MutableSet<ChannelKey> = ConcurrentHashMap.newKeySet()
+    // Authoritative, REFERENCE-COUNTED subscription set (survives profile rebuilds).
+    // Reference counting matters for the `events` channel: both SessionsViewModel
+    // and PendingQuestionService subscribe to it over the one socket, so a control
+    // `unsubscribe` must be sent only when the LAST consumer of a channel leaves —
+    // otherwise one screen's teardown would starve the other's feed.
+    private val refcounts: MutableMap<ChannelKey, Int> = HashMap()
 
     @Volatile private var connection: MuxConnection? = null
     private val pipeJobs = mutableListOf<Job>()
@@ -83,8 +87,8 @@ class MuxConnectionManager(
                 pipeBinary(conn, sid, relay)
             }
             conn.start()
-            // Re-assert every subscription (the connection also re-subscribes on its own reconnects).
-            for (k in subscriptions) conn.subscribe(k.channel, k.sessionId)
+            // Re-assert every live subscription (the connection also re-subscribes on its own reconnects).
+            for (k in refcounts.keys) conn.subscribe(k.channel, k.sessionId)
         }
     }
 
@@ -103,13 +107,37 @@ class MuxConnectionManager(
     // ──────────────────────── public API for adapters ────────────────────────
 
     fun subscribe(channel: String, sessionId: Int?) {
-        subscriptions.add(ChannelKey(channel, sessionId))
-        connection?.subscribe(channel, sessionId)
+        val k = ChannelKey(channel, sessionId)
+        val firstConsumer: Boolean
+        synchronized(lock) {
+            val n = refcounts.getOrDefault(k, 0)
+            refcounts[k] = n + 1
+            firstConsumer = n == 0
+        }
+        // Only open the channel on the shared socket for the FIRST consumer; a
+        // second consumer just shares the already-live channel + its relay flow.
+        if (firstConsumer) connection?.subscribe(channel, sessionId)
     }
 
     fun unsubscribe(channel: String, sessionId: Int?) {
-        subscriptions.remove(ChannelKey(channel, sessionId))
-        connection?.unsubscribe(channel, sessionId)
+        val k = ChannelKey(channel, sessionId)
+        val lastConsumer: Boolean
+        synchronized(lock) {
+            val n = refcounts.getOrDefault(k, 0)
+            when {
+                n <= 1 -> {
+                    refcounts.remove(k)
+                    lastConsumer = n == 1
+                }
+                else -> {
+                    refcounts[k] = n - 1
+                    lastConsumer = false
+                }
+            }
+        }
+        // Only close the channel when the LAST consumer leaves (the events feed
+        // is shared by two consumers).
+        if (lastConsumer) connection?.unsubscribe(channel, sessionId)
     }
 
     fun sendText(channel: String, sessionId: Int?, payloadJson: String): Boolean =
