@@ -412,6 +412,18 @@ paths:
             '*/*':
               schema:
                 type: object
+  /v1/capabilities:
+    get:
+      tags:
+      - capabilities-controller
+      operationId: capabilities
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/CapabilitiesResponse"
   /v1/sessions/{n}/mcp/{name}:
     delete:
       tags:
@@ -466,6 +478,240 @@ paths:
             '*/*':
               schema:
                 type: object
+  /v1/sessions/{n}/stream:
+    get:
+      tags:
+      - legacy-web-socket-gone-controller
+      operationId: legacyStream
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+    put:
+      tags:
+      - legacy-web-socket-gone-controller
+      operationId: legacyStream_2
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+    post:
+      tags:
+      - legacy-web-socket-gone-controller
+      operationId: legacyStream_1
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+    delete:
+      tags:
+      - legacy-web-socket-gone-controller
+      operationId: legacyStream_3
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+    options:
+      tags:
+      - legacy-web-socket-gone-controller
+      operationId: legacyStream_6
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+    head:
+      tags:
+      - legacy-web-socket-gone-controller
+      operationId: legacyStream_5
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+    patch:
+      tags:
+      - legacy-web-socket-gone-controller
+      operationId: legacyStream_4
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+  /v1/sessions/{n}/conversation:
+    get:
+      tags:
+      - legacy-web-socket-gone-controller
+      operationId: legacyConversation
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+    put:
+      tags:
+      - legacy-web-socket-gone-controller
+      operationId: legacyConversation_2
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+    post:
+      tags:
+      - legacy-web-socket-gone-controller
+      operationId: legacyConversation_1
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+    delete:
+      tags:
+      - legacy-web-socket-gone-controller
+      operationId: legacyConversation_3
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+    options:
+      tags:
+      - legacy-web-socket-gone-controller
+      operationId: legacyConversation_6
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+    head:
+      tags:
+      - legacy-web-socket-gone-controller
+      operationId: legacyConversation_5
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+    patch:
+      tags:
+      - legacy-web-socket-gone-controller
+      operationId: legacyConversation_4
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+  /v1/sessions/events:
+    get:
+      tags:
+      - legacy-web-socket-gone-controller
+      operationId: legacyEvents
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+    put:
+      tags:
+      - legacy-web-socket-gone-controller
+      operationId: legacyEvents_2
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+    post:
+      tags:
+      - legacy-web-socket-gone-controller
+      operationId: legacyEvents_1
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+    delete:
+      tags:
+      - legacy-web-socket-gone-controller
+      operationId: legacyEvents_3
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+    options:
+      tags:
+      - legacy-web-socket-gone-controller
+      operationId: legacyEvents_6
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+    head:
+      tags:
+      - legacy-web-socket-gone-controller
+      operationId: legacyEvents_5
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
+    patch:
+      tags:
+      - legacy-web-socket-gone-controller
+      operationId: legacyEvents_4
+      responses:
+        "200":
+          description: OK
+          content:
+            '*/*':
+              schema:
+                $ref: "#/components/schemas/ProblemDetail"
 components:
   schemas:
     SpawnRequest:
@@ -802,3 +1048,30 @@ components:
         addedAt:
           type: string
           format: date-time
+    CapabilitiesResponse:
+      type: object
+      description: Response of GET /v1/capabilities (UC-100).
+      properties:
+        ws_protocol:
+          type: string
+          description: "The realtime WebSocket protocol this server speaks, e.g. \"\
+            mux.v1\"."
+    ProblemDetail:
+      type: object
+      properties:
+        type:
+          type: string
+          format: uri
+        title:
+          type: string
+        status:
+          type: integer
+          format: int32
+        detail:
+          type: string
+        instance:
+          type: string
+          format: uri
+        properties:
+          type: object
+          additionalProperties: {}
