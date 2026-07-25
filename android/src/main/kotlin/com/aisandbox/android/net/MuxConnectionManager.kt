@@ -1,6 +1,8 @@
 package com.aisandbox.android.net
 
+import android.util.Log
 import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -33,7 +35,20 @@ class MuxConnectionManager(
     private val httpClientFactory: (ServerProfile) -> AiSandboxHttpClient,
 ) {
 
-    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    // UC-100 — a CoroutineExceptionHandler is REQUIRED here, not just a SupervisorJob:
+    // this process-lifetime singleton launches the profile-collect → rebuild →
+    // MuxConnection.maintain() chain, whose lazy AiSandboxHttpClient SSL build touches
+    // the AndroidKeyStore. A SupervisorJob only isolates sibling coroutines; it does
+    // NOT catch a child-launch throw — without a CEH that throw is UNCAUGHT (crashes
+    // the app in production, and under Robolectric leaks into kotlinx-coroutines-test's
+    // global uncaught handler, failing the next coroutines-test). The CEH contains any
+    // maintain()/rebuild()/probe failure to a log line; the socket's own reconnect
+    // (or the next profile emission) recovers.
+    private val scope = CoroutineScope(
+        SupervisorJob() +
+            Dispatchers.IO +
+            CoroutineExceptionHandler { _, t -> Log.w("MuxConnectionManager", "connection coroutine failed: $t") },
+    )
 
     private val _state = MutableStateFlow<MuxConnection.State>(MuxConnection.State.Idle)
     val state: StateFlow<MuxConnection.State> = _state.asStateFlow()
