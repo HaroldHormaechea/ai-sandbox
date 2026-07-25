@@ -11,30 +11,28 @@ import com.aisandbox.server.sessionevents.service.SessionEventBroadcaster;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
-import org.springframework.web.reactive.HandlerMapping;
-import org.springframework.web.reactive.handler.SimpleUrlHandlerMapping;
 import org.springframework.web.reactive.socket.server.support.WebSocketHandlerAdapter;
 
 /**
- * UC-32 — context-load regression guard for {@link SessionEventsWebSocketConfiguration}.
+ * UC-32 context-load regression guard for {@link SessionEventsWebSocketConfiguration},
+ * updated for the UC-100 hard cut (AC8).
  *
- * <p><b>Why this exists.</b> A first cut of this config autowired an
- * {@code ObjectMapper} bean (and injected {@code WebSocketHandlerAdapter} by
- * type). The reactive (WebFlux) context exposes no {@code ObjectMapper} bean and
- * has two {@code WebSocketHandlerAdapter}s, so the slice failed to wire and took
- * ~30 {@code @SpringBootTest} context loads down with it — a failure the
- * targeted {@code sessionevents.*} unit run (which never starts a Spring context)
- * did not surface; only the full pre-merge gate did.
+ * <p><b>What UC-100 changed.</b> The legacy {@code /v1/sessions/events}
+ * {@code HandlerMapping} ({@code sessionEventsHandlerMapping}) was REMOVED — the
+ * sessions-events feed is now the {@code events} channel of the single
+ * {@code /v1/mux} multiplex, and an old client's upgrade to
+ * {@code /v1/sessions/events} falls through to the 426 HTTP route
+ * ({@code api.LegacyWebSocketGoneController}, covered by
+ * {@code LegacyWebSocketGoneControllerTest}). So this slice must NO LONGER
+ * contribute a URL mapping for that path.
  *
- * <p>This test reproduces the wiring at the unit tier with a lightweight
- * {@link ApplicationContextRunner}: it provides ONLY the slice's genuine
- * collaborators ({@link SessionEventFacade}, {@link SessionEventBroadcaster},
- * {@link ActiveConnectionRegistry}, {@link ActiveStreamRegistry}) and pointedly
- * NO {@code ObjectMapper} and NO {@code WebSocketHandlerAdapter}. The
- * configuration must still produce both beans. If a future change re-introduces
- * a dependency on either of those context-level beans, this context fails to
- * refresh and the test goes red here — at the unit tier — instead of only in the
- * full {@code :server:test} gate.
+ * <p><b>What still matters.</b> The original wiring regression this test was
+ * written for — the slice must self-wire without autowiring a context-level
+ * {@code ObjectMapper} or {@code WebSocketHandlerAdapter} bean (the WebFlux
+ * context exposes no {@code ObjectMapper} bean and two adapters) — is unchanged
+ * and still guarded here: the retained {@link SessionEventWebSocketHandler} bean
+ * (the reference source of the events-channel logic) must still build with only
+ * its genuine collaborators present.
  */
 class SessionEventsWebSocketConfigurationContextTest {
 
@@ -46,28 +44,30 @@ class SessionEventsWebSocketConfigurationContextTest {
             .withUserConfiguration(SessionEventsWebSocketConfiguration.class);
 
     @Test
-    void slice_wires_handler_and_mapping_beans_with_no_objectmapper_or_adapter_bean_present() {
+    void slice_wires_handler_with_no_objectmapper_or_adapter_bean_present() {
         runner.run(context -> {
-            // The whole point: the context refreshes even though no ObjectMapper
-            // and no WebSocketHandlerAdapter bean are present — the slice is
+            // The context refreshes even though no ObjectMapper and no
+            // WebSocketHandlerAdapter bean are present — the slice is
             // self-contained (the missing-bean regression that broke ~30 context
             // loads would fail this refresh).
             assertThat(context).hasNotFailed();
             assertThat(context).doesNotHaveBean(ObjectMapper.class);
             assertThat(context).doesNotHaveBean(WebSocketHandlerAdapter.class);
 
-            // Both beans the channel needs are present.
+            // The events-channel handler bean is still wired (retained as the
+            // reference source of the logic now lifted into the mux channel).
             assertThat(context).hasSingleBean(SessionEventWebSocketHandler.class);
-            assertThat(context).hasBean("sessionEventsHandlerMapping");
         });
     }
 
     @Test
-    void handler_mapping_claims_the_events_path() {
+    void legacy_events_handler_mapping_is_removed_by_the_hard_cut() {
         runner.run(context -> {
-            HandlerMapping mapping = (HandlerMapping) context.getBean("sessionEventsHandlerMapping");
-            assertThat(mapping).isInstanceOf(SimpleUrlHandlerMapping.class);
-            assertThat(((SimpleUrlHandlerMapping) mapping).getUrlMap()).containsKey("/v1/sessions/events");
+            // AC8 hard cut — no HandlerMapping claims /v1/sessions/events for a WS
+            // upgrade anymore; the path is served by the 426 legacy HTTP route and
+            // the feed lives on /v1/mux. The old mapping bean must be gone.
+            assertThat(context).hasNotFailed();
+            assertThat(context).doesNotHaveBean("sessionEventsHandlerMapping");
         });
     }
 }

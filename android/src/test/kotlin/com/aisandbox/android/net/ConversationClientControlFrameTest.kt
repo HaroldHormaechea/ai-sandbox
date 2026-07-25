@@ -1,309 +1,180 @@
 package com.aisandbox.android.net
 
-import com.aisandbox.android.identity.KeyStoreIdentityManager
-import java.net.InetAddress
-import java.security.KeyStore
-import java.security.MessageDigest
-import java.util.concurrent.LinkedBlockingQueue
-import java.util.concurrent.TimeUnit
-import javax.net.ssl.KeyManagerFactory
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
-import okhttp3.Response
-import okhttp3.WebSocket
-import okhttp3.WebSocketListener
-import okhttp3.mockwebserver.MockResponse
-import okhttp3.mockwebserver.MockWebServer
-import okhttp3.tls.HandshakeCertificates
-import okhttp3.tls.HeldCertificate
+import com.aisandbox.android.conversation.AnswerItem
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withTimeout
 import org.assertj.core.api.Assertions.assertThat
-import org.junit.jupiter.api.AfterEach
-import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
+import org.mockito.ArgumentMatchers.any
+import org.mockito.ArgumentMatchers.anyString
 import org.mockito.Mockito.mock
+import org.mockito.Mockito.verify
 import org.mockito.Mockito.`when`
 
 /**
- * UC-37 — the Android [ConversationClient] wire contract, mirrored on the
- * server's `ConversationClientMessage` / `ConversationServerMessage` vocabulary.
- * Covers the outbound frames the structured view emits (composer / answer /
- * enumerate / select-target / interrupt — AC8/AC9/AC11/AC17) and the inbound
- * server frames it surfaces on [ConversationClient.incoming] (AC3–AC6/AC19).
- *
- * <p>Uses the same robust harness as [StreamClientControlFrameTest]: a loopback
- * TLS MockWebServer, real-time `runBlocking` (so the real-thread WS callbacks
- * resume), a server-side recorder queue, a subscription gate before an inbound
- * emit, bounded polls, and explicit collector teardown.
+ * UC-100 — the `conversation`-channel adapter's wire contract over the single
+ * multiplexed connection. [ConversationClient] delegates every `send*` to
+ * [MuxConnectionManager] on the `conversation` channel; these tests assert the
+ * exact **payload JSON** (AC2 — the existing typed models carried unchanged,
+ * incl. UC-43 multi-answer batches and JSON escaping) and that inbound
+ * conversation frames surface on [ConversationClient.incoming]. Deterministic
+ * (mocked manager) — no MockWebServer socket collector.
  */
 class ConversationClientControlFrameTest {
 
-    private lateinit var server: MockWebServer
-    private lateinit var profile: ServerProfile
-    private var http: AiSandboxHttpClient? = null
+    private val n = 7
 
-    @BeforeEach
-    fun setUp() {
-        val cert = HeldCertificate.Builder()
-            .commonName("ai-sandbox-test")
-            .addSubjectAlternativeName("127.0.0.1")
-            .rsa2048()
-            .build()
-        val handshake = HandshakeCertificates.Builder().heldCertificate(cert).build()
-        server = MockWebServer().apply {
-            useHttps(handshake.sslSocketFactory(), false)
-            start(InetAddress.getByName("127.0.0.1"), 0)
+    private class Harness(val n: Int) {
+        val manager: MuxConnectionManager = mock(MuxConnectionManager::class.java)
+        val stateFlow = MutableStateFlow<MuxConnection.State>(MuxConnection.State.Open)
+        val textFlow = MutableSharedFlow<String>(replay = 1, extraBufferCapacity = 8)
+
+        /** Every conversation-channel payload the adapter handed the manager, in order. */
+        val sentPayloads = java.util.concurrent.CopyOnWriteArrayList<String>()
+
+        @Volatile
+        var returnValue = true
+
+        init {
+            `when`(manager.state).thenReturn(stateFlow)
+            `when`(manager.textFrames(MuxEnvelope.CHANNEL_CONVERSATION, n)).thenReturn(textFlow)
+            // Record the payload (arg 2) rather than verify with eq()/captor — those
+            // return null and trip Kotlin's non-null checks on a mocked Kotlin method.
+            `when`(manager.sendText(anyString(), any(), anyString())).thenAnswer { inv ->
+                sentPayloads.add(inv.getArgument<String>(2))
+                returnValue
+            }
         }
-        val pinHex = MessageDigest.getInstance("SHA-256")
-            .digest(cert.certificate.publicKey.encoded)
-            .joinToString("") { "%02x".format(it.toInt() and 0xff) }
-        profile = ServerProfile(
-            serverUrl = "https://127.0.0.1:${server.port}",
-            pinSha256Hex = pinHex,
-            clientCertCn = "alice-phone",
-            clientCertExpiresAtMs = 0L,
+
+        fun client() = ConversationClient(manager, sessionN = n)
+    }
+
+    /** The single payload the adapter emitted this test. */
+    private fun sent(h: Harness): String = h.sentPayloads.single()
+
+    @Test
+    fun `sendComposer emits a composer-input frame`() {
+        val h = Harness(n)
+        assertThat(h.client().sendComposer("hello")).isTrue
+        assertThat(sent(h)).isEqualTo("""{"type":"composer-input","text":"hello"}""")
+    }
+
+    @Test
+    fun `sendComposer escapes newlines so multiline survives the wire`() {
+        val h = Harness(n)
+        h.client().sendComposer("line a\nline b")
+        assertThat(sent(h)).isEqualTo("""{"type":"composer-input","text":"line a\nline b"}""")
+    }
+
+    @Test
+    fun `sendAnswer emits an answer frame with selections and free text`() {
+        val h = Harness(n)
+        assertThat(h.client().sendAnswer("tuQ", 0, listOf(0, 2), "custom")).isTrue
+        assertThat(sent(h)).isEqualTo(
+            """{"type":"answer","questionUuid":"tuQ","questionIndex":0,"selections":[0,2],"freeText":"custom"}""",
         )
     }
 
-    @AfterEach
-    fun tearDown() {
-        http?.client?.dispatcher?.executorService?.shutdown()
-        http?.client?.connectionPool?.evictAll()
-        try {
-            server.shutdown()
-        } catch (_: Throwable) {
-            // best-effort cleanup
-        }
-    }
-
-    private fun newClient(n: Int): ConversationClient {
-        val h = AiSandboxHttpClient(profile, fakeIdentity())
-        http = h
-        return ConversationClient(h, sessionN = n)
-    }
-
-    private fun fakeIdentity(): KeyStoreIdentityManager {
-        val factory = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm())
-        val emptyP12 = KeyStore.getInstance("PKCS12").apply { load(null, null) }
-        factory.init(emptyP12, charArrayOf())
-        val m = mock(KeyStoreIdentityManager::class.java)
-        `when`(m.keyManagerFactory()).thenReturn(factory)
-        return m
-    }
-
-    private fun recordingUpgrade(received: LinkedBlockingQueue<String>) =
-        MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
-            override fun onMessage(webSocket: WebSocket, text: String) {
-                received.add(text)
-            }
-        })
-
-    // ── wire constants ───────────────────────────────────────────────────────
-
     @Test
-    fun `conversation subprotocol constant is stable`() {
-        assertThat(ConversationClient.SUBPROTOCOL).isEqualTo("ai-sandbox.conv.v1")
-    }
-
-    // ── before connect: no socket → false ─────────────────────────────────────
-
-    @Test
-    fun `sends are no-ops before the socket is open`() {
-        val c = newClient(7)
-        assertThat(c.sendComposer("hi")).isFalse
-        assertThat(c.sendEnumerate()).isFalse
-        assertThat(c.sendInterrupt()).isFalse
-        assertThat(c.sendSelectTarget("main")).isFalse
-        assertThat(c.sendAnswer("uq", 0, listOf(0), "")).isFalse
-        assertThat(c.sendAnswerBatch("uq", listOf(com.aisandbox.android.conversation.AnswerItem(0, listOf(0), "")))).isFalse
-        assertThat(c.sendFetchDetail("tu1", "u1")).isFalse
-    }
-
-    // ── outbound frames (captured server-side) ─────────────────────────────────
-
-    @Test
-    fun `sendComposer emits a composer-input frame`() = runBlocking {
-        val received = LinkedBlockingQueue<String>()
-        server.enqueue(recordingUpgrade(received))
-        val c = newClient(7)
-        c.connect()
-
-        assertThat(c.sendComposer("hello")).isTrue
-        assertThat(received.poll(2, TimeUnit.SECONDS)).isEqualTo("""{"type":"composer-input","text":"hello"}""")
-        c.close()
-    }
-
-    @Test
-    fun `sendComposer escapes newlines so multiline survives the wire`() = runBlocking {
-        val received = LinkedBlockingQueue<String>()
-        server.enqueue(recordingUpgrade(received))
-        val c = newClient(7)
-        c.connect()
-
-        // AC9 — a multiline composer body must serialize as a single JSON frame
-        // with the newline escaped (the server maps \n to the session's C-j).
-        c.sendComposer("line a\nline b")
-        val frame = received.poll(2, TimeUnit.SECONDS)
-        assertThat(frame).isEqualTo("""{"type":"composer-input","text":"line a\nline b"}""")
-        c.close()
-    }
-
-    @Test
-    fun `sendAnswer emits an answer frame with selections and free text`() = runBlocking {
-        val received = LinkedBlockingQueue<String>()
-        server.enqueue(recordingUpgrade(received))
-        val c = newClient(3)
-        c.connect()
-
-        assertThat(c.sendAnswer("tuQ", 0, listOf(0, 2), "custom")).isTrue
-        assertThat(received.poll(2, TimeUnit.SECONDS))
-            .isEqualTo(
-                """{"type":"answer","questionUuid":"tuQ","questionIndex":0,"selections":[0,2],"freeText":"custom"}""",
-            )
-        c.close()
-    }
-
-    @Test
-    fun `sendAnswer json-escapes the free text and question id`() = runBlocking {
-        val received = LinkedBlockingQueue<String>()
-        server.enqueue(recordingUpgrade(received))
-        val c = newClient(3)
-        c.connect()
-
-        c.sendAnswer("u\"q", 0, emptyList(), "a\"b\\c")
-        val frame = received.poll(2, TimeUnit.SECONDS)
+    fun `sendAnswer json-escapes the free text and question id`() {
+        val h = Harness(n)
+        h.client().sendAnswer("u\"q", 0, emptyList(), "a\"b\\c")
+        val frame = sent(h)
         assertThat(frame).contains(""""questionUuid":"u\"q"""")
         assertThat(frame).contains(""""freeText":"a\"b\\c"""")
         assertThat(frame).contains(""""selections":[]""")
-        c.close()
     }
 
     @Test
-    fun `sendAnswerBatch emits one answer-batch frame with every item in index order`() = runBlocking {
-        // UC-43 AC2/AC3 — a multi-question (N>1) submit goes out as a SINGLE answer-batch frame
-        // carrying one entry per question, in the caller-supplied questionIndex order.
-        val received = LinkedBlockingQueue<String>()
-        server.enqueue(recordingUpgrade(received))
-        val c = newClient(3)
-        c.connect()
-
+    fun `sendAnswerBatch emits one answer-batch frame with every item in index order`() {
+        val h = Harness(n)
         assertThat(
-            c.sendAnswerBatch(
+            h.client().sendAnswerBatch(
                 "tuQ",
                 listOf(
-                    com.aisandbox.android.conversation.AnswerItem(0, listOf(0, 2), ""),
-                    com.aisandbox.android.conversation.AnswerItem(1, listOf(1), "x"),
+                    AnswerItem(0, listOf(0, 2), ""),
+                    AnswerItem(1, listOf(1), "x"),
                 ),
             ),
         ).isTrue
-        assertThat(received.poll(2, TimeUnit.SECONDS))
-            .isEqualTo(
-                """{"type":"answer-batch","questionUuid":"tuQ","answers":[""" +
-                    """{"questionIndex":0,"selections":[0,2],"freeText":""},""" +
-                    """{"questionIndex":1,"selections":[1],"freeText":"x"}]}""",
-            )
-        c.close()
+        assertThat(sent(h)).isEqualTo(
+            """{"type":"answer-batch","questionUuid":"tuQ","answers":[""" +
+                """{"questionIndex":0,"selections":[0,2],"freeText":""},""" +
+                """{"questionIndex":1,"selections":[1],"freeText":"x"}]}""",
+        )
     }
 
     @Test
-    fun `sendAnswerBatch json-escapes the free text and question id`() = runBlocking {
-        val received = LinkedBlockingQueue<String>()
-        server.enqueue(recordingUpgrade(received))
-        val c = newClient(3)
-        c.connect()
-
-        c.sendAnswerBatch(
-            "u\"q",
-            listOf(com.aisandbox.android.conversation.AnswerItem(0, emptyList(), "a\"b\\c")),
-        )
-        val frame = received.poll(2, TimeUnit.SECONDS)
+    fun `sendAnswerBatch json-escapes the free text and question id`() {
+        val h = Harness(n)
+        h.client().sendAnswerBatch("u\"q", listOf(AnswerItem(0, emptyList(), "a\"b\\c")))
+        val frame = sent(h)
         assertThat(frame).contains(""""type":"answer-batch"""")
         assertThat(frame).contains(""""questionUuid":"u\"q"""")
         assertThat(frame).contains(""""freeText":"a\"b\\c"""")
         assertThat(frame).contains(""""selections":[]""")
-        c.close()
     }
 
     @Test
-    fun `sendEnumerate and sendInterrupt emit their control frames`() = runBlocking {
-        val received = LinkedBlockingQueue<String>()
-        server.enqueue(recordingUpgrade(received))
-        val c = newClient(7)
-        c.connect()
+    fun `sendEnumerate and sendInterrupt emit their control frames`() {
+        val h1 = Harness(n)
+        assertThat(h1.client().sendEnumerate()).isTrue
+        assertThat(sent(h1)).isEqualTo("""{"type":"enumerate-targets"}""")
 
-        assertThat(c.sendEnumerate()).isTrue
-        assertThat(received.poll(2, TimeUnit.SECONDS)).isEqualTo("""{"type":"enumerate-targets"}""")
-        assertThat(c.sendInterrupt()).isTrue
-        assertThat(received.poll(2, TimeUnit.SECONDS)).isEqualTo("""{"type":"interrupt"}""")
-        c.close()
+        val h2 = Harness(n)
+        assertThat(h2.client().sendInterrupt()).isTrue
+        assertThat(sent(h2)).isEqualTo("""{"type":"interrupt"}""")
     }
 
     @Test
-    fun `sendSelectTarget emits a select-target frame with the id`() = runBlocking {
-        val received = LinkedBlockingQueue<String>()
-        server.enqueue(recordingUpgrade(received))
-        val c = newClient(1)
-        c.connect()
-
-        c.sendSelectTarget("swarm:main:0.1")
-        assertThat(received.poll(2, TimeUnit.SECONDS))
-            .isEqualTo("""{"type":"select-target","targetId":"swarm:main:0.1"}""")
-        c.close()
+    fun `sendSelectTarget emits a select-target frame with the id`() {
+        val h = Harness(n)
+        h.client().sendSelectTarget("swarm:main:0.1")
+        assertThat(sent(h)).isEqualTo("""{"type":"select-target","targetId":"swarm:main:0.1"}""")
     }
 
     @Test
-    fun `sendFetchDetail emits a fetch-detail frame with the tool id and uuid`() = runBlocking {
-        val received = LinkedBlockingQueue<String>()
-        server.enqueue(recordingUpgrade(received))
-        val c = newClient(7)
-        c.connect()
-
-        // UC-41 AC5 — the tap-to-expand request carries both the merge key (toolUseId)
-        // and the originating tool_use line's uuid (server-side transcript scoping).
-        assertThat(c.sendFetchDetail("tu9", "u-line")).isTrue
-        assertThat(received.poll(2, TimeUnit.SECONDS))
-            .isEqualTo("""{"type":"fetch-detail","toolUseId":"tu9","uuid":"u-line"}""")
-        c.close()
+    fun `sendFetchDetail emits a fetch-detail frame with the tool id and uuid`() {
+        val h = Harness(n)
+        assertThat(h.client().sendFetchDetail("tu9", "u-line")).isTrue
+        assertThat(sent(h)).isEqualTo("""{"type":"fetch-detail","toolUseId":"tu9","uuid":"u-line"}""")
     }
 
     @Test
-    fun `sendFetchDetail json-escapes the ids`() = runBlocking {
-        val received = LinkedBlockingQueue<String>()
-        server.enqueue(recordingUpgrade(received))
-        val c = newClient(7)
-        c.connect()
-
-        c.sendFetchDetail("t\"u", "u\\1")
-        val frame = received.poll(2, TimeUnit.SECONDS)
+    fun `sendFetchDetail json-escapes the ids`() {
+        val h = Harness(n)
+        h.client().sendFetchDetail("t\"u", "u\\1")
+        val frame = sent(h)
         assertThat(frame).contains(""""toolUseId":"t\"u"""")
         assertThat(frame).contains(""""uuid":"u\\1"""")
-        c.close()
     }
 
-    // ── inbound frames → incoming ──────────────────────────────────────────────
+    @Test
+    fun `sends reflect the manager result when the connection is down`() {
+        val h = Harness(n)
+        `when`(h.manager.sendText(anyString(), any(), anyString())).thenReturn(false)
+        val c = h.client()
+        assertThat(c.sendComposer("hi")).isFalse
+        assertThat(c.sendEnumerate()).isFalse
+        assertThat(c.sendInterrupt()).isFalse
+    }
 
     @Test
-    fun `inbound server frame is surfaced on incoming`() = runBlocking {
-        val assistantFrame = """{"type":"assistant-text","uuid":"u1","source":"main","isSidechain":false,"text":"hi"}"""
-        server.enqueue(
-            MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
-                override fun onMessage(webSocket: WebSocket, text: String) {
-                    // reply to the client's enumerate with a conversation frame
-                    webSocket.send(assistantFrame)
-                }
-            }),
-        )
-        val c = newClient(7)
-        c.connect()
+    fun `inbound conversation frame is surfaced on incoming`() = runTest {
+        val h = Harness(n)
+        val c = h.client()
+        val assistantFrame =
+            """{"type":"assistant-text","uuid":"u1","source":"main","isSidechain":false,"text":"hi"}"""
+        h.textFlow.emit(assistantFrame)
+        val received = withTimeout(2_000) { c.incoming.first() }
+        assertThat(received).isEqualTo(assistantFrame)
+    }
 
-        val received = LinkedBlockingQueue<String>()
-        val collector = launch(Dispatchers.IO) { c.incoming.collect { received.add(it) } }
-        delay(200) // gate: ensure the replay=0 collector is subscribed
-        c.sendEnumerate()
-
-        assertThat(received.poll(2, TimeUnit.SECONDS)).isEqualTo(assistantFrame)
-        collector.cancel()
-        c.close()
+    @Test
+    fun `mux subprotocol constant is stable`() {
+        assertThat(ConversationClient.SUBPROTOCOL).isEqualTo("ai-sandbox.mux.v1")
     }
 }
