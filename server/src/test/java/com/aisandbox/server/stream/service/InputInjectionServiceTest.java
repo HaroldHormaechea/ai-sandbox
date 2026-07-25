@@ -753,7 +753,9 @@ class InputInjectionServiceTest {
     }
 
     private static boolean isNamedKey(List<String> argv, String key) {
-        return !argv.contains("-l") && argv.contains("send-keys") && argv.get(argv.size() - 1).equals(key);
+        return !argv.contains("-l")
+                && argv.contains("send-keys")
+                && argv.get(argv.size() - 1).equals(key);
     }
 
     private static int firstIndex(List<List<String>> calls, Predicate<List<String>> p) {
@@ -797,7 +799,8 @@ class InputInjectionServiceTest {
 
         List<List<String>> calls = allArgvsInOrder();
         int firstGate = firstIndex(calls, InputInjectionServiceTest::isCapturePane);
-        int literalIdx = firstIndex(calls, c -> isLiteralSend(c) && c.get(c.size() - 1).equals(SPAWN_TEXT));
+        int literalIdx =
+                firstIndex(calls, c -> isLiteralSend(c) && c.get(c.size() - 1).equals(SPAWN_TEXT));
         int enterIdx = firstIndex(calls, c -> isNamedKey(c, "Enter"));
 
         // The literal was typed exactly once and submitted with exactly one Enter (exactly-once).
