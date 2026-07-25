@@ -3,9 +3,6 @@ package com.aisandbox.android.terminal
 import android.content.Context
 import android.util.Log
 import com.aisandbox.android.net.AiSandboxHttpClient
-import com.aisandbox.android.net.NetworkEvent
-import com.aisandbox.android.net.NetworkEvents
-import com.aisandbox.android.net.ReconnectController
 import com.aisandbox.android.net.ServerProfile
 import com.aisandbox.android.net.ServerProfileStore
 import com.aisandbox.android.net.StreamClient
@@ -23,7 +20,6 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
@@ -68,7 +64,6 @@ class TerminalStreamController(
 
     /** Application-scoped — cancelled only by [close]; never tied to a screen. */
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    private val reconnect = ReconnectController()
     private val controlJson = Json { ignoreUnknownKeys = true; isLenient = true }
 
     private var streamClient: StreamClient? = null
@@ -202,9 +197,13 @@ class TerminalStreamController(
         }
     }
 
-    /** AC#25 "tap to reconnect" — reset back-off and restart the loop. */
+    /**
+     * AC#25 "tap to reconnect" — UC-100: the single shared
+     * [com.aisandbox.android.net.MuxConnection] owns the one authoritative
+     * back-off (its lone [com.aisandbox.android.net.ReconnectController]), so a
+     * manual retry just re-asserts this channel's subscription over that socket.
+     */
     fun userTriggeredReconnect() {
-        reconnect.reset()
         startConnectLoop()
     }
 
@@ -224,12 +223,19 @@ class TerminalStreamController(
         onClosed(sessionN)
     }
 
+    /**
+     * UC-100 — subscribe this session's `stream` channel over the single shared
+     * [com.aisandbox.android.net.MuxConnection] and mirror that connection's
+     * state. Reconnection + back-off are owned centrally by the one connection
+     * (AC6 — provably one reconnect loop), so this controller no longer runs its
+     * own retry loop or rebuilds a socket: it keeps ONE adapter whose inbound
+     * flows are stable across the connection's reconnects, and re-asserts
+     * geometry / enumerate / selection each time the shared connection
+     * (re)enters Open (AC#4 / AC#14). The redundant per-drop
+     * unsubscribe→subscribe churn is gone.
+     */
     private fun startConnectLoop() {
         connectJob?.cancel()
-        // UC-88 — cancelling the coroutine does NOT cancel the OkHttp socket it
-        // owns, so force-drop any in-flight/half-open client BEFORE relaunching
-        // (e.g. userTriggeredReconnect). Otherwise a relaunch orphans a draining
-        // socket; close() cancels the socket in ~0 ms.
         streamClient?.close("reconnect")
         streamClient = null
         connectJob = scope.launch {
@@ -239,103 +245,46 @@ class TerminalStreamController(
                 return@launch
             }
             val http = httpClientFactory(profile)
+            val client = streamClientFactory(http, sessionN)
+            streamClient = client
+            _state.value = TerminalState.Connecting
 
-            while (isActive) {
-                val client = streamClientFactory(http, sessionN)
-                streamClient = client
-                _state.value = TerminalState.Connecting
-                try {
-                    client.connect()
-                } catch (t: Throwable) {
-                    Log.w(TAG, "connect threw: $t")
+            // Persistent collectors over the shared connection's stable per-channel
+            // flows — they survive the connection's own reconnects, so collectors
+            // are never re-subscribed per drop.
+            launch { client.incoming.collect { wsSession.feed(it) } }
+            launch { client.controlIncoming.collect { onControlFrame(it) } }
+            // UC-24 / AC#12 — periodic re-enumeration while Open so teammates that
+            // appear/disappear mid-stream are reflected without a reconnect.
+            launch {
+                while (isActive) {
+                    if (client.state.value is StreamClient.State.Open) client.sendEnumerate()
+                    delay(ENUMERATE_INTERVAL_MS)
                 }
+            }
 
-                when (client.state.value) {
+            // Subscribe the stream channel over the shared socket.
+            launch { client.connect() }
+
+            // Reflect the shared connection's state into TerminalState; re-assert
+            // the view on each transition into Open (AC#4 / AC#14).
+            client.state.collect { s ->
+                when (s) {
                     is StreamClient.State.Open -> {
-                        reconnect.reset()
                         _state.value = TerminalState.Open
-                        // Re-assert geometry, refresh the target list, and
-                        // re-apply any prior selection so a reconnect restores
-                        // the prior view (AC#4 / AC#14).
-                        val s = _size.value
-                        client.sendResize(s.cols, s.rows)
+                        val sz = _size.value
+                        client.sendResize(sz.cols, sz.rows)
                         client.sendEnumerate()
                         if (_selectedTargetId.value != MAIN_TARGET_ID) {
                             client.sendSelectTarget(_selectedTargetId.value)
                         }
-                        // Pump WS stdout into the emulator + collect control
-                        // frames until the WS leaves Open.
-                        val pump = launch { client.incoming.collect { wsSession.feed(it) } }
-                        val control = launch { client.controlIncoming.collect { onControlFrame(it) } }
-                        // UC-24 / AC#12 — periodic re-enumeration so teammates that
-                        // appear or disappear mid-stream are reflected without a
-                        // reconnect. `_targets` already updates idempotently from
-                        // each `targets` frame, so the switcher row reacts
-                        // automatically. Scoped to this Open block and cancelled
-                        // with pump/control on every reconnect/teardown so it can
-                        // never leak or multiply across reconnects.
-                        val enumerate = launch {
-                            while (isActive) {
-                                delay(ENUMERATE_INTERVAL_MS)
-                                client.sendEnumerate()
-                            }
-                        }
-                        val terminal = client.state.first { it !is StreamClient.State.Open }
-                        pump.cancel()
-                        control.cancel()
-                        enumerate.cancel()
-                        if (terminal is StreamClient.State.Revoked) {
-                            _state.value = TerminalState.Revoked
-                            return@launch
-                        }
-                        _state.value = TerminalState.Connecting
                     }
-
-                    is StreamClient.State.Revoked -> {
-                        _state.value = TerminalState.Revoked
-                        return@launch
-                    }
-
-                    else -> {
-                        // Failed to open — fall through to the reconnect back-off.
-                    }
+                    is StreamClient.State.Connecting -> _state.value = TerminalState.Connecting
+                    is StreamClient.State.Disconnected -> _state.value = TerminalState.Connecting
+                    is StreamClient.State.Revoked -> _state.value = TerminalState.Revoked
+                    is StreamClient.State.Idle -> { /* not yet subscribed */ }
                 }
-
-                if (!isActive) break
-                // UC-88 — surface a server refusal (SERVICE_OVERLOAD / POLICY_VIOLATION)
-                // distinctly rather than letting it read as a routine drop. Back-off
-                // behaviour is unchanged (the unlimited-retry contract stands).
-                (client.state.value as? StreamClient.State.Disconnected)
-                    ?.let { logServerRefusalIfAny(it.reason) }
-                // UC-71 — this give-up branch only fires under an injected finite
-                // retry budget; with the unlimited default ctor it is unreachable.
-                if (reconnect.shouldGiveUp()) {
-                    _state.value = TerminalState.GaveUp
-                    NetworkEvents.tryEmit(NetworkEvent.StreamGaveUp(client.streamId))
-                    return@launch
-                }
-                val delayMs = reconnect.nextDelayMs()
-                NetworkEvents.tryEmit(
-                    NetworkEvent.StreamReconnecting(client.streamId, reconnect.attemptCount, delayMs),
-                )
-                _state.value = TerminalState.Reconnecting(reconnect.attemptCount, delayMs)
-                delay(delayMs)
             }
-        }
-    }
-
-    /**
-     * UC-88 — log a server-initiated *refusal* close distinctly (per-client cap
-     * SERVICE_OVERLOAD / POLICY_VIOLATION). The client encodes server closes as
-     * `"$code:$reason"`. Logging only — the unlimited-retry back-off contract is
-     * unchanged.
-     */
-    private fun logServerRefusalIfAny(reason: String) {
-        when {
-            reason.startsWith("${StreamClient.SERVICE_OVERLOAD_CLOSE_CODE}:") ->
-                Log.w(TAG, "stream refused by server — SERVICE_OVERLOAD: $reason; backing off, not hammering")
-            reason.startsWith("${StreamClient.POLICY_VIOLATION_CLOSE_CODE}:") ->
-                Log.w(TAG, "stream refused by server — POLICY_VIOLATION: $reason")
         }
     }
 

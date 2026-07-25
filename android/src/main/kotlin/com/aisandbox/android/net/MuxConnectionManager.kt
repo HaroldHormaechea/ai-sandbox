@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
+import okhttp3.Request
 
 /**
  * UC-100 — app-scoped owner of the **single** [MuxConnection] (held by
@@ -74,7 +75,17 @@ class MuxConnectionManager(
             _state.value = MuxConnection.State.Idle
             if (profile == null) return
 
-            val conn = MuxConnection(httpClientFactory(profile), scope)
+            val http = httpClientFactory(profile)
+            // UC-100 (AC8) — probe GET /v1/capabilities before relying on the socket
+            // so a NEW client detects an OLD server (which lacks the endpoint → 404,
+            // or reports a different ws_protocol) and routes to the update screen.
+            // An old server has no /v1/mux handler, so its upgrade attempt fails with
+            // a generic okhttp error, NOT a 4426 close — the probe is the reliable
+            // new-client↔old-server signal. A transient network error is ignored (the
+            // socket's own reconnect covers connectivity), so a momentary drop never
+            // false-positives into the update screen.
+            pipeJobs += scope.launch { probeCapabilities(http) }
+            val conn = MuxConnection(http, scope)
             connection = conn
             pipeJobs += scope.launch { conn.state.collect { _state.value = it } }
             pipeJobs += scope.launch { conn.control.collect { _control.emit(it) } }
@@ -157,6 +168,35 @@ class MuxConnectionManager(
         val relay = binaryRelays.computeIfAbsent(sessionId) { MutableSharedFlow(replay = 0, extraBufferCapacity = 64) }
         synchronized(lock) { connection?.let { pipeBinary(it, sessionId, relay) } }
         return relay.asSharedFlow()
+    }
+
+    /**
+     * UC-100 (AC8) — probe `GET /v1/capabilities`. A 404 (endpoint absent) or a
+     * mismatched `ws_protocol` means an OLD server → emit
+     * [NetworkEvent.ServerUpgradeRequired] (routes to the update screen). Any
+     * other outcome — including a network error — is ignored so a transient drop
+     * never mislabels a healthy server as needing an upgrade. Runs blocking on
+     * the IO scope it is launched from.
+     */
+    private fun probeCapabilities(http: AiSandboxHttpClient) {
+        try {
+            val req = Request.Builder().url("${http.baseUrl}/v1/capabilities").build()
+            http.client.newCall(req).execute().use { resp ->
+                when {
+                    resp.code == 404 -> NetworkEvents.tryEmit(NetworkEvent.ServerUpgradeRequired)
+                    !resp.isSuccessful -> { /* other status — inconclusive, ignore */ }
+                    else -> {
+                        val body = resp.body?.string().orEmpty()
+                        val proto = Regex("\"ws_protocol\"\\s*:\\s*\"([^\"]*)\"").find(body)?.groupValues?.get(1)
+                        if (proto != MuxConnection.PROTOCOL) {
+                            NetworkEvents.tryEmit(NetworkEvent.ServerUpgradeRequired)
+                        }
+                    }
+                }
+            }
+        } catch (t: Throwable) {
+            // Transient connectivity error — ignore; the socket's own reconnect handles it.
+        }
     }
 
     private fun keyStr(channel: String, sessionId: Int?): String =

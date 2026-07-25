@@ -2,7 +2,6 @@ package com.aisandbox.android.ui.screens
 
 import android.util.Log
 import com.aisandbox.android.net.AiSandboxHttpClient
-import com.aisandbox.android.net.ReconnectController
 import com.aisandbox.android.net.ServerProfile
 import com.aisandbox.android.net.ServerProfileStore
 import com.aisandbox.android.net.SessionEventMessage
@@ -13,9 +12,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 /**
@@ -63,7 +59,6 @@ class SessionEventsController(
     private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
 ) {
 
-    private val reconnect = ReconnectController(nowMs = nowMs)
     private var eventsClient: SessionEventsClient? = null
     private var connectJob: Job? = null
 
@@ -83,7 +78,6 @@ class SessionEventsController(
         connectJob = null
         eventsClient?.close(reason)
         eventsClient = null
-        reconnect.reset()
     }
 
     /** Permanent teardown (ViewModel.onCleared) — cancels the controller scope. */
@@ -92,207 +86,104 @@ class SessionEventsController(
         scope.cancel()
     }
 
+    /**
+     * UC-100 — subscribe the global `events` channel over the single shared
+     * [com.aisandbox.android.net.MuxConnection] and reflect that connection's
+     * state into [SessionsFeedStatus]. Reconnection + back-off are owned
+     * centrally by the one connection (AC6 — provably one reconnect loop); this
+     * controller no longer runs its own retry loop, rebuilds a socket, or holds a
+     * [com.aisandbox.android.net.ReconnectController]. The `events` channel is
+     * reference-counted in the manager, so the second consumer
+     * ([com.aisandbox.android.notifications.PendingQuestionService]) shares the
+     * same live channel rather than opening a second one.
+     *
+     * <p>The server pushes a fresh [SessionEventMessage.Snapshot] on every
+     * (re)subscribe, so collecting [SessionEventsClient.incoming] is the whole
+     * job — the resync happens for free (AC5). On an Open→drop edge we fire
+     * [onTransientDrop] so the list repaints from the authoritative REST GET at
+     * once (UC-92 AC4/AC5) instead of waiting for the shared connection's
+     * back-off; a genuine cold outage never reaches Open, so this can't turn an
+     * outage into a tight loop (AC6 preserved).
+     */
     private fun startConnectLoop() {
-        // UC-88 (challenger re-review) — NEVER relaunch over a connect that is still
-        // healthily inside its handshake window (Connecting) or already Open under an
-        // ACTIVE loop. Force-cancelling such a connect as part of a "relaunch" would
-        // let rapid chat→list bouncing thrash a slow-but-progressing connect
-        // (connect→cancel→reconnect→cancel…) and starve it from ever completing. The
-        // relaunch-cancel below is reserved for an ACTUAL new attempt / teardown,
-        // where the prior client is orphaned (its loop already ended) or has genuinely
-        // failed. (connect() already no-ops while a loop is active; this encodes that
-        // contract directly in the loop starter so it holds for every caller.)
-        if (connectJob?.isActive == true) {
-            when (eventsClient?.state?.value) {
-                is SessionEventsClient.State.Connecting,
-                is SessionEventsClient.State.Open -> return
-                else -> { /* active loop but the client failed/terminal — relaunch is fine */ }
-            }
-        }
         connectJob?.cancel()
-        // Cancelling the coroutine does NOT cancel the OkHttp socket it owns, so
-        // force-drop the prior/orphaned client BEFORE relaunching — a graceful close
-        // alone lets a half-open socket linger 30–60 s and pile up past the server's
-        // per-fingerprint cap. This close is intentional (quiescent onFailure) and,
-        // per the guard above, only ever runs on a terminal/orphaned client.
         eventsClient?.close("reconnect")
         eventsClient = null
         connectJob = scope.launch {
             val profile = profileStore.current()
             if (profile == null) {
                 Log.i(TAG, "no profile — events feed idle")
-                // UC-70 hard-req #5 — the no-profile branch emits NOTHING; the
-                // feed stays silent so an unconfigured client never shows the
-                // retrying background.
+                // UC-70 hard-req #5 — the no-profile branch emits NOTHING.
                 return@launch
             }
             val http = httpClientFactory(profile)
+            val client = eventsClientFactory(http)
+            eventsClient = client
+            var wasOpen = false
 
-            while (isActive) {
-                // UC-72 loop-top dial emit — fired before EVERY client.connect()
-                // to mark the attempt as in-flight (activity = ATTEMPTING → the
-                // status dot reads yellow). This replaces UC-70's
-                // attemptCount==0-only CONNECTING emit; the anti-flicker contract
-                // is preserved by keeping the PHASE stable across the cycle:
-                //
-                //  • attempt 0 (initial connect, no failure yet) → phase
-                //    CONNECTING — still the silent, non-retrying phase UC-70's
-                //    background ignores, so an initial connect never flashes the
-                //    "retrying" surface. Defaults (attempt 0, both instants null).
-                //  • attempt > 0 (a reconnect dial) → phase RECONNECTING, HELD
-                //    from the preceding WAITING emit so UC-70's background never
-                //    flickers away mid-sequence. We carry the SAME attempt and
-                //    giveUpAtMs the WAITING emit carried (so UC-70's "attempt N" /
-                //    give-up lines stay stable), and only nextRetryAtMs flips to
-                //    null — there is no scheduled next retry while the dial is in
-                //    flight, so the countdown hides during the attempt. We never
-                //    re-emit CONNECTING once a failure has been recorded.
-                if (reconnect.attemptCount == 0) {
-                    onStatus(
-                        SessionsFeedStatus(
-                            phase = SessionsFeedStatus.Phase.CONNECTING,
-                            activity = SessionsFeedStatus.ReconnectActivity.ATTEMPTING,
-                            attempt = 0,
-                            nextRetryAtMs = null,
-                            giveUpAtMs = null,
-                        ),
-                    )
-                } else {
-                    onStatus(
-                        SessionsFeedStatus(
-                            phase = SessionsFeedStatus.Phase.RECONNECTING,
-                            activity = SessionsFeedStatus.ReconnectActivity.ATTEMPTING,
-                            attempt = reconnect.attemptCount,
-                            // null during the dial — no next retry is scheduled
-                            // while the attempt is in flight (countdown hides).
-                            nextRetryAtMs = null,
-                            giveUpAtMs = reconnect.giveUpAtMs(),
-                        ),
-                    )
+            // Persistent incoming collector over the shared connection's stable
+            // relay flow (survives the connection's own reconnects).
+            launch {
+                client.incoming.collect { msg ->
+                    when (msg) {
+                        is SessionEventMessage.Snapshot -> onSnapshot(msg.sessions)
+                        is SessionEventMessage.Delta -> onDelta(msg.upserts, msg.removed)
+                    }
                 }
-                val client = eventsClientFactory(http)
-                eventsClient = client
-                try {
-                    client.connect()
-                } catch (t: Throwable) {
-                    Log.w(TAG, "events connect threw: $t")
-                }
+            }
 
-                when (client.state.value) {
+            // Subscribe the events channel over the shared socket.
+            launch { client.connect() }
+
+            // Reflect the shared connection's state into the feed-status dot.
+            client.state.collect { s ->
+                when (s) {
                     is SessionEventsClient.State.Open -> {
-                        reconnect.reset()
-                        // UC-70 — the socket is up: clear any retrying background.
-                        // UC-72 — activity IDLE: the dot returns to the REST ladder.
+                        wasOpen = true
                         onStatus(
                             SessionsFeedStatus(
                                 phase = SessionsFeedStatus.Phase.CONNECTED,
                                 activity = SessionsFeedStatus.ReconnectActivity.IDLE,
                             ),
                         )
-                        // The server pushes a fresh Snapshot immediately on
-                        // connect, so collecting incoming is the whole job —
-                        // the resync happens for free (AC5).
-                        val pump = launch {
-                            client.incoming.collect { msg ->
-                                when (msg) {
-                                    is SessionEventMessage.Snapshot -> onSnapshot(msg.sessions)
-                                    is SessionEventMessage.Delta -> onDelta(msg.upserts, msg.removed)
-                                }
-                            }
-                        }
-                        val terminal = client.state.first { it !is SessionEventsClient.State.Open }
-                        pump.cancel()
-                        if (terminal is SessionEventsClient.State.Revoked) {
-                            // CertRevoked already emitted by the client → root
-                            // composable routes to the dialog; stop the loop.
-                            return@launch
-                        }
-                        // UC-92 — the socket had been healthily Open and then
-                        // dropped for a non-identity reason (a TRANSIENT drop:
-                        // delete-induced connection churn, back-nav STOP/START,
-                        // or a flaky link). Kick an immediate REST refresh so the
-                        // list repaints from the authoritative GET at once rather
-                        // than waiting out the exponential back-off (AC4/AC5). The
-                        // back-off was already reset by reconnect.reset() on Open
-                        // above, so the next reconnect dial fires at ~1s. This
-                        // only runs on the Open→non-Revoked terminal edge, so a
-                        // genuine cold outage (which never Opens) can't reach it
-                        // ⇒ no tight retry loop (AC6 preserved).
-                        onTransientDrop()
                     }
-
-                    is SessionEventsClient.State.Revoked -> return@launch
-
-                    else -> {
-                        // Failed to open — fall through to the back-off.
+                    is SessionEventsClient.State.Connecting ->
+                        onStatus(
+                            SessionsFeedStatus(
+                                phase = SessionsFeedStatus.Phase.CONNECTING,
+                                activity = SessionsFeedStatus.ReconnectActivity.ATTEMPTING,
+                                attempt = 0,
+                                nextRetryAtMs = null,
+                                giveUpAtMs = null,
+                            ),
+                        )
+                    is SessionEventsClient.State.Disconnected -> {
+                        onStatus(
+                            SessionsFeedStatus(
+                                phase = SessionsFeedStatus.Phase.RECONNECTING,
+                                activity = SessionsFeedStatus.ReconnectActivity.WAITING,
+                                attempt = 1,
+                                // Timing is owned by the shared connection's one
+                                // ReconnectController; no per-controller countdown.
+                                nextRetryAtMs = null,
+                                giveUpAtMs = null,
+                            ),
+                        )
+                        // UC-92 — Open→drop for a non-identity reason: kick a REST
+                        // refresh once so the list repaints from the authoritative
+                        // GET immediately. Guarded by wasOpen so a cold outage
+                        // (never Open) can't reach it.
+                        if (wasOpen) {
+                            wasOpen = false
+                            onTransientDrop()
+                        }
                     }
+                    // CertRevoked is emitted by the client → root composable routes
+                    // to the dialog; nothing to do here.
+                    is SessionEventsClient.State.Revoked -> { /* handled by the bus */ }
+                    is SessionEventsClient.State.Idle -> { /* not yet subscribed */ }
                 }
-
-                if (!isActive) break
-                // UC-88 — if the server explicitly refused the feed (per-client cap
-                // SERVICE_OVERLOAD / POLICY_VIOLATION) log it distinctly, so a wedge
-                // caused by overload is visible in the logs instead of looking like an
-                // ordinary transient drop. We still honour the unlimited-retry
-                // contract (UC-70/71/72) and back off below — we just don't pretend a
-                // refusal was silent.
-                (client.state.value as? SessionEventsClient.State.Disconnected)
-                    ?.let { logServerRefusalIfAny(it.reason) }
-                // UC-71 — this give-up branch only fires under an injected finite
-                // retry budget; with the unlimited default ctor it is unreachable.
-                if (reconnect.shouldGiveUp()) {
-                    // Cumulative cap hit — defer to the REST fallback (AC5). A
-                    // later foreground (re)START reconnects with a fresh resync.
-                    Log.i(TAG, "events feed gave up after back-off cap; REST refresh is the fallback")
-                    // UC-70 hard-req #4 — terminal give-up: a static "Not
-                    // connected" background, no countdown.
-                    // UC-72 — activity IDLE; the dot's STOPPED→BACKOFF/red arm is
-                    // keyed off phase, not activity.
-                    onStatus(
-                        SessionsFeedStatus(
-                            phase = SessionsFeedStatus.Phase.STOPPED,
-                            activity = SessionsFeedStatus.ReconnectActivity.IDLE,
-                        ),
-                    )
-                    return@launch
-                }
-                // UC-70 hard-req #2 — advance the schedule FIRST (nextDelayMs()
-                // records the first-failure instant + bumps attemptCount), THEN
-                // emit RECONNECTING so attempt / nextRetryAtMs / giveUpAtMs are
-                // all the post-increment values. nextRetryAtMs and giveUpAtMs are
-                // computed off the SAME shared `nowMs` clock the controller uses.
-                val delayMs = reconnect.nextDelayMs()
-                onStatus(
-                    SessionsFeedStatus(
-                        phase = SessionsFeedStatus.Phase.RECONNECTING,
-                        // UC-72 — WAITING: sitting out the back-off delay before
-                        // the next attempt; the status dot reads red. The next
-                        // loop-top ATTEMPTING emit (same attempt / giveUpAtMs)
-                        // flips it back to yellow and hides the countdown.
-                        activity = SessionsFeedStatus.ReconnectActivity.WAITING,
-                        attempt = reconnect.attemptCount,
-                        nextRetryAtMs = nowMs() + delayMs,
-                        giveUpAtMs = reconnect.giveUpAtMs(),
-                    ),
-                )
-                delay(delayMs)
             }
-        }
-    }
-
-    /**
-     * UC-88 — log a server-initiated *refusal* close distinctly. The client
-     * encodes server closes as `"$code:$reason"` in [SessionEventsClient.State.Disconnected];
-     * a SERVICE_OVERLOAD (per-fingerprint cap) or POLICY_VIOLATION means the
-     * server is actively rejecting us, which is the wedge-by-overload symptom of
-     * this UC — surface it instead of letting it read as a routine drop. Does NOT
-     * change the back-off behaviour (the unlimited-retry contract stands).
-     */
-    private fun logServerRefusalIfAny(reason: String) {
-        when {
-            reason.startsWith("${SessionEventsClient.SERVICE_OVERLOAD_CLOSE_CODE}:") ->
-                Log.w(TAG, "events feed refused by server — SERVICE_OVERLOAD (per-client cap): $reason; backing off, not hammering")
-            reason.startsWith("${SessionEventsClient.POLICY_VIOLATION_CLOSE_CODE}:") ->
-                Log.w(TAG, "events feed refused by server — POLICY_VIOLATION: $reason")
         }
     }
 
