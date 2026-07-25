@@ -359,6 +359,9 @@ private fun TerminalBody(
                     composerMode = composerMode,
                     onToggleMode = { viewModel.setTerminalComposer(!composerMode) },
                     onSubmit = viewModel::submitComposerLine,
+                    // UC-99 (Bug 2) — read the pane's pending input line so the
+                    // composer opens pre-populated with it (an editable mirror).
+                    readPendingInput = viewModel::readPendingInputLine,
                 )
             },
             // AC15 / AC3 modifier bar — docked above the keyboard by the layout,
@@ -383,6 +386,7 @@ private fun TerminalInputBar(
     composerMode: Boolean,
     onToggleMode: () -> Unit,
     onSubmit: (String) -> Unit,
+    readPendingInput: () -> String = { "" },
 ) {
     Column(modifier = Modifier.fillMaxWidth()) {
         Row(
@@ -401,11 +405,18 @@ private fun TerminalInputBar(
             }
         }
         if (composerMode) {
+            // UC-99 (Bug 2) — read the pane's pending input line once when the
+            // composer opens (composerMode → true), and re-read on each re-open,
+            // so it pre-populates as an editable mirror of the PTY input line.
+            // Keyed on composerMode: a stable-open composer keeps whatever the
+            // user is typing (no re-seed while it stays open).
+            val initialText = remember(composerMode) { readPendingInput() }
             Composer(
                 enabled = true,
                 onSubmit = onSubmit,
                 inputTestTag = TerminalComposerTestTags.INPUT,
                 sendTestTag = TerminalComposerTestTags.SEND,
+                initialText = initialText,
             )
         }
     }

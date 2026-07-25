@@ -59,8 +59,16 @@ fun Composer(
     // two surfaces colliding on a single tag when both are in the tree.
     inputTestTag: String = ComposerTestTags.INPUT,
     sendTestTag: String = ComposerTestTags.SEND,
+    // UC-99 (Bug 2) — seed text the composer opens with. Defaults to "" so the
+    // UC-37 conversation composer is byte-identical; the terminal (tmux
+    // phone-view) composer passes the pane's pending input line here so it opens
+    // as an editable mirror of what is already typed on the PTY. Keyed into the
+    // `rememberSaveable` below so a NEW initialText (composer re-opened / re-read)
+    // re-seeds the field, while a stable value survives recomposition and config
+    // change (and does not clobber what the user is currently typing).
+    initialText: String = "",
 ) {
-    var text by rememberSaveable { mutableStateOf("") }
+    var text by rememberSaveable(initialText) { mutableStateOf(initialText) }
     val placeholder = remember(enabled, readOnly) {
         when {
             readOnly -> "Viewing a subagent — read-only"

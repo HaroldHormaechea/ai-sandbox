@@ -115,6 +115,15 @@ class TerminalStreamController(
         wsSession.flushComposingText()
     }
 
+    /**
+     * UC-99 (Bug 2) — the pane's PENDING input line (cursor-anchored) read from the
+     * live emulator buffer, or "" when there is nothing recognizable to prefill. Fed
+     * to the terminal composer as its `initialText` when it opens so it mirrors what
+     * is already on the PTY input line. Delegates to the bound [WsTerminalSession];
+     * main-thread only.
+     */
+    fun readPendingInputLine(): String = wsSession.readPendingInputLine()
+
     /** Send a resize frame and remember the geometry for reconnect + the FGS. */
     fun sendResize(cols: Int, rows: Int) {
         if (cols <= 0 || rows <= 0) return

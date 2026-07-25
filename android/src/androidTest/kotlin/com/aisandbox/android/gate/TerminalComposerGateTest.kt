@@ -18,6 +18,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertTextContains
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
@@ -123,6 +124,7 @@ class TerminalComposerGateTest {
     private fun TerminalInputHarness(
         composerMode: MutableState<Boolean>,
         ctrl: TerminalStreamController,
+        initialText: String = "",
         onEncoded: (ByteArray) -> Unit,
     ) {
         AiSandboxTheme {
@@ -140,6 +142,9 @@ class TerminalComposerGateTest {
                         onSubmit = { onEncoded(encodeComposerLine(it)) },
                         inputTestTag = TerminalComposerTestTags.INPUT,
                         sendTestTag = TerminalComposerTestTags.SEND,
+                        // UC-99 (Bug 2) — the pane's pending input line, seeded so the
+                        // composer opens as an editable mirror of what is already typed.
+                        initialText = initialText,
                     )
                 }
                 Box(modifier = Modifier.testTag(MODIFIER_BAR_TAG)) {
@@ -175,16 +180,52 @@ class TerminalComposerGateTest {
             delivered == null,
         )
 
-        // (b) tap Send — exactly the finalized line's UTF-8 bytes + CR, via the real encoder.
+        // (b) tap Send — a leading Ctrl-U (0x15, Bug 3 replace-on-send) + the finalized
+        // line's UTF-8 bytes + one CR, via the real encoder.
         composeTestRule.onNodeWithTag(TerminalComposerTestTags.SEND).performClick()
         composeTestRule.waitUntil(5_000) { delivered != null }
         assertArrayEquals(
-            "AC#6 un-mangled delivery — Send must emit the exact finalized bytes + CR",
-            "grep foo".toByteArray(Charsets.UTF_8) + 0x0D.toByte(),
+            "AC#6 un-mangled delivery — Send must emit Ctrl-U + the exact finalized bytes + CR",
+            byteArrayOf(0x15) + "grep foo".toByteArray(Charsets.UTF_8) + 0x0D.toByte(),
             delivered,
         )
         // The field clears: with blank text the Send control disables again.
         composeTestRule.onNodeWithTag(TerminalComposerTestTags.SEND).assertIsNotEnabled()
+    }
+
+    // ── (b2) — Bug 2 prefill + Bug 3 replace-on-send, verified together ──
+
+    /**
+     * UC-99 Bugs 2 & 3 coupled — the composer opens PRE-POPULATED with the pane's
+     * pending input line (Bug 2), and tapping Send REPLACES it on the PTY: the wire
+     * bytes are the leading kill-line (Ctrl-U, 0x15) + the buffer's UTF-8 + one CR,
+     * so {@code pending + buffer} can never be submitted (Bug 3). This drives the
+     * REAL [Composer] with a non-empty {@code initialText} and the REAL
+     * [encodeComposerLine].
+     */
+    @Test
+    fun composer_opens_prefilled_with_the_pending_line_and_send_replaces_it() {
+        val ctrl = newController()
+        var delivered: ByteArray? = null
+        composeTestRule.setContent {
+            val composerMode = remember { mutableStateOf(true) }
+            TerminalInputHarness(composerMode, ctrl, initialText = "grep pending") { delivered = it }
+        }
+        composeTestRule.waitForIdle()
+
+        // Bug 2 — the field opens showing the pending line (editable mirror), not empty.
+        composeTestRule.onNodeWithTag(TerminalComposerTestTags.INPUT).assertTextContains("grep pending")
+        // Nothing is delivered to the PTY merely by prefilling (no round-trip on open).
+        assertTrue("prefill must not deliver anything to the PTY on its own", delivered == null)
+
+        // Bug 3 — Send delivers Ctrl-U + the FULL buffer + CR (replace, not append).
+        composeTestRule.onNodeWithTag(TerminalComposerTestTags.SEND).performClick()
+        composeTestRule.waitUntil(5_000) { delivered != null }
+        assertArrayEquals(
+            "Bug 3 replace-on-send — Send must kill the pending line (Ctrl-U) then submit the full buffer",
+            byteArrayOf(0x15) + "grep pending".toByteArray(Charsets.UTF_8) + 0x0D.toByte(),
+            delivered,
+        )
     }
 
     // ── (c) — composer + modifier bar + surface coexist; raw view focus-gated ──
