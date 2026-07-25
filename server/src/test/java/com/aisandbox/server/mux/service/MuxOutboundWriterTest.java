@@ -113,7 +113,9 @@ class MuxOutboundWriterTest {
         c.pull(Long.MAX_VALUE);
 
         // All 23 frames drain.
-        long binary = c.frames.stream().filter(m -> m.getType() == WebSocketMessage.Type.BINARY).count();
+        long binary = c.frames.stream()
+                .filter(m -> m.getType() == WebSocketMessage.Type.BINARY)
+                .count();
         assertThat(binary).isEqualTo(20);
         List<String> conversation = textOf(c.frames);
         assertThat(conversation).hasSize(3);

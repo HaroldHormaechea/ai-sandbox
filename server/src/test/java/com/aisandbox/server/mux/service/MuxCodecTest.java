@@ -103,8 +103,7 @@ class MuxCodecTest {
 
     @Test
     void decode_rejects_invalid_json() {
-        assertThatThrownBy(() -> codec.decode("not json"))
-                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> codec.decode("not json")).isInstanceOf(IllegalArgumentException.class);
     }
 
     @Test

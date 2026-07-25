@@ -21,8 +21,7 @@ class MuxProtocolTest {
     private MuxProtocol protocol() {
         ServerProperties props = mock(ServerProperties.class);
         // idleTimeout, perClientCap, globalCap, maxBinary, maxText, outputRing, keepalivePing, keepalivePong
-        when(props.streams())
-                .thenReturn(new ServerProperties.Streams(7200, 10, 100, 262144, 16384, 262144, 30, 15));
+        when(props.streams()).thenReturn(new ServerProperties.Streams(7200, 10, 100, 262144, 16384, 262144, 30, 15));
         return new MuxProtocol(props);
     }
 

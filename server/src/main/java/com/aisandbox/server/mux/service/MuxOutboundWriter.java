@@ -280,7 +280,9 @@ public class MuxOutboundWriter {
         public void send(Object serverModel) {
             JsonNode payload = toTree(serverModel);
             if (payload == null) {
-                LOG.warn("mux writer: unroutable server model {}", serverModel.getClass().getName());
+                LOG.warn(
+                        "mux writer: unroutable server model {}",
+                        serverModel.getClass().getName());
                 return;
             }
             long seq = q.seq.getAndIncrement();

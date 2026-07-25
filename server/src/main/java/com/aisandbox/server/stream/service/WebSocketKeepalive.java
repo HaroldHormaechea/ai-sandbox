@@ -41,7 +41,8 @@ public class WebSocketKeepalive {
     @Scheduled(fixedDelay = 5_000L)
     public void tick() {
         long now = System.currentTimeMillis();
-        for (Map.Entry<WebSocketSession, Instant> entry : registry.connectionSnapshot().entrySet()) {
+        for (Map.Entry<WebSocketSession, Instant> entry :
+                registry.connectionSnapshot().entrySet()) {
             WebSocketSession session = entry.getKey();
             long sinceIo = now - entry.getValue().toEpochMilli();
             if (sinceIo > pingMs) {

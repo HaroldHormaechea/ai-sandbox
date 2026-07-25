@@ -96,8 +96,8 @@ public final class StreamChannelSession implements MuxChannelSession {
         Schedulers.boundedElastic().schedule(() -> {
             StreamId streamId;
             try {
-                streamId = facade.openStream(n, identity, (org.springframework.web.reactive.socket.WebSocketSession)
-                        sessionForRegistry);
+                streamId = facade.openStream(
+                        n, identity, (org.springframework.web.reactive.socket.WebSocketSession) sessionForRegistry);
             } catch (Exception e) {
                 LOG.warn("stream open failed for n={}: {}", n, e.toString());
                 sink.send(new StreamServerMessage.ServerError(
@@ -189,8 +189,7 @@ public final class StreamChannelSession implements MuxChannelSession {
                         List<StreamServerMessage.TargetInfo> targets = facade.enumerateTargets(n);
                         sink.send(new StreamServerMessage.Targets(targets, selectedTarget.get()));
                     });
-            case ControlMessage.SelectTarget st -> Schedulers.boundedElastic()
-                    .schedule(() -> rebridge(st.targetId()));
+            case ControlMessage.SelectTarget st -> Schedulers.boundedElastic().schedule(() -> rebridge(st.targetId()));
         }
     }
 

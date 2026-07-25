@@ -140,9 +140,8 @@ public class MultiplexWebSocketHandler implements WebSocketHandler {
         }
 
         Mono<Void> outbound = session.send(writer.outbound());
-        Mono<Void> inbound = session.receive()
-                .flatMap(msg -> conn.onInbound(msg))
-                .then();
+        Mono<Void> inbound =
+                session.receive().flatMap(msg -> conn.onInbound(msg)).then();
 
         return Mono.when(inbound, outbound).doFinally(sig -> {
             conn.teardownAll();
@@ -216,7 +215,8 @@ public class MultiplexWebSocketHandler implements WebSocketHandler {
             Envelope env = codec.decode(text);
             MuxChannel channel = MuxChannel.fromWire(env.channel());
             if (channel == null) {
-                writer.control(new MuxControlMessage.Error("bad_channel", "Unknown channel", String.valueOf(env.channel())));
+                writer.control(
+                        new MuxControlMessage.Error("bad_channel", "Unknown channel", String.valueOf(env.channel())));
                 return Mono.empty();
             }
             return switch (channel) {
@@ -249,8 +249,7 @@ public class MultiplexWebSocketHandler implements WebSocketHandler {
                                 "upgrade_required",
                                 "Upgrade required",
                                 "server speaks " + MuxProtocol.VERSION + "; client offered " + h.protocol()));
-                        yield session.close(new CloseStatus(
-                                MuxProtocol.CLOSE_UPGRADE_REQUIRED, "upgrade_required"));
+                        yield session.close(new CloseStatus(MuxProtocol.CLOSE_UPGRADE_REQUIRED, "upgrade_required"));
                     }
                     helloDone = true;
                     writer.control(new MuxControlMessage.Welcome(MuxProtocol.VERSION, protocol.capabilities()));
@@ -274,12 +273,20 @@ public class MultiplexWebSocketHandler implements WebSocketHandler {
             MuxChannel channel = MuxChannel.fromWire(channelWire);
             if (channel == null || channel == MuxChannel.CONTROL) {
                 writer.control(new MuxControlMessage.SubError(
-                        channelWire, sessionId, "bad_channel", "Unknown channel", "cannot subscribe to " + channelWire));
+                        channelWire,
+                        sessionId,
+                        "bad_channel",
+                        "Unknown channel",
+                        "cannot subscribe to " + channelWire));
                 return;
             }
             if (channel.isPerSession() && sessionId == null) {
                 writer.control(new MuxControlMessage.SubError(
-                        channelWire, null, "bad_request", "Missing sessionId", "per-session channel requires sessionId"));
+                        channelWire,
+                        null,
+                        "bad_request",
+                        "Missing sessionId",
+                        "per-session channel requires sessionId"));
                 return;
             }
             if (!helloDone) {
@@ -334,9 +341,14 @@ public class MultiplexWebSocketHandler implements WebSocketHandler {
                 case EVENTS -> {
                     SessionEventFacade.SubscribeDecision decision = eventsFacade.authorizeSubscribe(identity);
                     if (decision != SessionEventFacade.SubscribeDecision.ALLOWED) {
-                        String code = decision == SessionEventFacade.SubscribeDecision.DRAINING ? "draining" : "cap_exceeded";
+                        String code =
+                                decision == SessionEventFacade.SubscribeDecision.DRAINING ? "draining" : "cap_exceeded";
                         writer.control(new MuxControlMessage.SubError(
-                                channelWire, sessionId, code, "Events subscribe refused", decision.name().toLowerCase()));
+                                channelWire,
+                                sessionId,
+                                code,
+                                "Events subscribe refused",
+                                decision.name().toLowerCase()));
                         return;
                     }
                     FrameSink sink = writer.openChannel(channel, sessionId);

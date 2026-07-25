@@ -293,7 +293,9 @@ class MultiplexWebSocketHandlerTest {
         f.push(subscribe("events", null));
         f.push(subscribe("events", null)); // AC6 — dedupe: re-ack, no second channel session
 
-        long subscribedAcks = f.session.sentText().stream().filter(t -> t.contains("\"type\":\"subscribed\"")).count();
+        long subscribedAcks = f.session.sentText().stream()
+                .filter(t -> t.contains("\"type\":\"subscribed\""))
+                .count();
         assertThat(subscribedAcks).isEqualTo(2); // re-ack is sent
         // But the events subscriber (broadcaster registration) was created only ONCE.
         verify(f.broadcaster, times(1)).register(any());

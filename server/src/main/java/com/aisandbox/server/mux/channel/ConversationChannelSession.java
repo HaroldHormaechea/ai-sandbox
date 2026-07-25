@@ -258,7 +258,11 @@ public final class ConversationChannelSession implements MuxChannelSession {
         try {
             payload = facade.resyncPending(n, selectedTarget.get());
         } catch (RuntimeException e) {
-            LOG.warn("UC-97 resync-pending re-derive failed for n={} target={}: {}", n, selectedTarget.get(), e.toString());
+            LOG.warn(
+                    "UC-97 resync-pending re-derive failed for n={} target={}: {}",
+                    n,
+                    selectedTarget.get(),
+                    e.toString());
             return;
         }
         if (payload == null || payload.isBlank()) {
@@ -407,13 +411,13 @@ public final class ConversationChannelSession implements MuxChannelSession {
     }
 
     private void applyAnswer(ConversationClientMessage.Answer a) {
-        ConversationServerMessage.Question q =
-                a.questionUuid() == null ? null : pendingQuestions.get(a.questionUuid());
+        ConversationServerMessage.Question q = a.questionUuid() == null ? null : pendingQuestions.get(a.questionUuid());
         InputInjectionService.BatchAnswerSpec spec =
                 deriveAnswerSpec(q, a.questionIndex(), a.selections(), a.freeText());
         // UC-85/UC-96 — echo BEFORE the gate-releasing inject (kept symmetric with the batch path).
         if (facade.answerEchoEnabled()) {
-            emit(new ConversationServerMessage.AnswerEcho(a.questionUuid(), a.questionIndex(), a.selections(), a.freeText()));
+            emit(new ConversationServerMessage.AnswerEcho(
+                    a.questionUuid(), a.questionIndex(), a.selections(), a.freeText()));
         }
         safe(() -> facade.injectAnswer(
                 n,

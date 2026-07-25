@@ -36,10 +36,7 @@ public final class EventsChannelSession implements MuxChannelSession {
     private volatile Disposable subscription;
 
     public EventsChannelSession(
-            ClientIdentity identity,
-            SessionEventFacade facade,
-            SessionEventBroadcaster broadcaster,
-            FrameSink sink) {
+            ClientIdentity identity, SessionEventFacade facade, SessionEventBroadcaster broadcaster, FrameSink sink) {
         this.identity = identity;
         this.facade = facade;
         this.broadcaster = broadcaster;
@@ -51,8 +48,7 @@ public final class EventsChannelSession implements MuxChannelSession {
         // Register BEFORE snapshotting so a concurrent delta buffers rather than being lost.
         Sinks.Many<SessionEventMessage> f = Sinks.many().unicast().onBackpressureBuffer();
         this.feed = f;
-        SessionEventBroadcaster.Subscriber sub =
-                new SessionEventBroadcaster.Subscriber(identity.fingerprintHex(), f);
+        SessionEventBroadcaster.Subscriber sub = new SessionEventBroadcaster.Subscriber(identity.fingerprintHex(), f);
         this.subscriber = sub;
         broadcaster.register(sub);
 
@@ -60,10 +56,8 @@ public final class EventsChannelSession implements MuxChannelSession {
         sink.send(snapshot);
 
         // Forward every subsequent delta (and any delta buffered during the gap) onto the shared writer.
-        this.subscription = f.asFlux()
-                .subscribe(
-                        sink::send,
-                        t -> LOG.warn("mux events feed errored: {}", t.toString()));
+        this.subscription =
+                f.asFlux().subscribe(sink::send, t -> LOG.warn("mux events feed errored: {}", t.toString()));
     }
 
     @Override

@@ -4,9 +4,9 @@ import com.aisandbox.server.mux.dto.Envelope;
 import com.aisandbox.server.mux.dto.MuxChannel;
 import com.aisandbox.server.mux.dto.MuxControlMessage;
 import com.aisandbox.server.sessionevents.dto.SessionEventMessage;
+import com.aisandbox.server.stream.dto.ControlMessage;
 import com.aisandbox.server.stream.dto.ConversationClientMessage;
 import com.aisandbox.server.stream.dto.ConversationServerMessage;
-import com.aisandbox.server.stream.dto.ControlMessage;
 import com.aisandbox.server.stream.dto.StreamServerMessage;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -48,7 +48,9 @@ public class MuxCodec {
 
     /** Render an envelope text frame wrapping an already-computed payload tree. */
     public String encode(MuxChannel channel, Integer sessionId, long seq, JsonNode payload) {
-        String type = payload != null && payload.hasNonNull("type") ? payload.get("type").asText() : null;
+        String type = payload != null && payload.hasNonNull("type")
+                ? payload.get("type").asText()
+                : null;
         Envelope env = new Envelope(channel.wire(), sessionId, type, seq, payload);
         try {
             return mapper.writeValueAsString(env);
@@ -132,7 +134,8 @@ public class MuxCodec {
         try {
             return mapper.treeToValue(payload, type);
         } catch (JsonProcessingException e) {
-            throw new IllegalArgumentException("Invalid " + type.getSimpleName() + " payload: " + e.getOriginalMessage());
+            throw new IllegalArgumentException(
+                    "Invalid " + type.getSimpleName() + " payload: " + e.getOriginalMessage());
         }
     }
 
