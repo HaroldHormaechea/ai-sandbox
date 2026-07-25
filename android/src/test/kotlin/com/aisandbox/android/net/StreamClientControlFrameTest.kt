@@ -1,216 +1,141 @@
 package com.aisandbox.android.net
 
-import com.aisandbox.android.identity.KeyStoreIdentityManager
-import java.net.InetAddress
-import java.security.KeyStore
-import java.security.MessageDigest
-import java.util.concurrent.LinkedBlockingQueue
-import java.util.concurrent.TimeUnit
-import javax.net.ssl.KeyManagerFactory
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
-import okhttp3.Response
-import okhttp3.WebSocket
-import okhttp3.WebSocketListener
-import okhttp3.mockwebserver.MockResponse
-import okhttp3.mockwebserver.MockWebServer
-import okhttp3.tls.HandshakeCertificates
-import okhttp3.tls.HeldCertificate
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withTimeout
 import org.assertj.core.api.Assertions.assertThat
-import org.junit.jupiter.api.AfterEach
-import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
+import org.mockito.ArgumentMatchers.any
+import org.mockito.ArgumentMatchers.anyInt
+import org.mockito.ArgumentMatchers.anyString
 import org.mockito.Mockito.mock
+import org.mockito.Mockito.verify
 import org.mockito.Mockito.`when`
 
 /**
- * UC-21 AC#13 — the Android [StreamClient] mirror of the server's
- * agent-switcher protocol: the outbound {@code enumerate-targets} /
- * {@code select-target} frames it emits, and the inbound JSON text frames it
- * surfaces on [StreamClient.controlIncoming].
- *
- * <h2>Why a fresh class (the pre-existing {@code StreamClientTest} stays disabled)</h2>
- *
- * <p>{@code StreamClientTest} is {@code @Disabled} because its
- * {@code runTest}-based bodies hang the JUnit-Platform executor: under
- * {@code runTest}'s virtual clock, {@code delay()} fast-forwards and the
- * {@code SharedFlow.collect} collector never observes the real-thread
- * MockWebServer callbacks (and is never torn down). Re-enabling it as-is would
- * re-introduce that hang, and the developer's UC-21 changes are purely additive
- * ({@code controlIncoming} / {@code sendEnumerate} / {@code sendSelectTarget}).
- * So rather than disturb it, this class covers the new surface with the robust
- * pattern its own disable-comment recommends: real-time {@code runBlocking}
- * (so real-thread WS callbacks resume normally), a server-side listener that
- * records frames into a {@link LinkedBlockingQueue}, a subscription gate before
- * triggering an inbound emit, bounded polls, and explicit collector teardown.
+ * UC-100 — the `stream`-channel adapter's wire contract, re-pinned over the
+ * single multiplexed connection. [StreamClient] no longer owns a socket; it
+ * delegates every `send*` to [MuxConnectionManager] on the `stream` channel.
+ * These tests assert the exact **payload JSON** the adapter hands the manager
+ * (AC2 — payloads carried unchanged) and that inbound `stream`-channel text
+ * frames surface on [StreamClient.controlIncoming] — deterministically, against
+ * a mocked manager (no MockWebServer, so none of the socket-collector hang that
+ * disabled the original StreamClientTest).
  */
 class StreamClientControlFrameTest {
 
-    private lateinit var server: MockWebServer
-    private lateinit var profile: ServerProfile
-    private var http: AiSandboxHttpClient? = null
+    private val n = 7
 
-    @BeforeEach
-    fun setUp() {
-        // SAN = IP:127.0.0.1 so OkHttp's default hostname verifier accepts the
-        // loopback handshake and we sidestep the localhost→[::1] resolution that
-        // MockWebServer (bound to IPv4) refuses.
-        val cert = HeldCertificate.Builder()
-            .commonName("ai-sandbox-test")
-            .addSubjectAlternativeName("127.0.0.1")
-            .rsa2048()
-            .build()
-        val handshake = HandshakeCertificates.Builder().heldCertificate(cert).build()
-        server = MockWebServer().apply {
-            useHttps(handshake.sslSocketFactory(), false)
-            start(InetAddress.getByName("127.0.0.1"), 0)
+    /** A mocked manager pre-stubbed for the adapter's field initializers. */
+    private class Harness(val n: Int) {
+        val manager: MuxConnectionManager = mock(MuxConnectionManager::class.java)
+        val stateFlow = MutableStateFlow<MuxConnection.State>(MuxConnection.State.Open)
+        val binaryFlow = MutableSharedFlow<ByteArray>(replay = 1, extraBufferCapacity = 8)
+        val textFlow = MutableSharedFlow<String>(replay = 1, extraBufferCapacity = 8)
+
+        init {
+            `when`(manager.state).thenReturn(stateFlow)
+            `when`(manager.binaryFrames(n)).thenReturn(binaryFlow)
+            `when`(manager.textFrames(MuxEnvelope.CHANNEL_STREAM, n)).thenReturn(textFlow)
+            `when`(manager.sendText(anyString(), any(), anyString())).thenReturn(true)
+            `when`(manager.sendStreamBinary(anyInt(), anyNn())).thenReturn(true)
         }
-        // SpkiPinningTrustManager pins the SubjectPublicKeyInfo (SPKI), i.e. the
-        // SHA-256 of publicKey.encoded — NOT the whole-certificate DER.
-        val pinHex = MessageDigest.getInstance("SHA-256")
-            .digest(cert.certificate.publicKey.encoded)
-            .joinToString("") { "%02x".format(it.toInt() and 0xff) }
-        profile = ServerProfile(
-            serverUrl = "https://127.0.0.1:${server.port}",
-            pinSha256Hex = pinHex,
-            clientCertCn = "alice-phone",
-            clientCertExpiresAtMs = 0L,
+
+        fun client() = StreamClient(manager, sessionN = n)
+
+        companion object {
+            // Kotlin-safe any() for a NON-null reference param: ArgumentMatchers.any()
+            // returns null, which trips Kotlin's null-check on a non-null parameter
+            // (`any(...) must not be null`). The unchecked cast registers the matcher
+            // and hands back a value Kotlin treats as non-null.
+            @Suppress("UNCHECKED_CAST")
+            fun <T> anyNn(): T = any<T>() as T
+        }
+    }
+
+    @Test
+    fun `sendEnumerate emits the enumerate-targets payload on the stream channel`() {
+        val h = Harness(n)
+        val stream = h.client()
+
+        assertThat(stream.sendEnumerate()).isTrue
+        verify(h.manager).sendText(MuxEnvelope.CHANNEL_STREAM, n, """{"type":"enumerate-targets"}""")
+    }
+
+    @Test
+    fun `sendSelectTarget emits a select-target payload with the target id`() {
+        val h = Harness(n)
+        val stream = h.client()
+
+        assertThat(stream.sendSelectTarget("swarm:claude-swarm-1:0.1")).isTrue
+        verify(h.manager).sendText(
+            MuxEnvelope.CHANNEL_STREAM,
+            n,
+            """{"type":"select-target","targetId":"swarm:claude-swarm-1:0.1"}""",
         )
     }
 
-    @AfterEach
-    fun tearDown() {
-        // Deterministic shutdown — drain OkHttp's dispatcher + connection pool
-        // first so MockWebServer.shutdown() doesn't time out ("Gave up waiting
-        // for queue to shut down") on the still-pooled WebSocket connection.
-        http?.client?.dispatcher?.executorService?.shutdown()
-        http?.client?.connectionPool?.evictAll()
-        try {
-            server.shutdown()
-        } catch (_: Throwable) {
-            // best-effort cleanup
-        }
-    }
+    @Test
+    fun `sendSelectTarget json-escapes quotes and backslashes in the target id`() {
+        val h = Harness(n)
+        val stream = h.client()
 
-    /** Build a client (recorded for teardown) and a stream over it. */
-    private fun newStream(n: Int): StreamClient {
-        val h = AiSandboxHttpClient(profile, fakeIdentity())
-        http = h
-        return StreamClient(h, sessionN = n)
+        // raw id: x"y\z → wire must escape to x\"y\\z (still valid JSON).
+        stream.sendSelectTarget("x\"y\\z")
+        verify(h.manager).sendText(
+            MuxEnvelope.CHANNEL_STREAM,
+            n,
+            """{"type":"select-target","targetId":"x\"y\\z"}""",
+        )
     }
-
-    private fun fakeIdentity(): KeyStoreIdentityManager {
-        val factory = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm())
-        val emptyP12 = KeyStore.getInstance("PKCS12").apply { load(null, null) }
-        factory.init(emptyP12, charArrayOf())
-        val m = mock(KeyStoreIdentityManager::class.java)
-        `when`(m.keyManagerFactory()).thenReturn(factory)
-        return m
-    }
-
-    // ── before connect: no socket → false ────────────────────────────────────
 
     @Test
-    fun `enumerate and select are no-ops before the socket is open`() {
-        val stream = newStream(7)
+    fun `sendResize emits a resize payload`() {
+        val h = Harness(n)
+        val stream = h.client()
+
+        assertThat(stream.sendResize(120, 40)).isTrue
+        verify(h.manager).sendText(MuxEnvelope.CHANNEL_STREAM, n, """{"type":"resize","cols":120,"rows":40}""")
+    }
+
+    @Test
+    fun `sendStdin goes out as a binary stream frame`() {
+        val h = Harness(n)
+        val stream = h.client()
+        val bytes = "ls -la\n".toByteArray()
+
+        assertThat(stream.sendStdin(bytes)).isTrue
+        verify(h.manager).sendStreamBinary(n, bytes)
+    }
+
+    @Test
+    fun `sends reflect the manager result when the connection is down`() {
+        val h = Harness(n)
+        `when`(h.manager.sendText(anyString(), any(), anyString())).thenReturn(false)
+        val stream = h.client()
+
+        // No live connection → the manager returns false and the adapter surfaces it.
         assertThat(stream.sendEnumerate()).isFalse
         assertThat(stream.sendSelectTarget("main")).isFalse
     }
 
-    // ── outbound frame shapes (captured server-side) ──────────────────────────
-
     @Test
-    fun `sendEnumerate emits the enumerate-targets control frame`() = runBlocking {
-        val received = LinkedBlockingQueue<String>()
-        server.enqueue(
-            MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
-                override fun onMessage(webSocket: WebSocket, text: String) {
-                    received.add(text)
-                }
-            }),
-        )
-        val stream = newStream(7)
-        stream.connect()
+    fun `inbound stream-channel text frame is surfaced on controlIncoming`() = runTest {
+        val h = Harness(n)
+        val stream = h.client()
 
-        assertThat(stream.sendEnumerate()).isTrue
-        assertThat(received.poll(2, TimeUnit.SECONDS)).isEqualTo("""{"type":"enumerate-targets"}""")
-        stream.close()
-    }
-
-    @Test
-    fun `sendSelectTarget emits a select-target frame with the target id`() = runBlocking {
-        val received = LinkedBlockingQueue<String>()
-        server.enqueue(
-            MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
-                override fun onMessage(webSocket: WebSocket, text: String) {
-                    received.add(text)
-                }
-            }),
-        )
-        val stream = newStream(3)
-        stream.connect()
-
-        assertThat(stream.sendSelectTarget("swarm:claude-swarm-1:0.1")).isTrue
-        assertThat(received.poll(2, TimeUnit.SECONDS))
-            .isEqualTo("""{"type":"select-target","targetId":"swarm:claude-swarm-1:0.1"}""")
-        stream.close()
-    }
-
-    @Test
-    fun `sendSelectTarget json-escapes quotes and backslashes in the target id`() = runBlocking {
-        val received = LinkedBlockingQueue<String>()
-        server.enqueue(
-            MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
-                override fun onMessage(webSocket: WebSocket, text: String) {
-                    received.add(text)
-                }
-            }),
-        )
-        val stream = newStream(1)
-        stream.connect()
-
-        // raw id: x"y\z  → wire must escape to  x\"y\\z  (still valid JSON).
-        stream.sendSelectTarget("x\"y\\z")
-        val frame = received.poll(2, TimeUnit.SECONDS)
-        assertThat(frame).isNotNull
-        assertThat(frame).contains(""""type":"select-target"""")
-        assertThat(frame).contains("""x\"y\\z""")
-        stream.close()
-    }
-
-    // ── inbound control frames → controlIncoming ──────────────────────────────
-
-    @Test
-    fun `inbound text frame is surfaced on controlIncoming`() = runBlocking {
         val targetsFrame = """{"type":"targets","targets":[],"selectedId":"main"}"""
-        server.enqueue(
-            MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
-                override fun onMessage(webSocket: WebSocket, text: String) {
-                    // Reply to the client's enumerate with a server control frame.
-                    webSocket.send(targetsFrame)
-                }
-            }),
-        )
-        val stream = newStream(7)
-        stream.connect()
+        h.textFlow.emit(targetsFrame) // replay=1 so a late collector still sees it
 
-        val received = LinkedBlockingQueue<String>()
-        val collector = launch(Dispatchers.IO) { stream.controlIncoming.collect { received.add(it) } }
-        // Real-time gate so the (replay=0) collector is subscribed before the
-        // server emits — then trigger the server reply.
-        delay(200)
-        stream.sendEnumerate()
-
-        assertThat(received.poll(2, TimeUnit.SECONDS)).isEqualTo(targetsFrame)
-        collector.cancel()
-        stream.close()
+        val received = withTimeout(2_000) { stream.controlIncoming.first() }
+        assertThat(received).isEqualTo(targetsFrame)
     }
 
     @Test
-    fun `control-frame wire constants are stable`() {
-        // Pin the subprotocol so an Android/server drift surfaces here.
-        assertThat(StreamClient.SUBPROTOCOL).isEqualTo("ai-sandbox.v1")
+    fun `mux subprotocol constant is stable`() {
+        // The hard cut replaced the three legacy subprotocols with the one mux token.
+        assertThat(StreamClient.SUBPROTOCOL).isEqualTo("ai-sandbox.mux.v1")
     }
 }

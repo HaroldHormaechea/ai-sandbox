@@ -3,12 +3,8 @@ package com.aisandbox.android.conversation
 import android.util.Log
 import com.aisandbox.android.net.AiSandboxHttpClient
 import com.aisandbox.android.net.ConversationClient
-import com.aisandbox.android.net.NetworkEvent
-import com.aisandbox.android.net.NetworkEvents
-import com.aisandbox.android.net.ReconnectController
 import com.aisandbox.android.net.ServerProfile
 import com.aisandbox.android.net.ServerProfileStore
-import com.aisandbox.android.net.StreamClient
 import com.aisandbox.android.terminal.StreamTarget
 import com.aisandbox.android.terminal.TerminalStreamController
 import com.aisandbox.android.ui.screens.TerminalState
@@ -24,7 +20,6 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
@@ -65,7 +60,6 @@ class ConversationController(
 ) {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    private val reconnect = ReconnectController()
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
 
     private var client: ConversationClient? = null
@@ -597,7 +591,8 @@ class ConversationController(
     }
 
     fun userTriggeredReconnect() {
-        reconnect.reset()
+        // UC-100 — reconnection is owned by the single shared MuxConnection; a
+        // manual retry just re-asserts this channel's subscription over it.
         startConnectLoop()
     }
 
@@ -1256,12 +1251,20 @@ class ConversationController(
 
     // ──────────────────────── connect loop ────────────────────────
 
+    /**
+     * UC-100 — subscribe this session's `conversation` channel over the single
+     * shared [com.aisandbox.android.net.MuxConnection] and mirror that
+     * connection's state. Reconnection + back-off are owned centrally by the one
+     * connection (AC6 — provably one reconnect loop); this controller no longer
+     * runs its own retry loop, rebuilds a socket, or holds a
+     * [com.aisandbox.android.net.ReconnectController]. It keeps ONE adapter whose
+     * inbound flow is stable across the connection's reconnects, re-asserts
+     * enumerate + the selected target on each (re)Open, and — on each Open→leave
+     * edge — fails pending tool-detail requests (AC9) and clears the answer
+     * watchdog (UC-75), exactly as the old loop did per cycle.
+     */
     private fun startConnectLoop() {
         connectJob?.cancel()
-        // UC-88 — cancelling the coroutine does NOT cancel the OkHttp socket it
-        // owns, so force-drop any in-flight/half-open client BEFORE relaunching
-        // (e.g. userTriggeredReconnect). Otherwise a relaunch orphans a draining
-        // socket; close() flushes the app close frame + cancels the socket.
         client?.close("reconnect")
         client = null
         connectJob = scope.launch {
@@ -1271,81 +1274,54 @@ class ConversationController(
                 return@launch
             }
             val http = httpClientFactory(profile)
-            while (isActive) {
-                val c = clientFactory(http, sessionN)
-                client = c
-                _state.value = TerminalState.Connecting
-                try {
-                    c.connect()
-                } catch (t: Throwable) {
-                    Log.w(TAG, "conv connect threw: $t")
+            val c = clientFactory(http, sessionN)
+            client = c
+            _state.value = TerminalState.Connecting
+            var wasOpen = false
+
+            // Persistent frame collector over the shared connection's stable relay
+            // flow (survives the connection's own reconnects).
+            launch { c.incoming.collect { onFrame(it) } }
+            // UC-24 / AC#12 — periodic re-enumeration while Open.
+            launch {
+                while (isActive) {
+                    if (c.state.value is ConversationClient.State.Open) c.sendEnumerate()
+                    delay(TerminalStreamController.ENUMERATE_INTERVAL_MS)
                 }
-                when (c.state.value) {
+            }
+            // Subscribe the conversation channel over the shared socket.
+            launch { c.connect() }
+
+            c.state.collect { s ->
+                when (s) {
                     is ConversationClient.State.Open -> {
-                        reconnect.reset()
+                        wasOpen = true
                         _state.value = TerminalState.Open
                         c.sendEnumerate()
                         if (_selectedTargetId.value != TerminalStreamController.MAIN_TARGET_ID) {
                             c.sendSelectTarget(_selectedTargetId.value)
                         }
-                        val pump = launch { c.incoming.collect { onFrame(it) } }
-                        val enumerate = launch {
-                            while (isActive) {
-                                delay(TerminalStreamController.ENUMERATE_INTERVAL_MS)
-                                c.sendEnumerate()
-                            }
-                        }
-                        val terminal = c.state.first { it !is ConversationClient.State.Open }
-                        pump.cancel()
-                        enumerate.cancel()
-                        failPendingDetailsOnDisconnect() // AC9 — disconnect-while-pending → Unavailable
-                        clearAnswerWatchdog() // UC-75 — a disconnect ends the turn locally; drop the safety-net
-                        if (terminal is ConversationClient.State.Revoked) {
-                            _state.value = TerminalState.Revoked
-                            return@launch
+                    }
+                    is ConversationClient.State.Connecting -> _state.value = TerminalState.Connecting
+                    is ConversationClient.State.Disconnected -> {
+                        if (wasOpen) {
+                            wasOpen = false
+                            failPendingDetailsOnDisconnect() // AC9 — disconnect-while-pending → Unavailable
+                            clearAnswerWatchdog() // UC-75 — a disconnect ends the turn locally
                         }
                         _state.value = TerminalState.Connecting
                     }
                     is ConversationClient.State.Revoked -> {
+                        if (wasOpen) {
+                            wasOpen = false
+                            failPendingDetailsOnDisconnect()
+                            clearAnswerWatchdog()
+                        }
                         _state.value = TerminalState.Revoked
-                        return@launch
                     }
-                    else -> { /* failed to open — fall through to back-off */ }
+                    is ConversationClient.State.Idle -> { /* not yet subscribed */ }
                 }
-                if (!isActive) break
-                // UC-88 — surface a server refusal (SERVICE_OVERLOAD / POLICY_VIOLATION)
-                // distinctly rather than letting it read as a routine drop. Back-off
-                // behaviour is unchanged (the unlimited-retry contract stands).
-                (c.state.value as? ConversationClient.State.Disconnected)
-                    ?.let { logServerRefusalIfAny(it.reason) }
-                // UC-71 — this give-up branch only fires under an injected finite
-                // retry budget; with the unlimited default ctor it is unreachable.
-                if (reconnect.shouldGiveUp()) {
-                    _state.value = TerminalState.GaveUp
-                    NetworkEvents.tryEmit(NetworkEvent.StreamGaveUp(c.streamId))
-                    return@launch
-                }
-                val delayMs = reconnect.nextDelayMs()
-                NetworkEvents.tryEmit(NetworkEvent.StreamReconnecting(c.streamId, reconnect.attemptCount, delayMs))
-                _state.value = TerminalState.Reconnecting(reconnect.attemptCount, delayMs)
-                delay(delayMs)
             }
-        }
-    }
-
-    /**
-     * UC-88 — log a server-initiated *refusal* close distinctly (per-client cap
-     * SERVICE_OVERLOAD / POLICY_VIOLATION). The client encodes server closes as
-     * `"$code:$reason"`; both codes share [StreamClient]'s definitions (the
-     * conversation handler reuses Spring's `CloseStatus`). Logging only — the
-     * unlimited-retry back-off contract is unchanged.
-     */
-    private fun logServerRefusalIfAny(reason: String) {
-        when {
-            reason.startsWith("${StreamClient.SERVICE_OVERLOAD_CLOSE_CODE}:") ->
-                Log.w(TAG, "conv channel refused by server — SERVICE_OVERLOAD: $reason; backing off, not hammering")
-            reason.startsWith("${StreamClient.POLICY_VIOLATION_CLOSE_CODE}:") ->
-                Log.w(TAG, "conv channel refused by server — POLICY_VIOLATION: $reason")
         }
     }
 

@@ -1,3 +1,12 @@
+> **⚠️ SUPERSEDED (UC-100).** The standalone `/v1/sessions/{n}/conversation`
+> WebSocket endpoint has been **removed**. The structured conversation is now
+> the `conversation` channel of the single multiplexed connection at `/v1/mux`
+> — see [`MUX_PROTOCOL.md`](MUX_PROTOCOL.md). Every `ConversationServerMessage`
+> / `ConversationClientMessage` payload (and the UC-50/55/79/85/96/97 behaviour
+> around them) is carried **unchanged** inside the mux envelope. A request to
+> the old path now returns **HTTP 426 Upgrade Required**
+> (`client_upgrade_required`).
+
 # `/v1/sessions/{n}/conversation` — structured-conversation WebSocket (UC-37)
 
 A **second front-end onto the same live interactive `claude` session** as the

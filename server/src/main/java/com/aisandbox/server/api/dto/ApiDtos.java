@@ -2,6 +2,7 @@ package com.aisandbox.server.api.dto;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
 import com.fasterxml.jackson.annotation.JsonInclude.Include;
+import com.fasterxml.jackson.annotation.JsonProperty;
 import io.swagger.v3.oas.annotations.media.Schema;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.Pattern;
@@ -275,4 +276,16 @@ public final class ApiDtos {
             @Schema(description = "Always true on success (failures return a problem+json instead).") boolean accepted,
             @Schema(description = "Best-effort latest server-v* version the update targets, or omitted if unresolved.")
                     String targetVersion) {}
+
+    /**
+     * UC-100 — response of {@code GET /v1/capabilities}. A new client checks this
+     * before connecting so a new-client↔old-server mismatch fails fast (an old
+     * server has no such endpoint / returns a different {@code ws_protocol}). The
+     * matched-version realtime transport is the single multiplexed WebSocket.
+     */
+    @Schema(description = "Response of GET /v1/capabilities (UC-100).")
+    public record CapabilitiesResponse(
+            @JsonProperty("ws_protocol")
+                    @Schema(description = "The realtime WebSocket protocol this server speaks, e.g. \"mux.v1\".")
+                    String wsProtocol) {}
 }

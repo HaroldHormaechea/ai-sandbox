@@ -3,6 +3,9 @@ package com.aisandbox.android.conversation
 import com.aisandbox.android.identity.KeyStoreIdentityManager
 import com.aisandbox.android.net.AiSandboxHttpClient
 import com.aisandbox.android.net.ConversationClient
+import com.aisandbox.android.net.MuxConnection
+import com.aisandbox.android.net.MuxConnectionManager
+import com.aisandbox.android.net.MuxEnvelope
 import com.aisandbox.android.net.ServerProfile
 import com.aisandbox.android.net.ServerProfileStore
 import com.aisandbox.android.terminal.TerminalStreamController
@@ -10,7 +13,12 @@ import com.aisandbox.android.ui.screens.TerminalState
 import java.net.InetAddress
 import java.security.KeyStore
 import java.security.MessageDigest
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicReference
 import javax.net.ssl.KeyManagerFactory
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.runBlocking
 import okhttp3.Response
 import okhttp3.WebSocket
@@ -23,6 +31,9 @@ import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
+import org.mockito.ArgumentMatchers.any
+import org.mockito.ArgumentMatchers.anyString
+import org.mockito.ArgumentMatchers.eq
 import org.mockito.Mockito.doReturn
 import org.mockito.Mockito.mock
 import org.mockito.Mockito.`when`
@@ -113,13 +124,84 @@ class ConversationControllerTest {
         assertThat(c.turnPhase.value).isEqualTo(TurnPhase.IDLE)
     }
 
-    // ──────────────────────── Part B — MockWebServer ─────────────────────────
+    // ──────────────────────── Part B — shared mux connection (mocked manager) ─
+    //
+    // UC-100 — the three legacy per-endpoint sockets collapsed onto ONE mux
+    // connection, so [ConversationClient] is now a thin adapter over a
+    // [MuxConnectionManager] (no socket of its own). Part B therefore drives a
+    // REAL ConversationClient over a MOCKED manager: the client's real send*
+    // methods produce the real wire JSON (captured in [ConvMuxRig.outbound]) and
+    // its `incoming` is a per-session replay flow the test pushes onto. This
+    // keeps every test body unchanged — the shared helpers (enqueuePush /
+    // enqueueCapture / enqueueAutoReply / enqueueComposerEchoer) and the
+    // `wsRef.get()!!.send(...)` idiom are re-expressed over the rig — while
+    // eliminating the loopback-socket collector flakiness (the same reason the
+    // old runTest-based StreamClientTest was disabled). Transport concerns
+    // (reconnect, 4401/4426, single-socket) are covered centrally in the
+    // net/Mux* tests + the server-side mux suite.
 
     private lateinit var server: MockWebServer
     private lateinit var profile: ServerProfile
+    private lateinit var rig: ConvMuxRig
+
+    /**
+     * A mocked [MuxConnectionManager] that a real [ConversationClient] rides:
+     * per-session replay `incoming` flows the test pushes onto, an outbound
+     * capture list (the client's real wire JSON), an optional auto-reply hook
+     * (server-echo simulation), and a fake server [WebSocket] whose `send()`
+     * feeds the matching session's `incoming`.
+     */
+    private inner class ConvMuxRig {
+        val manager: MuxConnectionManager = mock(MuxConnectionManager::class.java)
+        val stateFlow = MutableStateFlow<MuxConnection.State>(MuxConnection.State.Open)
+        val outbound = CopyOnWriteArrayList<String>()
+
+        @Volatile
+        var autoReply: ((String) -> Unit)? = null
+
+        private val inbound = ConcurrentHashMap<Int, MutableSharedFlow<String>>()
+
+        init {
+            // NB: use anyString() (not eq(CONVERSATION)) for the channel — eq() returns
+            // null and trips Kotlin's non-null check on the mocked Kotlin method. A real
+            // ConversationClient only ever touches the conversation channel, so anyString()
+            // is exact enough here.
+            `when`(manager.state).thenReturn(stateFlow)
+            `when`(manager.textFrames(anyString(), any())).thenAnswer { inv ->
+                flowFor(inv.getArgument(1) as Int?)
+            }
+            `when`(manager.sendText(anyString(), any(), anyString())).thenAnswer { inv ->
+                val json = inv.getArgument<String>(2)
+                outbound.add(json)
+                autoReply?.invoke(json)
+                true
+            }
+        }
+
+        fun flowFor(sessionId: Int?): MutableSharedFlow<String> =
+            inbound.computeIfAbsent(sessionId ?: -1) {
+                MutableSharedFlow(replay = 256, extraBufferCapacity = 256)
+            }
+
+        /** Push server→client conversation frames onto a session's incoming flow. */
+        fun push(sessionId: Int, frames: List<String>) {
+            frames.forEach { flowFor(sessionId).tryEmit(it) }
+        }
+
+        /** A fake server WebSocket whose send(text) feeds the session's incoming flow. */
+        fun serverWs(sessionId: Int): WebSocket {
+            val ws = mock(WebSocket::class.java)
+            `when`(ws.send(anyString())).thenAnswer { inv ->
+                flowFor(sessionId).tryEmit(inv.getArgument(0) as String)
+                true
+            }
+            return ws
+        }
+    }
 
     @BeforeEach
     fun setUp() {
+        rig = ConvMuxRig()
         val cert = HeldCertificate.Builder()
             .commonName("ai-sandbox-test")
             .addSubjectAlternativeName("127.0.0.1")
@@ -159,7 +241,7 @@ class ConversationControllerTest {
         return m
     }
 
-    /** A controller wired to the loopback MockWebServer with a stubbed profile store. */
+    /** A controller wired to the shared mux [rig] with a stubbed profile store. */
     private fun networkedController(): ConversationController {
         val store = mock(ServerProfileStore::class.java)
         runBlocking { doReturn(profile).`when`(store).current() }
@@ -167,23 +249,18 @@ class ConversationControllerTest {
             sessionN = 7,
             profileStore = store,
             httpClientFactory = { AiSandboxHttpClient(profile, fakeIdentity()) },
-            clientFactory = { http, n -> ConversationClient(http, n) },
+            clientFactory = { _, n -> ConversationClient(rig.manager, n) },
             onClosed = {},
         )
     }
 
-    /** Enqueue a WS upgrade that pushes [frames] ~300 ms after open (subscription gate). */
+    /**
+     * Push [frames] onto session 7's shared `incoming` flow (replay-buffered, so
+     * a frame pushed before the controller subscribes is still delivered — the
+     * mux analogue of the old ~300 ms post-open subscription gate).
+     */
     private fun enqueuePush(frames: List<String>) {
-        server.enqueue(
-            MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
-                override fun onOpen(webSocket: WebSocket, response: Response) {
-                    Thread {
-                        Thread.sleep(300)
-                        frames.forEach { webSocket.send(it) }
-                    }.start()
-                }
-            }),
-        )
+        rig.push(7, frames)
     }
 
     private fun awaitUntil(timeoutMs: Long = 4000, cond: () -> Boolean): Boolean {
@@ -515,20 +592,9 @@ class ConversationControllerTest {
         // deriveAnswerSpec/answer-batch path — no parallel pane-specific injection path.
         val received = java.util.concurrent.CopyOnWriteArrayList<String>()
         val wsRef = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
-        server.enqueue(
-            MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
-                override fun onOpen(webSocket: WebSocket, response: Response) {
-                    Thread {
-                        Thread.sleep(300)
-                        wsRef.set(webSocket)
-                    }.start()
-                }
-
-                override fun onMessage(webSocket: WebSocket, text: String) {
-                    received.add(text)
-                }
-            }),
-        )
+        // Capture the controller's outbound frames + a fake server socket to push with.
+        rig.autoReply = { received.add(it) }
+        wsRef.set(rig.serverWs(7))
         val c = networkedController()
         c.attach(7)
         try {
@@ -677,15 +743,11 @@ class ConversationControllerTest {
 
     // ──────────────────────── Part C — UC-41 merged tool rows + detail dialog ─
 
-    /** Enqueue a WS upgrade that replies with [reply] to any inbound frame containing [trigger]. */
+    /** Reply with [reply] whenever the controller sends a frame containing [trigger]. */
     private fun enqueueAutoReply(trigger: String, reply: String) {
-        server.enqueue(
-            MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
-                override fun onMessage(webSocket: WebSocket, text: String) {
-                    if (text.contains(trigger)) webSocket.send(reply)
-                }
-            }),
-        )
+        rig.autoReply = { json ->
+            if (json.contains(trigger)) rig.push(7, listOf(reply))
+        }
     }
 
     private fun activityOf(c: ConversationController): ConversationItem.ToolActivity? =
@@ -798,14 +860,12 @@ class ConversationControllerTest {
 
     @Test
     fun `a disconnect while a detail fetch is in flight degrades to unavailable`() {
-        // The server receives the fetch-detail then closes WITHOUT replying (AC9).
-        server.enqueue(
-            MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
-                override fun onMessage(webSocket: WebSocket, text: String) {
-                    if (text.contains("fetch-detail")) webSocket.close(1000, "bye")
-                }
-            }),
-        )
+        // The shared connection drops right as the fetch-detail goes out, with no
+        // reply (AC9). Over the mux, a drop is a state transition to Disconnected —
+        // the controller must degrade the in-flight detail to Unavailable.
+        rig.autoReply = { json ->
+            if (json.contains("fetch-detail")) rig.stateFlow.value = MuxConnection.State.Disconnected
+        }
         val c = networkedController()
         c.attach(7)
         try {
@@ -1049,21 +1109,20 @@ class ConversationControllerTest {
      */
     private fun enqueueComposerEchoer(received: java.util.concurrent.CopyOnWriteArrayList<String>) {
         val seq = java.util.concurrent.atomic.AtomicInteger(0)
-        server.enqueue(
-            MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
-                override fun onMessage(webSocket: WebSocket, text: String) {
-                    received.add(text)
-                    if (text.contains(""""type":"composer-input"""")) {
-                        val typed = Regex(""""text":"(.*?)"""").find(text)?.groupValues?.get(1) ?: ""
-                        val n = seq.incrementAndGet()
-                        webSocket.send(
-                            """{"type":"turn-start","uuid":"srv$n","source":"main",""" +
-                                """"isSidechain":false,"text":"$typed"}""",
-                        )
-                    }
-                }
-            }),
-        )
+        rig.autoReply = { text ->
+            received.add(text)
+            if (text.contains(""""type":"composer-input"""")) {
+                val typed = Regex(""""text":"(.*?)"""").find(text)?.groupValues?.get(1) ?: ""
+                val n = seq.incrementAndGet()
+                rig.push(
+                    7,
+                    listOf(
+                        """{"type":"turn-start","uuid":"srv$n","source":"main",""" +
+                            """"isSidechain":false,"text":"$typed"}""",
+                    ),
+                )
+            }
+        }
     }
 
     /**
@@ -1077,16 +1136,10 @@ class ConversationControllerTest {
      * production change (do NOT make `_incoming` replay=1; that is a production decision).
      */
     private fun enqueueCapture(wsRef: java.util.concurrent.atomic.AtomicReference<WebSocket?>) {
-        server.enqueue(
-            MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
-                override fun onOpen(webSocket: WebSocket, response: Response) {
-                    Thread {
-                        Thread.sleep(300)
-                        wsRef.set(webSocket)
-                    }.start()
-                }
-            }),
-        )
+        // The shared incoming flow is replay-buffered, so a fake server socket can
+        // be handed over immediately — a frame sent before the controller subscribes
+        // is retained and replayed (no post-open gate needed).
+        wsRef.set(rig.serverWs(7))
     }
 
     private fun userMessages(c: ConversationController): List<ConversationItem.UserMessage> =
@@ -1323,25 +1376,13 @@ class ConversationControllerTest {
     // ConversationOverflowMenuInstrumentationTest); the live end-to-end gate (AC2/AC8)
     // is QA's runbook verification against a real server + emulator.
 
-    /** Record every inbound client→server frame AND capture the socket (300 ms subscription gate). */
+    /** Record every client→server frame the controller emits AND hand over a fake server socket. */
     private fun enqueueRecorder(
         received: java.util.concurrent.CopyOnWriteArrayList<String>,
         wsRef: java.util.concurrent.atomic.AtomicReference<WebSocket?>,
     ) {
-        server.enqueue(
-            MockResponse().withWebSocketUpgrade(object : WebSocketListener() {
-                override fun onOpen(webSocket: WebSocket, response: Response) {
-                    Thread {
-                        Thread.sleep(300)
-                        wsRef.set(webSocket)
-                    }.start()
-                }
-
-                override fun onMessage(webSocket: WebSocket, text: String) {
-                    received.add(text)
-                }
-            }),
-        )
+        rig.autoReply = { received.add(it) }
+        wsRef.set(rig.serverWs(7))
     }
 
     private fun composerInputs(received: List<String>): List<String> =
@@ -1583,7 +1624,7 @@ class ConversationControllerTest {
             answerWatchdogMs = watchdogMs,
         )
 
-    /** A networked controller with an injected (short) watchdog. */
+    /** A networked controller with an injected (short) watchdog, over the shared mux [rig]. */
     private fun networkedController(watchdogMs: Long): ConversationController {
         val store = mock(ServerProfileStore::class.java)
         runBlocking { doReturn(profile).`when`(store).current() }
@@ -1591,7 +1632,7 @@ class ConversationControllerTest {
             sessionN = 7,
             profileStore = store,
             httpClientFactory = { AiSandboxHttpClient(profile, fakeIdentity()) },
-            clientFactory = { http, n -> ConversationClient(http, n) },
+            clientFactory = { _, n -> ConversationClient(rig.manager, n) },
             onClosed = {},
             answerWatchdogMs = watchdogMs,
         )
@@ -2580,10 +2621,13 @@ class ConversationControllerTest {
         // Note: ViewModel-level isolation (ConversationViewModel.attach() collector lifecycle under
         // Android framework) is outside JVM unit-test scope — it requires instrumented tests to verify
         // that the old controller's collector coroutines are cancelled when the session changes.
+        // Per-session fake server sockets over the ONE shared connection — session 1
+        // and 2 have independent `incoming` flows (rig keys by sessionId), so a frame
+        // for session 2 can never contaminate session 1's transcript.
         val wsRef1 = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
         val wsRef2 = java.util.concurrent.atomic.AtomicReference<WebSocket?>(null)
-        enqueueCapture(wsRef1)
-        enqueueCapture(wsRef2)
+        wsRef1.set(rig.serverWs(1))
+        wsRef2.set(rig.serverWs(2))
 
         val store = org.mockito.Mockito.mock(ServerProfileStore::class.java)
         kotlinx.coroutines.runBlocking { org.mockito.Mockito.doReturn(profile).`when`(store).current() }
@@ -2592,7 +2636,7 @@ class ConversationControllerTest {
                 sessionN = n,
                 profileStore = store,
                 httpClientFactory = { AiSandboxHttpClient(profile, fakeIdentity()) },
-                clientFactory = { http, sn -> ConversationClient(http, sn) },
+                clientFactory = { _, sn -> ConversationClient(rig.manager, sn) },
                 onClosed = {},
             )
         }

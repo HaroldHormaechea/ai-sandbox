@@ -81,9 +81,11 @@ fun decideNetworkRoute(
     ->
         if (identityRouteActive) NetworkRouteDecision.Suppress else NetworkRouteDecision.Navigate
 
-    // CertRevoked is routed separately by the caller; transient + terminal-local
-    // events never touch the identity screen.
+    // CertRevoked and (UC-100) ServerUpgradeRequired are routed separately by the
+    // caller to their own destinations; transient + terminal-local events never
+    // touch the identity screen.
     NetworkEvent.CertRevoked,
+    NetworkEvent.ServerUpgradeRequired,
     NetworkEvent.ServerUnreachable,
     is NetworkEvent.StreamReconnecting,
     is NetworkEvent.StreamGaveUp,

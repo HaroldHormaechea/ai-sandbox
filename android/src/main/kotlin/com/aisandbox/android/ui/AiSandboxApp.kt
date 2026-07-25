@@ -107,6 +107,18 @@ fun AiSandboxApp() {
                 }
                 return@collect
             }
+            // UC-100 (AC8) — the single /v1/mux socket was refused for a protocol
+            // version mismatch (server closed 4426 after the hello/welcome
+            // handshake disagreed, or the /v1/capabilities probe reported a
+            // different ws_protocol). The hard cut requires matched client+server
+            // versions, so route to the actionable update-required screen rather
+            // than looping the reconnect back-off. Its own launchSingleTop de-dups.
+            if (event == NetworkEvent.ServerUpgradeRequired) {
+                navController.navigate(Routes.AppUpdate) {
+                    launchSingleTop = true
+                }
+                return@collect
+            }
             when (decideNetworkRoute(event, identityRouteActive.value)) {
                 NetworkRouteDecision.Navigate -> {
                     // UC-56 — set the single-shot flag BEFORE navigating, in

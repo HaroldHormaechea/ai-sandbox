@@ -45,6 +45,16 @@ public class StreamRegistryService {
     private final Map<String, AtomicInteger> perFingerprint = new ConcurrentHashMap<>();
     private final AtomicInteger global = new AtomicInteger(0);
 
+    /**
+     * UC-100 — connection-level keepalive/idle bookkeeping for the single
+     * {@code /v1/mux} socket. A mux connection may hold no {@link ActiveStream}
+     * at all (a conversation- or events-only client), so keepalive and the
+     * idle sweep can no longer key on per-stream records; they key on the
+     * connection entry here, which the handler {@code touch}es on any channel
+     * I/O. Value = last-I/O watermark.
+     */
+    private final Map<WebSocketSession, Instant> connections = new ConcurrentHashMap<>();
+
     public StreamRegistryService(ServerProperties props) {
         this.props = props;
     }
@@ -101,16 +111,48 @@ public class StreamRegistryService {
         }
     }
 
-    /** Idle-timeout sweeper; fires every 30 s. */
+    // ──────────────────────── UC-100 connection-level bookkeeping ────────────────────────
+
+    /** Register the single {@code /v1/mux} socket for keepalive + idle-sweep. */
+    public void registerConnection(WebSocketSession session) {
+        if (session != null) {
+            connections.put(session, Instant.now());
+        }
+    }
+
+    /** Refresh the connection watermark on any channel I/O (keeps a data-quiet client from being swept). */
+    public void touchConnection(WebSocketSession session) {
+        if (session != null) {
+            connections.computeIfPresent(session, (k, v) -> Instant.now());
+        }
+    }
+
+    /** Drop a connection entry on socket close. */
+    public void unregisterConnection(WebSocketSession session) {
+        if (session != null) {
+            connections.remove(session);
+        }
+    }
+
+    /** Snapshot of live connections and their last-I/O watermark (for {@code WebSocketKeepalive}). */
+    public Map<WebSocketSession, Instant> connectionSnapshot() {
+        return Map.copyOf(connections);
+    }
+
+    /**
+     * Idle-timeout sweeper; fires every 30&nbsp;s. UC-100 — now keyed on the
+     * connection-level watermark: a mux socket idle beyond {@code idleTimeoutSeconds}
+     * (no I/O on ANY channel) is closed as a zombie. Per-stream {@link ActiveStream}
+     * records are cap accounting only and are torn down on unsubscribe, not here.
+     */
     @Scheduled(fixedDelay = 30_000L)
     public void sweep() {
         long idleMs = props.streams().idleTimeoutSeconds() * 1000L;
         long deadline = System.currentTimeMillis() - idleMs;
-        for (var entry : Map.copyOf(streams).entrySet()) {
-            ActiveStream s = entry.getValue();
-            if (s.lastIo.toEpochMilli() < deadline) {
-                s.session.close().subscribe();
-                unregister(entry.getKey());
+        for (var entry : Map.copyOf(connections).entrySet()) {
+            if (entry.getValue().toEpochMilli() < deadline) {
+                entry.getKey().close().subscribe();
+                connections.remove(entry.getKey());
             }
         }
     }
