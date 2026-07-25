@@ -1,3 +1,12 @@
+> **⚠️ SUPERSEDED (UC-100).** The standalone `/v1/sessions/{n}/stream`
+> WebSocket endpoint has been **removed**. Terminal streaming is now the
+> `stream` channel of the single multiplexed connection at `/v1/mux` — see
+> [`MUX_PROTOCOL.md`](MUX_PROTOCOL.md). The framing below is retained for
+> historical reference and because the per-channel *payload* models
+> (`ControlMessage`, `StreamServerMessage`, binary PTY bytes) are carried
+> **unchanged** inside the mux envelope. A request to the old path now returns
+> **HTTP 426 Upgrade Required** (`client_upgrade_required`).
+
 # `/v1/sessions/{n}/stream` — WebSocket framing
 
 ## Subprotocol

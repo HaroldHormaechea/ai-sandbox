@@ -70,8 +70,10 @@ The `/opt/ai-sandbox-server/` payload:
 │   └── entrypoint.sh
 ├── README.md
 ├── openapi.yaml                   # springdoc-generated OAS, committed in repo
-├── STREAM_PROTOCOL.md
-├── SESSIONS_EVENTS_PROTOCOL.md     # /v1/sessions/events live status-push framing (UC-32)
+├── MUX_PROTOCOL.md                # /v1/mux single multiplexed WebSocket (UC-100) — the live protocol
+├── STREAM_PROTOCOL.md             # superseded by MUX_PROTOCOL.md; payload models unchanged
+├── SESSIONS_EVENTS_PROTOCOL.md    # superseded by MUX_PROTOCOL.md; payload models unchanged
+├── CONVERSATION_PROTOCOL.md       # superseded by MUX_PROTOCOL.md; payload models unchanged
 └── sample-config.yaml             # annotated reference of every tunable knob
 ```
 
@@ -515,39 +517,44 @@ analysis lives in [`../docs/THREAT_MODEL.md`](../docs/THREAT_MODEL.md)
 | DELETE | `/v1/clients/{cnOrFingerprint}`   | Remove a cert. |
 | GET    | `/v1/openapi.yaml`                | springdoc-generated OAS, committed to the repo. |
 | GET    | `/v1/swagger-ui`                  | Swagger UI (strict CSP). |
-| WSS    | `/v1/sessions/{n}/stream`         | Subprotocol `ai-sandbox.v1`. Schema in [STREAM_PROTOCOL.md](STREAM_PROTOCOL.md). |
-| WSS    | `/v1/sessions/events`             | Subprotocol `ai-sandbox.v1`. Live sessions-list status push (UC-32). One-way server→client. Schema in [SESSIONS_EVENTS_PROTOCOL.md](SESSIONS_EVENTS_PROTOCOL.md). |
+| GET    | `/v1/capabilities`                | `{ "ws_protocol": "mux.v1" }` (UC-100). A new client probes this before connecting to detect an old server (matched-version hard cut). |
+| WSS    | `/v1/mux`                         | Subprotocol `ai-sandbox.mux.v1`. **The single multiplexed realtime WebSocket** (UC-100) — `stream` / `conversation` / `events` / `control` channels over one connection. Schema in [MUX_PROTOCOL.md](MUX_PROTOCOL.md). |
+| ~~WSS~~ | ~~`/v1/sessions/{n}/stream`~~     | **Removed (UC-100)** → now the `stream` channel of `/v1/mux`. The old path returns **HTTP 426** `client_upgrade_required`. |
+| ~~WSS~~ | ~~`/v1/sessions/{n}/conversation`~~ | **Removed (UC-100)** → now the `conversation` channel of `/v1/mux`. The old path returns **HTTP 426** `client_upgrade_required`. |
+| ~~WSS~~ | ~~`/v1/sessions/events`~~         | **Removed (UC-100)** → now the `events` channel of `/v1/mux`. The old path returns **HTTP 426** `client_upgrade_required`. |
 
 Errors come back as `application/problem+json` per RFC 9457 with a
 machine-readable `code` (`session_not_found`, `spawn_timeout`,
 `stream_cap_exceeded`, etc.).
 
-## WebSocket framing (`/v1/sessions/{n}/stream`)
+## Realtime WebSocket framing (`/v1/mux`)
 
-- Mandatory subprotocol: `Sec-WebSocket-Protocol: ai-sandbox.v1`.
-- Binary frames: raw tty bytes (client → PTY stdin, server → PTY stdout).
-- Text frames: JSON control messages (`resize`, `mouse`, `error`, `close`).
-- Per-stream output buffer: 256 KiB. Overflow → ERROR text frame
-  (`stream_overflow`) + WebSocket close 1009.
-- Ping every 30s, pong timeout 15s → close 1001.
+UC-100 — all realtime traffic multiplexes over **one** connection at `/v1/mux`
+(subprotocol `ai-sandbox.mux.v1`). This replaced the three legacy per-purpose
+sockets (`/v1/sessions/{n}/stream`, `/v1/sessions/{n}/conversation`,
+`/v1/sessions/events`) to end the delete→create reconnect storm that tripped the
+per-IP TLS rate limiter — the limiter itself is **unchanged** (defense-in-depth).
 
-Full schema in [STREAM_PROTOCOL.md](STREAM_PROTOCOL.md).
+- Fresh typed envelope `{channel, sessionId, type, seq, payload}` (JSON for
+  control + all text; a compact binary header for `stream` PTY bytes). The
+  existing payload models (`ControlMessage`, `StreamServerMessage`,
+  `ConversationServerMessage`/`ConversationClientMessage`, `SessionEventMessage`)
+  are carried **unchanged**.
+- `hello`/`welcome` handshake negotiates the protocol version + per-channel caps
+  (defaults from `ServerProperties.Streams`).
+- `subscribe`/`unsubscribe` open/close logical channels over the one socket — no
+  TCP open/close. Idempotent (reconnect-race safe). A `sub-error` refuses one
+  channel; the socket stays up.
+- Per-channel fairness: a large terminal burst can't stall conversation/events
+  frames. Per-channel bounded queues; overflow closes just that channel.
+- Keepalive: ping every 30s / pong timeout 15s, keyed on a connection-level
+  entry so conversation/events-only clients are still pinged.
+- Close codes: `1008` anonymous, `4401` cert revoked, `4426` version mismatch.
 
-## Live sessions-list push (`/v1/sessions/events`)
-
-- Mandatory subprotocol: `Sec-WebSocket-Protocol: ai-sandbox.v1`. Same mTLS
-  allowlist + 4401 cert-revocation behaviour as the terminal stream.
-- One-way server→client text frames only: a `snapshot` (full list) on
-  subscribe and reconnect, then coalesced `delta` (upsert/remove by `n`)
-  frames as the server observes status changes.
-- Driven by a subscriber-gated ~1 s server-side reconcile of the same
-  enumeration `GET /v1/sessions` uses, so it catches out-of-band transitions
-  (a container dying on its own) too. Worst-case push latency ≈ 2 s.
-- Capped at 20 subscriptions per cert (raised from 4 in UC-69, since a device
-  now holds two feeds: the foreground-bound sessions screen plus the app-wide
-  pending-question watcher's background `dataSync` feed).
-
-Full schema in [SESSIONS_EVENTS_PROTOCOL.md](SESSIONS_EVENTS_PROTOCOL.md).
+Full schema — including the compact binary framing, the `sub-error` taxonomy,
+and the hard-cut 426 behaviour — in [MUX_PROTOCOL.md](MUX_PROTOCOL.md). The three
+legacy `*_PROTOCOL.md` docs remain for the (unchanged) payload models and are
+marked superseded.
 
 ## Operator notes & foot-guns
 

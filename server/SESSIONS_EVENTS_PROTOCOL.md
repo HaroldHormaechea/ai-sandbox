@@ -1,3 +1,11 @@
+> **⚠️ SUPERSEDED (UC-100).** The standalone `/v1/sessions/events` WebSocket
+> endpoint has been **removed**. The live sessions-list feed is now the
+> `events` channel of the single multiplexed connection at `/v1/mux` — see
+> [`MUX_PROTOCOL.md`](MUX_PROTOCOL.md). The `SessionEventMessage`
+> snapshot/delta payloads below are carried **unchanged** inside the mux
+> envelope. A request to the old path now returns **HTTP 426 Upgrade
+> Required** (`client_upgrade_required`).
+
 # `/v1/sessions/events` — WebSocket framing (live sessions-list status push)
 
 UC-32. A one-way **server→client** WebSocket that pushes session-status
