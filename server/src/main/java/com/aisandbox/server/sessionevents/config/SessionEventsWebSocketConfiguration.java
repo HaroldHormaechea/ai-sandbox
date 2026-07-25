@@ -9,13 +9,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
-import java.util.Map;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Profile;
-import org.springframework.core.Ordered;
-import org.springframework.web.reactive.HandlerMapping;
-import org.springframework.web.reactive.handler.SimpleUrlHandlerMapping;
 
 /**
  * UC-32 — wiring for the live sessions-list push channel
@@ -49,14 +45,13 @@ import org.springframework.web.reactive.handler.SimpleUrlHandlerMapping;
 @Profile("!docs-only")
 public class SessionEventsWebSocketConfiguration {
 
-    /** Map {@code /v1/sessions/events} to the events handler. */
-    @Bean
-    public HandlerMapping sessionEventsHandlerMapping(SessionEventWebSocketHandler handler) {
-        SimpleUrlHandlerMapping mapping = new SimpleUrlHandlerMapping();
-        mapping.setUrlMap(Map.of("/v1/sessions/events", handler));
-        mapping.setOrder(Ordered.HIGHEST_PRECEDENCE + 10);
-        return mapping;
-    }
+    // UC-100 — the legacy /v1/sessions/events HandlerMapping was REMOVED (hard
+    // cut, AC8). The sessions-events feed is now the `events` channel of the
+    // /v1/mux multiplex (mux.channel.EventsChannelSession). An old client's
+    // Upgrade to /v1/sessions/events falls through to the 426 HTTP route
+    // (api.LegacyWebSocketGoneController). The handler bean below is retained
+    // only as the reference source of the events-channel logic; it is no longer
+    // bound to any URL.
 
     @Bean
     public SessionEventWebSocketHandler sessionEventWebSocketHandler(

@@ -75,7 +75,13 @@ public enum ErrorCode {
     // UC-84 — the apply endpoint could not write the parameter-free update
     // trigger marker (I/O failure on the trigger dir). Mapped to 500; the
     // server keeps running on its current version (AC14).
-    UPDATE_TRIGGER_FAILED;
+    UPDATE_TRIGGER_FAILED,
+    // UC-100 — a request hit one of the three removed legacy WebSocket paths
+    // (/v1/sessions/{n}/stream, /v1/sessions/{n}/conversation,
+    // /v1/sessions/events). The hard cut requires matched client/server
+    // versions, so the server answers 426 Upgrade Required with this code
+    // instead of attempting an upgrade — a fast, explicit failure (AC8).
+    CLIENT_UPGRADE_REQUIRED;
 
     public String wire() {
         return name().toLowerCase();

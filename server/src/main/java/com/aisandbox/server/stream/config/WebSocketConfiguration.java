@@ -13,13 +13,9 @@ import com.aisandbox.server.stream.handshake.SubprotocolHandshakeInterceptor;
 import com.aisandbox.server.stream.service.ConversationEventMapper;
 import com.aisandbox.server.stream.service.StreamBridgeRegistry;
 import com.aisandbox.server.stream.service.StreamControlMessageService;
-import java.util.Map;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Profile;
-import org.springframework.core.Ordered;
-import org.springframework.web.reactive.HandlerMapping;
-import org.springframework.web.reactive.handler.SimpleUrlHandlerMapping;
 import org.springframework.web.reactive.socket.WebSocketHandler;
 import org.springframework.web.reactive.socket.server.support.WebSocketHandlerAdapter;
 
@@ -35,16 +31,15 @@ import org.springframework.web.reactive.socket.server.support.WebSocketHandlerAd
 @Profile("!docs-only")
 public class WebSocketConfiguration {
 
-    @Bean
-    public HandlerMapping streamHandlerMapping(
-            SessionStreamHandler handler, SessionConversationHandler conversationHandler) {
-        SimpleUrlHandlerMapping mapping = new SimpleUrlHandlerMapping();
-        mapping.setUrlMap(Map.of(
-                "/v1/sessions/*/stream", handler,
-                "/v1/sessions/*/conversation", conversationHandler));
-        mapping.setOrder(Ordered.HIGHEST_PRECEDENCE);
-        return mapping;
-    }
+    // UC-100 — the legacy /v1/sessions/*/stream + /v1/sessions/*/conversation
+    // HandlerMappings were REMOVED (hard cut, AC8). All realtime traffic now
+    // multiplexes over /v1/mux (mux.config.MultiplexWebSocketConfiguration); an
+    // old client's Upgrade: websocket to a legacy path is no longer claimed for
+    // upgrade and falls through to the 426 HTTP route
+    // (api.LegacyWebSocketGoneController). The SessionStreamHandler /
+    // SessionConversationHandler beans below are retained only as the reference
+    // source of the per-channel logic now driven by the mux.channel.* sessions;
+    // they are no longer bound to any URL.
 
     @Bean
     public WebSocketHandlerAdapter handlerAdapter() {
