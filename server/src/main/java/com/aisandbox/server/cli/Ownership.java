@@ -98,28 +98,26 @@ public record Ownership(UserPrincipal owner, GroupPrincipal group) implements Ch
     @Override
     public void chownTree(Path root) throws IOException {
         int[] skipped = {0};
-        Files.walkFileTree(
-                root,
-                new SimpleFileVisitor<Path>() {
-                    @Override
-                    public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) {
-                        tryChown(dir, skipped);
-                        return FileVisitResult.CONTINUE;
-                    }
+        Files.walkFileTree(root, new SimpleFileVisitor<Path>() {
+            @Override
+            public FileVisitResult preVisitDirectory(Path dir, BasicFileAttributes attrs) {
+                tryChown(dir, skipped);
+                return FileVisitResult.CONTINUE;
+            }
 
-                    @Override
-                    public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
-                        tryChown(file, skipped);
-                        return FileVisitResult.CONTINUE;
-                    }
+            @Override
+            public FileVisitResult visitFile(Path file, BasicFileAttributes attrs) {
+                tryChown(file, skipped);
+                return FileVisitResult.CONTINUE;
+            }
 
-                    @Override
-                    public FileVisitResult visitFileFailed(Path file, IOException exc) {
-                        // Entry disappeared or became unreadable mid-walk; skip and continue.
-                        skipped[0]++;
-                        return FileVisitResult.CONTINUE;
-                    }
-                });
+            @Override
+            public FileVisitResult visitFileFailed(Path file, IOException exc) {
+                // Entry disappeared or became unreadable mid-walk; skip and continue.
+                skipped[0]++;
+                return FileVisitResult.CONTINUE;
+            }
+        });
         if (skipped[0] > 0) {
             System.err.println("aisandboxctl: chownTree(" + root + ") skipped " + skipped[0] + " entr"
                     + (skipped[0] == 1 ? "y" : "ies")
