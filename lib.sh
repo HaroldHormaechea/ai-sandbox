@@ -705,6 +705,135 @@ host_kvm_gid() {
     printf '%s' "${gid:-0}"
 }
 
+# ── UC-101 — host NVIDIA GPU (CUDA) passthrough detection + injection ─────────
+#
+# Two decoupled layers (see docs/gpu.md):
+#   1. HOST-WIDE device/driver exposure (this block + docker-compose.gpu.yml) —
+#      every session on a GPU host gets the device via CDI, NO per-session opt-in
+#      (AC#1). Linux-only (AC#9); defeatable by a host kill switch (AC#10).
+#   2. CUDA userspace — the opt-in `aisandbox-gpu` devtool capability, absent
+#      until selected (AC#2/#4). Independent of this block.
+#
+# The injector mirrors the KVM precedent (host_kvm_gid + docker-compose.kvm.yml):
+# a spawn-time hook that layers an override compose file ONLY when the host can
+# actually serve a GPU, and is a strict no-op (byte-identical docker argv to
+# pre-UC-101) otherwise. That no-op guarantee is the backbone of AC#5/#10 and is
+# asserted by the fake-shim Java test.
+#
+# Detection keys on CDI (Container Device Interface): the NVIDIA Container
+# Toolkit generates a spec (`nvidia-ctk cdi generate`) the Docker daemon reads to
+# inject driver libs + nvidia-smi + device nodes. CDI is the documented
+# rootless/nested path (AC#6). The spec dir(s) are overridable for tests.
+
+# Space-separated CDI spec dirs scanned for an `nvidia.com/gpu` spec. The Docker
+# daemon's own defaults; overridable so the Java/bash tests can point detection
+# at a temp dir with a fake spec. /etc/cdi is the documented host output path for
+# `nvidia-ctk cdi generate` and is what docker-compose.gpu.yml bind-mounts into
+# the session for the nested-DinD path (AC#3).
+AISB_GPU_CDI_DIRS="${AISB_GPU_CDI_DIRS:-/etc/cdi /var/run/cdi}"
+
+# host_gpu_kill_switch_file → path to the persisted kill-switch sentinel. Under
+# the management server (AI_SANDBOX_HOST_STATE_ROOT set) it lives beside the
+# other per-install state; in developer mode it is a gitignored repo-root dot
+# file. Its mere existence disables GPU exposure (AC#10). Overridable for tests.
+host_gpu_kill_switch_file() {
+    if [ -n "${AISB_GPU_KILL_SWITCH_FILE:-}" ]; then
+        printf '%s' "$AISB_GPU_KILL_SWITCH_FILE"
+    elif [ -n "${AI_SANDBOX_HOST_STATE_ROOT:-}" ]; then
+        printf '%s' "$AI_SANDBOX_HOST_STATE_ROOT/.ai-sandbox-gpu-disabled"
+    else
+        printf '%s' ".ai-sandbox-gpu-disabled"
+    fi
+}
+
+# host_gpu_disabled → 0 (true, "GPU is disabled") when the operator kill switch
+# is engaged, by EITHER the env override AI_SANDBOX_GPU_DISABLED (truthy) OR the
+# persisted sentinel file. This is the host-level override of the host-wide
+# default (AC#10) — it wins even on a fully GPU-capable host.
+host_gpu_disabled() {
+    case "${AI_SANDBOX_GPU_DISABLED:-}" in
+        1|true|TRUE|yes|YES|on|ON) return 0 ;;
+    esac
+    [ -f "$(host_gpu_kill_switch_file)" ]
+}
+
+# host_gpu_driver_present → 0 when the NVIDIA driver appears loaded on the host:
+# any of the NVIDIA device nodes, the /proc driver tree, or a resolvable
+# nvidia-smi. Cheap and test-fakeable (a fake nvidia-smi on PATH flips it true).
+host_gpu_driver_present() {
+    [ -e /dev/nvidiactl ] && return 0
+    [ -e /dev/nvidia0 ] && return 0
+    [ -d /proc/driver/nvidia ] && return 0
+    command -v nvidia-smi >/dev/null 2>&1
+}
+
+# host_gpu_cdi_spec_present → 0 when a CDI spec declaring `nvidia.com/gpu` is
+# resolvable under one of AISB_GPU_CDI_DIRS. On success it records the OWNING dir
+# in _AISB_GPU_CDI_DIR_FOUND so the injector can bind-mount exactly that dir into
+# the session (the nested-DinD path, AC#3) with no risk of mounting a missing
+# path. Scans JSON/YAML specs (both NVIDIA output formats).
+host_gpu_cdi_spec_present() {
+    _AISB_GPU_CDI_DIR_FOUND=""
+    local dir f
+    for dir in ${AISB_GPU_CDI_DIRS}; do
+        [ -d "$dir" ] || continue
+        for f in "$dir"/*.json "$dir"/*.yaml "$dir"/*.yml; do
+            [ -f "$f" ] || continue
+            if grep -q 'nvidia.com/gpu' "$f" 2>/dev/null; then
+                _AISB_GPU_CDI_DIR_FOUND="$dir"
+                return 0
+            fi
+        done
+    done
+    return 1
+}
+
+# host_gpu_available → 0 ONLY when the host can actually serve a GPU to a
+# session: Linux (AC#9) AND the driver is present AND a CDI spec is resolvable.
+# The kill switch is deliberately NOT consulted here — that is the injector's
+# job, so callers that only want "is the hardware/toolkit here?" (setup.sh
+# reporting) get an honest answer independent of the operator's override.
+host_gpu_available() {
+    [ "$(uname -s)" = "Linux" ] || return 1
+    host_gpu_driver_present || return 1
+    host_gpu_cdi_spec_present || return 1
+}
+
+# inject_host_gpu_passthrough → spawn-time host-side wiring, called by spawn.sh
+# BEFORE `ai_sandbox_compose up`. Exports AI_SANDBOX_GPU_STATUS (consumed only by
+# spawn.sh's info logging) and, in the GPU-on case, exports AI_SANDBOX_GPU=1 +
+# the resolved CDI dir and layers docker-compose.gpu.yml. EVERY other path is a
+# strict no-op: no env that any compose file substitutes, no override layered →
+# the docker argv is byte-identical to pre-UC-101 (AC#5/#9/#10). Status values:
+#   on            — Linux + driver + CDI + switch off → passthrough layered
+#   disabled      — kill switch engaged (AC#10)
+#   driver-no-cdi — driver present but no CDI spec (AC#5/#7 actionable hint)
+#   none          — no driver / non-Linux (silent; today's behaviour)
+inject_host_gpu_passthrough() {
+    # AC#9 — Linux-only gate. macOS/Windows hosts: no GPU path at all, silent.
+    if [ "$(uname -s)" != "Linux" ]; then
+        export AI_SANDBOX_GPU_STATUS="none"
+        return 0
+    fi
+    # AC#10 — operator kill switch wins even on a GPU-capable host.
+    if host_gpu_disabled; then
+        export AI_SANDBOX_GPU_STATUS="disabled"
+        return 0
+    fi
+    if host_gpu_available; then
+        export AI_SANDBOX_GPU=1
+        export AI_SANDBOX_GPU_CDI_DIR="${_AISB_GPU_CDI_DIR_FOUND:-/etc/cdi}"
+        export AI_SANDBOX_GPU_STATUS="on"
+        _aisb_append_compose_override "docker-compose.gpu.yml"
+    elif host_gpu_driver_present; then
+        # Driver loaded but no CDI spec — the one state that MUST NOT be a silent
+        # no-op (minor 3): tell the operator the single missing step (AC#5/#7).
+        export AI_SANDBOX_GPU_STATUS="driver-no-cdi"
+    else
+        export AI_SANDBOX_GPU_STATUS="none"
+    fi
+}
+
 # ── Dev-mode workspace root (relocate-out-of-tree) ───────────────────────────
 #
 # Historically, developer-mode runs put the shared workspace at the in-repo

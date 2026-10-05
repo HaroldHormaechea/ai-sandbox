@@ -23,6 +23,11 @@ templates/claude-config/*
 # spawn.sh / spawn.ps1 to inject spawn-time env vars + compose override files.
 .ai-sandbox-devtools
 
+# UC-101 — host GPU kill-switch sentinel. When present it disables the host-wide
+# NVIDIA GPU passthrough even on a GPU-capable host (AC#10). Per-machine operator
+# choice (toggled by `./setup.sh --gpu-disable` / `--gpu-enable`); never committed.
+.ai-sandbox-gpu-disabled
+
 # Persisted, per-machine dev workspace root. As of the workspace-relocation
 # change the dev-mode workspace lives OUTSIDE this repo by default (under
 # $XDG_STATE_HOME/ai-sandbox or %LOCALAPPDATA%\ai-sandbox); spawn.sh / clean.sh

@@ -288,6 +288,31 @@ cmd_start() {
     local exec_root="$SOCK_DIR/docker-exec"
     mkdir -p "$exec_root"
 
+    # UC-101 — nested-DinD GPU (CDI). When the HOST exposed a GPU to this session
+    # (docker-compose.gpu.yml sets AI_SANDBOX_GPU=1 and bind-mounts the host CDI
+    # spec to /etc/cdi) point the inner rootless dockerd at that spec dir so
+    # `docker run --device nvidia.com/gpu=all …` resolves the host GPU from inside
+    # the session (AC#3 — the depth the workload actually runs at). This is the
+    # drop-in the inner daemon reads on start:
+    #   • ORDER-INDEPENDENT — AI_SANDBOX_GPU is set at container creation, before
+    #     ANY devtool provisioning, so it is seen whenever dind starts regardless
+    #     of whether the `gpu` capability provisioned before or after dind (they
+    #     have no DEPENDS_ON ordering).
+    #   • IDEMPOTENT / no running-daemon mutation — the flag is applied as a fresh
+    #     dockerd START argument; we never reconfigure a live dockerd.
+    #   • A STRICT NO-OP when AI_SANDBOX_GPU is unset → the dockerd argv is
+    #     byte-identical to pre-UC-101 for every non-GPU session.
+    # CDI is the rootless-compatible device path (no nvidia-container-runtime shim
+    # needed on the inner daemon). `--cdi-spec-dir` has existed since Docker 25;
+    # the pinned engine (27.x) supports CDI. If a future engine rejects the flag,
+    # start is warn-and-continue by design, so a GPU session degrades rather than
+    # losing DinD entirely (see docs/gpu.md for the owner-GPU-host runbook).
+    local gpu_opts=()
+    if [ "${AI_SANDBOX_GPU:-0}" = "1" ] && [ -d /etc/cdi ]; then
+        gpu_opts+=(--cdi-spec-dir /etc/cdi)
+        log "Host GPU passthrough detected (AI_SANDBOX_GPU=1) — enabling CDI spec dir /etc/cdi for nested 'docker run --device nvidia.com/gpu=all'."
+    fi
+
     log "Starting rootless dockerd (logs: $LOG_FILE)..."
     # Run in background; nohup so the daemon survives a `docker compose exec`
     # tmux window that started us. dockerd-rootless.sh expects `dockerd` on
@@ -301,6 +326,7 @@ cmd_start() {
     nohup "$BIN_DIR/dockerd-rootless.sh" \
         --data-root "$VAR_DIR/lib-docker" \
         --exec-root "$exec_root" \
+        ${gpu_opts[@]+"${gpu_opts[@]}"} \
         >>"$LOG_FILE" 2>&1 &
     echo "$!" > "$PID_FILE"
 

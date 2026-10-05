@@ -463,6 +463,15 @@ val releaseBundle by tasks.registering(Zip::class) {
     // `/dev/fuse` passthrough + apparmor/seccomp unconfined opts never apply)
     // and `aisandbox-dind start` cannot bring up the rootless daemon.
     from(rootProject.file("docker-compose.dind.yml")) { into("host") }
+    // UC-101 § AC1,AC3 — the host GPU passthrough override must ship beside
+    // docker-compose.yml exactly like the KVM/DinD overrides above. spawn.sh's
+    // inject_host_gpu_passthrough resolves it as
+    // `$(dirname AI_SANDBOX_COMPOSE_FILE)/docker-compose.gpu.yml` and appends it
+    // to AI_SANDBOX_EXTRA_COMPOSE_FILES on a GPU-capable Linux host; for a
+    // server-spawned / .deb / zip session AI_SANDBOX_COMPOSE_FILE points at
+    // host/docker-compose.yml, so without this file the override silently can't
+    // be layered and host-wide GPU passthrough never happens.
+    from(rootProject.file("docker-compose.gpu.yml")) { into("host") }
     // UC05 § AC5,AC6 — SandboxDockerfile:42 does `COPY git-hooks/ /etc/git-hooks/`,
     // so git-hooks/ is part of the container build context and must ship in host/.
     // Exec bit preserves the convention (matches entrypoint.sh above); the
@@ -608,7 +617,12 @@ val prepDebStaging by tasks.registering(Copy::class) {
         // when `dind` is enabled, so a .deb / server-spawned session needs it
         // present beside host/docker-compose.yml or the DinD override never
         // applies. Mode 0644 like the other compose context files.
-        "docker-compose.yml", "docker-compose.kvm.yml", "docker-compose.dind.yml", "SandboxDockerfile",
+        // UC-101 § AC1,AC3 — docker-compose.gpu.yml ships alongside for the same
+        // reason: spawn.sh's inject_host_gpu_passthrough layers it onto
+        // AI_SANDBOX_EXTRA_COMPOSE_FILES on a GPU-capable Linux host, so a .deb /
+        // server-spawned session needs it beside host/docker-compose.yml or the
+        // host-wide GPU override never applies. Mode 0644.
+        "docker-compose.yml", "docker-compose.kvm.yml", "docker-compose.dind.yml", "docker-compose.gpu.yml", "SandboxDockerfile",
     )
     hostData.forEach { name ->
         from(rootProject.file(name)) {

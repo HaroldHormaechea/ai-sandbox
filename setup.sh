@@ -17,15 +17,106 @@ cd "$(dirname "$0")"
 # devtools step under a reconfigure banner with current selections pre-filled,
 # writes the updated ledger, and exits — no other step runs (AC#4).
 RECONFIGURE_MODE=0
+# UC-101 — host GPU kill-switch / status flags. Parsed here so they short-circuit
+# like --reconfigure (they are small operator actions, not the full wizard).
+GPU_ACTION=""
 _setup_args=()
 for _a in "$@"; do
     case "$_a" in
         --reconfigure) RECONFIGURE_MODE=1 ;;
+        --gpu-status)  GPU_ACTION="status" ;;
+        --gpu-disable) GPU_ACTION="disable" ;;
+        --gpu-enable)  GPU_ACTION="enable" ;;
         *) _setup_args+=("$_a") ;;
     esac
 done
 # Leave the residual argv in place for any future flag parsing.
 set -- ${_setup_args[@]+"${_setup_args[@]}"}
+
+# ── UC-101 — host GPU prerequisites + kill switch ────────────────────────────
+# Operator-facing view of the host-wide NVIDIA GPU passthrough (AC#7/#10). The
+# detection primitives live in lib.sh (host_gpu_available / _driver_present /
+# _cdi_spec_present / _disabled / _kill_switch_file) so spawn.sh and setup.sh
+# agree. This prints the host state and the exact missing prerequisite, if any.
+print_gpu_host_status() {
+    hr
+    printf "  %s%sHost GPU (NVIDIA CUDA) — UC-101%s\n" "${BOLD:-}" "${CYAN:-}" "${RESET:-}"
+    if [ "$(uname -s)" != "Linux" ]; then
+        info "  GPU passthrough is Linux-only; this host is $(uname -s). No GPU path (macOS/Windows unaffected)."
+        return 0
+    fi
+    # Kill-switch state first — it overrides everything (AC#10).
+    if host_gpu_disabled; then
+        warn "  Host GPU passthrough is DISABLED (kill switch engaged)."
+        if [ -n "${AI_SANDBOX_GPU_DISABLED:-}" ]; then
+            info "    via env AI_SANDBOX_GPU_DISABLED=${AI_SANDBOX_GPU_DISABLED}"
+        fi
+        [ -f "$(host_gpu_kill_switch_file)" ] && info "    via sentinel $(host_gpu_kill_switch_file)"
+        info "    Re-enable with: ./setup.sh --gpu-enable"
+    else
+        info "  Host GPU kill switch: OFF (passthrough allowed when the host is capable)."
+    fi
+    # Capability (independent of the switch).
+    if host_gpu_driver_present; then
+        ok "  NVIDIA driver: present"
+    else
+        warn "  NVIDIA driver: NOT detected — install a supported NVIDIA driver on the host."
+    fi
+    if host_gpu_cdi_spec_present; then
+        ok "  CDI spec: found under ${_AISB_GPU_CDI_DIR_FOUND}"
+    else
+        warn "  CDI spec: NOT found — install the NVIDIA Container Toolkit and run:"
+        info "      sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml"
+    fi
+    if host_gpu_available && ! host_gpu_disabled; then
+        ok "  → Sessions spawned on this host will get the GPU (host-wide, no per-session opt-in)."
+    elif host_gpu_available && host_gpu_disabled; then
+        info "  → Host is GPU-capable but passthrough is kill-switched off; sessions start with no GPU."
+    else
+        info "  → Sessions will start WITHOUT a GPU until the prerequisites above are met."
+    fi
+    info "  CUDA userspace is the opt-in 'gpu' devtool (./setup.sh --reconfigure). See docs/gpu.md."
+    hr
+}
+
+# Toggle the persisted kill-switch sentinel (AC#10). Writes/removes the file that
+# host_gpu_disabled() checks; env AI_SANDBOX_GPU_DISABLED remains an independent,
+# higher-priority override for one-off / CI use.
+gpu_set_kill_switch() {
+    local f; f="$(host_gpu_kill_switch_file)"
+    if ! : > "$f"; then
+        warn "Could not write kill-switch sentinel $f."
+        exit 1
+    fi
+    ok "Host GPU passthrough DISABLED (sentinel: $f)."
+    info "New sessions will start with no GPU. Re-enable with ./setup.sh --gpu-enable."
+    info "(A one-off override is also available via AI_SANDBOX_GPU_DISABLED=1.)"
+}
+gpu_clear_kill_switch() {
+    local f; f="$(host_gpu_kill_switch_file)"
+    if [ -f "$f" ]; then
+        if ! rm -f "$f"; then
+            warn "Could not remove $f."
+            exit 1
+        fi
+        ok "Host GPU kill switch cleared (removed $f)."
+    else
+        ok "Host GPU kill switch was already off (no sentinel at $f)."
+    fi
+    if host_gpu_disabled; then
+        warn "GPU is still disabled via env AI_SANDBOX_GPU_DISABLED=${AI_SANDBOX_GPU_DISABLED:-} — unset it to fully re-enable."
+    fi
+    info "GPU passthrough will resume for NEW sessions on a GPU-capable host. Verify with ./setup.sh --gpu-status."
+}
+
+if [ -n "$GPU_ACTION" ]; then
+    case "$GPU_ACTION" in
+        status)  print_gpu_host_status ;;
+        disable) gpu_set_kill_switch ;;
+        enable)  gpu_clear_kill_switch ;;
+    esac
+    exit 0
+fi
 
 list_ssh_keys() {
     [ -d "$HOME/.ssh" ] || return 0
@@ -270,8 +361,16 @@ if [ "$RECONFIGURE_MODE" -eq 1 ]; then
     # selection, then surface notes + any hard-gated capabilities before exit.
     run_devtool_server_install
     print_server_install_summary
+    # UC-101 — if the operator (re)selected the GPU capability, show the host GPU
+    # prerequisites + kill-switch state so they know whether sessions will
+    # actually get a GPU (AC#7). Harmless/noise-free otherwise.
+    if devtool_is_enabled gpu 2>/dev/null; then
+        print_gpu_host_status
+    fi
     hr
     printf "  Re-run any time with %s./setup.sh --reconfigure%s.\n" "$MAGENTA" "$RESET"
+    printf "  GPU host status / kill switch: %s./setup.sh --gpu-status%s | %s--gpu-disable%s | %s--gpu-enable%s.\n" \
+        "$MAGENTA" "$RESET" "$MAGENTA" "$RESET" "$MAGENTA" "$RESET"
     exit 0
 fi
 

@@ -262,6 +262,32 @@ if [ -n "${AI_SANDBOX_DEVTOOLS:-}" ]; then
     fi
 fi
 
+# UC-101 — host NVIDIA GPU (CUDA) passthrough. This is HOST-WIDE and independent
+# of the devtools selection above: every session on a Linux GPU host gets the
+# device via CDI, with NO per-session opt-in (AC#1), unless the operator kill
+# switch is engaged (AC#10). inject_host_gpu_passthrough layers
+# docker-compose.gpu.yml + exports AI_SANDBOX_GPU=1 ONLY when the host can
+# actually serve a GPU; every other path is a strict no-op → the `compose up`
+# argv below is byte-identical to pre-UC-101 on non-GPU / kill-switched hosts
+# (AC#5). The opt-in `aisandbox-gpu` capability (CUDA userspace) is orthogonal
+# and rides the normal devtools loop. Called AFTER the devtools injection so it
+# layers on top of any dind/kvm overrides (additive, order-independent).
+inject_host_gpu_passthrough
+case "${AI_SANDBOX_GPU_STATUS:-none}" in
+    on)
+        info "  gpu           : host NVIDIA GPU detected — passthrough ON (host-wide, CDI); nvidia-smi/CUDA available in every session" >&2
+        ;;
+    disabled)
+        info "  gpu           : host GPU passthrough DISABLED by kill switch (AI_SANDBOX_GPU_DISABLED or $(host_gpu_kill_switch_file)); session starts with no GPU" >&2
+        ;;
+    driver-no-cdi)
+        warn "  gpu           : NVIDIA driver present but no CDI spec found — GPU NOT passed through. Generate one on the host: sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml  (see docs/gpu.md)" >&2
+        ;;
+    none|*)
+        : # no GPU / non-Linux host → silent, byte-identical to today.
+        ;;
+esac
+
 if ! ai_sandbox_compose -p "$PROJECT" up -d; then
     warn "docker compose up failed for $PROJECT." >&2
     warn "Counter NOT rolled back (monotonic by design); next spawn will use N=$(( N + 1 ))." >&2
