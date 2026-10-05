@@ -129,12 +129,15 @@ public class PkiInitCommand implements Runnable {
         // needing sudo.
         private java.util.function.BooleanSupplier rootCheck = Init::isRoot;
 
-        // Test seam (c) — resolves the owner/group used for every chown.
-        // Production defaults to Ownership.resolve, so the production code
-        // path is byte-identical when the seam is not overridden. Tests
-        // inject a resolver returning an Ownership for the current user, so
-        // the real chown path runs against a tempdir hierarchy without root.
-        private java.util.function.BiFunction<String, String, Ownership> ownershipResolver = Ownership::resolve;
+        // Test seam (c) — resolves the Chowner used for every chown.
+        // Production defaults to Ownership.resolve (Ownership implements
+        // Chowner), so the production code path is behaviorally identical
+        // when the seam is not overridden. The return type is the Chowner
+        // interface rather than the final Ownership record specifically so
+        // a test can inject a RECORDING SPY — proving sessions/ itself is
+        // chowned while its per-session contents are not recursively
+        // re-owned, which owner inspection alone (a self-chown no-op) can't.
+        private java.util.function.BiFunction<String, String, Chowner> ownershipResolver = Ownership::resolve;
 
         /** Test seam — substitute a fake SystemUserAdmin before invoking {@link #call()}. */
         void setSystemUserAdmin(SystemUserAdmin admin) {
@@ -147,7 +150,7 @@ public class PkiInitCommand implements Runnable {
         }
 
         /** Test seam — override the ownership resolver (defaults to {@link Ownership#resolve}). */
-        void setOwnershipResolver(java.util.function.BiFunction<String, String, Ownership> resolver) {
+        void setOwnershipResolver(java.util.function.BiFunction<String, String, Chowner> resolver) {
             this.ownershipResolver = resolver;
         }
 
@@ -222,7 +225,7 @@ public class PkiInitCommand implements Runnable {
             // UserPrincipalNotFoundException — we log a single warning and
             // skip every chown rather than blowing up mid-flow. The CI
             // smoke job exercises real chown as root in ubuntu:24.04.
-            Ownership ownership = posix ? ownershipResolver.apply(systemUserName, "pki init") : null;
+            Chowner ownership = posix ? ownershipResolver.apply(systemUserName, "pki init") : null;
             if (posix && ownership != null) {
                 ownership.chownTree(etcRoot);
                 if (sessionsParent != null) {
