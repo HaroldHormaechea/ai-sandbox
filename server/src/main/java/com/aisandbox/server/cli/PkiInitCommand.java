@@ -129,6 +129,13 @@ public class PkiInitCommand implements Runnable {
         // needing sudo.
         private java.util.function.BooleanSupplier rootCheck = Init::isRoot;
 
+        // Test seam (c) — resolves the owner/group used for every chown.
+        // Production defaults to Ownership.resolve, so the production code
+        // path is byte-identical when the seam is not overridden. Tests
+        // inject a resolver returning an Ownership for the current user, so
+        // the real chown path runs against a tempdir hierarchy without root.
+        private java.util.function.BiFunction<String, String, Ownership> ownershipResolver = Ownership::resolve;
+
         /** Test seam — substitute a fake SystemUserAdmin before invoking {@link #call()}. */
         void setSystemUserAdmin(SystemUserAdmin admin) {
             this.systemUserAdmin = admin;
@@ -137,6 +144,11 @@ public class PkiInitCommand implements Runnable {
         /** Test seam — override the root-check probe. */
         void setRootCheck(java.util.function.BooleanSupplier rootCheck) {
             this.rootCheck = rootCheck;
+        }
+
+        /** Test seam — override the ownership resolver (defaults to {@link Ownership#resolve}). */
+        void setOwnershipResolver(java.util.function.BiFunction<String, String, Ownership> resolver) {
+            this.ownershipResolver = resolver;
         }
 
         @Override
@@ -210,13 +222,20 @@ public class PkiInitCommand implements Runnable {
             // UserPrincipalNotFoundException — we log a single warning and
             // skip every chown rather than blowing up mid-flow. The CI
             // smoke job exercises real chown as root in ubuntu:24.04.
-            Ownership ownership = posix ? Ownership.resolve(systemUserName, "pki init") : null;
+            Ownership ownership = posix ? ownershipResolver.apply(systemUserName, "pki init") : null;
             if (posix && ownership != null) {
                 ownership.chownTree(etcRoot);
                 if (sessionsParent != null) {
                     ownership.chown(sessionsParent);
                 }
-                ownership.chownTree(sessionsDir);
+                // Only the top-level sessions/ dir is (re-)owned to the service
+                // user — NOT its per-session contents. A recursive chown here
+                // would flatten rootless-DinD subuid-mapped files (uid 100000+)
+                // back to ai-sandbox-server (UC-30 regression) and was the
+                // trigger for the dangling-symlink crash. sessions/ only needs
+                // to exist at 0750 owned by the service user at its top level
+                // (UC-05); per-session state is managed per session.
+                ownership.chown(sessionsDir);
                 // Enrollment dir lives under /var/lib (sibling of sessions),
                 // so it is not covered by the etcRoot chownTree above.
                 ownership.chownTree(enrollmentDir);
