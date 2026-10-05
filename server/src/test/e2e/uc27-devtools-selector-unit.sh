@@ -73,12 +73,13 @@ cd "$REPO_ROOT"
 . "$REPO_ROOT/devtools-ui.sh"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# AC#2 / AC#6 — manifest auto-discovery: the catalog is exactly the three
-# shipped capabilities, emitted in byte-stable (sorted) order, populated from
-# the directory (no hardcoded list).
+# AC#2 / AC#6 — manifest auto-discovery: the catalog is exactly the shipped
+# capabilities, emitted in byte-stable (sorted) order, populated from the
+# directory (no hardcoded list). UC-101 added the `gpu` capability, so the set
+# is now android/dind/gpu/java (sorted).
 # ─────────────────────────────────────────────────────────────────────────────
-assert_eq "AC#2/#6 catalog discovers exactly the 3 shipped capabilities, sorted" \
-  "android dind java" "$(devtool_catalog_ids | tr '\n' ' ' | sed 's/ $//')"
+assert_eq "AC#2/#6 catalog discovers exactly the 4 shipped capabilities, sorted (incl. UC-101 gpu)" \
+  "android dind gpu java" "$(devtool_catalog_ids | tr '\n' ' ' | sed 's/ $//')"
 
 # AC#2 — discovery is data-driven: a drop-in manifest dir is picked up with no
 # code edits. Point AISB_DEVTOOLS_DIR at a synthetic catalog and re-query.
