@@ -1,12 +1,14 @@
 package com.aisandbox.server.sessions;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.nio.file.attribute.PosixFilePermission;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.HashMap;
@@ -354,11 +356,19 @@ class HostScriptGpuPassthroughTest {
      * in and flip detection true — the GPU host is simulated ONLY through the
      * explicit shims/knobs each test installs. {@code AI_SANDBOX_COMPOSE_FILE}
      * points at the staged base compose file (install-mode resolution).
+     *
+     * <p>Defense-in-depth against a CI hang: {@code DOCKER_HOST} is pointed at an
+     * UNREACHABLE socket. This test drives only {@code docker compose config}
+     * (daemon-free) through a fake shim, so the daemon is never needed; but if a
+     * real {@code docker} ever leaked onto PATH on a runner with a LIVE daemon, an
+     * unreachable {@code DOCKER_HOST} makes it fail FAST ("cannot connect")
+     * instead of talking to the live daemon and blocking the whole suite.
      */
     private static Map<String, String> baseEnv(Stage s) {
         Map<String, String> env = new HashMap<>();
         env.put("PATH", s.bin + ":/usr/bin:/bin");
         env.put("AI_SANDBOX_COMPOSE_FILE", s.dir.resolve("docker-compose.yml").toString());
+        env.put("DOCKER_HOST", "unix://" + s.dir.resolve("no-such-docker.sock"));
         return env;
     }
 
@@ -374,9 +384,19 @@ class HostScriptGpuPassthroughTest {
 
     /**
      * Run {@code bash -c 'source lib.sh; [inject_host_gpu_passthrough;] printf
-     * probe; ai_sandbox_compose -p ai-sandbox-1 up -d'} with the supplied env and
+     * probe; ai_sandbox_compose -p ai-sandbox-1 config'} with the supplied env and
      * working dir = the stage. Captures the fake-docker argv and a probe of the
      * GPU env vars the injector set.
+     *
+     * <p><b>Why {@code config}, not {@code up}:</b> this test only needs the
+     * composed {@code docker compose} ARGV ({@code -f} override layering + flags),
+     * which {@code ai_sandbox_compose} builds identically regardless of the
+     * subcommand. {@code config} is DAEMON-FREE — it merely parses/validates the
+     * compose files — so even if the fake shim were somehow bypassed on a CI
+     * runner with a LIVE daemon, there is no {@code up}/build/readiness-poll that
+     * could block the suite (the 15-min-CI-hang failure mode). The whole call is
+     * additionally wrapped in a preemptive 25s timeout so any unexpected block
+     * becomes a FAST, clearly-labeled failure rather than a suite hang.
      */
     private static Result run(Stage s, Map<String, String> env, boolean callInjector) throws Exception {
         // Fresh docker log per run so back-to-back spawns don't accumulate.
@@ -386,8 +406,11 @@ class HostScriptGpuPassthroughTest {
         String cmd = "source './lib.sh' && " + inject
                 + "printf 'GPU=%s\\nSTATUS=%s\\nCDIDIR=%s\\n' "
                 + "\"${AI_SANDBOX_GPU:-}\" \"${AI_SANDBOX_GPU_STATUS:-}\" \"${AI_SANDBOX_GPU_CDI_DIR:-}\" > '"
-                + probe + "' && ai_sandbox_compose -p ai-sandbox-1 up -d";
-        int rc = runShell(s.dir, env, cmd);
+                + probe + "' && ai_sandbox_compose -p ai-sandbox-1 config";
+        int rc = assertTimeoutPreemptively(
+                Duration.ofSeconds(25),
+                () -> runShell(s.dir, env, cmd),
+                "GPU passthrough shell invocation blocked >25s (possible real-docker leak / daemon reach)");
         List<String> argv = Files.exists(s.log) ? Files.readAllLines(s.log) : List.of();
         return new Result(rc, argv, Files.readString(probe));
     }
