@@ -96,7 +96,8 @@ class HostScriptGpuPassthroughTest {
 
         boolean gpuOverridePresent = r.argv.stream().anyMatch(a -> a.endsWith(GPU_OVERRIDE));
         assertThat(gpuOverridePresent)
-                .as("AC1 — ai_sandbox_compose MUST layer docker-compose.gpu.yml as a -f override (host-wide, no opt-in)")
+                .as(
+                        "AC1 — ai_sandbox_compose MUST layer docker-compose.gpu.yml as a -f override (host-wide, no opt-in)")
                 .isTrue();
         // The override is a `-f` value (preceded by a -f flag somewhere in argv).
         assertThat(r.argv).as("argv carries a -f flag for the override").contains("-f");
@@ -224,7 +225,8 @@ class HostScriptGpuPassthroughTest {
 
         Map<String, String> envOff = baseEnv(s);
         envOff.put("AISB_GPU_CDI_DIRS", cdiDir.toString());
-        envOff.put("AISB_GPU_KILL_SWITCH_FILE", tmp.resolve("no-such-kill-switch").toString());
+        envOff.put(
+                "AISB_GPU_KILL_SWITCH_FILE", tmp.resolve("no-such-kill-switch").toString());
         // Baseline = no injector, same env → today's argv.
         Result baseline = run(s, envOff, false);
 
@@ -337,8 +339,7 @@ class HostScriptGpuPassthroughTest {
                 REPO_ROOT.resolve("docker-compose.yml"),
                 dir.resolve("docker-compose.yml"),
                 StandardCopyOption.REPLACE_EXISTING);
-        Files.copy(
-                REPO_ROOT.resolve(GPU_OVERRIDE), dir.resolve(GPU_OVERRIDE), StandardCopyOption.REPLACE_EXISTING);
+        Files.copy(REPO_ROOT.resolve(GPU_OVERRIDE), dir.resolve(GPU_OVERRIDE), StandardCopyOption.REPLACE_EXISTING);
 
         Path bin = tmp.resolve("bin");
         Files.createDirectories(bin);
@@ -454,6 +455,13 @@ class HostScriptGpuPassthroughTest {
             }
         }
         procEnv.remove("TERM");
+        // Drop BASH_ENV so a non-interactive `bash -c` does NOT source an
+        // environment profile that re-prepends real tool dirs (e.g. a dind
+        // `docker`) onto PATH and shadows the fake shim this test installs. In
+        // CI BASH_ENV is unset, so this is a no-op there; in a dev sandbox that
+        // exports BASH_ENV it keeps the test's PATH authoritative and the fake
+        // docker argv assertions deterministic.
+        procEnv.remove("BASH_ENV");
         Process p = pb.start();
         Thread out = new Thread(() -> drain(p.getInputStream(), System.out));
         Thread err = new Thread(() -> drain(p.getErrorStream(), System.err));

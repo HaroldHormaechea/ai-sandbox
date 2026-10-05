@@ -75,10 +75,11 @@ class SandboxDockerfileGpuContractTest {
         // userspace into the base image → AC4 violation. We scan build steps
         // only (comments stripped) because the file legitimately *documents*
         // CUDA in comments to explain why it is absent.
-        Pattern aptInstall = Pattern.compile("\\b(apt-get|apt)\\s+install\\b.*\\b(cuda|nvidia)", Pattern.CASE_INSENSITIVE);
-        Pattern pipInstall =
-                Pattern.compile("\\bpip3?\\s+install\\b.*\\b(cuda|nvidia)", Pattern.CASE_INSENSITIVE);
-        Pattern cudaPkg = Pattern.compile("\\b(cuda-toolkit|cuda-runtime|nvidia-cuda|nvidia-container)", Pattern.CASE_INSENSITIVE);
+        Pattern aptInstall =
+                Pattern.compile("\\b(apt-get|apt)\\s+install\\b.*\\b(cuda|nvidia)", Pattern.CASE_INSENSITIVE);
+        Pattern pipInstall = Pattern.compile("\\bpip3?\\s+install\\b.*\\b(cuda|nvidia)", Pattern.CASE_INSENSITIVE);
+        Pattern cudaPkg = Pattern.compile(
+                "\\b(cuda-toolkit|cuda-runtime|nvidia-cuda|nvidia-container)", Pattern.CASE_INSENSITIVE);
 
         for (String line : lines) {
             if (isCommentOrBlank(line)) {

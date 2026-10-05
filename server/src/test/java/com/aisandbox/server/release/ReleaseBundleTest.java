@@ -296,7 +296,8 @@ class ReleaseBundleTest {
         Integer gpuHelperMode = modes.get("host/container-bin/aisandbox-gpu");
         assertThat(gpuHelperMode).as("mode of host/container-bin/aisandbox-gpu").isNotNull();
         assertThat(gpuHelperMode & 0777)
-                .as("mode of host/container-bin/aisandbox-gpu — must be exec for the SandboxDockerfile COPY to land it +x")
+                .as(
+                        "mode of host/container-bin/aisandbox-gpu — must be exec for the SandboxDockerfile COPY to land it +x")
                 .isEqualTo(0755);
     }
 
