@@ -2,23 +2,32 @@ package com.aisandbox.android.ui.theme
 
 import androidx.compose.material3.Typography
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.sp
+import com.aisandbox.android.R
 
 /**
  * Typography for ai-sandbox. The design (UC04 § Theming) calls for
  * Roboto Flex (sans, primary UI) + JetBrains Mono (mono, session ids /
  * fingerprints / terminal output).
  *
- * For Checkpoint-1 we declare placeholder [FontFamily.SansSerif] +
- * [FontFamily.Monospace] so the module compiles without bundled font
- * assets. The Roboto Flex / JetBrains Mono GoogleFont providers land in a
- * later checkpoint together with the actual font wiring.
+ * [Mono] is backed by the bundled static JetBrains Mono TTFs
+ * ([R.font.jetbrains_mono_regular] W400 + [R.font.jetbrains_mono_medium] W500),
+ * so all Compose mono chrome (session ids / fingerprints / cert metadata)
+ * renders with the same typeface the vendored Termux terminal view now uses
+ * (the terminal renderer is wired separately in `TerminalSurface.kt`, which
+ * takes a raw [android.graphics.Typeface] rather than a Compose [FontFamily]).
+ * [Sans] remains a placeholder [FontFamily.SansSerif]; the Roboto Flex wiring
+ * lands in a later checkpoint.
  */
 
 val Sans: FontFamily = FontFamily.SansSerif
-val Mono: FontFamily = FontFamily.Monospace
+val Mono: FontFamily = FontFamily(
+    Font(R.font.jetbrains_mono_regular, FontWeight.W400),
+    Font(R.font.jetbrains_mono_medium, FontWeight.W500),
+)
 
 private fun robotoFlex(weight: FontWeight, size: Int, line: Int, tracking: Int = 0): TextStyle =
     TextStyle(

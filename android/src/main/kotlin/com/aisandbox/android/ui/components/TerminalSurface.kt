@@ -1,6 +1,7 @@
 package com.aisandbox.android.ui.components
 
 import android.content.Context
+import android.graphics.Typeface
 import android.view.KeyEvent
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
@@ -9,6 +10,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.res.ResourcesCompat
+import com.aisandbox.android.R
 import com.aisandbox.android.terminal.TerminalStreamController
 import com.termux.terminal.TerminalSession
 import com.termux.view.TerminalView
@@ -54,6 +57,24 @@ fun TerminalSurface(
                     AiSandboxTerminalViewClient(ctx, this, textSizePx, conversational, inputEnabled),
                 )
                 setTextSize(textSizePx)
+                // Bundled JetBrains Mono — the vendored Termux TerminalView otherwise
+                // defaults to Typeface.MONOSPACE, which on some OEM skins (e.g. ColorOS)
+                // resolves to a device font with poor box-drawing/block-element coverage,
+                // producing the blocky tmux glyphs this fixes. Applied AFTER setTextSize
+                // (which the view re-reads when the renderer is rebuilt) and BEFORE
+                // attachSession so the initial column/row metrics use JB Mono. If the
+                // font fails to load (bad packaging) the view falls back to MONOSPACE;
+                // we log a warning so that degraded path is diagnosable.
+                val mono = monoTypeface(ctx)
+                if (mono != null) {
+                    setTypeface(mono)
+                } else {
+                    android.util.Log.w(
+                        "TerminalSurface",
+                        "Bundled JetBrains Mono (R.font.jetbrains_mono_regular) failed to load; " +
+                            "terminal falls back to Typeface.MONOSPACE (box-drawing glyphs may render blocky).",
+                    )
+                }
                 attachSession(controller.wsSession.session)
                 controller.wsSession.bindView(this)
                 // Take focus so the IME / hardware keyboard targets the terminal —
@@ -196,3 +217,11 @@ private class AiSandboxTerminalViewClient(
 }
 
 private const val DEFAULT_TEXT_SIZE_SP = 13
+
+/**
+ * Resolves the bundled JetBrains Mono (Regular / W400) typeface for the terminal
+ * renderer. Extracted as a top-level function so it is unit-testable (Robolectric)
+ * without standing up the Compose/AndroidView surface. Returns `null` if the font
+ * resource fails to load, so the caller can log and fall back to [Typeface.MONOSPACE].
+ */
+fun monoTypeface(ctx: Context): Typeface? = ResourcesCompat.getFont(ctx, R.font.jetbrains_mono_regular)
