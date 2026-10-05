@@ -38,3 +38,14 @@ AISB_ANDROID_PLATFORM="${AISB_ANDROID_PLATFORM:-android-36}"
 # x86_64 system image (amd64-only — AC#11). Used both for the label and the
 # `sdkmanager` install line.
 AISB_ANDROID_SYSTEM_IMAGE="${AISB_ANDROID_SYSTEM_IMAGE:-system-images;android-36;google_apis;x86_64}"
+
+# ── GPU (NVIDIA CUDA userspace) — UC-101 ─────────────────────────────────────
+# CUDA userspace major.minor the opt-in `aisandbox-gpu` capability provisions
+# into the per-session cache. SINGLE source for BOTH the manifest LABEL and the
+# install (aisandbox-gpu), so the menu text and the toolkit that lands can never
+# drift (AC#9 parity with java/android). This is the CUDA *userspace* version;
+# it must be compatible with the host's installed NVIDIA DRIVER per NVIDIA's
+# CUDA/driver compatibility matrix (see docs/gpu.md). The matching pip-wheel
+# suffix (e.g. `cu12`) is derived from the major by aisandbox-gpu. x86_64-only
+# (CUDA toolkit is amd64-only — the manifest sets ARCH=amd64).
+AISB_CUDA_VERSION="${AISB_CUDA_VERSION:-12.4}"

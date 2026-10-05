@@ -1,0 +1,51 @@
+# UC-101 — host NVIDIA GPU (CUDA) passthrough override.
+#
+# Layered ON TOP of docker-compose.yml by spawn.sh (lib.sh
+# inject_host_gpu_passthrough → AI_SANDBOX_EXTRA_COMPOSE_FILES) ONLY when ALL of:
+#   1. the host is Linux (UC-27 / AC#9),
+#   2. the NVIDIA driver is present AND a CDI spec (`nvidia.com/gpu`) is
+#      resolvable under /etc/cdi or /var/run/cdi, and
+#   3. the host kill switch is OFF (AC#10).
+# Never applied otherwise, so non-GPU / no-CDI / kill-switched / non-Linux runs
+# are completely unaffected — the `docker compose up` argv is byte-identical to
+# pre-UC-101 (AC#5). This mirrors the UC-22 KVM override precedent
+# (docker-compose.kvm.yml).
+#
+# Mechanism — CDI (Container Device Interface). The NVIDIA Container Toolkit
+# injects the host driver libraries, `nvidia-smi`, and the GPU device nodes into
+# the container from the spec the operator generated with
+# `nvidia-ctk cdi generate` (see docs/gpu.md). CDI is the documented path that
+# works with ROOTLESS Docker and the subuid model (UC-30 / AC#6) because it is a
+# declarative device injection — no privileged host-root runtime, no `--gpus`
+# nvidia-container-runtime shim required on the host daemon.
+#
+# NO CUDA userspace is added here (AC#4) — the base image is unchanged. The CUDA
+# toolkit/libraries are the opt-in `aisandbox-gpu` capability, cache-provisioned
+# into the session on demand. This file only exposes the DEVICE + driver.
+services:
+  claude-sandbox:
+    # CDI device reference. Requires docker compose v2 (PROJECT_BRIEF `docker_compose: v2+`)
+    # and a host daemon with CDI support (Docker 25+, on by default in 27.x) plus
+    # the generated spec. `all` = every GPU the host spec advertises; concurrent
+    # sessions share the physical GPU (time-sliced; VRAM not partitioned — see
+    # docs/gpu.md §"Multiple sessions / contention", AC#8).
+    devices:
+      - "nvidia.com/gpu=all"
+    # Make the host CDI spec readable INSIDE the session so the nested rootless
+    # dockerd (aisandbox-dind) can itself resolve `nvidia.com/gpu=all` for
+    # `docker run --device nvidia.com/gpu=all …` (AC#3). The source is the exact
+    # dir where spawn.sh FOUND the spec (AI_SANDBOX_GPU_CDI_DIR, set by
+    # inject_host_gpu_passthrough), so the bind source always exists when this
+    # override is layered. Read-only — the session never mutates the host spec.
+    volumes:
+      - "${AI_SANDBOX_GPU_CDI_DIR:-/etc/cdi}:/etc/cdi:ro"
+    environment:
+      # Signals to entrypoint.sh / aisandbox-dind that this session has host-GPU
+      # exposure. aisandbox-dind reads it on start (order-independent: set at
+      # container creation, before any devtool provisioning) to point the inner
+      # rootless dockerd at /etc/cdi for the nested path (AC#3).
+      AI_SANDBOX_GPU: "1"
+      # Standard NVIDIA container env — honoured by CUDA userspace + the toolkit
+      # when present; harmless when the `aisandbox-gpu` capability is not selected.
+      NVIDIA_VISIBLE_DEVICES: "all"
+      NVIDIA_DRIVER_CAPABILITIES: "all"

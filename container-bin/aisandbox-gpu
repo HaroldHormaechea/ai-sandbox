@@ -1,0 +1,190 @@
+#!/usr/bin/env bash
+# aisandbox-gpu — provision the NVIDIA CUDA userspace into the per-session cache
+# and wire CUDA_HOME / PATH / LD_LIBRARY_PATH (UC-101 `gpu` capability).
+#
+# Invoked by the gpu manifest's devtool_provision hook from entrypoint.sh at
+# spawn, BEFORE tmux/claude launches, so a GPU session is ready at handover. The
+# CUDA userspace is cached under the persisted /workspace mount, so a
+# restart/respawn reuses it; only the first provision needs network.
+#
+# This provides ONLY the CUDA USERSPACE (toolkit/libraries). The GPU DEVICE +
+# driver are exposed host-wide by docker-compose.gpu.yml (see lib.sh
+# inject_host_gpu_passthrough + docs/gpu.md) — not by this helper. On a session
+# with no host GPU exposed, `install` still lays down the userspace but CUDA will
+# be unusable; `doctor` reports exactly which prerequisite is missing (AC#5).
+#
+# Version constants come from devtools.d/lib/versions.sh — the SAME source the
+# manifest LABEL reads, so the installed userspace and the picked label can never
+# drift (AC#9).
+#
+# Subcommands:
+#   install  install the CUDA userspace wheels into the cache (idempotent;
+#            cache-aware) and write the env snippet ($CACHE/env.sh).
+#   doctor   graceful-degradation reporter: names every missing prerequisite
+#            (device nodes / libcuda / CDI exposure / kill switch / userspace)
+#            with an actionable hint. Never crashes. Exit 0 = GPU usable,
+#            1 = degraded (a prerequisite is missing).
+#   env      print the env snippet path's contents (entrypoint sources it).
+set -euo pipefail
+
+VERSIONS_SH="${AISB_DEVTOOLS_VERSIONS:-/opt/ai-sandbox/devtools.d/lib/versions.sh}"
+PROV_LIB="${AISB_PROVISION_LIB:-/opt/ai-sandbox/devtools.d/lib/provision.sh}"
+# shellcheck disable=SC1090
+[ -r "$VERSIONS_SH" ] && . "$VERSIONS_SH" || true
+# shellcheck disable=SC1090
+[ -r "$PROV_LIB" ] && . "$PROV_LIB" || true
+
+CUDA_VERSION="${AISB_CUDA_VERSION:-12.4}"
+# Major drives the pip-wheel suffix (cuXX) — the CUDA wheels are published per
+# major (e.g. nvidia-cuda-runtime-cu12). Derive it from the pinned version.
+CUDA_MAJOR="${CUDA_VERSION%%.*}"
+CU_SUFFIX="cu${CUDA_MAJOR}"
+CACHE_ROOT="${AISB_GPU_CACHE:-/workspace/environment-utilities/gpu}"
+CUDA_DIR="$CACHE_ROOT/cuda"          # pip --target root for the CUDA wheels
+VERSION_FILE="$CACHE_ROOT/.cuda-version"
+ENV_FILE="$CACHE_ROOT/env.sh"
+MARKER="# aisandbox-gpu:env"
+
+# CUDA userspace wheels installed into the cache. A compact but useful core:
+# the runtime (cudart), nvcc (compiler), cuBLAS, and cuDNN-adjacent primitives
+# are the common CUDA framework dependencies; frameworks (torch, etc.) bring
+# their own but benefit from nvcc + a resolvable CUDA_HOME. Overridable so an
+# operator can trim/extend the set for the host's CUDA/driver matrix.
+CUDA_WHEELS="${AISB_CUDA_WHEELS:-nvidia-cuda-runtime-${CU_SUFFIX} nvidia-cuda-nvcc-${CU_SUFFIX} nvidia-cuda-cupti-${CU_SUFFIX} nvidia-cublas-${CU_SUFFIX}}"
+
+log() { printf '  [aisandbox-gpu] %s\n' "$*" >&2; }
+die() { printf '  [aisandbox-gpu] ERROR: %s\n' "$*" >&2; exit 1; }
+
+# pick a python interpreter with pip. CUDA wheels are the rootless-friendly way
+# to lay down the userspace (no apt/root). node:20 base ships no python, so a GPU
+# session needs python3 — report clearly if absent rather than crashing.
+find_python() {
+    local p
+    for p in python3 python; do
+        if command -v "$p" >/dev/null 2>&1; then
+            printf '%s' "$p"
+            return 0
+        fi
+    done
+    return 1
+}
+
+write_env() {
+    mkdir -p "$CACHE_ROOT"
+    # The wheels unpack lib dirs under <target>/nvidia/<pkg>/lib and binaries
+    # (nvcc) under <target>/nvidia/cuda_nvcc/bin. We glob them at SOURCE time so
+    # the snippet stays correct if the wheel layout shifts between CUDA majors.
+    cat > "$ENV_FILE" <<EOF
+# Managed by aisandbox-gpu (UC-101) — do not hand-edit.
+export CUDA_HOME="$CUDA_DIR/nvidia/cuda_nvcc"
+# Prepend every CUDA wheel lib dir to LD_LIBRARY_PATH (idempotent).
+for _d in "$CUDA_DIR"/nvidia/*/lib; do
+    [ -d "\$_d" ] || continue
+    case ":\${LD_LIBRARY_PATH:-}:" in
+        *":\$_d:"*) ;;
+        *) export LD_LIBRARY_PATH="\$_d\${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}" ;;
+    esac
+done
+unset _d
+# nvcc on PATH when the nvcc wheel is present.
+if [ -d "$CUDA_DIR/nvidia/cuda_nvcc/bin" ]; then
+    case ":\$PATH:" in
+        *":$CUDA_DIR/nvidia/cuda_nvcc/bin:"*) ;;
+        *) export PATH="$CUDA_DIR/nvidia/cuda_nvcc/bin:\$PATH" ;;
+    esac
+fi
+EOF
+    chmod 0644 "$ENV_FILE" 2>/dev/null || true
+    if command -v aisb_stitch_profile >/dev/null 2>&1; then
+        aisb_stitch_profile "$ENV_FILE" "$MARKER"
+    fi
+}
+
+cmd_install() {
+    mkdir -p "$CACHE_ROOT"
+    if [ -d "$CUDA_DIR/nvidia" ] && [ "$(cat "$VERSION_FILE" 2>/dev/null || true)" = "$CUDA_VERSION" ]; then
+        log "CUDA userspace $CUDA_VERSION already provisioned at $CUDA_DIR."
+        write_env
+        return 0
+    fi
+    local py
+    if ! py="$(find_python)"; then
+        die "python3 not found — the CUDA userspace is provisioned via pip wheels. Install python3 in the session (or bake it) and re-run \`aisandbox-gpu install\`."
+    fi
+    if ! "$py" -m pip --version >/dev/null 2>&1; then
+        die "pip not available for $py — cannot install the CUDA userspace wheels. Ensure pip is present and re-run \`aisandbox-gpu install\`."
+    fi
+    log "Provisioning CUDA userspace $CUDA_VERSION ($CU_SUFFIX) → $CUDA_DIR (needs network on first run)…"
+    mkdir -p "$CUDA_DIR"
+    # --target keeps the install self-contained in the cache (no venv activation,
+    # no site-packages pollution). shellcheck-safe word-splitting of the list.
+    # shellcheck disable=SC2086
+    if ! "$py" -m pip install --no-cache-dir --upgrade --target "$CUDA_DIR" $CUDA_WHEELS; then
+        die "Failed to install CUDA wheels ($CUDA_WHEELS). Check network + that the wheels exist for $CU_SUFFIX on PyPI, or override AISB_CUDA_WHEELS for this host's CUDA/driver matrix."
+    fi
+    printf '%s\n' "$CUDA_VERSION" > "$VERSION_FILE"
+    write_env
+    log "CUDA userspace ready under $CUDA_DIR (CUDA_HOME=$CUDA_DIR/nvidia/cuda_nvcc)."
+    log "Note: GPU USE also requires the host to expose the device (host-wide passthrough). Run \`aisandbox-gpu doctor\` to confirm."
+}
+
+# report_missing LABEL HINT → print a degraded line; bumps the degraded counter.
+_degraded=0
+report_ok()      { log "  ✓ $*"; }
+report_missing() { log "  ✗ $1 — $2"; _degraded=1; }
+
+cmd_doctor() {
+    log "cache root     : $CACHE_ROOT"
+    log "CUDA version   : $CUDA_VERSION ($CU_SUFFIX)"
+
+    # 1. CUDA userspace installed?
+    if [ -d "$CUDA_DIR/nvidia" ]; then
+        report_ok "CUDA userspace present ($CUDA_DIR)"
+    else
+        report_missing "CUDA userspace NOT installed" "run \`aisandbox-gpu install\` (select the 'gpu' devtool and respawn, or run it manually)."
+    fi
+
+    # 2. Host GPU device nodes passed through?
+    if [ -e /dev/nvidiactl ] || [ -e /dev/nvidia0 ]; then
+        report_ok "GPU device nodes present (/dev/nvidia*)"
+    else
+        report_missing "no GPU device nodes (/dev/nvidia*)" "the host did not expose a GPU to this session. Requires a Linux host with the NVIDIA driver + NVIDIA Container Toolkit + a CDI spec, the kill switch OFF, and a FRESH session (respawn). See docs/gpu.md."
+    fi
+
+    # 3. Driver userspace (libcuda) reachable?
+    if { command -v ldconfig >/dev/null 2>&1 && ldconfig -p 2>/dev/null | grep -q 'libcuda\.so'; } \
+        || ls /usr/lib/x86_64-linux-gnu/libcuda.so* >/dev/null 2>&1; then
+        report_ok "driver userspace reachable (libcuda.so)"
+    else
+        report_missing "libcuda.so not found" "the NVIDIA driver libraries were not injected. On a GPU host this is injected by CDI — regenerate the spec with \`nvidia-ctk cdi generate\` and respawn. See docs/gpu.md."
+    fi
+
+    # 4. nvidia-smi (host driver query)?
+    if command -v nvidia-smi >/dev/null 2>&1; then
+        report_ok "nvidia-smi present on PATH"
+    else
+        report_missing "nvidia-smi not on PATH" "injected by CDI on a GPU host; its absence means no host-GPU exposure in this session."
+    fi
+
+    # 5. Host-wide exposure signal + kill-switch awareness.
+    if [ "${AI_SANDBOX_GPU:-0}" = "1" ]; then
+        report_ok "host-wide GPU passthrough signalled (AI_SANDBOX_GPU=1)"
+    else
+        report_missing "AI_SANDBOX_GPU not set" "this session was spawned WITHOUT host GPU passthrough — either the host has no usable GPU/CDI, or the operator kill switch is engaged (AI_SANDBOX_GPU_DISABLED / ./setup.sh --gpu-disable). See docs/gpu.md / \`./setup.sh --gpu-status\` on the host."
+    fi
+
+    if [ "$_degraded" -eq 0 ]; then
+        log "GPU is usable in this session."
+        return 0
+    fi
+    log "GPU is NOT fully usable in this session — see the ✗ lines above for the exact missing prerequisite(s)."
+    return 1
+}
+
+case "${1:-}" in
+    install) cmd_install ;;
+    doctor)  cmd_doctor ;;
+    env)     [ -f "$ENV_FILE" ] && cat "$ENV_FILE" || { die "no env file yet — run \`aisandbox-gpu install\`."; } ;;
+    -h|--help|"") printf 'Usage: aisandbox-gpu {install|doctor|env}\n' >&2; exit 2 ;;
+    *) die "Unknown command: $1" ;;
+esac

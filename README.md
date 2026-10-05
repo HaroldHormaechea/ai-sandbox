@@ -130,13 +130,14 @@ The selector is reachable two ways:
 
 #### Capabilities
 
-The catalog ships exactly three capabilities — all **default OFF** on a fresh install:
+The catalog ships exactly four capabilities — all **default OFF** on a fresh install:
 
 | id | what it installs |
 |---|---|
 | `dind` | rootless Docker-in-Docker daemon |
 | `java` | Temurin JDK 21 (standalone) |
 | `android` | Android SDK (cmdline-tools, platform-tools, build-tools, platform, x86_64 system image, emulator). **Depends on `java`; amd64-only** — shown disabled on other arches. See [Testing Android apps](#testing-android-apps-inside-the-sandbox). |
+| `gpu` | NVIDIA CUDA userspace (toolkit/libraries). **amd64-only; needs a GPU-capable Linux host.** Installs only the CUDA *userspace* — the GPU device/driver is exposed host-wide (see [Host GPU (NVIDIA CUDA)](#host-gpu-nvidia-cuda) / [`docs/gpu.md`](docs/gpu.md)). |
 
 **`dind` — Docker-in-Docker (rootless)**
 
@@ -150,6 +151,17 @@ Lets code running inside a session start its own `docker` / `docker compose` com
 - **First-use network.** The static rootless-Docker tarball is fetched from `download.docker.com` on first DinD-enabled start. The build + JVM-test lane (`./gradlew :android:lint`, `:android:test`, etc.) and the rest of the session never need network for this.
 - **Isolated-workspace caveat.** `/workspace/environment-utilities/dind/` lives under the session's workspace bind mount. Sessions created with an **isolated** workspace have their own `environment-utilities/dind/` cache and re-download on first DinD-enabled use. Sessions sharing one workspace all reuse the single cache. Same trade-off as the UC-22 Android emulator cache.
 - **When DinD is disabled (or skipped).** Spawned sessions are byte/behaviour-identical to today: no rootless daemon, no `/dev/fuse` device, no `docker-compose.dind.yml` override applied.
+
+### Host GPU (NVIDIA CUDA)
+
+Lets a session use the **host's NVIDIA GPU** for CUDA workloads (e.g. ML/AI training) — including inside the session's nested rootless DinD. Linux-only. Full operator reference, host prerequisites, and the on-GPU-host verification runbook live in **[`docs/gpu.md`](docs/gpu.md)**; the essentials:
+
+- **Two layers.** (1) **Host-wide device/driver exposure** — on a GPU-capable Linux host, `spawn.sh` passes the GPU into **every** session via **CDI** (Container Device Interface), with **no per-session opt-in**. So `nvidia-smi` and CUDA just work in-session once the host is set up. (2) **CUDA userspace** — the opt-in **`gpu`** devtool capability, cache-provisioned on demand; **not baked into the base image**, so non-GPU users pay no image-size cost.
+- **Host prerequisites (operator).** A supported **NVIDIA driver**, the **NVIDIA Container Toolkit**, and a generated **CDI spec**: `sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml`. Check readiness any time with `./setup.sh --gpu-status`. Without these, sessions spawn exactly as today and `aisandbox-gpu doctor` names the missing prerequisite — no crash, no silent breakage.
+- **Trust-boundary tradeoff (deliberate).** Host-wide exposure reaches **every** session, not only GPU users — it widens the "container is the trust boundary" surface and makes GPU contention automatic across concurrent sessions. This is the accepted host-wide decision; the mitigation is the **host kill switch**.
+- **Kill switch.** Disable GPU exposure entirely even on a GPU-capable host with `./setup.sh --gpu-disable` (persisted sentinel) or the one-off `AI_SANDBOX_GPU_DISABLED=1` env; re-enable with `./setup.sh --gpu-enable`.
+- **Sharing/contention.** Concurrent sessions share one physical GPU (time-sliced; VRAM is **not** partitioned or capped in v1). MIG/per-session VRAM caps are out of scope for now — see `docs/gpu.md`.
+- **When GPU is unavailable / disabled.** Spawned sessions are byte/behaviour-identical to today: no `docker-compose.gpu.yml` override, no GPU env.
 
 ## Management server (quick-start)
 

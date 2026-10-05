@@ -253,6 +253,54 @@ class ReleaseBundleTest {
         }
     }
 
+    /**
+     * UC-101 § AC1,AC3 — the host GPU passthrough assets must ship in the same
+     * zip as the rest of the container build context so a {@code .deb}/zip-
+     * installed operator gets host-wide GPU passthrough on a GPU-capable host.
+     * Two assets are load-bearing, mirroring the KVM/DinD overrides:
+     *
+     * <ul>
+     *   <li>{@code host/docker-compose.gpu.yml} (mode 0644) — spawn.sh's
+     *       {@code inject_host_gpu_passthrough} resolves it as
+     *       {@code $(dirname AI_SANDBOX_COMPOSE_FILE)/docker-compose.gpu.yml} and
+     *       appends it to {@code AI_SANDBOX_EXTRA_COMPOSE_FILES}; without it the
+     *       override silently can't be layered and host-wide passthrough never
+     *       happens on a server-spawned / .deb / zip session.</li>
+     *   <li>{@code host/container-bin/aisandbox-gpu} (mode 0755) — the CUDA
+     *       userspace provisioner the SandboxDockerfile COPYs into the image;
+     *       without the +x bit the in-image helper is non-executable.</li>
+     * </ul>
+     */
+    @Test
+    void uc101_gpu_override_and_helper_ship_with_correct_modes() throws Exception {
+        Path zip = findZip();
+        assumeTrue(zip != null, "release bundle not built: ./gradlew :server:releaseBundle");
+
+        Set<String> entries = readEntryNames(zip);
+        Map<String, Integer> modes = readPosixModes(zip);
+
+        // host/docker-compose.gpu.yml — data file, mode 0644.
+        assertThat(entries)
+                .as("UC-101 AC1/AC3 — release zip MUST ship docker-compose.gpu.yml beside docker-compose.yml")
+                .contains("host/docker-compose.gpu.yml");
+        Integer gpuComposeMode = modes.get("host/docker-compose.gpu.yml");
+        assertThat(gpuComposeMode).as("mode of host/docker-compose.gpu.yml").isNotNull();
+        assertThat(gpuComposeMode & 0777)
+                .as("mode of host/docker-compose.gpu.yml")
+                .isEqualTo(0644);
+
+        // host/container-bin/aisandbox-gpu — exec helper, mode 0755.
+        assertThat(entries)
+                .as("UC-101 AC4 — release zip MUST ship the container-bin/aisandbox-gpu helper")
+                .contains("host/container-bin/aisandbox-gpu");
+        Integer gpuHelperMode = modes.get("host/container-bin/aisandbox-gpu");
+        assertThat(gpuHelperMode).as("mode of host/container-bin/aisandbox-gpu").isNotNull();
+        assertThat(gpuHelperMode & 0777)
+                .as(
+                        "mode of host/container-bin/aisandbox-gpu — must be exec for the SandboxDockerfile COPY to land it +x")
+                .isEqualTo(0755);
+    }
+
     @Test
     void uc22_bundled_kvm_override_and_emulator_helper_are_byte_identical_to_repo_originals() throws Exception {
         Path zip = findZip();

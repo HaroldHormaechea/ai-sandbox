@@ -264,6 +264,14 @@ START_DIR="$PROJECT_DIR"
 # ANDROID_HOME / PATH (AC#10 — the entrypoint PATH-inheritance fix, not just a
 # profile.d snippet). With no capabilities the loop is a no-op and the session is
 # byte-identical to today (AC#12).
+#
+# UC-101 — the `gpu` capability needs NO special handling here: its
+# devtool_provision (`aisandbox-gpu install`) runs via this same generic loop,
+# and its env snippet ($cache/gpu/env.sh) is picked up by load_devtool_env's
+# `*/env.sh` glob, wiring CUDA_HOME / LD_LIBRARY_PATH into claude's environment.
+# The HOST-WIDE device/driver exposure and the nested-DinD CDI wiring are handled
+# OUTSIDE this loop (docker-compose.gpu.yml + aisandbox-dind reading the
+# AI_SANDBOX_GPU env at start), so they stay order-independent of provisioning.
 if [ -n "${AI_SANDBOX_DEVTOOLS:-}" ]; then
     for _devtool_id in ${AI_SANDBOX_DEVTOOLS}; do
         provision_capability "$_devtool_id"
