@@ -10,6 +10,7 @@ import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.attribute.PosixFileAttributes;
 import java.nio.file.attribute.PosixFilePermission;
 import java.nio.file.attribute.PosixFilePermissions;
 import java.security.cert.X509Certificate;
@@ -467,7 +468,153 @@ class PkiInitCommandTest {
         assertThat(san.ipAddresses).contains("127.0.0.1");
     }
 
+    // ── pki init chownTree dangling-symlink regression ───────────────
+
+    @Test
+    void init_completes_and_mints_cert_with_a_dangling_symlink_under_sessions(@TempDir Path tmp) throws Exception {
+        // End-to-end regression for the `pki init` crash: a dangling
+        // symlink inside sessions/ (mirroring a per-session rootless-DinD
+        // overlay2 layer whose .../usr/local/bin/nodejs points at a missing
+        // target) must NOT abort the install before the cert is minted.
+        Assumptions.assumeTrue(isPosixFs(tmp), "non-POSIX FS — the real chown path isn't exercised");
+
+        Path etc = tmp.resolve("etc/ai-sandbox-server");
+        Path sessions = tmp.resolve("var/lib/ai-sandbox-server/sessions");
+        Path logs = tmp.resolve("var/log/ai-sandbox-server");
+
+        // Pre-create sessions/ and plant the dangling symlink BEFORE init
+        // runs (init creates + chowns sessions/ in one call, so we can't
+        // interleave). ensureDir tolerates a pre-existing dir.
+        Files.createDirectories(sessions);
+        Path dangling = sessions.resolve("dind-nodejs");
+        try {
+            Files.createSymbolicLink(dangling, sessions.resolve("missing-overlay-target"));
+        } catch (UnsupportedOperationException | IOException e) {
+            Assumptions.assumeTrue(false, "symlinks unsupported on this FS: " + e.getMessage());
+        }
+
+        // Inject a current-user resolver so the REAL chown path runs. The
+        // default Ownership.resolve returns null for the absent
+        // ai-sandbox-server user and would skip every chown (masking the bug).
+        Ownership self = selfOwnership(tmp);
+        PkiInitCommand.Init sub = init(new FakeSystemUserAdmin(false));
+        sub.setOwnershipResolver((user, label) -> self);
+
+        int exit = new CommandLine(sub).execute(stdArgs(etc, sessions, logs, "--force", "--no-auto-hostname"));
+
+        // Pre-fix: chownTree(sessions) walked into the dangling link and
+        // chown (without NOFOLLOW_LINKS) followed it to the missing target
+        // → NoSuchFileException thrown in step 4, BEFORE the cert mint in
+        // step 5 → exit != 0 and no key produced. Post-fix: sessions/ is
+        // chown'd non-recursively, so the link is never visited; the mint
+        // proceeds and completes.
+        assertThat(exit).as("pki init must complete past the sessions chown").isZero();
+        assertThat(etc.resolve("pki").resolve("server.crt")).exists();
+        assertThat(etc.resolve("pki").resolve("server.key")).exists();
+        // A real mint, not a truncated/empty file.
+        X509Certificate cert =
+                PemUtils.parseCertificate(Files.readString(etc.resolve("pki").resolve("server.crt")));
+        assertThat(PemUtils.extractCommonName(cert)).isEqualTo("ai-sandbox-server");
+    }
+
+    @Test
+    void init_chowns_sessions_dir_itself_but_never_its_per_session_contents(@TempDir Path tmp) throws Exception {
+        // UC-30 / UC-94 regression: sessions/ TOP-LEVEL dir is owned by the
+        // service user, but its per-session contents must NOT be recursively
+        // re-owned (that would flatten rootless-DinD subuid-mapped files back
+        // to ai-sandbox-server). Owner inspection is vacuous here (self-chown
+        // is an indistinguishable no-op), so we inject a recording spy — the
+        // ownershipResolver seam returns a Chowner, so a non-Ownership spy is
+        // injectable.
+        Assumptions.assumeTrue(isPosixFs(tmp), "non-POSIX FS — the real chown path isn't exercised");
+
+        Path etc = tmp.resolve("etc/ai-sandbox-server");
+        Path sessions = tmp.resolve("var/lib/ai-sandbox-server/sessions");
+        Path logs = tmp.resolve("var/log/ai-sandbox-server");
+
+        // Plant per-session content. A recursive chownTree(sessions) would
+        // record these; a correct single chown(sessions) must not.
+        Path sessionChild = Files.createDirectories(sessions.resolve("session-abc/environment-utilities"));
+        Files.writeString(sessionChild.resolve("marker"), "subuid-mapped-content");
+
+        RecordingChowner spy = new RecordingChowner(selfOwnership(tmp));
+        PkiInitCommand.Init sub = init(new FakeSystemUserAdmin(false));
+        sub.setOwnershipResolver((user, label) -> spy);
+
+        int exit = new CommandLine(sub).execute(stdArgs(etc, sessions, logs, "--no-auto-hostname"));
+        assertThat(exit).isZero();
+
+        Path sessionsNorm = sessions.toAbsolutePath().normalize();
+
+        // sessions/ itself IS chown'd (single, non-recursive — UC-05 top-level
+        // ownership).
+        boolean sessionsChowned = spy.chownPaths.stream()
+                .anyMatch(p -> p.toAbsolutePath().normalize().equals(sessionsNorm));
+        assertThat(sessionsChowned)
+                .as("sessions/ top-level dir must be chown'd via single chown()")
+                .isTrue();
+
+        // chownTree() was NEVER invoked on sessions/.
+        boolean sessionsTreeChowned = spy.chownTreePaths.stream()
+                .anyMatch(p -> p.toAbsolutePath().normalize().equals(sessionsNorm));
+        assertThat(sessionsTreeChowned)
+                .as("sessions/ must NOT be recursively chown'd (UC-30 subuid preservation)")
+                .isFalse();
+
+        // No strict descendant of sessions/ was passed to chown() OR chownTree().
+        List<Path> allOps = new ArrayList<>();
+        allOps.addAll(spy.chownPaths);
+        allOps.addAll(spy.chownTreePaths);
+        for (Path p : allOps) {
+            Path pn = p.toAbsolutePath().normalize();
+            if (!pn.equals(sessionsNorm)) {
+                assertThat(pn.startsWith(sessionsNorm))
+                        .as("no per-session content under sessions/ may be chown'd: %s", pn)
+                        .isFalse();
+            }
+        }
+    }
+
     // ── helpers ──────────────────────────────────────────────────────
+
+    /**
+     * A {@link Chowner} spy that records which paths {@code chown} /
+     * {@code chownTree} were invoked on, then delegates to a real
+     * {@link Ownership} so the pki init flow still completes. Injectable
+     * because the {@code ownershipResolver} seam returns the {@link Chowner}
+     * interface rather than the final {@link Ownership} record.
+     */
+    private static final class RecordingChowner implements Chowner {
+        private final Chowner delegate;
+        final List<Path> chownPaths = new ArrayList<>();
+        final List<Path> chownTreePaths = new ArrayList<>();
+
+        RecordingChowner(Chowner delegate) {
+            this.delegate = delegate;
+        }
+
+        @Override
+        public void chown(Path p) throws IOException {
+            chownPaths.add(p);
+            delegate.chown(p);
+        }
+
+        @Override
+        public void chownTree(Path root) throws IOException {
+            chownTreePaths.add(root);
+            delegate.chownTree(root);
+        }
+    }
+
+    /**
+     * Build an {@link Ownership} from the CURRENT owner/group of {@code probe}.
+     * Chowning to the current user/group is a permitted no-op, so the real
+     * {@code setOwner}/{@code setGroup} path runs without root.
+     */
+    private static Ownership selfOwnership(Path probe) throws IOException {
+        PosixFileAttributes attrs = Files.readAttributes(probe, PosixFileAttributes.class);
+        return new Ownership(attrs.owner(), attrs.group());
+    }
 
     /**
      * X509-extension decoding for SubjectAlternativeName. JDK's native
