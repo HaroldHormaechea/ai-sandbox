@@ -43,3 +43,34 @@ Modifications made in ai-sandbox (each retains the Apache-2.0 license):
   * Upstream unit tests under `src/test/**` were not vendored.
 
 `com/termux/view/**` is vendored unmodified.
+
+--------------------------------------------------------------------------
+JetBrains Mono  (android/src/main/res/font/, android/src/main/assets/fonts/)
+--------------------------------------------------------------------------
+
+Bundled to give the terminal / tmux view (and the Compose mono chrome) a
+deterministic monospace typeface with full box-drawing (U+2500–U+257F) and
+block-element (U+2580–U+259F) coverage, fixing blocky glyph rendering on OEM
+skins (e.g. ColorOS) whose default monospace font covers those ranges poorly.
+
+  Origin:   https://github.com/JetBrains/JetBrainsMono
+  Release:  v2.304 (static TTFs, from JetBrainsMono-2.304.zip)
+  License:  SIL Open Font License, Version 1.1 — see LICENSE-jetbrains-mono
+            (an in-APK copy is also shipped at
+            android/src/main/assets/fonts/OFL.txt).
+
+Copyright 2020 The JetBrains Mono Project Authors
+(https://github.com/JetBrains/JetBrainsMono).
+
+Bundled files (verbatim from the release; SHA-256):
+
+  * android/src/main/res/font/jetbrains_mono_regular.ttf
+    (JetBrainsMono-Regular.ttf, W400)
+    a0bf60ef0f83c5ed4d7a75d45838548b1f6873372dfac88f71804491898d138f
+
+  * android/src/main/res/font/jetbrains_mono_medium.ttf
+    (JetBrainsMono-Medium.ttf, W500)
+    31c92d01a8a08528b718a43addf0ad3df0af2ca4b7b3290a452f70f358e14d3d
+
+The fonts are bundled unmodified (only the res/font filenames were lowercased
+to satisfy Android resource naming).
